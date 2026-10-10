@@ -1,0 +1,211 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --neutral-dark: #1E1E1E;
+    --neutral-dark-surface: #2D2D2D;
+    --neutral-dark-border: #3E3E3E;
+    --neutral-dark-text: #DFDBD2;
+    --neutral-dark-muted: #8F8B82;
+  }
+
+  body {
+    font-family: 'Ubuntu', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* Custom Clean Neutral Scrollbars */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(143, 139, 130, 0.25);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(143, 139, 130, 0.5);
+  }
+
+  /* Monochromatic Achromatic Text Selection - No colored highlight */
+  ::selection {
+    background-color: rgba(143, 139, 130, 0.35);
+    color: inherit;
+  }
+
+  /* Universal tactile click feedback for interactive elements */
+  button:active, [role="button"]:active {
+    transform: scale(0.96);
+  }
+}
+
+/* WYSIWYG Content Area Styles */
+.wysiwyg-content {
+  font-family: 'Ubuntu', sans-serif;
+  line-height: 1.7;
+  outline: none;
+  word-break: break-word;
+}
+
+.wysiwyg-content:empty:before {
+  content: attr(data-placeholder);
+  color: #8f8b82;
+  pointer-events: none;
+  display: block;
+}
+
+.wysiwyg-content h1 {
+  font-size: 2em;
+  font-weight: 700;
+  margin-top: 1.25em;
+  margin-bottom: 0.75em;
+  line-height: 1.25;
+  border-bottom: 1px solid rgba(143, 139, 130, 0.2);
+  padding-bottom: 0.35em;
+}
+
+.wysiwyg-content h2 {
+  font-size: 1.5em;
+  font-weight: 600;
+  margin-top: 1.1em;
+  margin-bottom: 0.5em;
+  line-height: 1.3;
+}
+
+.wysiwyg-content h3 {
+  font-size: 1.25em;
+  font-weight: 600;
+  margin-top: 0.9em;
+  margin-bottom: 0.4em;
+  line-height: 1.4;
+}
+
+.wysiwyg-content p {
+  margin-top: 0.4em;
+  margin-bottom: 0.6em;
+}
+
+.wysiwyg-content strong {
+  font-weight: 700;
+}
+
+.wysiwyg-content em {
+  font-style: italic;
+}
+
+.wysiwyg-content u {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1.5px;
+}
+
+.wysiwyg-content s, .wysiwyg-content strike, .wysiwyg-content del {
+  text-decoration: line-through;
+  opacity: 0.8;
+}
+
+.wysiwyg-content blockquote {
+  border-left: 3px solid rgba(143, 139, 130, 0.6);
+  padding-left: 1rem;
+  margin: 0.75rem 0;
+  font-style: italic;
+  opacity: 0.9;
+}
+
+.wysiwyg-content ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin: 0.5rem 0;
+}
+
+.wysiwyg-content ol {
+  list-style-type: decimal;
+  padding-left: 1.5rem;
+  margin: 0.5rem 0;
+}
+
+.wysiwyg-content li {
+  margin-bottom: 0.25rem;
+}
+
+.wysiwyg-content pre {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(143, 139, 130, 0.2);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  font-family: 'Ubuntu Mono', monospace;
+  font-size: 0.9rem;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+}
+
+.wysiwyg-content code:not(pre code) {
+  background: rgba(143, 139, 130, 0.15);
+  color: inherit;
+  font-weight: 500;
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+  font-family: 'Ubuntu Mono', monospace;
+  font-size: 0.9em;
+}
+
+.wysiwyg-content hr {
+  border: none;
+  height: 1px;
+  background: rgba(143, 139, 130, 0.25);
+  margin: 1.5rem 0;
+}
+
+.wysiwyg-content a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  opacity: 0.9;
+}
+
+.wysiwyg-content a:hover {
+  opacity: 1;
+}
+
+.wysiwyg-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.wysiwyg-content th,
+.wysiwyg-content td {
+  border: 1px solid rgba(143, 139, 130, 0.25);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.wysiwyg-content th {
+  background: rgba(143, 139, 130, 0.1);
+  font-weight: 600;
+}
+
+.task-list-item {
+  list-style-type: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.task-list-item input[type="checkbox"] {
+  accent-color: currentColor;
+  cursor: pointer;
+  width: 1rem;
+  height: 1rem;
+}

@@ -1,0 +1,21 @@
+{
+  "id": "/",
+  "name": "Ubuntu Notepad",
+  "short_name": "UbuntuPad",
+  "description": "Ultra-lightweight native-feel Markdown and plain text editor with Ubuntu GNOME aesthetic.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1e1e1e",
+  "theme_color": "#1b1b1b",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
