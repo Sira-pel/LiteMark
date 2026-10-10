@@ -78,7 +78,7 @@ export const NativeCodeModal: React.FC<NativeCodeModalProps> = ({
             </div>
             <div>
               <h2 className="font-semibold text-xs sm:text-sm truncate">
-                Native Ubuntu Build: C & Rust with GTK4
+                LiteMark Native Ubuntu Build: C & Rust with GTK4
               </h2>
               <p className="text-[11px] sm:text-xs text-neutral-400 hidden xs:block">
                 Ultra-lightweight native performance, ~18–22 MB RAM, instant Wayland/X11
@@ -177,7 +177,7 @@ export const NativeCodeModal: React.FC<NativeCodeModalProps> = ({
                 <div>
                   <h3 className="font-semibold text-sm">Rust + gtk4-rs Implementation</h3>
                   <p className="text-neutral-400 text-xs">
-                    Uses memory-safe gtk4 bindings with Pango text tags for Bold, Italic, Underline, and async file dialogs.
+                    Memory-safe gtk4 bindings with Pango formatting, async file dialogs, and automatic <strong className="text-neutral-200">~/Documents/Notes</strong> folder organization.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -242,7 +242,7 @@ export const NativeCodeModal: React.FC<NativeCodeModalProps> = ({
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <div className="flex items-center gap-1.5">
-                    <span className="font-mono text-neutral-400 text-[11px]">ubuntu-notepad.desktop</span>
+                    <span className="font-mono text-neutral-400 text-[11px]">litemark.desktop</span>
                     <span className="text-[10px] px-1.5 py-0.2 rounded bg-neutral-200 text-neutral-800 dark:bg-neutral-800 dark:text-neutral-300 font-mono">
                       Ubuntu App Launcher & .deb
                     </span>
@@ -259,7 +259,7 @@ export const NativeCodeModal: React.FC<NativeCodeModalProps> = ({
                     </button>
                     <button
                       type="button"
-                      onClick={() => downloadFile('ubuntu-notepad.desktop', UBUNTU_DESKTOP_ENTRY)}
+                      onClick={() => downloadFile('litemark.desktop', UBUNTU_DESKTOP_ENTRY)}
                       className={`text-[11px] hover:underline cursor-pointer flex items-center gap-1 ${
                         isDark ? 'text-neutral-300 hover:text-white' : 'text-neutral-700 hover:text-black'
                       }`}
@@ -287,7 +287,7 @@ export const NativeCodeModal: React.FC<NativeCodeModalProps> = ({
                 <div>
                   <h3 className="font-semibold text-sm">C + GTK4 Minimalist Implementation</h3>
                   <p className="text-neutral-400 text-xs">
-                    Pure C99 with GTK4 runtime. Single executable binary (~120KB), ~18MB idle memory, zero garbage collection.
+                    Pure C99 with GTK4 runtime. Single executable binary (~120KB), ~18MB idle memory, and automatic <strong className="text-neutral-200">~/Documents/Notes</strong> folder management.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -455,8 +455,8 @@ export const NativeCodeModal: React.FC<NativeCodeModalProps> = ({
                       isDark ? 'bg-[#181818] border-[#333]' : 'bg-neutral-100 border-neutral-200'
                     }`}
                   >
-                    gcc $(pkg-config --cflags gtk4) main.c -o ubuntu-notepad $(pkg-config --libs gtk4) -O2{"\n"}
-                    ./ubuntu-notepad
+                    gcc $(pkg-config --cflags gtk4) main.c -o litemark $(pkg-config --libs gtk4) -O2{"\n"}
+                    ./litemark
                   </pre>
                 </div>
 
@@ -469,8 +469,8 @@ export const NativeCodeModal: React.FC<NativeCodeModalProps> = ({
                   >
                     # Install Rust toolchain if not already present:{"\n"}
                     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh{"\n"}
-                    cargo new ubuntu-notepad && cd ubuntu-notepad{"\n"}
-                    # Replace Cargo.toml, src/main.rs and add ubuntu-notepad.desktop from the tabs above{"\n"}
+                    cargo new litemark && cd litemark{"\n"}
+                    # Replace Cargo.toml, src/main.rs and add litemark.desktop from the tabs above{"\n"}
                     cargo run --release
                   </pre>
                 </div>
@@ -490,7 +490,7 @@ export const NativeCodeModal: React.FC<NativeCodeModalProps> = ({
                     # Build the .deb package:{"\n"}
                     cargo deb{"\n\n"}
                     # Install the generated .deb package on your Ubuntu system:{"\n"}
-                    sudo apt install ./target/debian/ubuntu-notepad_0.1.0_amd64.deb{"\n\n"}
+                    sudo apt install ./target/debian/litemark_0.1.0_amd64.deb{"\n\n"}
                     # Or double-click the .deb file in Ubuntu Files to install via Ubuntu App Center!
                   </pre>
                 </div>

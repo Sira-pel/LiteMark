@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Ubuntu Notepad",
-  "short_name": "UbuntuPad",
-  "description": "Ultra-lightweight native-feel Markdown and plain text editor with Ubuntu GNOME aesthetic.",
+  "name": "LiteMark",
+  "short_name": "LiteMark",
+  "description": "Ultra-lightweight native-feel Markdown and plain text editor with dedicated notes folder.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

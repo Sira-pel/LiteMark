@@ -32,7 +32,9 @@ export const ShortcutsModal: React.FC<ShortcutsModalProps> = ({
     { key: 'Ctrl + Y', action: 'Redo' },
     { key: 'Tab', action: 'Indent 2 spaces' },
     { key: 'Shift + Tab', action: 'Outdent' },
-    { key: 'Escape', action: 'Close modals / Find bar' },
+    { key: 'Ctrl + \\', action: 'Toggle Notes Folder Sidebar' },
+    { key: 'F11', action: 'Toggle Zen Mode' },
+    { key: 'Escape', action: 'Exit Zen Mode / Close modals' },
   ];
 
   return (

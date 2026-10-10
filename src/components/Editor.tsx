@@ -528,22 +528,24 @@ export const Editor: React.FC<EditorProps> = ({
         </div>
       ) : (
         /* Editor View: Raw Source Code Mode */
-        <textarea
-          ref={textareaRef}
-          value={content}
-          onChange={handleTextareaChange}
-          onKeyDown={handleKeyDown}
-          onKeyUp={updateCursorAndFormatState}
-          onClick={updateCursorAndFormatState}
-          placeholder="Start typing raw Markdown or Plain Text..."
-          spellCheck={false}
-          className={`flex-1 w-full h-full p-4 sm:p-6 font-mono outline-none resize-none leading-[1.7] transition-colors ${
-            isDark
-              ? 'bg-[#1e1e1e] text-[#dfdbd2] placeholder-neutral-600'
-              : 'bg-white text-neutral-900 placeholder-neutral-400'
-          }`}
-          style={{ fontSize: `${fontSize}px` }}
-        />
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 w-full">
+          <textarea
+            ref={textareaRef}
+            value={content}
+            onChange={handleTextareaChange}
+            onKeyDown={handleKeyDown}
+            onKeyUp={updateCursorAndFormatState}
+            onClick={updateCursorAndFormatState}
+            placeholder="Start typing raw Markdown or Plain Text..."
+            spellCheck={false}
+            className={`w-full h-full min-h-[80vh] font-mono outline-none resize-none leading-[1.7] transition-colors ${
+              isDark
+                ? 'bg-[#1e1e1e] text-[#dfdbd2] placeholder-neutral-600'
+                : 'bg-white text-neutral-900 placeholder-neutral-400'
+            }`}
+            style={{ fontSize: `${fontSize}px` }}
+          />
+        </div>
       )}
     </div>
   );

@@ -48,6 +48,9 @@ interface HeaderBarProps {
   onViewPdf?: () => void;
   onOpenInstallModal?: () => void;
   canInstall?: boolean;
+  isStandalone?: boolean;
+  showSidebar?: boolean;
+  onToggleSidebar?: () => void;
 }
 
 export const HeaderBar: React.FC<HeaderBarProps> = ({
@@ -77,6 +80,9 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   onViewPdf,
   onOpenInstallModal,
   canInstall,
+  isStandalone = false,
+  showSidebar = false,
+  onToggleSidebar,
 }) => {
   const [saveMenuOpen, setSaveMenuOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -119,8 +125,40 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
         isDark ? 'bg-[#1b1b1b] border-[#383838] text-[#dfdbd2]' : 'bg-[#e0e0e0] border-neutral-300 text-neutral-800'
       }`}
     >
-      {/* Attached Document Tabs (Leftmost of the program) */}
-      <div className="flex items-end gap-1 overflow-x-auto flex-1 min-w-0 mr-1 sm:mr-2 scrollbar-none h-full">
+      {/* Sidebar Toggle Button (Notes Folder Directory - Leftmost) */}
+      {onToggleSidebar && (
+        <div className="flex items-center my-auto mr-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            title={showSidebar ? 'Hide Notes Folder Directory (Ctrl+\\)' : 'Show Notes Folder Directory (Ctrl+\\)'}
+            className={`p-1.5 rounded transition-all cursor-pointer flex items-center justify-center shrink-0 ${
+              showSidebar
+                ? isDark
+                  ? 'bg-white/15 text-white border border-white/20 shadow-xs'
+                  : 'bg-black/10 text-neutral-900 border border-neutral-300 shadow-xs'
+                : isDark
+                ? 'text-neutral-400 hover:text-white hover:bg-white/10 border border-transparent'
+                : 'text-neutral-600 hover:text-black hover:bg-black/5 border border-transparent'
+            }`}
+            aria-label="Toggle Notes Directory Sidebar"
+          >
+            {/* Custom SVG matching exact rounded box + left pill bar from user image */}
+            <svg
+              viewBox="0 0 20 20"
+              className="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+            >
+              <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" strokeWidth="1.8" />
+              <rect x="5.2" y="5.2" width="2.4" height="9.6" rx="1.2" fill="currentColor" stroke="none" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {/* Attached Document Tabs */}
+      <div className="flex items-end justify-start gap-1 overflow-x-auto flex-1 min-w-0 mr-2 scrollbar-none h-full">
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           const isEditing = editingTitleId === tab.id;
@@ -130,7 +168,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
               key={tab.id}
               onClick={() => onSelectTab(tab.id)}
               onDoubleClick={() => handleStartRename(tab)}
-              className={`flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-t-md text-xs cursor-pointer transition-all duration-75 shrink-0 max-w-[140px] sm:max-w-[200px] active:scale-[0.98] ${
+              className={`flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-t-md text-xs cursor-pointer transition-all duration-75 shrink-0 max-w-[130px] sm:max-w-[180px] active:scale-[0.98] ${
                 isActive
                   ? isDark
                     ? 'h-[34px] sm:h-[36px] -mb-px relative z-10 bg-[#242424] text-white font-bold border-t-2 border-t-white border-x border-[#383838] shadow-xs'
@@ -164,7 +202,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
                   className="bg-transparent border-b border-neutral-800 dark:border-neutral-200 outline-none text-xs w-20 sm:w-24 text-white"
                 />
               ) : (
-                <span className="truncate max-w-[80px] sm:max-w-[130px] select-none" title={tab.title}>
+                <span className="truncate max-w-[70px] sm:max-w-[110px] select-none" title={tab.title}>
                   {tab.title}
                 </span>
               )}
@@ -216,24 +254,6 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
           title="Save File (Ctrl+S)"
         >
           <Save className="w-4 h-4" />
-        </button>
-
-        {/* View Mode Toggle (Always visible) */}
-        <button
-          type="button"
-          onClick={onToggleViewMode}
-          className={`px-2 py-1 text-xs rounded font-medium cursor-pointer transition-colors ${
-            viewMode === 'wysiwyg'
-              ? isDark
-                ? 'bg-neutral-100 text-neutral-950 font-semibold shadow-xs'
-                : 'bg-neutral-900 text-white font-semibold shadow-xs'
-              : isDark
-              ? 'bg-[#333] text-neutral-300 hover:bg-[#444]'
-              : 'bg-neutral-200 text-neutral-700 hover:bg-neutral-300'
-          }`}
-          title="Toggle WYSIWYG vs Raw Source"
-        >
-          {viewMode === 'wysiwyg' ? 'WYSIWYG' : 'Raw .md'}
         </button>
 
         {/* Desktop-Only Action Buttons (hidden below md) */}
@@ -350,35 +370,20 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
             </button>
           )}
 
-          {/* C & Rust Native Code modal button */}
-          <button
-            type="button"
-            onClick={onOpenNativeModal}
-            className={`px-2 py-1 text-xs rounded flex items-center gap-1.5 border transition-colors cursor-pointer ${
-              isDark
-                ? 'bg-neutral-800 text-neutral-200 hover:bg-neutral-700 border-neutral-700'
-                : 'bg-neutral-100 text-neutral-800 hover:bg-neutral-200 border-neutral-300'
-            }`}
-            title="View & Download Native C or Rust GTK4 Source Code for Ubuntu"
-          >
-            <Terminal className="w-3.5 h-3.5 text-neutral-400" />
-            <span className="hidden xl:inline font-mono">C / Rust GTK</span>
-          </button>
-
-          {/* Seamless Install App Button */}
-          {onOpenInstallModal && (
+          {/* C & Rust Native Code modal button (hidden in native/installed app) */}
+          {!isStandalone && (
             <button
               type="button"
-              onClick={onOpenInstallModal}
-              className={`px-2.5 py-1 text-xs font-medium rounded flex items-center gap-1.5 border transition-colors cursor-pointer shadow-xs ${
+              onClick={onOpenNativeModal}
+              className={`px-2 py-1 text-xs rounded flex items-center gap-1.5 border transition-colors cursor-pointer ${
                 isDark
-                  ? 'bg-neutral-800 hover:bg-neutral-700 text-white border-neutral-600'
-                  : 'bg-white hover:bg-neutral-100 text-neutral-900 border-neutral-300'
+                  ? 'bg-neutral-800 text-neutral-200 hover:bg-neutral-700 border-neutral-700'
+                  : 'bg-neutral-100 text-neutral-800 hover:bg-neutral-200 border-neutral-300'
               }`}
-              title="Install Ubuntu Notepad as a native desktop app (.deb, PWA, or launcher)"
+              title="View & Download Native C or Rust GTK4 Source Code for Ubuntu"
             >
-              <Download className="w-3.5 h-3.5 text-neutral-400" />
-              <span className="hidden sm:inline">Install App</span>
+              <Terminal className="w-3.5 h-3.5 text-neutral-400" />
+              <span className="hidden xl:inline font-mono">C / Rust GTK</span>
             </button>
           )}
 
@@ -452,7 +457,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
                 ? 'hover:bg-[#2e2e2e] text-[#dfdbd2]'
                 : 'hover:bg-neutral-300 text-neutral-800'
             }`}
-            title={zenMode ? 'Exit Zen Mode' : 'Enter Zen Mode (Distraction-Free)'}
+            title={zenMode ? 'Exit Zen Mode (Esc or F11)' : 'Enter Zen Mode (Distraction-Free) (F11)'}
           >
             {zenMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
@@ -643,22 +648,6 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
                 </div>
               </div>
 
-              {onOpenInstallModal && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onOpenInstallModal();
-                    setMobileMenuOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-2 flex items-center gap-2.5 cursor-pointer font-medium ${
-                    isDark ? 'hover:bg-[#333] text-white' : 'hover:bg-neutral-100 text-neutral-900'
-                  }`}
-                >
-                  <Download className="w-4 h-4 text-neutral-400" />
-                  <span>Install App (.deb, PWA, Launcher)</span>
-                </button>
-              )}
-
               <button
                 type="button"
                 onClick={() => {
@@ -672,6 +661,30 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
                 <Terminal className="w-4 h-4 text-neutral-400" />
                 <span>C & Rust GTK4 Source</span>
               </button>
+
+              {onToggleSidebar && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onToggleSidebar();
+                    setMobileMenuOpen(false);
+                  }}
+                  className={`w-full text-left px-3 py-2 flex items-center gap-2.5 cursor-pointer ${
+                    isDark ? 'hover:bg-[#333]' : 'hover:bg-neutral-100'
+                  }`}
+                >
+                  <svg
+                    viewBox="0 0 20 20"
+                    className="w-4 h-4 text-neutral-400"
+                    fill="none"
+                    stroke="currentColor"
+                  >
+                    <rect x="2.5" y="2.5" width="15" height="15" rx="3.5" strokeWidth="1.8" />
+                    <rect x="5.2" y="5.2" width="2.4" height="9.6" rx="1.2" fill="currentColor" stroke="none" />
+                  </svg>
+                  <span>{showSidebar ? 'Hide Notes Directory' : 'Show Notes Directory'}</span>
+                </button>
+              )}
 
               <button
                 type="button"

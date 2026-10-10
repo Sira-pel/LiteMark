@@ -71,7 +71,7 @@ export const FormattingToolbar: React.FC<FormattingToolbarProps> = ({
 
   return (
     <div
-      className={`flex items-center gap-1 sm:gap-0.5 px-2 sm:px-3 py-1 sm:py-1.5 border-b overflow-x-auto select-none transition-colors scrollbar-none ${
+      className={`flex items-center justify-center gap-1 sm:gap-0.5 px-2 sm:px-3 py-1 sm:py-1.5 border-b overflow-x-auto select-none transition-colors scrollbar-none ${
         isDark ? 'bg-[#242424] border-[#383838]' : 'bg-[#f4f4f4] border-neutral-300'
       }`}
     >
@@ -268,7 +268,7 @@ export const FormattingToolbar: React.FC<FormattingToolbarProps> = ({
         <RemoveFormatting className="w-4 h-4" />
       </button>
 
-      <div className="flex-1 min-w-[8px]" />
+      <div className={dividerClass} />
 
       {/* Find & Replace Search Trigger */}
       <button

@@ -15,6 +15,7 @@ import {
   Monitor,
   Flame,
 } from 'lucide-react';
+import { LiteMarkLogo } from './LiteMarkLogo';
 import { ThemeMode } from '../types';
 
 interface InstallModalProps {
@@ -58,48 +59,69 @@ export function InstallModal({
   };
 
   const oneClickScript = `#!/usr/bin/env bash
-# Ubuntu Notepad - Seamless Desktop Setup Script
+# LiteMark - Seamless Desktop Setup Script
 set -e
 
-echo "🚀 Installing Ubuntu Notepad to your system..."
+echo "🚀 Installing LiteMark to your system..."
 
-# 1. Create local application directories
+# 1. Create local application and notes directories
+mkdir -p "$HOME/Documents/Notes"
 mkdir -p "$HOME/.local/share/applications"
 mkdir -p "$HOME/.local/share/icons/hicolor/scalable/apps"
 
 # 2. Download application icon
-cat << 'EOF' > "$HOME/.local/share/icons/hicolor/scalable/apps/ubuntu-notepad.svg"
+cat << 'EOF' > "$HOME/.local/share/icons/hicolor/scalable/apps/litemark.svg"
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <rect x="24" y="24" width="464" height="464" rx="108" fill="#E95420"/>
-  <rect x="110" y="96" width="292" height="320" rx="16" fill="#FFFFFF"/>
-  <rect x="150" y="160" width="160" height="14" rx="7" fill="#E95420"/>
-  <rect x="150" y="200" width="212" height="10" rx="5" fill="#AEA79F"/>
-  <rect x="150" y="232" width="190" height="10" rx="5" fill="#AEA79F"/>
-  <rect x="150" y="264" width="204" height="10" rx="5" fill="#AEA79F"/>
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2D2034"/>
+      <stop offset="45%" stop-color="#1E1E24"/>
+      <stop offset="100%" stop-color="#141416"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF6B35"/>
+      <stop offset="50%" stop-color="#E95420"/>
+      <stop offset="100%" stop-color="#C71585"/>
+    </linearGradient>
+    <linearGradient id="featherGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#DFDBD2"/>
+    </linearGradient>
+  </defs>
+  <rect x="28" y="28" width="456" height="456" rx="112" fill="url(#bgGrad)"/>
+  <rect x="29" y="29" width="454" height="454" rx="111" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="2"/>
+  <circle cx="256" cy="256" r="160" fill="url(#accentGrad)" opacity="0.16"/>
+  <rect x="116" y="96" width="280" height="320" rx="24" fill="#242426" stroke="#38383C" stroke-width="3"/>
+  <rect x="116" y="96" width="280" height="12" rx="6" fill="url(#accentGrad)"/>
+  <line x1="160" y1="164" x2="352" y2="164" stroke="#44444A" stroke-width="6" stroke-linecap="round"/>
+  <line x1="160" y1="204" x2="280" y2="204" stroke="#44444A" stroke-width="6" stroke-linecap="round"/>
+  <path d="M 164 252 L 164 360 L 228 360" fill="none" stroke="url(#featherGrad)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 248 360 L 272 268 L 308 316 L 344 268 L 368 360" fill="none" stroke="url(#accentGrad)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <polygon points="308,368 296,348 320,348" fill="url(#accentGrad)"/>
 </svg>
 EOF
 
 # 3. Create .desktop launcher for Ubuntu Applications menu & Dock
 APP_URL="${typeof window !== 'undefined' ? window.location.href : 'https://ais-dev-bcco4o4744w66wxgtdzpr6-871645041052.asia-east1.run.app'}"
 
-cat << EOF > "$HOME/.local/share/applications/ubuntu-notepad.desktop"
+cat << EOF > "$HOME/.local/share/applications/litemark.desktop"
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Ubuntu Notepad
-Comment=Fast, distraction-free markdown & text editor
+Name=LiteMark
+Comment=Fast, distraction-free markdown & text editor with dedicated notes folder
 Exec=xdg-open "$APP_URL"
-Icon=ubuntu-notepad
+Icon=litemark
 Terminal=false
 Categories=Utility;TextEditor;Development;
 StartupNotify=true
-StartupWMClass=ubuntu-notepad
+StartupWMClass=litemark
 EOF
 
-chmod +x "$HOME/.local/share/applications/ubuntu-notepad.desktop"
+chmod +x "$HOME/.local/share/applications/litemark.desktop"
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
-echo "✅ Installed successfully! Search 'Ubuntu Notepad' in your Ubuntu Super menu or dock."
+echo "✅ Installed successfully! Search 'LiteMark' in your Ubuntu Super menu or dock."
 `;
 
   const downloadScriptFile = () => {
@@ -107,7 +129,7 @@ echo "✅ Installed successfully! Search 'Ubuntu Notepad' in your Ubuntu Super m
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'install-ubuntu-notepad.sh';
+    a.download = 'install-litemark.sh';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -130,12 +152,10 @@ echo "✅ Installed successfully! Search 'Ubuntu Notepad' in your Ubuntu Super m
           }`}
         >
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-linear-to-br from-[#E95420] to-[#77216F] flex items-center justify-center text-white shadow-sm font-bold text-sm">
-              <Download className="w-4 h-4" />
-            </div>
+            <LiteMarkLogo className="w-8 h-8 rounded-lg shadow-sm shrink-0" />
             <div>
               <h2 className="text-sm font-semibold tracking-tight flex items-center gap-2">
-                Install Ubuntu Notepad
+                Install LiteMark
                 {isStandalone && (
                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-normal border border-emerald-500/30">
                     Installed & Active
@@ -143,7 +163,7 @@ echo "✅ Installed successfully! Search 'Ubuntu Notepad' in your Ubuntu Super m
                 )}
               </h2>
               <p className="text-[11px] text-neutral-400">
-                Choose the fastest, most seamless way to install on your Ubuntu desktop
+                Choose the fastest, most seamless way to install LiteMark on your Ubuntu desktop
               </p>
             </div>
           </div>
@@ -341,7 +361,7 @@ echo "✅ Installed successfully! Search 'Ubuntu Notepad' in your Ubuntu Super m
                   </div>
                   <div className="text-[11px] text-neutral-400">
                     Creates an official <code className="text-neutral-300">.deb</code> file that installs to{' '}
-                    <code>/usr/bin/ubuntu-notepad</code> and integrates into Ubuntu App Center.
+                    <code>/usr/bin/litemark</code> and integrates into Ubuntu App Center.
                   </div>
                 </div>
               </div>
@@ -398,13 +418,17 @@ echo "✅ Installed successfully! Search 'Ubuntu Notepad' in your Ubuntu Super m
                 </div>
                 <ul className="list-disc list-inside space-y-1 text-neutral-400">
                   <li>
+                    Automatically organizes your notes into{' '}
+                    <code className="text-neutral-300">~/Documents/Notes</code>
+                  </li>
+                  <li>
                     Installs the compiled binary to{' '}
-                    <code className="text-neutral-300">/usr/bin/ubuntu-notepad</code>
+                    <code className="text-neutral-300">/usr/bin/litemark</code>
                   </li>
                   <li>
                     Puts the launcher in{' '}
                     <code className="text-neutral-300">
-                      /usr/share/applications/ubuntu-notepad.desktop
+                      /usr/share/applications/litemark.desktop
                     </code>
                   </li>
                   <li>
@@ -412,7 +436,7 @@ echo "✅ Installed successfully! Search 'Ubuntu Notepad' in your Ubuntu Super m
                   </li>
                   <li>
                     Can be removed anytime cleanly with{' '}
-                    <code className="text-neutral-300">sudo apt remove ubuntu-notepad</code>
+                    <code className="text-neutral-300">sudo apt remove litemark</code>
                   </li>
                 </ul>
               </div>
@@ -457,12 +481,12 @@ echo "✅ Installed successfully! Search 'Ubuntu Notepad' in your Ubuntu Super m
                   }`}
                 >
                   <code className="text-neutral-200 overflow-x-auto pr-16 select-all">
-                    curl -sSL {typeof window !== 'undefined' ? window.location.origin : ''}/install-ubuntu-notepad.sh | bash
+                    curl -sSL {typeof window !== 'undefined' ? window.location.origin : ''}/install-litemark.sh | bash
                   </code>
                   <button
                     onClick={() =>
                       copyToClipboard(
-                        `curl -sSL ${typeof window !== 'undefined' ? window.location.origin : ''}/install-ubuntu-notepad.sh | bash`,
+                        `curl -sSL ${typeof window !== 'undefined' ? window.location.origin : ''}/install-litemark.sh | bash`,
                         'curl-script-cmd'
                       )
                     }
@@ -492,7 +516,7 @@ echo "✅ Installed successfully! Search 'Ubuntu Notepad' in your Ubuntu Super m
               {/* Script code preview */}
               <div className="space-y-1.5">
                 <span className="text-neutral-400 text-[11px] block">
-                  Script Source Code (install-ubuntu-notepad.sh):
+                  Script Source Code (install-litemark.sh):
                 </span>
                 <pre
                   className={`p-3 rounded-lg font-mono text-[11px] border overflow-x-auto max-h-40 ${
