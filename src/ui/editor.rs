@@ -57,35 +57,17 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
         })
         .child(if is_wysiwyg {
             div()
-                .flex()
-                .flex_col()
                 .flex_1()
                 .size_full()
-                .min_h_0()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .child(render_wysiwyg_view(
-                            &props.content,
-                            base_size,
-                            zoom_factor,
-                            theme,
-                            props.wysiwyg_bounds.clone(),
-                            props.on_wysiwyg_place.clone(),
-                        )),
-                )
-                .child(div().h(px(1.0)).bg(theme.border_subtle).flex_shrink_0())
-                .child(
-                    div()
-                        .id("wysiwyg-raw-fallback")
-                        .flex_1()
-                        .min_h(px(160.0))
-                        .flex()
-                        .overflow_hidden()
-                        .child(props.raw_editor),
-                )
+                .overflow_hidden()
+                .child(render_wysiwyg_view(
+                    &props.content,
+                    base_size,
+                    zoom_factor,
+                    theme,
+                    props.wysiwyg_bounds.clone(),
+                    props.on_wysiwyg_place.clone(),
+                ))
                 .into_any_element()
         } else {
             div()
