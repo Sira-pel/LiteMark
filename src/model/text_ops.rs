@@ -786,9 +786,9 @@ fn push_wrapped(
         rows.push((start, end));
         return;
     }
-    let chars: Vec<usize> = content[start..end]
+    let chars: Vec<(usize, char)> = content[start..end]
         .char_indices()
-        .map(|(index, _)| start + index)
+        .map(|(index, ch)| (start + index, ch))
         .collect();
     if chars.len() <= wrap_cols {
         rows.push((start, end));
@@ -796,9 +796,30 @@ fn push_wrapped(
     }
     let mut index = 0usize;
     while index < chars.len() {
-        let row_start = chars[index];
-        let next = (index + wrap_cols).min(chars.len());
-        let row_end = if next < chars.len() { chars[next] } else { end };
+        let row_start = chars[index].0;
+        let max_next = (index + wrap_cols).min(chars.len());
+        if max_next == chars.len() {
+            rows.push((row_start, end));
+            break;
+        }
+
+        // Look for a break opportunity (whitespace or punctuation) between index and max_next
+        let mut break_idx = None;
+        for i in (index + 1..=max_next).rev() {
+            let (_, ch) = chars[i - 1];
+            if ch.is_whitespace() {
+                break_idx = Some(i);
+                break;
+            }
+        }
+
+        let next = if let Some(b) = break_idx {
+            b
+        } else {
+            max_next
+        };
+
+        let row_end = if next < chars.len() { chars[next].0 } else { end };
         rows.push((row_start, row_end));
         index = next;
     }
@@ -1132,6 +1153,10 @@ mod tests {
         assert_eq!(rows, vec![(0, 3), (3, 6), (7, 9)]);
         let plain = visual_rows("ab\n", usize::MAX);
         assert_eq!(plain, vec![(0, 2), (3, 3)]);
+
+        // Test word wrapping splits on whitespace if available within wrap_cols
+        let words = visual_rows("hello world test", 8);
+        assert_eq!(words, vec![(0, 6), (6, 12), (12, 16)]);
     }
 
     #[test]

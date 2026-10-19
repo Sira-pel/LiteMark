@@ -34,7 +34,7 @@ A super lightweight, high-performance **Markdown & Plain Text Editor** designed 
 ## ✨ Key Features
 - **WYSIWYG Rich Markdown:** All markdown features work natively without showing raw syntax clutter!
 - **Dedicated Notes Folder:** Automatically manages your notes in `~/Documents/Notes`.
-- **Formatting Included:** Bold, *italic*, <u>underline</u>, and ~~strikethrough~~.
+- **Formatting Included:** **Bold**, *italic*, <u>underline</u>, and ~~strikethrough~~.
 - **Header Levels:** Clean H1, H2, and H3 headers.
 - **Lists & Checklists:**
   - [x] Lightweight & low memory usage (~18–28MB RAM)

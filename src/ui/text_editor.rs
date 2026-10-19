@@ -247,19 +247,25 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     color,
                 );
             }
-            if focused
-                && self.selection.is_empty()
-                && self.selection.start >= start
-                && self.selection.start <= end
-            {
+            let is_last_row = index + 1 == rows_src.len();
+            let caret_matches = if is_last_row {
+                self.selection.start >= start && self.selection.start <= end
+            } else {
+                self.selection.start >= start && self.selection.start < end
+            };
+            if focused && self.selection.is_empty() && caret_matches {
                 let local = self.selection.start - start;
                 let x = if start == end {
                     px(0.0)
                 } else {
                     shaped.x_for_index(local.min(display_len))
                 };
+                let (caret_y, caret_h) = {
+                    let pad = (line_height - shaped.ascent - shaped.descent).max(px(0.0)) / 2.0;
+                    (origin.y + pad, shaped.ascent + shaped.descent)
+                };
                 cursor = Some(fill(
-                    Bounds::new(point(origin.x + x, origin.y), size(px(1.5), line_height)),
+                    Bounds::new(point(origin.x + x, caret_y), size(px(2.0), caret_h)),
                     self.cursor_color,
                 ));
             }

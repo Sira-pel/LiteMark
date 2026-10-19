@@ -3389,6 +3389,36 @@ impl Render for LiteMarkApp {
                 window.refresh();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &EditorSelectLineUp, window, cx| {
+                this.editor_move(cx, |tab| tab.select_line_up());
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorSelectLineDown, window, cx| {
+                this.editor_move(cx, |tab| tab.select_line_down());
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorDocStart, window, cx| {
+                this.editor_move(cx, |tab| tab.move_doc_start(false));
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorDocEnd, window, cx| {
+                this.editor_move(cx, |tab| tab.move_doc_end(false));
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorSelectDocStart, window, cx| {
+                this.editor_move(cx, |tab| tab.move_doc_start(true));
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorSelectDocEnd, window, cx| {
+                this.editor_move(cx, |tab| tab.move_doc_end(true));
+                window.refresh();
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &EditorWordLeft, window, cx| {
                 this.editor_move(cx, |tab| tab.move_word_left(false));
                 window.refresh();

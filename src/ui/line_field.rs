@@ -202,6 +202,14 @@ impl LineField {
         self.move_to(self.content.len(), cx);
     }
 
+    fn select_home(&mut self, _: &crate::actions::EditorSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &crate::actions::EditorSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
     fn word_left(&mut self, _: &crate::actions::EditorWordLeft, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let offset = crate::model::text_ops::word_left(&self.content, self.cursor_offset());
@@ -600,6 +608,8 @@ impl Render for LineField {
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::word_left))
             .on_action(cx.listener(Self::word_right))
             .on_action(cx.listener(Self::select_word_left))

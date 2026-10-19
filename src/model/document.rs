@@ -783,6 +783,43 @@ impl DocumentTab {
         self.place(target, extend);
     }
 
+    pub fn select_line_up(&mut self) {
+        let cursor = self.cursor_offset();
+        let current_line_start = super::text_ops::home_offset(&self.content, cursor);
+        let target = if cursor > current_line_start {
+            current_line_start
+        } else if current_line_start > 0 {
+            super::text_ops::home_offset(&self.content, current_line_start - 1)
+        } else {
+            0
+        };
+        self.place(target, true);
+    }
+
+    pub fn select_line_down(&mut self) {
+        let cursor = self.cursor_offset();
+        let current_line_start = super::text_ops::home_offset(&self.content, cursor);
+        let current_line_end = super::text_ops::line_end(&self.content, current_line_start);
+        let target = if cursor < current_line_end {
+            current_line_end
+        } else if current_line_end < self.content.len() {
+            let next_line_start = current_line_end + 1;
+            super::text_ops::line_end(&self.content, next_line_start)
+        } else {
+            self.content.len()
+        };
+        self.place(target, true);
+    }
+
+    pub fn move_doc_start(&mut self, extend: bool) {
+        self.place(0, extend);
+    }
+
+    pub fn move_doc_end(&mut self, extend: bool) {
+        let len = self.content.len();
+        self.place(len, extend);
+    }
+
     pub fn move_word_left(&mut self, extend: bool) {
         let target = if !extend && !self.caret.range.is_empty() {
             super::text_ops::word_left(&self.content, self.selection_range().start)
@@ -1279,6 +1316,81 @@ mod tests {
         doc.caret.move_to(2);
         doc.move_line_up();
         assert_eq!(doc.content, "First line\nSecond line\nThird line");
+    }
+
+    #[test]
+    fn select_line_up_and_down_multiline() {
+        let text = "Line one\nLine two\nLine three";
+        let mut doc = DocumentTab::new(
+            "tab-1".into(),
+            "Doc.md".into(),
+            text.into(),
+            None,
+            None,
+        );
+        // "Line one" is 0..8, newline at 8
+        // "Line two" is 9..17, newline at 17
+        // "Line three" is 18..28
+        // Place cursor in the middle of Line two (index 13: "Line |two")
+        doc.caret.move_to(13);
+
+        // First Ctrl+Shift+Up selects to beginning of Line two (index 9)
+        doc.select_line_up();
+        assert_eq!(doc.selection_range(), 9..13);
+        assert_eq!(doc.selected_text(), "Line");
+
+        // Second Ctrl+Shift+Up extends beyond to beginning of Line one (index 0)
+        doc.select_line_up();
+        assert_eq!(doc.selection_range(), 0..13);
+        assert_eq!(doc.selected_text(), "Line one\nLine");
+
+        // Third Ctrl+Shift+Up stays at 0 (start of doc)
+        doc.select_line_up();
+        assert_eq!(doc.selection_range(), 0..13);
+
+        // Now test select_line_down:
+        doc.caret.move_to(13);
+        // First Ctrl+Shift+Down selects to end of Line two (index 17)
+        doc.select_line_down();
+        assert_eq!(doc.selection_range(), 13..17);
+        assert_eq!(doc.selected_text(), " two");
+
+        // Second Ctrl+Shift+Down extends beyond to end of Line three (index 28)
+        doc.select_line_down();
+        assert_eq!(doc.selection_range(), 13..28);
+        assert_eq!(doc.selected_text(), " two\nLine three");
+
+        // Third Ctrl+Shift+Down stays at doc end
+        doc.select_line_down();
+        assert_eq!(doc.selection_range(), 13..28);
+    }
+
+    #[test]
+    fn doc_start_and_end_navigation() {
+        let mut doc = DocumentTab::new(
+            "tab-1".into(),
+            "Doc.md".into(),
+            "Alpha\nBeta\nGamma".into(),
+            None,
+            None,
+        );
+        doc.caret.move_to(7); // In "Beta"
+        doc.move_doc_start(false);
+        assert_eq!(doc.cursor_offset(), 0);
+        assert!(doc.caret.range.is_empty());
+
+        doc.caret.move_to(7);
+        doc.move_doc_start(true);
+        assert_eq!(doc.selection_range(), 0..7);
+
+        doc.caret.move_to(7);
+        doc.move_doc_end(false);
+        assert_eq!(doc.cursor_offset(), 16);
+        assert!(doc.caret.range.is_empty());
+
+        doc.caret.move_to(7);
+        doc.move_doc_end(true);
+        assert_eq!(doc.selection_range(), 7..16);
     }
 
     #[test]

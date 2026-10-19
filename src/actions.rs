@@ -86,6 +86,12 @@ actions!(
         EditorPlainNewline,
         EditorMoveLineUp,
         EditorMoveLineDown,
+        EditorSelectLineUp,
+        EditorSelectLineDown,
+        EditorDocStart,
+        EditorDocEnd,
+        EditorSelectDocStart,
+        EditorSelectDocEnd,
         FindNextMatch,
         FindPrevMatch,
     ]
