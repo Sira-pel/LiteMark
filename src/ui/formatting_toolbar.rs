@@ -86,7 +86,7 @@ where
         })
         .child({
             let l = on_link.clone();
-            icon_button("tb-link", "link", "Insert Link (Ctrl+K)", false, theme, move |_, _, cx| l(cx))
+            icon_button("tb-link", "link", "Insert Link (Ctrl+K)", formats.link, theme, move |_, _, cx| l(cx))
         })
         .child(divider(theme))
         // 9, 10, 11: Bullet, Numbered, Checklist
@@ -100,7 +100,7 @@ where
         })
         .child({
             let f = on_format.clone();
-            icon_button("tb-task", "square-check", "Checklist", false, theme, move |_, _, cx| f("checklist", cx))
+            icon_button("tb-task", "square-check", "Checklist", formats.checklist, theme, move |_, _, cx| f("checklist", cx))
         })
         .child(divider(theme))
         // 12: Search

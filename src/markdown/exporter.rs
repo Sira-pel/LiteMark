@@ -170,6 +170,7 @@ mod tests {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn format_markdown_table(headers: &[String], rows: &[Vec<String>]) -> String {
     let mut out = String::new();
     out.push_str("| ");

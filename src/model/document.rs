@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::markdown::{parse_document, InlineTagKind, LineKind, ParsedDocument};
 
 use super::text_ops::{
     find_matches, find_next, find_prev, format_replacement, home_offset, line_col, line_end,
@@ -64,8 +67,10 @@ pub struct ActiveFormats {
     pub h3: bool,
     pub ul: bool,
     pub ol: bool,
+    pub checklist: bool,
     pub quote: bool,
     pub code: bool,
+    pub link: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -111,8 +116,11 @@ pub struct DocumentTab {
     pub cursor_line: usize,
     pub cursor_col: usize,
     pub active_formats: ActiveFormats,
+    pub pending_formats: ActiveFormats,
     pub caret: Caret,
     pub marked_range: Option<Range<usize>>,
+    pub revision: u64,
+    cached_parse: Option<(u64, Arc<ParsedDocument>)>,
     history: UndoHistory,
 }
 
@@ -127,7 +135,7 @@ impl DocumentTab {
         let file_type = FileType::from_filename(&title);
         let stats = compute_stats(&content);
 
-        Self {
+        let mut tab = Self {
             id,
             title,
             content,
@@ -143,10 +151,36 @@ impl DocumentTab {
             cursor_line: 1,
             cursor_col: 1,
             active_formats: ActiveFormats::default(),
+            pending_formats: ActiveFormats::default(),
             caret: Caret::default(),
             marked_range: None,
+            revision: 1,
+            cached_parse: None,
             history: UndoHistory::default(),
+        };
+        tab.refresh_cursor();
+        tab
+    }
+
+    pub fn parsed(&mut self) -> Arc<ParsedDocument> {
+        if let Some((rev, ref doc)) = self.cached_parse {
+            if rev == self.revision {
+                return doc.clone();
+            }
         }
+        let doc = Arc::new(parse_document(&self.content));
+        self.cached_parse = Some((self.revision, doc.clone()));
+        doc
+    }
+
+    #[allow(dead_code)]
+    pub fn parsed_snapshot(&self) -> Arc<ParsedDocument> {
+        if let Some((rev, ref doc)) = self.cached_parse {
+            if rev == self.revision {
+                return doc.clone();
+            }
+        }
+        Arc::new(parse_document(&self.content))
     }
 
     pub fn is_read_only(&self) -> bool {
@@ -204,6 +238,7 @@ impl DocumentTab {
         });
         let cursor = range.start + new_text.len();
         self.content.replace_range(range, new_text);
+        self.revision = self.revision.wrapping_add(1);
         self.caret.move_to(cursor.min(self.content.len()));
         self.marked_range = None;
         self.is_modified = true;
@@ -552,110 +587,166 @@ impl DocumentTab {
         self.refresh_cursor();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn apply_format(&mut self, cmd: &str) {
+        self.apply_format_in_mode(cmd, ViewMode::Raw);
+    }
+
+    pub fn apply_format_in_mode(&mut self, cmd: &str, mode: ViewMode) {
         if self.is_read_only() {
             return;
         }
 
-        // 1. Headings (H1, H2, H3) - operates on whole line(s)
-        if matches!(cmd, "h1" | "h2" | "h3") {
-            let range = self.selection_range();
-            let start_line = super::text_ops::home_offset(&self.content, range.start);
-            let end_line = super::text_ops::line_end(&self.content, range.end);
-            let target_level = match cmd {
-                "h1" => 1,
-                "h2" => 2,
-                "h3" => 3,
-                _ => 1,
-            };
-            let target_prefix = match target_level {
-                1 => "# ",
-                2 => "## ",
-                3 => "### ",
-                _ => "# ",
-            };
-
-            let lines_str = &self.content[start_line..end_line];
-            let mut transformed_lines = Vec::new();
-            for line in lines_str.split('\n') {
-                let trimmed = line.trim_start();
-                let leading_spaces = &line[..line.len() - trimmed.len()];
-                let (existing_level, content_after_prefix) = if let Some(rest) = trimmed.strip_prefix("###### ") {
-                    (Some(6), rest)
-                } else if let Some(rest) = trimmed.strip_prefix("##### ") {
-                    (Some(5), rest)
-                } else if let Some(rest) = trimmed.strip_prefix("#### ") {
-                    (Some(4), rest)
-                } else if let Some(rest) = trimmed.strip_prefix("### ") {
-                    (Some(3), rest)
-                } else if let Some(rest) = trimmed.strip_prefix("## ") {
-                    (Some(2), rest)
-                } else if let Some(rest) = trimmed.strip_prefix("# ") {
-                    (Some(1), rest)
-                } else {
-                    (None, trimmed)
-                };
-
-                if existing_level == Some(target_level) {
-                    // Toggle off heading -> plain text
-                    transformed_lines.push(format!("{}{}", leading_spaces, content_after_prefix));
-                } else {
-                    // Apply or switch heading level
-                    transformed_lines.push(format!("{}{}{}", leading_spaces, target_prefix, content_after_prefix));
-                }
-            }
-            let replacement = transformed_lines.join("\n");
-            self.edit(start_line..end_line, &replacement);
+        // 1. Block-level formats: h1, h2, h3, ul, ol, checklist, quote
+        let block_target = match cmd {
+            "h1" => Some(BlockFormatTarget::Heading(1)),
+            "h2" => Some(BlockFormatTarget::Heading(2)),
+            "h3" => Some(BlockFormatTarget::Heading(3)),
+            "ul" => Some(BlockFormatTarget::BulletList),
+            "ol" => Some(BlockFormatTarget::OrderedList),
+            "checklist" => Some(BlockFormatTarget::TaskList),
+            "quote" => Some(BlockFormatTarget::Blockquote),
+            _ => None,
+        };
+        if let Some(target) = block_target {
+            self.toggle_block_lines(target);
             return;
         }
 
-        // 2. Inline styling (bold, italic, underline, strike, code)
-        let inline_delims = match cmd {
-            "bold" => Some(("**", "**", "bold text")),
-            "italic" => Some(("*", "*", "italic text")),
-            "underline" => Some(("<u>", "</u>", "underlined")),
-            "strike" => Some(("~~", "~~", "strikethrough")),
-            "code" => Some(("`", "`", "code")),
+        // 2. Code block toggle (Ctrl+Shift+C)
+        if cmd == "codeblock" {
+            self.toggle_code_block();
+            return;
+        }
+
+        // 3. Inline styling & Link: bold, italic, underline, strike, code, link
+        let inline_spec = match cmd {
+            "bold" => Some((InlineTagKind::Bold, "**", "**", "bold text")),
+            "italic" => Some((InlineTagKind::Italic, "*", "*", "italic text")),
+            "underline" => Some((InlineTagKind::Underline, "<u>", "</u>", "underlined")),
+            "strike" => Some((InlineTagKind::Strike, "~~", "~~", "strikethrough")),
+            "code" => Some((InlineTagKind::Code, "`", "`", "code")),
+            "link" => Some((InlineTagKind::Link, "[", "](https://)", "link")),
             _ => None,
         };
 
-        if let Some((prefix, suffix, placeholder)) = inline_delims {
+        if let Some((tag_kind, prefix, suffix, placeholder)) = inline_spec {
             let mut range = self.selection_range();
+            let parsed = self.parsed();
 
-            // If selection is empty, check if cursor is on/inside a word
+            // Check if the cursor or selection is inside or wrapping an existing InlinePair of `tag_kind`
+            if let Some(pair) = parsed
+                .inline_pairs
+                .iter()
+                .rev()
+                .find(|p| {
+                    p.kind == tag_kind
+                        && ((range.start >= p.open_delim.start && range.end <= p.close_delim.end)
+                            || (range.start <= p.open_delim.start && range.end >= p.close_delim.end))
+                })
+                .cloned()
+            {
+                let inner_text = self.content[pair.inner.clone()].to_string();
+                let edit_range = pair.open_delim.start..pair.close_delim.end;
+                // If the inner text is just the default unmodified placeholder and the user immediately toggled off,
+                // remove the placeholder too so pressing Ctrl+B twice on an empty spot leaves it empty!
+                if inner_text == placeholder && range == pair.inner {
+                    let pos = pair.open_delim.start;
+                    self.edit(edit_range, "");
+                    self.caret.move_to(pos);
+                    self.pending_formats = ActiveFormats::default();
+                    self.refresh_cursor();
+                    return;
+                }
+                let new_start = pair.open_delim.start;
+                let new_end = new_start + inner_text.len();
+                self.edit(edit_range, &inner_text);
+                if range.is_empty() {
+                    let rel = range.start.saturating_sub(pair.inner.start).min(inner_text.len());
+                    self.caret.move_to(new_start + rel);
+                } else {
+                    self.caret.range = new_start..new_end;
+                    self.caret.reversed = false;
+                }
+                self.pending_formats = ActiveFormats::default();
+                self.refresh_cursor();
+                return;
+            }
+
+            // If selection is empty, check if cursor is on/inside a word or enclosed by raw delimiters
             if range.is_empty() {
                 let cursor = range.start;
+                // Check empty delimiters right around cursor, e.g. `**|**`
+                if outer_is_delimited(&self.content, cursor, cursor, prefix, suffix) {
+                    let edit_range = (cursor - prefix.len())..(cursor + suffix.len());
+                    let pos = cursor - prefix.len();
+                    self.edit(edit_range, "");
+                    self.caret.move_to(pos);
+                    self.pending_formats = ActiveFormats::default();
+                    self.refresh_cursor();
+                    return;
+                }
+
                 let word_start = super::text_ops::word_left(&self.content, cursor);
                 let word_end = super::text_ops::word_right(&self.content, cursor);
 
-                // Check if already enclosed by delimiters around the cursor/word
-                let has_enclosing_delims = outer_is_delimited(&self.content, word_start, word_end, prefix, suffix);
-
-                if has_enclosing_delims {
-                    // Toggle off: strip the delimiters
+                if outer_is_delimited(&self.content, word_start, word_end, prefix, suffix) {
                     let core = self.content[word_start..word_end].to_string();
-                    let edit_range = word_start - prefix.len()..word_end + suffix.len();
+                    let edit_range = (word_start - prefix.len())..(word_end + suffix.len());
                     let new_start = word_start - prefix.len();
                     let new_end = new_start + core.len();
                     self.edit(edit_range, &core);
                     self.caret.range = new_start..new_end;
                     self.caret.reversed = false;
+                    self.pending_formats = ActiveFormats::default();
                     self.refresh_cursor();
                     return;
                 }
 
-                // If on a valid non-empty word, expand to it
-                if word_start < word_end
-                    && self.content[word_start..word_end].chars().any(|c| c.is_alphanumeric())
-                {
-                    range = word_start..word_end;
+                // Expand to word only if cursor is touching/inside an alphanumeric word on the same line
+                let line_s = home_offset(&self.content, cursor);
+                let line_e = line_end(&self.content, cursor);
+                let w_start = word_start.max(line_s);
+                let w_end = word_end.min(line_e);
+                let touching_word = (cursor > w_start
+                    && self.content[..cursor]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_'))
+                    || (cursor < w_end
+                        && self.content[cursor..]
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_'));
+                if touching_word && w_start < w_end {
+                    let extent = super::text_ops::word_extent(&self.content, cursor);
+                    if self.content[extent.clone()]
+                        .chars()
+                        .any(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        range = extent;
+                    }
                 }
             }
 
             let selected = self.content[range.clone()].to_string();
 
             if selected.is_empty() {
-                // Empty at whitespace / empty line -> insert placeholder
+                // In WYSIWYG mode, toggling bold/italic/underline/strike/code at an empty cursor toggles pending_formats!
+                if mode == ViewMode::Wysiwyg && tag_kind != InlineTagKind::Link {
+                    match tag_kind {
+                        InlineTagKind::Bold => self.pending_formats.bold = !self.pending_formats.bold,
+                        InlineTagKind::Italic => self.pending_formats.italic = !self.pending_formats.italic,
+                        InlineTagKind::Underline => self.pending_formats.underline = !self.pending_formats.underline,
+                        InlineTagKind::Strike => self.pending_formats.strike = !self.pending_formats.strike,
+                        InlineTagKind::Code => self.pending_formats.code = !self.pending_formats.code,
+                        InlineTagKind::Link => {}
+                    }
+                    self.refresh_cursor();
+                    return;
+                }
+
+                // In Raw mode (or for Link), insert placeholder and select inner placeholder so a second press unwraps/removes it
                 self.edit(range.clone(), &format!("{}{}{}", prefix, placeholder, suffix));
                 let start = floor_boundary(&self.content, range.start + prefix.len());
                 let end = floor_boundary(&self.content, start + placeholder.len());
@@ -674,14 +765,13 @@ impl DocumentTab {
                 let core = &selected[lead_len..selected.len() - trail_len];
                 let trailing = &selected[selected.len() - trail_len..];
 
-                // Check if core is already enclosed by prefix and suffix
                 let core_wrapped = is_delimited(core, prefix, suffix);
-
-                // Check if text outside the selection has prefix and suffix
-                let outer_wrapped = outer_is_delimited(&self.content, range.start, range.end, prefix, suffix);
+                let core_start = range.start + lead_len;
+                let core_end = range.end - trail_len;
+                let outer_wrapped =
+                    outer_is_delimited(&self.content, core_start, core_end, prefix, suffix);
 
                 if core_wrapped {
-                    // Toggle off from inside core
                     let unwrapped = &core[prefix.len()..core.len() - suffix.len()];
                     let replacement = format!("{}{}{}", leading, unwrapped, trailing);
                     let new_start = range.start + lead_len;
@@ -692,22 +782,21 @@ impl DocumentTab {
                     self.refresh_cursor();
                     return;
                 } else if outer_wrapped {
-                    // Toggle off from outside selection
-                    let edit_range = range.start - prefix.len()..range.end + suffix.len();
-                    let new_start = range.start - prefix.len();
-                    let new_end = new_start + selected.len();
-                    self.edit(edit_range, &selected);
+                    let edit_range = (core_start - prefix.len())..(core_end + suffix.len());
+                    let core_owned = core.to_string();
+                    let new_start = core_start - prefix.len();
+                    let new_end = new_start + core_owned.len();
+                    self.edit(edit_range, &core_owned);
                     self.caret.range = new_start..new_end;
                     self.caret.reversed = false;
                     self.refresh_cursor();
                     return;
                 } else {
-                    // Wrap tightly around core, keeping whitespace outside
                     let replacement = format!("{}{}{}{}{}", leading, prefix, core, suffix, trailing);
-                    let new_start = range.start;
-                    let new_end = range.start + replacement.len();
+                    let inner_start = range.start + lead_len + prefix.len();
+                    let inner_end = inner_start + core.len();
                     self.edit(range, &replacement);
-                    self.caret.range = new_start..new_end;
+                    self.caret.range = inner_start..inner_end;
                     self.caret.reversed = false;
                     self.refresh_cursor();
                     return;
@@ -715,7 +804,7 @@ impl DocumentTab {
             }
         }
 
-        // 3. Fallback for lists, clear, blockquote, hr, table, link
+        // 4. Fallback for clear, hr, table
         let range = self.selection_range();
         let selected = self.content[range.clone()].to_string();
         let flags = line_start_flags(&self.content, range.start, &selected);
@@ -734,6 +823,194 @@ impl DocumentTab {
         }
     }
 
+    fn toggle_block_lines(&mut self, target: BlockFormatTarget) {
+        let range = self.selection_range();
+        let start_line = home_offset(&self.content, range.start);
+        let end_line = line_end(&self.content, range.end);
+        let lines_str = &self.content[start_line..end_line];
+        let split_lines: Vec<&str> = lines_str.split('\n').collect();
+
+        // Check if all non-empty lines (or the single line) already match `target`
+        let all_match = split_lines
+            .iter()
+            .filter(|l| !l.trim().is_empty() || split_lines.len() == 1)
+            .all(|line| {
+                let (_, existing, _) = parse_line_block_prefix(line);
+                existing == Some(target)
+            });
+
+        let mut transformed = Vec::with_capacity(split_lines.len());
+        let mut first_delta: isize = 0;
+        let mut total_delta: isize = 0;
+
+        for (idx, line) in split_lines.iter().enumerate() {
+            let (indent, _existing, prefix_end) = parse_line_block_prefix(line);
+            let leading_spaces = if matches!(target, BlockFormatTarget::Heading(_)) {
+                &line[..indent.min(3)]
+            } else {
+                &line[..indent]
+            };
+            let body = &line[prefix_end..];
+            let new_line = if all_match {
+                format!("{}{}", leading_spaces, body)
+            } else {
+                let new_prefix = match target {
+                    BlockFormatTarget::Heading(1) => "# ".to_string(),
+                    BlockFormatTarget::Heading(2) => "## ".to_string(),
+                    BlockFormatTarget::Heading(_) => "### ".to_string(),
+                    BlockFormatTarget::BulletList => "- ".to_string(),
+                    BlockFormatTarget::OrderedList => format!("{}. ", idx + 1),
+                    BlockFormatTarget::TaskList => "- [ ] ".to_string(),
+                    BlockFormatTarget::Blockquote => "> ".to_string(),
+                };
+                format!("{}{}{}", leading_spaces, new_prefix, body)
+            };
+            let delta = new_line.len() as isize - line.len() as isize;
+            if idx == 0 {
+                first_delta = delta;
+            }
+            total_delta += delta;
+            transformed.push(new_line);
+        }
+
+        let replacement = transformed.join("\n");
+        self.edit(start_line..end_line, &replacement);
+        if range.is_empty() {
+            let new_cursor = (range.start as isize + first_delta)
+                .max(start_line as isize) as usize;
+            self.caret.move_to(floor_boundary(&self.content, new_cursor));
+        } else {
+            let new_start = (range.start as isize + first_delta)
+                .max(start_line as isize) as usize;
+            let new_end = (range.end as isize + total_delta).max(new_start as isize) as usize;
+            self.caret.range =
+                floor_boundary(&self.content, new_start)..floor_boundary(&self.content, new_end);
+            self.caret.reversed = false;
+        }
+        self.refresh_cursor();
+    }
+
+    fn toggle_code_block(&mut self) {
+        let range = self.selection_range();
+        let parsed = self.parsed();
+
+        // Check if selection/cursor is inside a fenced code block
+        if let Some((open_fence, close_fence)) = parsed
+            .code_blocks
+            .iter()
+            .find(|(open_r, close_r)| range.start >= open_r.start && range.end <= close_r.end)
+            .cloned()
+        {
+            let inner_start = open_fence.end.min(close_fence.start);
+            let inner_end = close_fence.start;
+            let mut inner = self.content[inner_start..inner_end].to_string();
+            if inner.ends_with('\n') && !close_fence.is_empty() {
+                inner.pop();
+            }
+            let full_end = close_fence.end;
+            let trailing_nl = if full_end <= self.content.len()
+                && self.content[..full_end].ends_with('\n')
+            {
+                "\n"
+            } else {
+                ""
+            };
+            let replacement = format!("{}{}", inner, trailing_nl);
+            self.edit(open_fence.start..full_end, &replacement);
+            self.caret.move_to(floor_boundary(
+                &self.content,
+                open_fence.start + inner.len(),
+            ));
+            self.refresh_cursor();
+            return;
+        }
+
+        // Also check if `selected` itself starts and ends with ```
+        let selected = self.content[range.clone()].to_string();
+        if selected.starts_with("```\n") && selected.ends_with("\n```") && selected.len() >= 8 {
+            let unwrapped = selected[4..selected.len() - 4].to_string();
+            let start = range.start;
+            let end = start + unwrapped.len();
+            self.edit(range, &unwrapped);
+            self.caret.range = start..end;
+            self.caret.reversed = false;
+            self.refresh_cursor();
+            return;
+        }
+
+        if selected.is_empty() {
+            let line_s = home_offset(&self.content, range.start);
+            let line_e = line_end(&self.content, range.start);
+            let line_text = self.content[line_s..line_e].to_string();
+            if line_text.is_empty() {
+                self.edit(range.clone(), "```\ncode\n```");
+                self.caret.range = (range.start + 4)..(range.start + 8);
+                self.caret.reversed = false;
+            } else {
+                let wrapped = format!("```\n{}\n```", line_text);
+                self.edit(line_s..line_e, &wrapped);
+                self.caret.range = (line_s + 4)..(line_s + 4 + line_text.len());
+                self.caret.reversed = false;
+            }
+            self.refresh_cursor();
+        } else {
+            let wrapped = format!("```\n{}\n```", selected);
+            let inner_start = range.start + 4;
+            let inner_end = inner_start + selected.len();
+            self.edit(range, &wrapped);
+            self.caret.range = inner_start..inner_end;
+            self.caret.reversed = false;
+            self.refresh_cursor();
+        }
+    }
+
+    pub fn has_pending_inline_formats(&self) -> bool {
+        let pf = self.pending_formats;
+        pf.bold || pf.italic || pf.underline || pf.strike || pf.code
+    }
+
+    pub fn insert_text_in_mode(&mut self, range: Range<usize>, text: &str, mode: ViewMode) {
+        if self.is_read_only() {
+            return;
+        }
+        if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() && text != "\n" {
+            let pf = self.pending_formats;
+            if pf.bold || pf.italic || pf.underline || pf.strike || pf.code {
+                let mut open = String::new();
+                let mut close = String::new();
+                if pf.bold {
+                    open.push_str("**");
+                    close.insert_str(0, "**");
+                }
+                if pf.italic {
+                    open.push('*');
+                    close.insert(0, '*');
+                }
+                if pf.underline {
+                    open.push_str("<u>");
+                    close.insert_str(0, "</u>");
+                }
+                if pf.strike {
+                    open.push_str("~~");
+                    close.insert_str(0, "~~");
+                }
+                if pf.code {
+                    open.push('`');
+                    close.insert(0, '`');
+                }
+                let wrapped = format!("{}{}{}", open, text, close);
+                let cursor_after = range.start + open.len() + text.len();
+                self.pending_formats = ActiveFormats::default();
+                self.edit(range, &wrapped);
+                self.caret.move_to(floor_boundary(&self.content, cursor_after));
+                self.refresh_cursor();
+                return;
+            }
+        }
+        self.pending_formats = ActiveFormats::default();
+        self.edit(range, text);
+    }
+
     #[allow(dead_code)]
     pub fn insert_snippet(&mut self, snippet: &str) {
         let cursor = self.cursor_offset();
@@ -745,6 +1022,7 @@ impl DocumentTab {
     }
 
     pub fn move_left(&mut self, extend: bool) {
+        self.pending_formats = ActiveFormats::default();
         let target = if !extend && !self.caret.range.is_empty() {
             self.selection_range().start
         } else {
@@ -754,6 +1032,7 @@ impl DocumentTab {
     }
 
     pub fn move_right(&mut self, extend: bool) {
+        self.pending_formats = ActiveFormats::default();
         let target = if !extend && !self.caret.range.is_empty() {
             self.selection_range().end
         } else {
@@ -762,22 +1041,212 @@ impl DocumentTab {
         self.place(target, extend);
     }
 
+    pub fn move_left_in_mode(&mut self, extend: bool, mode: ViewMode) {
+        self.pending_formats = ActiveFormats::default();
+        if mode == ViewMode::Raw {
+            self.move_left(extend);
+            return;
+        }
+        if !extend && !self.caret.range.is_empty() {
+            let start = self.selection_range().start;
+            self.place(start, false);
+            return;
+        }
+        let parsed = self.parsed();
+        let mut pos = self.cursor_offset();
+        if pos == 0 {
+            return;
+        }
+        if let Some(pline) = parsed.line_at_offset(pos) {
+            if pos <= pline.prefix_range.end && pos >= pline.source.start {
+                if pline.source.start > 0 {
+                    let prev_end = pline.source.start - 1;
+                    let snapped = skip_hidden_left(&parsed, prev_end);
+                    self.place(snapped, extend);
+                } else {
+                    self.place(0, extend);
+                }
+                return;
+            }
+        }
+        pos = skip_hidden_left(&parsed, pos);
+        pos = previous_grapheme(&self.content, pos);
+        pos = skip_hidden_interior_left(&parsed, pos);
+        if let Some(pline) = parsed.line_at_offset(pos) {
+            if pos < pline.prefix_range.end {
+                pos = pline.prefix_range.end;
+            }
+        }
+        self.place(pos, extend);
+    }
+
+    pub fn move_right_in_mode(&mut self, extend: bool, mode: ViewMode) {
+        self.pending_formats = ActiveFormats::default();
+        if mode == ViewMode::Raw {
+            self.move_right(extend);
+            return;
+        }
+        if !extend && !self.caret.range.is_empty() {
+            let end = self.selection_range().end;
+            self.place(end, false);
+            return;
+        }
+        let parsed = self.parsed();
+        let mut pos = self.cursor_offset();
+        if pos >= self.content.len() {
+            return;
+        }
+        if let Some(pline) = parsed.line_at_offset(pos) {
+            if pos < pline.prefix_range.end {
+                pos = pline.prefix_range.end;
+            }
+        }
+        pos = skip_hidden_right(&parsed, pos);
+        if pos >= self.content.len() {
+            self.place(self.content.len(), extend);
+            return;
+        }
+        if self.content.as_bytes().get(pos) == Some(&b'\n') {
+            let next_line_start = pos + 1;
+            if let Some(nline) = parsed.line_at_offset(next_line_start) {
+                let target = skip_hidden_right(&parsed, nline.prefix_range.end);
+                self.place(target, extend);
+                return;
+            }
+        }
+        pos = next_grapheme(&self.content, pos);
+        pos = skip_hidden_right(&parsed, pos);
+        self.place(pos, extend);
+    }
+
+    pub fn smart_backspace_in_mode(&mut self, mode: ViewMode) -> bool {
+        self.pending_formats = ActiveFormats::default();
+        if mode == ViewMode::Raw {
+            return self.smart_backspace();
+        }
+        if self.is_read_only() {
+            return false;
+        }
+        if !self.selection_range().is_empty() {
+            let range = self.selection_range();
+            self.edit(range, "");
+            return true;
+        }
+        let cursor = self.cursor_offset();
+        if cursor == 0 {
+            return false;
+        }
+        let parsed = self.parsed();
+
+        // 1. Check if cursor is inside or immediately after an InlinePair
+        for pair in parsed.inline_pairs.iter().rev() {
+            let prev_vis = if cursor == pair.close_delim.end {
+                pair.inner.end
+            } else {
+                cursor
+            };
+            if prev_vis > pair.inner.start && prev_vis <= pair.inner.end {
+                let prev_g = previous_grapheme(&self.content, prev_vis);
+                if prev_g <= pair.inner.start && prev_vis == pair.inner.end {
+                    // Only 1 visible grapheme inside this formatted span! Delete the whole span + delimiters!
+                    let start = pair.open_delim.start;
+                    let end = pair.close_delim.end;
+                    self.edit(start..end, "");
+                    self.caret.move_to(start);
+                    self.refresh_cursor();
+                    return true;
+                } else if cursor == pair.close_delim.end {
+                    // Cursor was right outside `**word**|` -> delete the last visible grapheme inside `word`
+                    let close_len = pair.close_delim.len();
+                    self.edit(prev_g..prev_vis, "");
+                    self.caret
+                        .move_to(floor_boundary(&self.content, prev_g + close_len));
+                    self.refresh_cursor();
+                    return true;
+                }
+            }
+        }
+
+        self.smart_backspace()
+    }
+
+    pub fn tab_table_cell(&mut self, backwards: bool) -> bool {
+        let cursor = self.cursor_offset();
+        let parsed = self.parsed();
+        let mut all_cells: Vec<Range<usize>> = Vec::new();
+        let mut in_table = false;
+        for line in &parsed.lines {
+            if let LineKind::TableRow { ref cells, ref table_source, .. } = line.kind {
+                if cursor >= table_source.start && cursor <= table_source.end {
+                    in_table = true;
+                    all_cells.extend(cells.iter().cloned());
+                }
+            }
+        }
+        if !in_table || all_cells.is_empty() {
+            return false;
+        }
+        let cur_idx = all_cells
+            .iter()
+            .position(|c| cursor >= c.start && cursor <= c.end)
+            .unwrap_or_else(|| {
+                all_cells
+                    .iter()
+                    .rposition(|c| c.start <= cursor)
+                    .unwrap_or(0)
+            });
+        let next_idx = if backwards {
+            if cur_idx == 0 {
+                all_cells.len() - 1
+            } else {
+                cur_idx - 1
+            }
+        } else {
+            (cur_idx + 1) % all_cells.len()
+        };
+        let target = all_cells[next_idx].clone();
+        self.caret.range = target;
+        self.caret.reversed = false;
+        self.refresh_cursor();
+        true
+    }
+
     pub fn move_up(&mut self, extend: bool) {
+        self.pending_formats = ActiveFormats::default();
         move_vertical_collapsed(&self.content, &mut self.caret, -1, extend);
         self.refresh_cursor();
     }
 
     pub fn move_down(&mut self, extend: bool) {
+        self.pending_formats = ActiveFormats::default();
         move_vertical_collapsed(&self.content, &mut self.caret, 1, extend);
         self.refresh_cursor();
     }
 
     pub fn move_home(&mut self, extend: bool) {
+        self.pending_formats = ActiveFormats::default();
         let target = super::text_ops::home_offset(&self.content, self.cursor_offset());
         self.place(target, extend);
     }
 
+    pub fn move_home_in_mode(&mut self, extend: bool, mode: ViewMode) {
+        self.pending_formats = ActiveFormats::default();
+        if mode == ViewMode::Raw {
+            self.move_home(extend);
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let parsed = self.parsed();
+        if let Some(pline) = parsed.line_at_offset(cursor) {
+            let vis_start = skip_hidden_right(&parsed, pline.prefix_range.end).min(pline.source.end);
+            self.place(vis_start, extend);
+        } else {
+            self.move_home(extend);
+        }
+    }
+
     pub fn move_end(&mut self, extend: bool) {
+        self.pending_formats = ActiveFormats::default();
         let line_start = super::text_ops::home_offset(&self.content, self.cursor_offset());
         let target = super::text_ops::line_end(&self.content, line_start);
         self.place(target, extend);
@@ -922,6 +1391,7 @@ impl DocumentTab {
     }
 
     pub fn place(&mut self, offset: usize, extend: bool) {
+        self.pending_formats = ActiveFormats::default();
         let offset = floor_boundary(&self.content, offset);
         if extend {
             self.caret.select_to(offset);
@@ -1000,15 +1470,20 @@ impl DocumentTab {
     }
 
     pub fn refresh_cursor(&mut self) {
-        let (line, col) = line_col(&self.content, self.cursor_offset());
+        let cursor = self.cursor_offset();
+        let (line, col) = line_col(&self.content, cursor);
         self.cursor_line = line;
         self.cursor_col = col;
+        let parsed = self.parsed();
+        self.active_formats = compute_active_formats(&parsed, cursor, &self.pending_formats);
     }
 
     pub fn undo(&mut self) -> bool {
         let Some(caret) = self.history.undo(&mut self.content) else {
             return false;
         };
+        self.revision = self.revision.wrapping_add(1);
+        self.pending_formats = ActiveFormats::default();
         self.place_after_history(caret);
         true
     }
@@ -1017,6 +1492,8 @@ impl DocumentTab {
         let Some(caret) = self.history.redo(&mut self.content) else {
             return false;
         };
+        self.revision = self.revision.wrapping_add(1);
+        self.pending_formats = ActiveFormats::default();
         self.place_after_history(caret);
         true
     }
@@ -1042,6 +1519,159 @@ impl DocumentTab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockFormatTarget {
+    Heading(u8),
+    BulletList,
+    OrderedList,
+    TaskList,
+    Blockquote,
+}
+
+fn parse_line_block_prefix(line: &str) -> (usize, Option<BlockFormatTarget>, usize) {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    if indent <= 3 {
+        for (lvl, pfx) in [
+            (6u8, "###### "),
+            (5, "##### "),
+            (4, "#### "),
+            (3, "### "),
+            (2, "## "),
+            (1, "# "),
+        ] {
+            if trimmed.starts_with(pfx) {
+                return (
+                    indent,
+                    Some(BlockFormatTarget::Heading(lvl)),
+                    indent + pfx.len(),
+                );
+            }
+        }
+    }
+    for pfx in [
+        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
+    ] {
+        if trimmed.starts_with(pfx) {
+            return (indent, Some(BlockFormatTarget::TaskList), indent + pfx.len());
+        }
+    }
+    for pfx in ["- ", "* ", "+ "] {
+        if trimmed.starts_with(pfx) {
+            return (
+                indent,
+                Some(BlockFormatTarget::BulletList),
+                indent + pfx.len(),
+            );
+        }
+    }
+    if let Some(dot) = trimmed.find(". ") {
+        if dot > 0 && trimmed[..dot].chars().all(|c| c.is_ascii_digit()) {
+            return (
+                indent,
+                Some(BlockFormatTarget::OrderedList),
+                indent + dot + 2,
+            );
+        }
+    }
+    if trimmed.starts_with("> ") {
+        return (indent, Some(BlockFormatTarget::Blockquote), indent + 2);
+    }
+    if trimmed == ">" {
+        return (indent, Some(BlockFormatTarget::Blockquote), indent + 1);
+    }
+    (indent, None, indent)
+}
+
+fn compute_active_formats(
+    parsed: &ParsedDocument,
+    cursor: usize,
+    pending: &ActiveFormats,
+) -> ActiveFormats {
+    let mut fmt = *pending;
+    if let Some(line) = parsed.line_at_offset(cursor) {
+        match line.kind {
+            LineKind::Heading { level: 1 } => fmt.h1 = true,
+            LineKind::Heading { level: 2 } => fmt.h2 = true,
+            LineKind::Heading { level: 3.. } => fmt.h3 = true,
+            LineKind::ListItem {
+                ordered,
+                task,
+                ..
+            } => {
+                if task.is_some() {
+                    fmt.checklist = true;
+                } else if ordered {
+                    fmt.ol = true;
+                } else {
+                    fmt.ul = true;
+                }
+            }
+            LineKind::Blockquote => fmt.quote = true,
+            LineKind::CodeFence { .. } | LineKind::CodeLine => fmt.code = true,
+            _ => {}
+        }
+        for pair in &line.inline_pairs {
+            if cursor >= pair.open_delim.start && cursor <= pair.close_delim.end {
+                match pair.kind {
+                    InlineTagKind::Bold => fmt.bold = true,
+                    InlineTagKind::Italic => fmt.italic = true,
+                    InlineTagKind::Underline => fmt.underline = true,
+                    InlineTagKind::Strike => fmt.strike = true,
+                    InlineTagKind::Code => fmt.code = true,
+                    InlineTagKind::Link => fmt.link = true,
+                }
+            }
+        }
+    }
+    fmt
+}
+
+fn skip_hidden_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
+    loop {
+        if let Some(h) = parsed
+            .hidden_ranges
+            .iter()
+            .find(|r| pos > r.start && pos <= r.end)
+        {
+            pos = h.start;
+        } else {
+            break;
+        }
+    }
+    pos
+}
+
+fn skip_hidden_interior_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
+    loop {
+        if let Some(h) = parsed
+            .hidden_ranges
+            .iter()
+            .find(|r| pos > r.start && pos < r.end)
+        {
+            pos = h.start;
+        } else {
+            break;
+        }
+    }
+    pos
+}
+
+fn skip_hidden_right(parsed: &ParsedDocument, mut pos: usize) -> usize {
+    loop {
+        if let Some(h) = parsed
+            .hidden_ranges
+            .iter()
+            .find(|r| pos >= r.start && pos < r.end)
+        {
+            pos = h.end;
+        } else {
+            break;
+        }
+    }
+    pos
+}
+
 fn floor_boundary(content: &str, offset: usize) -> usize {
     let offset = offset.min(content.len());
     if content.is_char_boundary(offset) {
@@ -1059,7 +1689,6 @@ fn is_delimited(text: &str, prefix: &str, suffix: &str) -> bool {
         return false;
     }
     if prefix == "*" {
-        // To be italic, must be triple asterisks (***) or single asterisk (* not preceded/followed by *)
         let triple = text.starts_with("***") && text.ends_with("***") && text.len() >= 6;
         let single = !text.starts_with("**") && !text.ends_with("**");
         triple || single
@@ -1094,7 +1723,6 @@ pub fn block_prefix_len(line: &str) -> usize {
     let trimmed_start = line.trim_start();
     let indent_len = line.len() - trimmed_start.len();
 
-    // Headings (up to 3 spaces before # in CommonMark)
     if indent_len <= 3 {
         for prefix in ["###### ", "##### ", "#### ", "### ", "## ", "# "] {
             if trimmed_start.starts_with(prefix) {
@@ -1103,7 +1731,6 @@ pub fn block_prefix_len(line: &str) -> usize {
         }
     }
 
-    // Task lists
     for prefix in [
         "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
     ] {
@@ -1112,19 +1739,16 @@ pub fn block_prefix_len(line: &str) -> usize {
         }
     }
 
-    // Bullet lists
     for prefix in ["- ", "* ", "+ "] {
         if trimmed_start.starts_with(prefix) {
             return indent_len + prefix.len();
         }
     }
 
-    // Blockquote
     if trimmed_start.starts_with("> ") {
         return indent_len + 2;
     }
 
-    // Numbered list: digits + ". "
     if let Some(dot_pos) = trimmed_start.find(". ") {
         if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
             return indent_len + dot_pos + 2;
@@ -1705,5 +2329,139 @@ mod tests {
         assert_eq!(block_prefix_len("10. Ten"), 4);
         assert_eq!(block_prefix_len("> Quote"), 2);
         assert_eq!(block_prefix_len("Plain paragraph"), 0);
+    }
+
+    #[test]
+    fn test_universal_reversible_inline_and_block_toggling() {
+        // 1. Inline toggling with cursor inside word (no selection needed)
+        for (cmd, expected_wrapped) in [
+            ("bold", "hello **world**"),
+            ("italic", "hello *world*"),
+            ("underline", "hello <u>world</u>"),
+            ("strike", "hello ~~world~~"),
+            ("code", "hello `world`"),
+            ("link", "hello [world](https://)"),
+        ] {
+            let mut doc =
+                DocumentTab::new("t".into(), "test.md".into(), "hello world".into(), None, None);
+            doc.place(8, false); // inside "world"
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(doc.content, expected_wrapped, "apply {cmd} failed");
+            // Pressing the exact same command again must cleanly undo/unwrap it!
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "hello world", "second press of {cmd} did not unwrap");
+        }
+
+        // 2. Block toggling ON and OFF idempotently, plus switching between block types
+        for (cmd, expected_line) in [
+            ("h1", "# My line"),
+            ("h2", "## My line"),
+            ("h3", "### My line"),
+            ("ul", "- My line"),
+            ("ol", "1. My line"),
+            ("checklist", "- [ ] My line"),
+            ("quote", "> My line"),
+            ("codeblock", "```\nMy line\n```"),
+        ] {
+            let mut doc =
+                DocumentTab::new("b".into(), "test.md".into(), "My line".into(), None, None);
+            doc.place(3, false);
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(doc.content, expected_line, "apply block {cmd} failed");
+            // Pressing a second time toggles off back to "My line"
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "My line", "second press of block {cmd} did not toggle off");
+        }
+
+        // 3. Switching directly from Bullet List to Numbered List to Checklist without stacking
+        let mut doc = DocumentTab::new("s".into(), "test.md".into(), "Task item".into(), None, None);
+        doc.place(2, false);
+        doc.apply_format_in_mode("ul", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "- Task item");
+        assert!(doc.active_formats.ul);
+        doc.apply_format_in_mode("ol", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "1. Task item");
+        assert!(doc.active_formats.ol);
+        assert!(!doc.active_formats.ul);
+        doc.apply_format_in_mode("checklist", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "- [ ] Task item");
+        assert!(doc.active_formats.checklist);
+        assert!(!doc.active_formats.ol);
+        doc.apply_format_in_mode("checklist", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "Task item");
+        assert!(!doc.active_formats.checklist);
+    }
+
+    #[test]
+    fn test_wysiwyg_pending_inline_formats_and_typing() {
+        let mut doc = DocumentTab::new("p".into(), "test.md".into(), "hello ".into(), None, None);
+        doc.place(6, false); // at empty end after space
+
+        // Press Ctrl+B once -> arms pending bold, does not insert placeholder text
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "hello ");
+        assert!(doc.pending_formats.bold);
+        assert!(doc.active_formats.bold);
+
+        // Press Ctrl+B again -> disarms pending bold
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "hello ");
+        assert!(!doc.pending_formats.bold);
+        assert!(!doc.active_formats.bold);
+
+        // Re-arm Bold + Italic, then type "A" -> wraps in "***A***" and places cursor after A
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        assert!(doc.active_formats.bold && doc.active_formats.italic);
+        let range = doc.selection_range();
+        doc.insert_text_in_mode(range, "A", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "hello ***A***");
+        assert_eq!(doc.cursor_offset(), 10); // right after 'A', inside closing '***'
+        assert!(doc.active_formats.bold && doc.active_formats.italic);
+    }
+
+    #[test]
+    fn test_wysiwyg_delimiter_skipping_navigation_and_atomic_backspace() {
+        let mut doc =
+            DocumentTab::new("n".into(), "test.md".into(), "a **b** c".into(), None, None);
+        doc.place(0, false);
+
+        // Visible text is "a b c"
+        // Step right across visible characters: 'a' -> ' ' -> 'b' -> ' ' -> 'c'
+        doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), 1); // after 'a'
+        doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), 4); // skipped space and opening "**" to land before 'b'
+        doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), 7); // stepped over 'b' and skipped closing "**"
+
+        // Step left back onto 'b'
+        doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), 4); // before 'b'
+
+        // Place right after 'b' (offset 5 or 7) and atomic backspace the single-char bold span
+        doc.place(5, false);
+        doc.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "a  c");
+    }
+
+    #[test]
+    fn test_table_cell_tab_navigation() {
+        let table = "| Name | Role |\n| --- | --- |\n| Alice | Admin |";
+        let mut doc = DocumentTab::new("tbl".into(), "test.md".into(), table.into(), None, None);
+        doc.place(2, false); // inside "Name"
+
+        assert!(doc.tab_table_cell(false));
+        assert_eq!(doc.selected_text(), "Role");
+
+        assert!(doc.tab_table_cell(false));
+        assert_eq!(doc.selected_text(), "Alice");
+
+        assert!(doc.tab_table_cell(false));
+        assert_eq!(doc.selected_text(), "Admin");
+
+        // Shift+Tab goes backwards
+        assert!(doc.tab_table_cell(true));
+        assert_eq!(doc.selected_text(), "Alice");
     }
 }

@@ -832,6 +832,7 @@ pub fn hud_should_hide(elapsed_ms: u64) -> bool {
 
 /// Minimum block height for a WYSIWYG list row, in CSS pixels.
 /// The extra gap keeps the next bullet from painting over this one.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn wysiwyg_list_row_height(font_px: f32) -> f32 {
     font_px * 1.65 + 8.0
 }
