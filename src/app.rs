@@ -3294,6 +3294,22 @@ impl Render for LiteMarkApp {
                 window.refresh();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &EditorMoveLineUp, window, cx| {
+                if let Some(tab) = this.active_tab_mut() {
+                    tab.move_line_up();
+                }
+                this.refresh_find();
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorMoveLineDown, window, cx| {
+                if let Some(tab) = this.active_tab_mut() {
+                    tab.move_line_down();
+                }
+                this.refresh_find();
+                window.refresh();
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &FindNextMatch, _w, cx| {
                 this.find_next();
                 cx.notify();

@@ -144,6 +144,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = height.into();
+        style.min_size.width = px(0.0).into();
+        style.max_size.width = relative(1.).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -172,7 +174,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         );
         let char_width = sample.width.max(px(1.0));
         let gutter = self.gutter();
-        let available_width = (bounds.size.width - gutter - px(32.0)).max(px(32.0));
+        let available_width = (bounds.size.width - gutter - px(48.0)).max(px(32.0));
         let (content_width, x_offset) = if self.centered {
             let max_w = self.max_measure.unwrap_or(available_width).min(available_width);
             let offset = ((available_width - max_w) / 2.0).max(px(0.0));

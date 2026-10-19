@@ -34,6 +34,7 @@ where
         ("Ctrl + Left / Right", "Jump Word Left / Right"),
         ("Ctrl + Shift + Left / Right", "Select Word Left / Right"),
         ("Ctrl + Backspace / Delete", "Delete Word Left / Right"),
+        ("Ctrl + Up / Down", "Move Line Up / Down"),
         ("Ctrl + \\", "Toggle Notes Folder Sidebar"),
         ("F1", "Help & Shortcuts"),
         ("Alt + F / E / V", "Open File / Edit / View Menu"),

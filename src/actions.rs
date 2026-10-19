@@ -83,6 +83,8 @@ actions!(
         EditorBackspace,
         EditorDelete,
         EditorNewline,
+        EditorMoveLineUp,
+        EditorMoveLineDown,
         FindNextMatch,
         FindPrevMatch,
     ]

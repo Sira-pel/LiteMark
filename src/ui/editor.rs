@@ -102,10 +102,18 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
         } else {
             div()
                 .id("raw-editor-scroll")
+                .w_full()
+                .min_w_0()
                 .flex_1()
                 .size_full()
+                .overflow_x_hidden()
                 .overflow_y_scroll()
-                .child(props.raw_editor)
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .child(props.raw_editor),
+                )
                 .into_any_element()
         })
 }
@@ -206,46 +214,18 @@ fn render_spans(
         }
     }
 
-    if let Some(char_idx) = caret_char_pos {
-        let byte_idx = full_text
+    let caret_byte_idx = caret_char_pos.map(|char_idx| {
+        full_text
             .char_indices()
             .nth(char_idx)
             .map(|(i, _)| i)
-            .unwrap_or(full_text.len());
-        let cursor_str = "\u{258F}";
-        let cursor_len = cursor_str.len();
-
-        for (range, _) in &mut highlights {
-            if range.start >= byte_idx {
-                range.start += cursor_len;
-            }
-            if range.end >= byte_idx {
-                range.end += cursor_len;
-            }
-        }
-        for (range, _) in &mut links {
-            if range.start >= byte_idx {
-                range.start += cursor_len;
-            }
-            if range.end >= byte_idx {
-                range.end += cursor_len;
-            }
-        }
-
-        full_text.insert_str(byte_idx, cursor_str);
-        highlights.push((
-            byte_idx..byte_idx + cursor_len,
-            HighlightStyle {
-                color: Some(theme.text_hi.into()),
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            },
-        ));
-    }
+            .unwrap_or(full_text.len())
+    });
 
     let styled = StyledText::new(full_text).with_highlights(highlights);
+    let text_layout = styled.layout().clone();
 
-    if !links.is_empty() {
+    let text_element: AnyElement = if !links.is_empty() {
         let click_ranges = links.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
         let url_targets = links.into_iter().map(|(_, u)| u).collect::<Vec<_>>();
         InteractiveText::new(("interactive-span", block_ix), styled)
@@ -257,6 +237,35 @@ fn render_spans(
             .into_any_element()
     } else {
         styled.into_any_element()
+    };
+
+    if let Some(byte_idx) = caret_byte_idx {
+        let cursor_color = theme.text_hi;
+        let caret_h = px((_text_size_px * 1.25).max(14.0));
+        div()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .child(text_element)
+            .child(
+                canvas(
+                    |_bounds, _window, _cx| (),
+                    move |bounds, (), window, _cx| {
+                        let pos = text_layout
+                            .position_for_index(byte_idx)
+                            .unwrap_or(bounds.origin);
+                        window.paint_quad(fill(
+                            Bounds::new(pos, size(px(2.0), caret_h)),
+                            cursor_color,
+                        ));
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
+    } else {
+        text_element
     }
 }
 

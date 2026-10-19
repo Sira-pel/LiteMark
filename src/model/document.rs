@@ -211,10 +211,223 @@ impl DocumentTab {
         self.refresh_cursor();
     }
 
+    pub fn move_line_up(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let current_line_start = super::text_ops::home_offset(&self.content, cursor);
+        if current_line_start == 0 {
+            return;
+        }
+        let col = cursor - current_line_start;
+        let prev_line_start = super::text_ops::home_offset(&self.content, current_line_start - 1);
+        let current_line_end = super::text_ops::line_end(&self.content, current_line_start);
+
+        let prev_line = self.content[prev_line_start..current_line_start - 1].to_string();
+        let curr_line = self.content[current_line_start..current_line_end].to_string();
+        let curr_len = curr_line.len();
+
+        let new_text = format!("{}\n{}", curr_line, prev_line);
+        self.edit(prev_line_start..current_line_end, &new_text);
+
+        let new_cursor = (prev_line_start + col).min(prev_line_start + curr_len);
+        self.caret.move_to(new_cursor);
+        self.refresh_cursor();
+    }
+
+    pub fn move_line_down(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let current_line_start = super::text_ops::home_offset(&self.content, cursor);
+        let current_line_end = super::text_ops::line_end(&self.content, current_line_start);
+        if current_line_end >= self.content.len() {
+            return;
+        }
+        let col = cursor - current_line_start;
+        let next_line_start = current_line_end + 1;
+        let next_line_end = super::text_ops::line_end(&self.content, next_line_start);
+
+        let curr_line = self.content[current_line_start..current_line_end].to_string();
+        let next_line = self.content[next_line_start..next_line_end].to_string();
+        let curr_len = curr_line.len();
+        let next_len = next_line.len();
+
+        let new_text = format!("{}\n{}", next_line, curr_line);
+        self.edit(current_line_start..next_line_end, &new_text);
+
+        let new_line_start = current_line_start + next_len + 1;
+        let new_cursor = (new_line_start + col).min(new_line_start + curr_len);
+        self.caret.move_to(new_cursor);
+        self.refresh_cursor();
+    }
+
     pub fn apply_format(&mut self, cmd: &str) {
         if self.is_read_only() {
             return;
         }
+
+        // 1. Headings (H1, H2, H3) - operates on whole line(s)
+        if matches!(cmd, "h1" | "h2" | "h3") {
+            let range = self.selection_range();
+            let start_line = super::text_ops::home_offset(&self.content, range.start);
+            let end_line = super::text_ops::line_end(&self.content, range.end);
+            let target_level = match cmd {
+                "h1" => 1,
+                "h2" => 2,
+                "h3" => 3,
+                _ => 1,
+            };
+            let target_prefix = match target_level {
+                1 => "# ",
+                2 => "## ",
+                3 => "### ",
+                _ => "# ",
+            };
+
+            let lines_str = &self.content[start_line..end_line];
+            let mut transformed_lines = Vec::new();
+            for line in lines_str.split('\n') {
+                let trimmed = line.trim_start();
+                let leading_spaces = &line[..line.len() - trimmed.len()];
+                let (existing_level, content_after_prefix) = if let Some(rest) = trimmed.strip_prefix("###### ") {
+                    (Some(6), rest)
+                } else if let Some(rest) = trimmed.strip_prefix("##### ") {
+                    (Some(5), rest)
+                } else if let Some(rest) = trimmed.strip_prefix("#### ") {
+                    (Some(4), rest)
+                } else if let Some(rest) = trimmed.strip_prefix("### ") {
+                    (Some(3), rest)
+                } else if let Some(rest) = trimmed.strip_prefix("## ") {
+                    (Some(2), rest)
+                } else if let Some(rest) = trimmed.strip_prefix("# ") {
+                    (Some(1), rest)
+                } else {
+                    (None, trimmed)
+                };
+
+                if existing_level == Some(target_level) {
+                    // Toggle off heading -> plain text
+                    transformed_lines.push(format!("{}{}", leading_spaces, content_after_prefix));
+                } else {
+                    // Apply or switch heading level
+                    transformed_lines.push(format!("{}{}{}", leading_spaces, target_prefix, content_after_prefix));
+                }
+            }
+            let replacement = transformed_lines.join("\n");
+            self.edit(start_line..end_line, &replacement);
+            return;
+        }
+
+        // 2. Inline styling (bold, italic, underline, strike, code)
+        let inline_delims = match cmd {
+            "bold" => Some(("**", "**", "bold text")),
+            "italic" => Some(("*", "*", "italic text")),
+            "underline" => Some(("<u>", "</u>", "underlined")),
+            "strike" => Some(("~~", "~~", "strikethrough")),
+            "code" => Some(("`", "`", "code")),
+            _ => None,
+        };
+
+        if let Some((prefix, suffix, placeholder)) = inline_delims {
+            let mut range = self.selection_range();
+
+            // If selection is empty, check if cursor is on/inside a word
+            if range.is_empty() {
+                let cursor = range.start;
+                let word_start = super::text_ops::word_left(&self.content, cursor);
+                let word_end = super::text_ops::word_right(&self.content, cursor);
+
+                // Check if already enclosed by delimiters around the cursor/word
+                let has_enclosing_delims = outer_is_delimited(&self.content, word_start, word_end, prefix, suffix);
+
+                if has_enclosing_delims {
+                    // Toggle off: strip the delimiters
+                    let core = self.content[word_start..word_end].to_string();
+                    let edit_range = word_start - prefix.len()..word_end + suffix.len();
+                    let new_start = word_start - prefix.len();
+                    let new_end = new_start + core.len();
+                    self.edit(edit_range, &core);
+                    self.caret.range = new_start..new_end;
+                    self.caret.reversed = false;
+                    self.refresh_cursor();
+                    return;
+                }
+
+                // If on a valid non-empty word, expand to it
+                if word_start < word_end
+                    && self.content[word_start..word_end].chars().any(|c| c.is_alphanumeric())
+                {
+                    range = word_start..word_end;
+                }
+            }
+
+            let selected = self.content[range.clone()].to_string();
+
+            if selected.is_empty() {
+                // Empty at whitespace / empty line -> insert placeholder
+                self.edit(range.clone(), &format!("{}{}{}", prefix, placeholder, suffix));
+                let start = floor_boundary(&self.content, range.start + prefix.len());
+                let end = floor_boundary(&self.content, start + placeholder.len());
+                self.caret.range = start..end;
+                self.caret.reversed = false;
+                self.refresh_cursor();
+                return;
+            }
+
+            // Non-empty text: trim whitespace to place delimiters tightly around text
+            let lead_len = selected.len() - selected.trim_start().len();
+            let trail_len = selected.len() - selected.trim_end().len();
+
+            if lead_len + trail_len < selected.len() {
+                let leading = &selected[..lead_len];
+                let core = &selected[lead_len..selected.len() - trail_len];
+                let trailing = &selected[selected.len() - trail_len..];
+
+                // Check if core is already enclosed by prefix and suffix
+                let core_wrapped = is_delimited(core, prefix, suffix);
+
+                // Check if text outside the selection has prefix and suffix
+                let outer_wrapped = outer_is_delimited(&self.content, range.start, range.end, prefix, suffix);
+
+                if core_wrapped {
+                    // Toggle off from inside core
+                    let unwrapped = &core[prefix.len()..core.len() - suffix.len()];
+                    let replacement = format!("{}{}{}", leading, unwrapped, trailing);
+                    let new_start = range.start + lead_len;
+                    let new_end = new_start + unwrapped.len();
+                    self.edit(range, &replacement);
+                    self.caret.range = new_start..new_end;
+                    self.caret.reversed = false;
+                    self.refresh_cursor();
+                    return;
+                } else if outer_wrapped {
+                    // Toggle off from outside selection
+                    let edit_range = range.start - prefix.len()..range.end + suffix.len();
+                    let new_start = range.start - prefix.len();
+                    let new_end = new_start + selected.len();
+                    self.edit(edit_range, &selected);
+                    self.caret.range = new_start..new_end;
+                    self.caret.reversed = false;
+                    self.refresh_cursor();
+                    return;
+                } else {
+                    // Wrap tightly around core, keeping whitespace outside
+                    let replacement = format!("{}{}{}{}{}", leading, prefix, core, suffix, trailing);
+                    let new_start = range.start;
+                    let new_end = range.start + replacement.len();
+                    self.edit(range, &replacement);
+                    self.caret.range = new_start..new_end;
+                    self.caret.reversed = false;
+                    self.refresh_cursor();
+                    return;
+                }
+            }
+        }
+
+        // 3. Fallback for lists, clear, blockquote, hr, table, link
         let range = self.selection_range();
         let selected = self.content[range.clone()].to_string();
         let flags = line_start_flags(&self.content, range.start, &selected);
@@ -513,6 +726,45 @@ fn floor_boundary(content: &str, offset: usize) -> usize {
     }
 }
 
+fn is_delimited(text: &str, prefix: &str, suffix: &str) -> bool {
+    if text.len() < prefix.len() + suffix.len() {
+        return false;
+    }
+    if !text.starts_with(prefix) || !text.ends_with(suffix) {
+        return false;
+    }
+    if prefix == "*" {
+        // To be italic, must be triple asterisks (***) or single asterisk (* not preceded/followed by *)
+        let triple = text.starts_with("***") && text.ends_with("***") && text.len() >= 6;
+        let single = !text.starts_with("**") && !text.ends_with("**");
+        triple || single
+    } else {
+        true
+    }
+}
+
+fn outer_is_delimited(content: &str, start: usize, end: usize, prefix: &str, suffix: &str) -> bool {
+    if start < prefix.len() || content.len() < end + suffix.len() {
+        return false;
+    }
+    let before = &content[start - prefix.len()..start];
+    let after = &content[end..end + suffix.len()];
+    if before != prefix || after != suffix {
+        return false;
+    }
+    if prefix == "*" {
+        let extra_before = start > 1 && content.as_bytes().get(start - 2) == Some(&b'*');
+        let extra_after = content.as_bytes().get(end + 1) == Some(&b'*');
+        let triple_before = start > 2 && content.as_bytes().get(start - 3) == Some(&b'*');
+        let triple_after = content.as_bytes().get(end + 2) == Some(&b'*');
+        let triple = extra_before && triple_before && extra_after && triple_after;
+        let single = !extra_before && !extra_after;
+        triple || single
+    } else {
+        true
+    }
+}
+
 fn cmd_selects_placeholder(cmd: &str) -> bool {
     matches!(
         cmd,
@@ -652,14 +904,118 @@ mod tests {
         let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), "abc".into(), None, None);
         doc.caret.move_to(1);
         doc.apply_format("bold");
-        assert!(doc.content.starts_with("a**bold text**"));
-        assert!(doc.content.ends_with("bc"));
+        assert_eq!(doc.content, "**abc**");
+        // Toggling bold again strips delimiters
+        doc.apply_format("bold");
+        assert_eq!(doc.content, "abc");
+
+        let mut empty_doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), "".into(), None, None);
+        empty_doc.apply_format("bold");
+        assert_eq!(empty_doc.content, "**bold text**");
 
         let source = "- item *keep*\n* bullet `code`";
         let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), source.into(), None, None);
         doc.select_all();
         doc.apply_format("clear");
         assert_eq!(doc.content, "- item keep\n* bullet code");
+    }
+
+    #[test]
+    fn move_line_up_and_down_and_undo() {
+        let mut doc = DocumentTab::new(
+            "tab-1".into(),
+            "Doc.md".into(),
+            "First line\nSecond line\nThird line".into(),
+            None,
+            None,
+        );
+        // Cursor on Second line
+        doc.caret.move_to(15);
+        doc.move_line_up();
+        assert_eq!(doc.content, "Second line\nFirst line\nThird line");
+        assert!(doc.undo());
+        assert_eq!(doc.content, "First line\nSecond line\nThird line");
+
+        // Move down
+        doc.caret.move_to(15);
+        doc.move_line_down();
+        assert_eq!(doc.content, "First line\nThird line\nSecond line");
+        assert!(doc.undo());
+        assert_eq!(doc.content, "First line\nSecond line\nThird line");
+
+        // Edge case: top line cannot move up
+        doc.caret.move_to(2);
+        doc.move_line_up();
+        assert_eq!(doc.content, "First line\nSecond line\nThird line");
+    }
+
+    #[test]
+    fn heading_toggle_and_level_switching() {
+        let mut doc = DocumentTab::new(
+            "tab-1".into(),
+            "Doc.md".into(),
+            "My heading\nParagraph".into(),
+            None,
+            None,
+        );
+        doc.caret.move_to(3);
+        // Apply H1
+        doc.apply_format("h1");
+        assert_eq!(doc.content, "# My heading\nParagraph");
+
+        // Switch to H2 (should not stack ## #)
+        doc.apply_format("h2");
+        assert_eq!(doc.content, "## My heading\nParagraph");
+
+        // Toggle H2 off
+        doc.apply_format("h2");
+        assert_eq!(doc.content, "My heading\nParagraph");
+    }
+
+    #[test]
+    fn inline_formatting_whitespace_trimming() {
+        let mut doc = DocumentTab::new(
+            "tab-1".into(),
+            "Doc.md".into(),
+            "leading  RAM usage  trailing".into(),
+            None,
+            None,
+        );
+        // Select "  RAM usage  " (includes leading and trailing spaces)
+        doc.caret.range = 7..20;
+        doc.apply_format("bold");
+        assert_eq!(doc.content, "leading  **RAM usage**  trailing");
+
+        // Toggle off
+        doc.caret.range = 7..24;
+        doc.apply_format("bold");
+        assert_eq!(doc.content, "leading  RAM usage  trailing");
+    }
+
+    #[test]
+    fn stacking_bold_and_italic_formatting() {
+        let mut doc = DocumentTab::new(
+            "tab-1".into(),
+            "Doc.md".into(),
+            "hello world".into(),
+            None,
+            None,
+        );
+        doc.caret.range = 6..11; // select "world"
+        doc.apply_format("bold");
+        assert_eq!(doc.content, "hello **world**");
+
+        // Stack italic on top
+        doc.apply_format("italic");
+        assert_eq!(doc.content, "hello ***world***");
+
+        // Toggle bold off
+        doc.apply_format("bold");
+        assert_eq!(doc.content, "hello *world*");
+
+        // Toggle italic off
+        doc.apply_format("italic");
+        assert_eq!(doc.content, "hello world");
     }
 
     #[test]
