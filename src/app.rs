@@ -74,6 +74,8 @@ pub struct LiteMarkApp {
     pub rename_field: Entity<LineField>,
     pub wysiwyg_bounds: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
     pub field_owns_keys: bool,
+    pub field_focus: TextInput,
+    pub bounds_subscription: Option<Subscription>,
 }
 
 impl LiteMarkApp {
@@ -120,6 +122,7 @@ impl LiteMarkApp {
                                     this.find_index = None;
                                     this.refresh_find();
                                     cx.notify();
+                                    cx.refresh_windows();
                                 })
                                 .ok();
                         }
@@ -135,7 +138,16 @@ impl LiteMarkApp {
                                         this.find_next();
                                     }
                                     cx.notify();
+                                    cx.refresh_windows();
                                 })
+                                .ok();
+                        }
+                    }),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |app| {
+                            app_handle
+                                .update(app, |this, cx| this.claim_field(TextInput::Find, cx))
                                 .ok();
                         }
                     }),
@@ -149,15 +161,27 @@ impl LiteMarkApp {
                     cx,
                     "replace-field",
                     "Replace with...",
-                    Arc::new(move |text, app| {
-                        app_handle
-                            .update(app, |this, cx| {
-                                this.replace_term = text.to_string();
-                                cx.notify();
-                            })
-                            .ok();
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |text, app| {
+                            app_handle
+                                .update(app, |this, cx| {
+                                    this.replace_term = text.to_string();
+                                    cx.notify();
+                                    cx.refresh_windows();
+                                })
+                                .ok();
+                        }
                     }),
                     Arc::new(|_, _| {}),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |app| {
+                            app_handle
+                                .update(app, |this, cx| this.claim_field(TextInput::Replace, cx))
+                                .ok();
+                        }
+                    }),
                 )
             }
         });
@@ -176,7 +200,16 @@ impl LiteMarkApp {
                                 .update(app, |this, cx| {
                                     this.commit_rename(cx);
                                     cx.notify();
+                                    cx.refresh_windows();
                                 })
+                                .ok();
+                        }
+                    }),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |app| {
+                            app_handle
+                                .update(app, |this, cx| this.claim_field(TextInput::Rename, cx))
                                 .ok();
                         }
                     }),
@@ -230,7 +263,64 @@ impl LiteMarkApp {
             rename_field,
             wysiwyg_bounds: Rc::new(RefCell::new(Vec::new())),
             field_owns_keys: false,
+            field_focus: TextInput::Editor,
+            bounds_subscription: None,
         }
+    }
+
+    fn claim_field(&mut self, which: TextInput, cx: &mut Context<Self>) {
+        self.field_focus = which;
+        self.field_owns_keys = !document_accepts_keystrokes(which);
+        if which == TextInput::Editor {
+            self.applied_focus = None;
+        }
+        cx.notify();
+        cx.refresh_windows();
+    }
+
+    fn line_field_for_focus(&self) -> Option<Entity<LineField>> {
+        match self.field_focus {
+            TextInput::Find if self.show_find_replace => Some(self.find_field.clone()),
+            TextInput::Replace if self.show_find_replace => Some(self.replace_field.clone()),
+            TextInput::Rename if self.rename_target.is_some() => Some(self.rename_field.clone()),
+            _ => None,
+        }
+    }
+
+    /// The platform input handler may still be the editor for a frame after a
+    /// field click. Deliver the keystroke to the field that owns it.
+    fn forward_keystroke_to_field(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let focused = if self.find_field.read(cx).is_focused(window) {
+            Some(self.find_field.clone())
+        } else if self.replace_field.read(cx).is_focused(window) {
+            Some(self.replace_field.clone())
+        } else if self.rename_field.read(cx).is_focused(window) {
+            Some(self.rename_field.clone())
+        } else {
+            self.line_field_for_focus()
+        };
+        let Some(field) = focused else {
+            return false;
+        };
+        let find_id = self.find_field.entity_id();
+        let replace_id = self.replace_field.entity_id();
+        let written = field.update(cx, |field, cx| field.push_input(text, cx));
+        if field.entity_id() == find_id {
+            self.find_term = written;
+            self.find_index = None;
+            self.refresh_find();
+        } else if field.entity_id() == replace_id {
+            self.replace_term = written;
+        }
+        window.refresh();
+        cx.notify();
+        cx.refresh_windows();
+        true
     }
 
     pub fn active_tab(&self) -> Option<&DocumentTab> {
@@ -357,8 +447,8 @@ impl LiteMarkApp {
         }
     }
 
-    pub fn handle_format_cmd(&mut self, cmd: &'static str) {
-        if self.field_owns_keys {
+    pub fn handle_format_cmd(&mut self, cmd: &'static str, cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus) || self.field_owns_keys {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) && cmd != "undo" && cmd != "redo"
@@ -378,14 +468,15 @@ impl LiteMarkApp {
             }
         }
         self.refresh_find();
+        cx.refresh_windows();
     }
 
-    pub fn handle_insert_table(&mut self) {
-        self.handle_format_cmd("table");
+    pub fn handle_insert_table(&mut self, cx: &mut App) {
+        self.handle_format_cmd("table", cx);
     }
 
-    pub fn handle_insert_link(&mut self) {
-        self.handle_format_cmd("link");
+    pub fn handle_insert_link(&mut self, cx: &mut App) {
+        self.handle_format_cmd("link", cx);
     }
 
     pub fn handle_toggle_sidebar(&mut self) {
@@ -1294,6 +1385,13 @@ impl LiteMarkApp {
             return;
         }
         self.close_hook_installed = true;
+        if self.bounds_subscription.is_none() {
+            self.bounds_subscription =
+                Some(cx.observe_window_bounds(window, |_this, window, cx| {
+                    window.refresh();
+                    cx.notify();
+                }));
+        }
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |_window, cx| {
             view.update(cx, |this, cx| {
@@ -1312,8 +1410,11 @@ impl LiteMarkApp {
         });
     }
 
-    fn editor_backspace(&mut self) {
-        if self.field_owns_keys || self.input_blocked() {
+    fn editor_backspace(&mut self, cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
@@ -1330,10 +1431,14 @@ impl LiteMarkApp {
             tab.edit(range, "");
         }
         self.refresh_find();
+        cx.refresh_windows();
     }
 
-    fn editor_delete(&mut self) {
-        if self.field_owns_keys || self.input_blocked() {
+    fn editor_delete(&mut self, cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
@@ -1350,10 +1455,14 @@ impl LiteMarkApp {
             tab.edit(range, "");
         }
         self.refresh_find();
+        cx.refresh_windows();
     }
 
-    fn editor_newline(&mut self) {
-        if self.field_owns_keys || self.input_blocked() {
+    fn editor_newline(&mut self, cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
@@ -1365,15 +1474,20 @@ impl LiteMarkApp {
             tab.edit(range, "\n");
         }
         self.refresh_find();
+        cx.refresh_windows();
     }
 
-    fn editor_move(&mut self, edit: impl FnOnce(&mut DocumentTab)) {
-        if self.field_owns_keys || self.input_blocked() {
+    fn editor_move(&mut self, cx: &mut App, edit: impl FnOnce(&mut DocumentTab)) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
             return;
         }
         if let Some(tab) = self.active_tab_mut() {
             edit(tab);
         }
+        cx.refresh_windows();
     }
 
     fn editor_mouse_down(
@@ -1382,7 +1496,7 @@ impl LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.input_blocked() {
+        if self.input_blocked() || window.default_prevented() {
             return;
         }
         let offset = {
@@ -1394,6 +1508,7 @@ impl LiteMarkApp {
         };
         self.focus_handle.focus(window);
         self.applied_focus = Some(FocusSlot::Editor);
+        self.field_focus = TextInput::Editor;
         self.field_owns_keys = false;
         if let Some(tab) = self.active_tab_mut() {
             if event.click_count >= 3 {
@@ -1407,6 +1522,7 @@ impl LiteMarkApp {
             }
         }
         self.selecting = event.click_count <= 1;
+        window.refresh();
         cx.notify();
     }
 
@@ -1425,6 +1541,7 @@ impl LiteMarkApp {
             tab.place(offset, true);
         }
         cx.notify();
+        cx.refresh_windows();
     }
 
     fn active_content(&self) -> String {
@@ -1528,11 +1645,12 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.text_field_focused(window, cx) || self.input_blocked() {
+        if self.forward_keystroke_to_field(text, window, cx) || self.input_blocked() {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
             self.show_error("PDF files are read-only.");
+            window.refresh();
             cx.notify();
             return;
         }
@@ -1547,6 +1665,7 @@ impl EntityInputHandler for LiteMarkApp {
             tab.edit(range, text);
         }
         self.refresh_find();
+        window.refresh();
         cx.notify();
     }
 
@@ -1558,9 +1677,13 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.forward_keystroke_to_field(new_text, window, cx) {
+            return;
+        }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
             self.show_error("PDF files are read-only.");
             cx.notify();
+            window.refresh();
             return;
         }
         let content = self.active_content();
@@ -1589,7 +1712,7 @@ impl EntityInputHandler for LiteMarkApp {
             }
         }
         self.refresh_find();
-        let _ = window;
+        window.refresh();
         cx.notify();
     }
 
@@ -1640,27 +1763,51 @@ impl Render for LiteMarkApp {
         if self.allow_window_close {
             window.remove_window();
         }
+        if !self.show_find_replace
+            && matches!(self.field_focus, TextInput::Find | TextInput::Replace)
+        {
+            self.field_focus = TextInput::Editor;
+            self.field_owns_keys = false;
+            self.applied_focus = None;
+        }
+        if self.rename_target.is_none() && self.field_focus == TextInput::Rename {
+            self.field_focus = TextInput::Editor;
+            self.field_owns_keys = false;
+            self.applied_focus = None;
+        }
+        if self.pending_find_focus && self.show_find_replace {
+            self.pending_find_focus = false;
+            self.field_focus = TextInput::Find;
+        }
+        if self.pending_rename_focus && self.rename_target.is_some() {
+            self.pending_rename_focus = false;
+            self.field_focus = TextInput::Rename;
+        }
         let next_focus = if self.open_menu.is_some() {
             FocusSlot::Menu
         } else {
             FocusSlot::Editor
         };
-        if focus_if_changed(self.applied_focus, next_focus) {
-            match next_focus {
-                FocusSlot::Menu => self.menu_focus_handle.focus(window),
-                FocusSlot::Editor => self.focus_handle.focus(window),
+        if self.open_menu.is_some() {
+            if focus_if_changed(self.applied_focus, next_focus) {
+                self.menu_focus_handle.focus(window);
+                self.applied_focus = Some(FocusSlot::Menu);
             }
-            self.applied_focus = Some(next_focus);
+        } else if let Some(field) = self.line_field_for_focus() {
+            // Apply field focus after the editor slot so a clicked Replace
+            // field keeps the input handler, the same way Find does.
+            field.read(cx).focus(window);
+            self.applied_focus = None;
+            self.field_owns_keys = true;
+        } else if focus_if_changed(self.applied_focus, FocusSlot::Editor) {
+            self.focus_handle.focus(window);
+            self.applied_focus = Some(FocusSlot::Editor);
+            self.field_focus = TextInput::Editor;
+            self.field_owns_keys = false;
         }
-        if self.pending_find_focus && self.show_find_replace {
-            self.pending_find_focus = false;
-            self.find_field.read(cx).focus(window);
+        if self.text_field_focused(window, cx) {
+            self.field_owns_keys = true;
         }
-        if self.pending_rename_focus && self.rename_target.is_some() {
-            self.pending_rename_focus = false;
-            self.rename_field.read(cx).focus(window);
-        }
-        self.field_owns_keys = self.text_field_focused(window, cx);
         let text_color = theme.text_primary;
         let placeholder_color = theme.placeholder;
         let field_bg = theme.bg_input;
@@ -1882,7 +2029,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_format_cmd("undo");
+                    this.handle_format_cmd("undo", cx);
                     cx.notify();
                 });
             }
@@ -1892,7 +2039,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_format_cmd("redo");
+                    this.handle_format_cmd("redo", cx);
                     cx.notify();
                 });
             }
@@ -2065,7 +2212,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cmd: &'static str, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_format_cmd(cmd);
+                    this.handle_format_cmd(cmd, cx);
                     cx.notify();
                 });
             }
@@ -2075,7 +2222,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_insert_table();
+                    this.handle_insert_table(cx);
                     cx.notify();
                 });
             }
@@ -2085,7 +2232,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_insert_link();
+                    this.handle_insert_link(cx);
                     cx.notify();
                 });
             }
@@ -2295,13 +2442,18 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             Arc::new(move |offset: usize, window: &mut Window, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
+                    if window.default_prevented() {
+                        return;
+                    }
                     this.sidebar_menu = None;
                     this.focus_handle.focus(window);
                     this.applied_focus = Some(FocusSlot::Editor);
+                    this.field_focus = TextInput::Editor;
                     this.field_owns_keys = false;
                     if let Some(tab) = this.active_tab_mut() {
                         tab.place(offset, false);
                     }
+                    window.refresh();
                     cx.notify();
                 });
             })
@@ -2616,71 +2768,71 @@ impl Render for LiteMarkApp {
             .font_family(Theme::FONT_PROSE)
             // Keyboard shortcut bindings
             .on_action(cx.listener(|this, _: &ToggleBold, _window, cx| {
-                this.handle_format_cmd("bold");
+                this.handle_format_cmd("bold", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleItalic, _window, cx| {
-                this.handle_format_cmd("italic");
+                this.handle_format_cmd("italic", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleUnderline, _window, cx| {
-                this.handle_format_cmd("underline");
+                this.handle_format_cmd("underline", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleStrikethrough, _window, cx| {
-                this.handle_format_cmd("strike");
+                this.handle_format_cmd("strike", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Heading1, _window, cx| {
-                this.handle_format_cmd("h1");
+                this.handle_format_cmd("h1", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Heading2, _window, cx| {
-                this.handle_format_cmd("h2");
+                this.handle_format_cmd("h2", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Heading3, _window, cx| {
-                this.handle_format_cmd("h3");
+                this.handle_format_cmd("h3", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleBulletList, _window, cx| {
-                this.handle_format_cmd("ul");
+                this.handle_format_cmd("ul", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleNumberedList, _window, cx| {
-                this.handle_format_cmd("ol");
+                this.handle_format_cmd("ol", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleChecklist, _window, cx| {
-                this.handle_format_cmd("checklist");
+                this.handle_format_cmd("checklist", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleQuote, _window, cx| {
-                this.handle_format_cmd("quote");
+                this.handle_format_cmd("quote", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleInlineCode, _window, cx| {
-                this.handle_format_cmd("code");
+                this.handle_format_cmd("code", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &InsertCodeBlock, _window, cx| {
-                this.handle_format_cmd("codeblock");
+                this.handle_format_cmd("codeblock", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &InsertDivider, _window, cx| {
-                this.handle_format_cmd("hr");
+                this.handle_format_cmd("hr", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &InsertTable, _window, cx| {
-                this.handle_insert_table();
+                this.handle_insert_table(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &InsertLink, _window, cx| {
-                this.handle_insert_link();
+                this.handle_insert_link(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ClearFormatting, _window, cx| {
-                this.handle_format_cmd("clear");
+                this.handle_format_cmd("clear", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SaveFile, _window, cx| {
@@ -2740,11 +2892,11 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &UndoAction, _window, cx| {
-                this.handle_format_cmd("undo");
+                this.handle_format_cmd("undo", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &RedoAction, _window, cx| {
-                this.handle_format_cmd("redo");
+                this.handle_format_cmd("redo", cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SaveFileAs, _window, cx| {
@@ -2878,63 +3030,63 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorLeft, _w, cx| {
-                this.editor_move(|tab| tab.move_left(false));
+                this.editor_move(cx, |tab| tab.move_left(false));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorRight, _w, cx| {
-                this.editor_move(|tab| tab.move_right(false));
+                this.editor_move(cx, |tab| tab.move_right(false));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorUp, _w, cx| {
-                this.editor_move(|tab| tab.move_up(false));
+                this.editor_move(cx, |tab| tab.move_up(false));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorDown, _w, cx| {
-                this.editor_move(|tab| tab.move_down(false));
+                this.editor_move(cx, |tab| tab.move_down(false));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectLeft, _w, cx| {
-                this.editor_move(|tab| tab.move_left(true));
+                this.editor_move(cx, |tab| tab.move_left(true));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectRight, _w, cx| {
-                this.editor_move(|tab| tab.move_right(true));
+                this.editor_move(cx, |tab| tab.move_right(true));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectUp, _w, cx| {
-                this.editor_move(|tab| tab.move_up(true));
+                this.editor_move(cx, |tab| tab.move_up(true));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectDown, _w, cx| {
-                this.editor_move(|tab| tab.move_down(true));
+                this.editor_move(cx, |tab| tab.move_down(true));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorHome, _w, cx| {
-                this.editor_move(|tab| tab.move_home(false));
+                this.editor_move(cx, |tab| tab.move_home(false));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorEnd, _w, cx| {
-                this.editor_move(|tab| tab.move_end(false));
+                this.editor_move(cx, |tab| tab.move_end(false));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectHome, _w, cx| {
-                this.editor_move(|tab| tab.move_home(true));
+                this.editor_move(cx, |tab| tab.move_home(true));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectEnd, _w, cx| {
-                this.editor_move(|tab| tab.move_end(true));
+                this.editor_move(cx, |tab| tab.move_end(true));
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorBackspace, _w, cx| {
-                this.editor_backspace();
+                this.editor_backspace(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorDelete, _w, cx| {
-                this.editor_delete();
+                this.editor_delete(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorNewline, _w, cx| {
-                this.editor_newline();
+                this.editor_newline(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FindNextMatch, _w, cx| {
@@ -2959,9 +3111,9 @@ impl Render for LiteMarkApp {
                 cx.listener(|this, _: &MouseUpEvent, window, cx| {
                     if this.selecting {
                         this.selecting = false;
-                        window.refresh();
-                        cx.notify();
                     }
+                    window.refresh();
+                    cx.notify();
                 }),
             )
             .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {

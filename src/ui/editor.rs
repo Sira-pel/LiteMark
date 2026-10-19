@@ -173,6 +173,9 @@ fn track_block(
         .on_mouse_down(MouseButton::Left, {
             let hits = hits.clone();
             move |event, window, cx| {
+                if window.default_prevented() {
+                    return;
+                }
                 let bounds = hits.borrow().get(index).copied().flatten();
                 if let Some(bounds) = bounds {
                     let mut local_x = event.position.x - bounds.left() - px(text_inset);

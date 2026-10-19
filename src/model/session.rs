@@ -222,6 +222,20 @@ pub enum FocusSlot {
     Menu,
 }
 
+/// Which surface should receive typed text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextInput {
+    Editor,
+    Find,
+    Replace,
+    Rename,
+}
+
+/// Printable keys and editing actions reach the document only while the editor owns input.
+pub fn document_accepts_keystrokes(owner: TextInput) -> bool {
+    owner == TextInput::Editor
+}
+
 /// Focus is applied only when the desired slot changes.
 pub fn focus_if_changed(previous: Option<FocusSlot>, next: FocusSlot) -> bool {
     previous != Some(next)
@@ -361,6 +375,14 @@ mod tests {
             tab_index_for_path(&open, Path::new("/notes/other.md")),
             None
         );
+    }
+
+    #[test]
+    fn keystrokes_follow_the_focused_field() {
+        assert!(document_accepts_keystrokes(TextInput::Editor));
+        assert!(!document_accepts_keystrokes(TextInput::Find));
+        assert!(!document_accepts_keystrokes(TextInput::Replace));
+        assert!(!document_accepts_keystrokes(TextInput::Rename));
     }
 
     #[test]

@@ -3,6 +3,8 @@ use crate::model::DocumentTab;
 use crate::theme::{sz, Theme};
 use gpui::prelude::*;
 use gpui::*;
+use std::cell::Cell;
+use std::rc::Rc;
 
 pub struct HeaderBarProps<
     FSelectTab,
@@ -72,6 +74,7 @@ where
     let on_close_win = props.on_close_window;
     let active_id = props.active_tab_id;
     let tab_count = props.tabs.len();
+    let press_origin: Rc<Cell<Option<Point<Pixels>>>> = Rc::new(Cell::new(None));
 
     div()
         .id("title-bar")
@@ -83,15 +86,45 @@ where
         .px(px(8.0))
         .bg(theme.bg_header)
         .flex_shrink_0()
-        // Window drag on empty space, double-click maximize, right click window menu
-        .on_mouse_down(MouseButton::Left, |e, window, cx| {
-            if e.click_count == 2 {
-                window.zoom_window();
-                window.refresh();
-            } else {
-                window.start_window_move();
+        // Double-click zooms. A plain click only arms a drag so the move
+        // grab does not swallow the second click of a double-click.
+        .on_mouse_down(MouseButton::Left, {
+            let press_origin = press_origin.clone();
+            move |event, window, cx| {
+                if title_bar_pointer(event.click_count) == TitleBarPointer::Zoom {
+                    press_origin.set(None);
+                    window.zoom_window();
+                    window.refresh();
+                } else {
+                    press_origin.set(Some(event.position));
+                }
+                cx.stop_propagation();
             }
-            cx.stop_propagation();
+        })
+        .on_mouse_up(MouseButton::Left, {
+            let press_origin = press_origin.clone();
+            move |_, _, _| {
+                press_origin.set(None);
+            }
+        })
+        .on_mouse_move({
+            let press_origin = press_origin.clone();
+            move |event, window, cx| {
+                let Some(origin) = press_origin.get() else {
+                    return;
+                };
+                if event.pressed_button != Some(MouseButton::Left) {
+                    press_origin.set(None);
+                    return;
+                }
+                let moved = (event.position.x - origin.x).abs() > px(4.0)
+                    || (event.position.y - origin.y).abs() > px(4.0);
+                if moved {
+                    press_origin.set(None);
+                    window.start_window_move();
+                    cx.stop_propagation();
+                }
+            }
         })
         .on_mouse_down(MouseButton::Right, |e, window, cx| {
             window.show_window_menu(e.position);
@@ -342,135 +375,283 @@ where
         )
 }
 
-const RESIZE_PX: f32 = 6.0;
+const EDGE_PX: f32 = 6.0;
+const CORNER_PX: f32 = 16.0;
 
-fn resize_handle(id: &'static str, edge: ResizeEdge, cursor: CursorStyle) -> Stateful<Div> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleBarPointer {
+    Zoom,
+    /// A single click arms dragging. The move starts on the following drag
+    /// so a double-click can still reach [`Window::zoom_window`].
+    ArmDrag,
+}
+
+pub fn title_bar_pointer(click_count: usize) -> TitleBarPointer {
+    if click_count >= 2 {
+        TitleBarPointer::Zoom
+    } else {
+        TitleBarPointer::ArmDrag
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ResizeHit {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub edge: f32,
+    pub corner: f32,
+    pub tile_top: bool,
+    pub tile_right: bool,
+    pub tile_bottom: bool,
+    pub tile_left: bool,
+}
+
+/// Map a window-local point to a resize edge.
+/// The right side is [`ResizeEdge::Right`] and the bottom-right corner is
+/// [`ResizeEdge::BottomRight`]. Tiled edges are not resizable.
+pub fn client_resize_edge(hit: ResizeHit) -> Option<ResizeEdge> {
+    let ResizeHit {
+        x,
+        y,
+        width,
+        height,
+        edge,
+        corner,
+        tile_top,
+        tile_right,
+        tile_bottom,
+        tile_left,
+    } = hit;
+    if width <= 0.0 || height <= 0.0 || edge <= 0.0 || corner <= 0.0 {
+        return None;
+    }
+    if x < 0.0 || y < 0.0 || x > width || y > height {
+        return None;
+    }
+    let corner_x = corner.min(width);
+    let corner_y = corner.min(height);
+    let on_left = !tile_left && x < corner_x;
+    let on_right = !tile_right && x >= width - corner_x;
+    let on_top = !tile_top && y < corner_y;
+    let on_bottom = !tile_bottom && y >= height - corner_y;
+    if on_top && on_left {
+        return Some(ResizeEdge::TopLeft);
+    }
+    if on_top && on_right {
+        return Some(ResizeEdge::TopRight);
+    }
+    if on_bottom && on_left {
+        return Some(ResizeEdge::BottomLeft);
+    }
+    if on_bottom && on_right {
+        return Some(ResizeEdge::BottomRight);
+    }
+    let edge_x = edge.min(width);
+    let edge_y = edge.min(height);
+    if !tile_top && y < edge_y {
+        Some(ResizeEdge::Top)
+    } else if !tile_bottom && y >= height - edge_y {
+        Some(ResizeEdge::Bottom)
+    } else if !tile_left && x < edge_x {
+        Some(ResizeEdge::Left)
+    } else if !tile_right && x >= width - edge_x {
+        Some(ResizeEdge::Right)
+    } else {
+        None
+    }
+}
+
+fn resize_handle(id: &'static str, cursor: CursorStyle) -> Stateful<Div> {
     div()
         .id(id)
         .cursor(cursor)
         .on_mouse_move(|_, window, _| window.refresh())
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            window.start_window_resize(edge);
-            window.refresh();
+        .on_mouse_down(MouseButton::Left, |event, window, cx| {
+            let size = window.viewport_size();
+            let (tile_top, tile_right, tile_bottom, tile_left) = match window.window_decorations() {
+                Decorations::Client { tiling } => {
+                    (tiling.top, tiling.right, tiling.bottom, tiling.left)
+                }
+                Decorations::Server => {
+                    cx.stop_propagation();
+                    return;
+                }
+            };
+            if let Some(edge) = client_resize_edge(ResizeHit {
+                x: f32::from(event.position.x),
+                y: f32::from(event.position.y),
+                width: f32::from(size.width),
+                height: f32::from(size.height),
+                edge: EDGE_PX,
+                corner: CORNER_PX,
+                tile_top,
+                tile_right,
+                tile_bottom,
+                tile_left,
+            }) {
+                window.start_window_resize(edge);
+                window.refresh();
+            }
             cx.stop_propagation();
         })
 }
 
 /// Edge and corner hit targets for client-side window decorations.
-/// The wrapper stays empty so it does not steal clicks from the window body.
+/// The layer is window-sized and painted above the document so the edges
+/// receive hits. The right edge starts a [`ResizeEdge::Right`] resize.
 pub fn render_client_resize_borders(window: &Window) -> AnyElement {
     let Decorations::Client { tiling } = window.window_decorations() else {
         return div().into_any_element();
     };
-    let thickness = px(RESIZE_PX);
+    let edge = px(EDGE_PX);
+    let corner = px(CORNER_PX);
     div()
+        .id("client-resize-layer")
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
         .when(!tiling.top, |parent| {
             parent.child(
-                resize_handle("resize-top", ResizeEdge::Top, CursorStyle::ResizeUpDown)
+                resize_handle("resize-top", CursorStyle::ResizeUpDown)
                     .absolute()
                     .top_0()
-                    .left(thickness)
-                    .right(thickness)
-                    .h(thickness),
+                    .left(corner)
+                    .right(corner)
+                    .h(edge),
             )
         })
         .when(!tiling.bottom, |parent| {
             parent.child(
-                resize_handle(
-                    "resize-bottom",
-                    ResizeEdge::Bottom,
-                    CursorStyle::ResizeUpDown,
-                )
-                .absolute()
-                .bottom_0()
-                .left(thickness)
-                .right(thickness)
-                .h(thickness),
+                resize_handle("resize-bottom", CursorStyle::ResizeUpDown)
+                    .absolute()
+                    .bottom_0()
+                    .left(corner)
+                    .right(corner)
+                    .h(edge),
             )
         })
         .when(!tiling.left, |parent| {
             parent.child(
-                resize_handle(
-                    "resize-left",
-                    ResizeEdge::Left,
-                    CursorStyle::ResizeLeftRight,
-                )
-                .absolute()
-                .left_0()
-                .top(thickness)
-                .bottom(thickness)
-                .w(thickness),
+                resize_handle("resize-left", CursorStyle::ResizeLeftRight)
+                    .absolute()
+                    .left_0()
+                    .top(corner)
+                    .bottom(corner)
+                    .w(edge),
             )
         })
         .when(!tiling.right, |parent| {
             parent.child(
-                resize_handle(
-                    "resize-right",
-                    ResizeEdge::Right,
-                    CursorStyle::ResizeLeftRight,
-                )
-                .absolute()
-                .right_0()
-                .top(thickness)
-                .bottom(thickness)
-                .w(thickness),
+                resize_handle("resize-right", CursorStyle::ResizeLeftRight)
+                    .absolute()
+                    .right_0()
+                    .top(corner)
+                    .bottom(corner)
+                    .w(edge),
             )
         })
         .when(!tiling.top && !tiling.left, |parent| {
             parent.child(
-                resize_handle(
-                    "resize-top-left",
-                    ResizeEdge::TopLeft,
-                    CursorStyle::ResizeUpLeftDownRight,
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .w(thickness)
-                .h(thickness),
+                resize_handle("resize-top-left", CursorStyle::ResizeUpLeftDownRight)
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(corner)
+                    .h(corner),
             )
         })
         .when(!tiling.top && !tiling.right, |parent| {
             parent.child(
-                resize_handle(
-                    "resize-top-right",
-                    ResizeEdge::TopRight,
-                    CursorStyle::ResizeUpRightDownLeft,
-                )
-                .absolute()
-                .top_0()
-                .right_0()
-                .w(thickness)
-                .h(thickness),
+                resize_handle("resize-top-right", CursorStyle::ResizeUpRightDownLeft)
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .w(corner)
+                    .h(corner),
             )
         })
         .when(!tiling.bottom && !tiling.left, |parent| {
             parent.child(
-                resize_handle(
-                    "resize-bottom-left",
-                    ResizeEdge::BottomLeft,
-                    CursorStyle::ResizeUpRightDownLeft,
-                )
-                .absolute()
-                .bottom_0()
-                .left_0()
-                .w(thickness)
-                .h(thickness),
+                resize_handle("resize-bottom-left", CursorStyle::ResizeUpRightDownLeft)
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .w(corner)
+                    .h(corner),
             )
         })
         .when(!tiling.bottom && !tiling.right, |parent| {
             parent.child(
-                resize_handle(
-                    "resize-bottom-right",
-                    ResizeEdge::BottomRight,
-                    CursorStyle::ResizeUpLeftDownRight,
-                )
-                .absolute()
-                .bottom_0()
-                .right_0()
-                .w(thickness)
-                .h(thickness),
+                resize_handle("resize-bottom-right", CursorStyle::ResizeUpLeftDownRight)
+                    .absolute()
+                    .bottom_0()
+                    .right_0()
+                    .w(corner)
+                    .h(corner),
             )
         })
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        client_resize_edge, title_bar_pointer, ResizeHit, TitleBarPointer, CORNER_PX, EDGE_PX,
+    };
+    use gpui::ResizeEdge;
+
+    fn hit(x: f32, y: f32, width: f32, height: f32, tile_right: bool) -> ResizeHit {
+        ResizeHit {
+            x,
+            y,
+            width,
+            height,
+            edge: EDGE_PX,
+            corner: CORNER_PX,
+            tile_top: false,
+            tile_right,
+            tile_bottom: false,
+            tile_left: false,
+        }
+    }
+
+    #[test]
+    fn right_edge_grows_from_the_right_and_corners_are_diagonal() {
+        let width = 800.0;
+        let height = 600.0;
+        assert_eq!(
+            client_resize_edge(hit(width - 1.0, height / 2.0, width, height, false)),
+            Some(ResizeEdge::Right)
+        );
+        assert_eq!(
+            client_resize_edge(hit(1.0, height / 2.0, width, height, false)),
+            Some(ResizeEdge::Left)
+        );
+        assert_eq!(
+            client_resize_edge(hit(width - 1.0, height - 1.0, width, height, false)),
+            Some(ResizeEdge::BottomRight)
+        );
+        assert_eq!(
+            client_resize_edge(hit(width / 2.0, height - 1.0, width, height, false)),
+            Some(ResizeEdge::Bottom)
+        );
+        assert_eq!(
+            client_resize_edge(hit(width / 2.0, height / 2.0, width, height, false)),
+            None
+        );
+        assert_eq!(
+            client_resize_edge(hit(width - 1.0, height / 2.0, width, height, true)),
+            None
+        );
+    }
+
+    #[test]
+    fn header_double_click_zooms_without_starting_a_move() {
+        assert_eq!(title_bar_pointer(1), TitleBarPointer::ArmDrag);
+        assert_eq!(title_bar_pointer(2), TitleBarPointer::Zoom);
+        assert_eq!(title_bar_pointer(3), TitleBarPointer::Zoom);
+    }
 }

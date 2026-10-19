@@ -14,6 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const AT_FDCWD: i32 = -100;
 const RENAME_NOREPLACE: u32 = 1;
+const ENOSYS: i32 = 38;
+const EINVAL: i32 = 22;
 
 unsafe extern "C" {
     fn renameat2(
@@ -119,6 +121,12 @@ fn random_suffix() -> u64 {
         .map(|duration| duration.as_nanos() as u64)
         .unwrap_or(0);
     nanos ^ tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (std::process::id() as u64)
+}
+
+/// `renameat2(RENAME_NOREPLACE)` is missing on this filesystem.
+/// ENOSYS is the usual code; some filesystems return EINVAL instead.
+pub(crate) fn noreplace_unsupported(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(ENOSYS) | Some(EINVAL))
 }
 
 /// `renameat2(RENAME_NOREPLACE)`. Fails with [`io::ErrorKind::AlreadyExists`]
@@ -229,9 +237,9 @@ pub fn atomic_save_new(dir: &Path, desired_name: &str, content: &str) -> io::Res
                 let _ = fs::remove_file(&temp_path);
                 blocked.push(name);
             }
-            Err(err) if err.raw_os_error() == Some(38) => {
-                // ENOSYS: fall back to a same-directory hard link, which also
-                // fails when the destination exists.
+            Err(err) if noreplace_unsupported(&err) => {
+                // ENOSYS or EINVAL: fall back to a same-directory hard link,
+                // which also fails when the destination exists.
                 match fs::hard_link(&temp_path, &path) {
                     Ok(()) => {
                         let _ = fs::remove_file(&temp_path);
@@ -632,6 +640,17 @@ mod tests {
         assert!(!temp_dir.join(".blocked.md.litemark-tmp").exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn noreplace_falls_back_on_enosys_and_einval() {
+        assert!(noreplace_unsupported(&io::Error::from_raw_os_error(38)));
+        assert!(noreplace_unsupported(&io::Error::from_raw_os_error(22)));
+        assert!(!noreplace_unsupported(&io::Error::from_raw_os_error(17)));
+        assert!(!noreplace_unsupported(&io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "exists"
+        )));
     }
 
     #[test]

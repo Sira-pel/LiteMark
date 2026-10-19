@@ -9,6 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 type FieldChange = Arc<dyn Fn(&str, &mut App) + 'static>;
 type FieldSubmit = Arc<dyn Fn(bool, &mut App) + 'static>;
+type FieldFocus = Arc<dyn Fn(&mut App) + 'static>;
 
 pub struct LineField {
     field_id: SharedString,
@@ -23,6 +24,7 @@ pub struct LineField {
     selecting: bool,
     on_change: FieldChange,
     on_submit: FieldSubmit,
+    on_focus: FieldFocus,
     text_color: Hsla,
     placeholder_color: Hsla,
     bg: Hsla,
@@ -36,6 +38,7 @@ impl LineField {
         placeholder: impl Into<SharedString>,
         on_change: FieldChange,
         on_submit: FieldSubmit,
+        on_focus: FieldFocus,
     ) -> Self {
         Self {
             field_id: field_id.into(),
@@ -50,6 +53,7 @@ impl LineField {
             selecting: false,
             on_change,
             on_submit,
+            on_focus,
             text_color: rgb(0xd4d4d4).into(),
             placeholder_color: rgb(0x8a8a8a).into(),
             bg: rgb(0x212121).into(),
@@ -285,9 +289,17 @@ impl LineField {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        // Capture phase: claim the click before a later sibling (the editor
+        // or a resize border) can focus itself and swallow the keystrokes.
         self.focus_handle.focus(window);
         window.prevent_default();
         cx.stop_propagation();
+        let callback = self.on_focus.clone();
+        callback(cx);
+        window.refresh();
         self.selecting = true;
         let index = self.index_for_mouse(event.position);
         if event.modifiers.shift {
@@ -342,6 +354,30 @@ impl LineField {
     fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
         self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
     }
+
+    /// Insert text without telling the owner. Used when the editor input
+    /// handler is still installed and must hand the keystroke to this field.
+    pub fn push_input(&mut self, new_text: &str, cx: &mut Context<Self>) -> String {
+        self.splice_text(None, new_text);
+        cx.notify();
+        self.content.to_string()
+    }
+
+    fn splice_text(&mut self, range_utf16: Option<Range<usize>>, new_text: &str) {
+        let new_text = new_text.replace(['\n', '\r'], "");
+        let range = range_utf16
+            .as_ref()
+            .map(|range| self.range_from_utf16(range))
+            .or_else(|| self.marked_range.clone())
+            .unwrap_or_else(|| self.selected_range.clone());
+        let range = clamp_range(&self.content, range);
+        self.content =
+            (self.content[..range.start].to_owned() + &new_text + &self.content[range.end..])
+                .into();
+        let cursor = range.start + new_text.len();
+        self.selected_range = cursor..cursor;
+        self.marked_range = None;
+    }
 }
 
 impl EntityInputHandler for LineField {
@@ -383,23 +419,12 @@ impl EntityInputHandler for LineField {
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let new_text = new_text.replace(['\n', '\r'], "");
-        let range = range_utf16
-            .as_ref()
-            .map(|range| self.range_from_utf16(range))
-            .or_else(|| self.marked_range.clone())
-            .unwrap_or_else(|| self.selected_range.clone());
-        let range = clamp_range(&self.content, range);
-        self.content =
-            (self.content[..range.start].to_owned() + &new_text + &self.content[range.end..])
-                .into();
-        let cursor = range.start + new_text.len();
-        self.selected_range = cursor..cursor;
-        self.marked_range = None;
+        self.splice_text(range_utf16, new_text);
         self.notify_change(cx);
+        window.refresh();
     }
 
     fn replace_and_mark_text_in_range(
@@ -492,6 +517,7 @@ impl Render for LineField {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::submit_prev))
+            .capture_any_mouse_down(cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
