@@ -514,18 +514,47 @@ mod tests {
         );
         for _ in 0..80 {
             let end = doc.content.len();
-            doc.edit(end..end, "y");
+            // A trailing space keeps each insert as its own undo step.
+            doc.edit(end..end, "y ");
         }
         assert!(doc.undo_stored_bytes() < 2_000 * 80);
-        assert_eq!(doc.content.len(), 2_080);
-        assert_eq!(doc.content.chars().last(), Some('y'));
+        assert_eq!(doc.content.len(), 2_160);
+        assert!(doc.content.ends_with("y "));
         assert!(doc.undo());
-        assert_eq!(doc.content.len(), 2_079);
+        assert_eq!(doc.content.len(), 2_158);
         for _ in 0..79 {
             assert!(doc.undo());
         }
         assert_eq!(doc.content.chars().last(), Some('x'));
         assert!(!doc.undo());
+    }
+
+    #[test]
+    fn a_typed_word_is_one_undo_and_replace_all_is_one_step() {
+        let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), String::new(), None, None);
+        for ch in ["h", "e", "l", "l", "o"] {
+            let end = doc.content.len();
+            doc.edit(end..end, ch);
+        }
+        assert_eq!(doc.content, "hello");
+        assert!(doc.undo());
+        assert_eq!(doc.content, "");
+        assert!(!doc.undo());
+
+        doc.edit(0..0, "hello");
+        doc.edit(5..5, " ");
+        doc.edit(6..6, "world");
+        assert_eq!(doc.content, "hello world");
+        assert!(doc.undo());
+        assert_eq!(doc.content, "hello ");
+        assert!(doc.undo());
+        assert_eq!(doc.content, "hello");
+
+        doc.edit(0..5, "cat cat");
+        assert!(doc.replace_every_match("cat", "dog", true));
+        assert_eq!(doc.content, "dog dog");
+        assert!(doc.undo());
+        assert_eq!(doc.content, "cat cat");
     }
 
     #[test]

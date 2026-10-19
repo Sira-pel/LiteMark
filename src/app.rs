@@ -10,7 +10,7 @@ use crate::ui::MenuItem;
 use crate::ui::*;
 use gpui::prelude::*;
 use gpui::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -76,6 +76,7 @@ pub struct LiteMarkApp {
     pub field_owns_keys: bool,
     pub field_focus: TextInput,
     pub bounds_subscription: Option<Subscription>,
+    title_drag_armed: Rc<Cell<bool>>,
 }
 
 impl LiteMarkApp {
@@ -122,7 +123,6 @@ impl LiteMarkApp {
                                     this.find_index = None;
                                     this.refresh_find();
                                     cx.notify();
-                                    cx.refresh_windows();
                                 })
                                 .ok();
                         }
@@ -138,7 +138,6 @@ impl LiteMarkApp {
                                         this.find_next();
                                     }
                                     cx.notify();
-                                    cx.refresh_windows();
                                 })
                                 .ok();
                         }
@@ -168,7 +167,6 @@ impl LiteMarkApp {
                                 .update(app, |this, cx| {
                                     this.replace_term = text.to_string();
                                     cx.notify();
-                                    cx.refresh_windows();
                                 })
                                 .ok();
                         }
@@ -200,7 +198,6 @@ impl LiteMarkApp {
                                 .update(app, |this, cx| {
                                     this.commit_rename(cx);
                                     cx.notify();
-                                    cx.refresh_windows();
                                 })
                                 .ok();
                         }
@@ -265,6 +262,7 @@ impl LiteMarkApp {
             field_owns_keys: false,
             field_focus: TextInput::Editor,
             bounds_subscription: None,
+            title_drag_armed: Rc::new(Cell::new(false)),
         }
     }
 
@@ -275,7 +273,6 @@ impl LiteMarkApp {
             self.applied_focus = None;
         }
         cx.notify();
-        cx.refresh_windows();
     }
 
     fn line_field_for_focus(&self) -> Option<Entity<LineField>> {
@@ -319,7 +316,6 @@ impl LiteMarkApp {
         }
         window.refresh();
         cx.notify();
-        cx.refresh_windows();
         true
     }
 
@@ -447,8 +443,8 @@ impl LiteMarkApp {
         }
     }
 
-    pub fn handle_format_cmd(&mut self, cmd: &'static str, cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus) || self.field_owns_keys {
+    pub fn handle_format_cmd(&mut self, cmd: &'static str, _cx: &mut App) {
+        if !command_edits_document(cmd, self.field_focus, self.field_owns_keys) {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) && cmd != "undo" && cmd != "redo"
@@ -468,7 +464,6 @@ impl LiteMarkApp {
             }
         }
         self.refresh_find();
-        cx.refresh_windows();
     }
 
     pub fn handle_insert_table(&mut self, cx: &mut App) {
@@ -1410,7 +1405,7 @@ impl LiteMarkApp {
         });
     }
 
-    fn editor_backspace(&mut self, cx: &mut App) {
+    fn editor_backspace(&mut self, _cx: &mut App) {
         if !document_accepts_keystrokes(self.field_focus)
             || self.field_owns_keys
             || self.input_blocked()
@@ -1431,10 +1426,9 @@ impl LiteMarkApp {
             tab.edit(range, "");
         }
         self.refresh_find();
-        cx.refresh_windows();
     }
 
-    fn editor_delete(&mut self, cx: &mut App) {
+    fn editor_delete(&mut self, _cx: &mut App) {
         if !document_accepts_keystrokes(self.field_focus)
             || self.field_owns_keys
             || self.input_blocked()
@@ -1455,10 +1449,9 @@ impl LiteMarkApp {
             tab.edit(range, "");
         }
         self.refresh_find();
-        cx.refresh_windows();
     }
 
-    fn editor_newline(&mut self, cx: &mut App) {
+    fn editor_newline(&mut self, _cx: &mut App) {
         if !document_accepts_keystrokes(self.field_focus)
             || self.field_owns_keys
             || self.input_blocked()
@@ -1474,10 +1467,9 @@ impl LiteMarkApp {
             tab.edit(range, "\n");
         }
         self.refresh_find();
-        cx.refresh_windows();
     }
 
-    fn editor_move(&mut self, cx: &mut App, edit: impl FnOnce(&mut DocumentTab)) {
+    fn editor_move(&mut self, _cx: &mut App, edit: impl FnOnce(&mut DocumentTab)) {
         if !document_accepts_keystrokes(self.field_focus)
             || self.field_owns_keys
             || self.input_blocked()
@@ -1487,7 +1479,6 @@ impl LiteMarkApp {
         if let Some(tab) = self.active_tab_mut() {
             edit(tab);
         }
-        cx.refresh_windows();
     }
 
     fn editor_mouse_down(
@@ -1541,7 +1532,6 @@ impl LiteMarkApp {
             tab.place(offset, true);
         }
         cx.notify();
-        cx.refresh_windows();
     }
 
     fn active_content(&self) -> String {
@@ -2767,72 +2757,89 @@ impl Render for LiteMarkApp {
             .text_color(theme.text_primary)
             .font_family(Theme::FONT_PROSE)
             // Keyboard shortcut bindings
-            .on_action(cx.listener(|this, _: &ToggleBold, _window, cx| {
+            .on_action(cx.listener(|this, _: &ToggleBold, window, cx| {
                 this.handle_format_cmd("bold", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleItalic, _window, cx| {
+            .on_action(cx.listener(|this, _: &ToggleItalic, window, cx| {
                 this.handle_format_cmd("italic", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleUnderline, _window, cx| {
+            .on_action(cx.listener(|this, _: &ToggleUnderline, window, cx| {
                 this.handle_format_cmd("underline", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleStrikethrough, _window, cx| {
+            .on_action(cx.listener(|this, _: &ToggleStrikethrough, window, cx| {
                 this.handle_format_cmd("strike", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Heading1, _window, cx| {
+            .on_action(cx.listener(|this, _: &Heading1, window, cx| {
                 this.handle_format_cmd("h1", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Heading2, _window, cx| {
+            .on_action(cx.listener(|this, _: &Heading2, window, cx| {
                 this.handle_format_cmd("h2", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Heading3, _window, cx| {
+            .on_action(cx.listener(|this, _: &Heading3, window, cx| {
                 this.handle_format_cmd("h3", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleBulletList, _window, cx| {
+            .on_action(cx.listener(|this, _: &ToggleBulletList, window, cx| {
                 this.handle_format_cmd("ul", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleNumberedList, _window, cx| {
+            .on_action(cx.listener(|this, _: &ToggleNumberedList, window, cx| {
                 this.handle_format_cmd("ol", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleChecklist, _window, cx| {
+            .on_action(cx.listener(|this, _: &ToggleChecklist, window, cx| {
                 this.handle_format_cmd("checklist", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleQuote, _window, cx| {
+            .on_action(cx.listener(|this, _: &ToggleQuote, window, cx| {
                 this.handle_format_cmd("quote", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleInlineCode, _window, cx| {
+            .on_action(cx.listener(|this, _: &ToggleInlineCode, window, cx| {
                 this.handle_format_cmd("code", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &InsertCodeBlock, _window, cx| {
+            .on_action(cx.listener(|this, _: &InsertCodeBlock, window, cx| {
                 this.handle_format_cmd("codeblock", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &InsertDivider, _window, cx| {
+            .on_action(cx.listener(|this, _: &InsertDivider, window, cx| {
                 this.handle_format_cmd("hr", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &InsertTable, _window, cx| {
+            .on_action(cx.listener(|this, _: &InsertTable, window, cx| {
                 this.handle_insert_table(cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &InsertLink, _window, cx| {
+            .on_action(cx.listener(|this, _: &InsertLink, window, cx| {
                 this.handle_insert_link(cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ClearFormatting, _window, cx| {
+            .on_action(cx.listener(|this, _: &ClearFormatting, window, cx| {
                 this.handle_format_cmd("clear", cx);
+                window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SaveFile, _window, cx| {
@@ -2891,12 +2898,14 @@ impl Render for LiteMarkApp {
                 this.handle_toggle_mode();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &UndoAction, _window, cx| {
+            .on_action(cx.listener(|this, _: &UndoAction, window, cx| {
                 this.handle_format_cmd("undo", cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &RedoAction, _window, cx| {
+            .on_action(cx.listener(|this, _: &RedoAction, window, cx| {
                 this.handle_format_cmd("redo", cx);
+                window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SaveFileAs, _window, cx| {
@@ -3029,64 +3038,79 @@ impl Render for LiteMarkApp {
                 this.menu_open_submenu_ix = None;
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorLeft, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorLeft, window, cx| {
                 this.editor_move(cx, |tab| tab.move_left(false));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorRight, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorRight, window, cx| {
                 this.editor_move(cx, |tab| tab.move_right(false));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorUp, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorUp, window, cx| {
                 this.editor_move(cx, |tab| tab.move_up(false));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorDown, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorDown, window, cx| {
                 this.editor_move(cx, |tab| tab.move_down(false));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorSelectLeft, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorSelectLeft, window, cx| {
                 this.editor_move(cx, |tab| tab.move_left(true));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorSelectRight, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorSelectRight, window, cx| {
                 this.editor_move(cx, |tab| tab.move_right(true));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorSelectUp, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorSelectUp, window, cx| {
                 this.editor_move(cx, |tab| tab.move_up(true));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorSelectDown, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorSelectDown, window, cx| {
                 this.editor_move(cx, |tab| tab.move_down(true));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorHome, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorHome, window, cx| {
                 this.editor_move(cx, |tab| tab.move_home(false));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorEnd, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorEnd, window, cx| {
                 this.editor_move(cx, |tab| tab.move_end(false));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorSelectHome, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorSelectHome, window, cx| {
                 this.editor_move(cx, |tab| tab.move_home(true));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorSelectEnd, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorSelectEnd, window, cx| {
                 this.editor_move(cx, |tab| tab.move_end(true));
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorBackspace, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorBackspace, window, cx| {
                 this.editor_backspace(cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorDelete, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorDelete, window, cx| {
                 this.editor_delete(cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &EditorNewline, _w, cx| {
+            .on_action(cx.listener(|this, _: &EditorNewline, window, cx| {
                 this.editor_newline(cx);
+                window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FindNextMatch, _w, cx| {
@@ -3103,8 +3127,9 @@ impl Render for LiteMarkApp {
                     this.editor_mouse_down(event, window, cx);
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.editor_mouse_move(event, cx);
+                window.refresh();
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -3165,6 +3190,7 @@ impl Render for LiteMarkApp {
                             on_minimize,
                             on_maximize,
                             on_close_window,
+                            drag_armed: self.title_drag_armed.clone(),
                         },
                         &theme,
                     ))

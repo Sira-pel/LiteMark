@@ -236,6 +236,15 @@ pub fn document_accepts_keystrokes(owner: TextInput) -> bool {
     owner == TextInput::Editor
 }
 
+/// Undo and redo always edit the document, including while Replace is focused.
+/// Other format commands stay with the editor so the field keeps its own keys.
+pub fn command_edits_document(cmd: &str, owner: TextInput, field_owns_keys: bool) -> bool {
+    if cmd == "undo" || cmd == "redo" {
+        return true;
+    }
+    document_accepts_keystrokes(owner) && !field_owns_keys
+}
+
 /// Focus is applied only when the desired slot changes.
 pub fn focus_if_changed(previous: Option<FocusSlot>, next: FocusSlot) -> bool {
     previous != Some(next)
@@ -383,6 +392,18 @@ mod tests {
         assert!(!document_accepts_keystrokes(TextInput::Find));
         assert!(!document_accepts_keystrokes(TextInput::Replace));
         assert!(!document_accepts_keystrokes(TextInput::Rename));
+        assert!(command_edits_document("undo", TextInput::Replace, true));
+        assert!(command_edits_document("redo", TextInput::Find, true));
+        assert!(!command_edits_document(
+            "bold",
+            TextInput::Replace,
+            true
+        ));
+        assert!(command_edits_document(
+            "bold",
+            TextInput::Editor,
+            false
+        ));
     }
 
     #[test]

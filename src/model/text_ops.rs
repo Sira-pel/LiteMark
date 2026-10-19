@@ -4,10 +4,14 @@
 //! the oldest diffs once the stored text exceeds [`UNDO_BYTE_BUDGET`].
 
 use std::ops::Range;
+use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Maximum total bytes of deleted + inserted text kept on the undo and redo stacks.
 pub const UNDO_BYTE_BUDGET: usize = 256 * 1024;
+
+/// Typing that continues the same word inside this window is one undo step.
+pub const TYPING_BURST_MS: u64 = 1_000;
 
 /// Hide zoom and save toasts after this long.
 pub const TRANSIENT_TTL_MS: u64 = 1_500;
@@ -31,6 +35,27 @@ pub struct UndoHistory {
     redo: Vec<DiffEdit>,
     undo_bytes: usize,
     redo_bytes: usize,
+    last_edit: Option<Instant>,
+}
+
+/// Group a continued word into the previous undo step.
+/// A space, newline, deletion, non-adjacent caret, or a pause starts a new step.
+pub fn coalesce_typing(previous: &DiffEdit, next: &DiffEdit, elapsed_ms: u64) -> bool {
+    if elapsed_ms >= TYPING_BURST_MS {
+        return false;
+    }
+    if !previous.deleted.is_empty() || !next.deleted.is_empty() {
+        return false;
+    }
+    if previous.inserted.is_empty() || next.inserted.is_empty() {
+        return false;
+    }
+    if next.start != previous.start + previous.inserted.len() {
+        return false;
+    }
+    let previous_is_word = !previous.inserted.chars().any(char::is_whitespace);
+    let next_is_word = !next.inserted.chars().any(char::is_whitespace);
+    previous_is_word && next_is_word
 }
 
 impl UndoHistory {
@@ -40,17 +65,37 @@ impl UndoHistory {
     }
 
     pub fn push(&mut self, edit: DiffEdit) {
+        self.push_at(edit, Instant::now());
+    }
+
+    pub fn push_at(&mut self, edit: DiffEdit, now: Instant) {
         if edit.deleted.is_empty() && edit.inserted.is_empty() {
             return;
         }
-        self.undo_bytes += edit.cost();
-        self.undo.push(edit);
+        let elapsed = self
+            .last_edit
+            .map(|then| now.saturating_duration_since(then).as_millis() as u64)
+            .unwrap_or(u64::MAX);
+        let merge = self
+            .undo
+            .last()
+            .is_some_and(|previous| coalesce_typing(previous, &edit, elapsed));
+        if merge {
+            if let Some(previous) = self.undo.last_mut() {
+                previous.inserted.push_str(&edit.inserted);
+            }
+            self.undo_bytes += edit.cost();
+        } else {
+            self.undo_bytes += edit.cost();
+            self.undo.push(edit);
+        }
         while self.undo_bytes > UNDO_BYTE_BUDGET && self.undo.len() > 1 {
             let dropped = self.undo.remove(0);
             self.undo_bytes = self.undo_bytes.saturating_sub(dropped.cost());
         }
         self.redo.clear();
         self.redo_bytes = 0;
+        self.last_edit = Some(now);
     }
 
     /// Undo the latest edit.
@@ -60,6 +105,7 @@ impl UndoHistory {
     /// bytes). Callers still snap that offset onto a char boundary.
     pub fn undo(&mut self, content: &mut String) -> Option<usize> {
         let edit = self.undo.pop()?;
+        self.last_edit = None;
         self.undo_bytes = self.undo_bytes.saturating_sub(edit.cost());
         let end = edit.start + edit.inserted.len();
         if end > content.len() || content.get(edit.start..end).is_none() {
@@ -81,6 +127,7 @@ impl UndoHistory {
     /// Redo the latest undone edit. The caret is the end of the text just written.
     pub fn redo(&mut self, content: &mut String) -> Option<usize> {
         let edit = self.redo.pop()?;
+        self.last_edit = None;
         self.redo_bytes = self.redo_bytes.saturating_sub(edit.cost());
         let end = edit.start + edit.inserted.len();
         if end > content.len() || content.get(edit.start..end).is_none() {
@@ -852,6 +899,114 @@ mod tests {
         assert_ne!(content, before);
         assert!(history.redo(&mut content).is_some());
         assert_eq!(content, before);
+    }
+
+    #[test]
+    fn typing_groups_a_word_until_space_or_pause() {
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let mut history = UndoHistory::default();
+        let mut content = String::new();
+        for (index, ch) in "hi".chars().enumerate() {
+            let at = content.len();
+            let text = ch.to_string();
+            history.push_at(
+                DiffEdit {
+                    start: at,
+                    deleted: String::new(),
+                    inserted: text.clone(),
+                },
+                start + Duration::from_millis(20 * index as u64),
+            );
+            content.push_str(&text);
+        }
+        assert_eq!(history.undo.len(), 1);
+        assert_eq!(history.undo(&mut content), Some(0));
+        assert_eq!(content, "");
+
+        history.push_at(
+            DiffEdit {
+                start: 0,
+                deleted: String::new(),
+                inserted: "hi".into(),
+            },
+            start + Duration::from_millis(40),
+        );
+        content.push_str("hi");
+        history.push_at(
+            DiffEdit {
+                start: 2,
+                deleted: String::new(),
+                inserted: " ".into(),
+            },
+            start + Duration::from_millis(60),
+        );
+        content.push(' ');
+        history.push_at(
+            DiffEdit {
+                start: 3,
+                deleted: String::new(),
+                inserted: "you".into(),
+            },
+            start + Duration::from_millis(80),
+        );
+        content.push_str("you");
+        assert_eq!(history.undo(&mut content), Some(3));
+        assert_eq!(content, "hi ");
+        assert_eq!(history.undo(&mut content), Some(2));
+        assert_eq!(content, "hi");
+
+        let mut paused = UndoHistory::default();
+        let mut paused_content = String::new();
+        paused.push_at(
+            DiffEdit {
+                start: 0,
+                deleted: String::new(),
+                inserted: "a".into(),
+            },
+            start,
+        );
+        paused_content.push('a');
+        paused.push_at(
+            DiffEdit {
+                start: 1,
+                deleted: String::new(),
+                inserted: "b".into(),
+            },
+            start + Duration::from_millis(TYPING_BURST_MS),
+        );
+        paused_content.push('b');
+        assert_eq!(paused.undo.len(), 2);
+        assert_eq!(paused.undo(&mut paused_content), Some(1));
+        assert_eq!(paused_content, "a");
+
+        assert!(!coalesce_typing(
+            &DiffEdit {
+                start: 0,
+                deleted: "x".into(),
+                inserted: String::new(),
+            },
+            &DiffEdit {
+                start: 0,
+                deleted: String::new(),
+                inserted: "y".into(),
+            },
+            0,
+        ));
+        assert!(!coalesce_typing(
+            &DiffEdit {
+                start: 0,
+                deleted: String::new(),
+                inserted: "a".into(),
+            },
+            &DiffEdit {
+                start: 4,
+                deleted: String::new(),
+                inserted: "b".into(),
+            },
+            0,
+        ));
     }
 
     #[test]

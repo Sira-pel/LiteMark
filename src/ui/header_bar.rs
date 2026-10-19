@@ -34,6 +34,10 @@ pub struct HeaderBarProps<
     pub on_minimize: FMinimize,
     pub on_maximize: FMaximize,
     pub on_close_window: FCloseWindow,
+    /// Lives on the app so a redraw between mouse-down and mouse-move does
+    /// not drop the drag. X11 only moves if the grab starts while the button
+    /// is still down.
+    pub drag_armed: Rc<Cell<bool>>,
 }
 
 pub fn render_header_bar<
@@ -74,7 +78,7 @@ where
     let on_close_win = props.on_close_window;
     let active_id = props.active_tab_id;
     let tab_count = props.tabs.len();
-    let press_origin: Rc<Cell<Option<Point<Pixels>>>> = Rc::new(Cell::new(None));
+    let drag_armed = props.drag_armed;
 
     div()
         .id("title-bar")
@@ -86,43 +90,39 @@ where
         .px(px(8.0))
         .bg(theme.bg_header)
         .flex_shrink_0()
-        // Double-click zooms. A plain click only arms a drag so the move
-        // grab does not swallow the second click of a double-click.
+        // Double-click zooms. A plain click only arms a drag. X11 has to
+        // receive `_NET_WM_MOVERESIZE` while the button is still down, so the
+        // first move with the left button pressed starts the move immediately.
         .on_mouse_down(MouseButton::Left, {
-            let press_origin = press_origin.clone();
+            let drag_armed = drag_armed.clone();
             move |event, window, cx| {
                 if title_bar_pointer(event.click_count) == TitleBarPointer::Zoom {
-                    press_origin.set(None);
+                    drag_armed.set(false);
                     window.zoom_window();
                     window.refresh();
                 } else {
-                    press_origin.set(Some(event.position));
+                    drag_armed.set(true);
                 }
                 cx.stop_propagation();
             }
         })
         .on_mouse_up(MouseButton::Left, {
-            let press_origin = press_origin.clone();
+            let drag_armed = drag_armed.clone();
             move |_, _, _| {
-                press_origin.set(None);
+                drag_armed.set(false);
             }
         })
         .on_mouse_move({
-            let press_origin = press_origin.clone();
+            let drag_armed = drag_armed.clone();
             move |event, window, cx| {
-                let Some(origin) = press_origin.get() else {
-                    return;
-                };
-                if event.pressed_button != Some(MouseButton::Left) {
-                    press_origin.set(None);
-                    return;
-                }
-                let moved = (event.position.x - origin.x).abs() > px(4.0)
-                    || (event.position.y - origin.y).abs() > px(4.0);
-                if moved {
-                    press_origin.set(None);
+                let armed = drag_armed.get();
+                let button_is_left = event.pressed_button == Some(MouseButton::Left);
+                if title_drag_should_move(armed, button_is_left) {
+                    drag_armed.set(false);
                     window.start_window_move();
                     cx.stop_propagation();
+                } else if armed && !button_is_left {
+                    drag_armed.set(false);
                 }
             }
         })
@@ -394,6 +394,14 @@ pub fn title_bar_pointer(click_count: usize) -> TitleBarPointer {
     }
 }
 
+/// Start `_NET_WM_MOVERESIZE` on the first move while the button is still held.
+/// A distance threshold lets the button go up before the grab, and X11 then
+/// leaves the window where it is.
+pub fn title_drag_should_move(armed: bool, button_is_left: bool) -> bool {
+    armed && button_is_left
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub struct ResizeHit {
     pub x: f32,
@@ -411,6 +419,7 @@ pub struct ResizeHit {
 /// Map a window-local point to a resize edge.
 /// The right side is [`ResizeEdge::Right`] and the bottom-right corner is
 /// [`ResizeEdge::BottomRight`]. Tiled edges are not resizable.
+#[cfg(test)]
 pub fn client_resize_edge(hit: ResizeHit) -> Option<ResizeEdge> {
     let ResizeHit {
         x,
@@ -463,143 +472,192 @@ pub fn client_resize_edge(hit: ResizeHit) -> Option<ResizeEdge> {
     }
 }
 
-fn resize_handle(id: &'static str, cursor: CursorStyle) -> Stateful<Div> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResizeHandleBox {
+    pub edge: ResizeEdge,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Logical-pixel hit boxes for the eight edges and corners.
+/// `viewport_width` and `viewport_height` are logical pixels, the same space
+/// as [`Window::viewport_size`]. The platform applies display scale, so these
+/// boxes stay in logical pixels at 1.5x and every other scale.
+pub fn resize_handle_boxes(
+    viewport_width: f32,
+    viewport_height: f32,
+    edge: f32,
+    corner: f32,
+) -> [ResizeHandleBox; 8] {
+    let width = viewport_width.max(0.0);
+    let height = viewport_height.max(0.0);
+    let limit = width.min(height);
+    let edge = edge.max(0.0).min(limit);
+    let corner = corner.max(edge).min(limit);
+    let span_x = (width - corner * 2.0).max(0.0);
+    let span_y = (height - corner * 2.0).max(0.0);
+    [
+        ResizeHandleBox {
+            edge: ResizeEdge::Top,
+            x: corner,
+            y: 0.0,
+            width: span_x,
+            height: edge,
+        },
+        ResizeHandleBox {
+            edge: ResizeEdge::Bottom,
+            x: corner,
+            y: (height - edge).max(0.0),
+            width: span_x,
+            height: edge,
+        },
+        ResizeHandleBox {
+            edge: ResizeEdge::Left,
+            x: 0.0,
+            y: corner,
+            width: edge,
+            height: span_y,
+        },
+        ResizeHandleBox {
+            edge: ResizeEdge::Right,
+            x: (width - edge).max(0.0),
+            y: corner,
+            width: edge,
+            height: span_y,
+        },
+        ResizeHandleBox {
+            edge: ResizeEdge::TopLeft,
+            x: 0.0,
+            y: 0.0,
+            width: corner,
+            height: corner,
+        },
+        ResizeHandleBox {
+            edge: ResizeEdge::TopRight,
+            x: (width - corner).max(0.0),
+            y: 0.0,
+            width: corner,
+            height: corner,
+        },
+        ResizeHandleBox {
+            edge: ResizeEdge::BottomLeft,
+            x: 0.0,
+            y: (height - corner).max(0.0),
+            width: corner,
+            height: corner,
+        },
+        ResizeHandleBox {
+            edge: ResizeEdge::BottomRight,
+            x: (width - corner).max(0.0),
+            y: (height - corner).max(0.0),
+            width: corner,
+            height: corner,
+        },
+    ]
+}
+
+/// A tiled side, or a corner that includes a tiled side, is not resizable.
+pub fn resize_edge_is_blocked(
+    edge: ResizeEdge,
+    tile_top: bool,
+    tile_right: bool,
+    tile_bottom: bool,
+    tile_left: bool,
+) -> bool {
+    match edge {
+        ResizeEdge::Top => tile_top,
+        ResizeEdge::Right => tile_right,
+        ResizeEdge::Bottom => tile_bottom,
+        ResizeEdge::Left => tile_left,
+        ResizeEdge::TopLeft => tile_top || tile_left,
+        ResizeEdge::TopRight => tile_top || tile_right,
+        ResizeEdge::BottomLeft => tile_bottom || tile_left,
+        ResizeEdge::BottomRight => tile_bottom || tile_right,
+    }
+}
+
+fn resize_handle_id(edge: ResizeEdge) -> &'static str {
+    match edge {
+        ResizeEdge::Top => "resize-top",
+        ResizeEdge::Bottom => "resize-bottom",
+        ResizeEdge::Left => "resize-left",
+        ResizeEdge::Right => "resize-right",
+        ResizeEdge::TopLeft => "resize-top-left",
+        ResizeEdge::TopRight => "resize-top-right",
+        ResizeEdge::BottomLeft => "resize-bottom-left",
+        ResizeEdge::BottomRight => "resize-bottom-right",
+    }
+}
+
+fn resize_cursor(edge: ResizeEdge) -> CursorStyle {
+    match edge {
+        ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
+        ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
+        ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+        ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+    }
+}
+
+fn resize_handle(handle: ResizeHandleBox) -> Stateful<Div> {
+    let edge = handle.edge;
     div()
-        .id(id)
-        .cursor(cursor)
-        .on_mouse_move(|_, window, _| window.refresh())
-        .on_mouse_down(MouseButton::Left, |event, window, cx| {
-            let size = window.viewport_size();
-            let (tile_top, tile_right, tile_bottom, tile_left) = match window.window_decorations() {
-                Decorations::Client { tiling } => {
-                    (tiling.top, tiling.right, tiling.bottom, tiling.left)
-                }
-                Decorations::Server => {
-                    cx.stop_propagation();
-                    return;
-                }
-            };
-            if let Some(edge) = client_resize_edge(ResizeHit {
-                x: f32::from(event.position.x),
-                y: f32::from(event.position.y),
-                width: f32::from(size.width),
-                height: f32::from(size.height),
-                edge: EDGE_PX,
-                corner: CORNER_PX,
-                tile_top,
-                tile_right,
-                tile_bottom,
-                tile_left,
-            }) {
-                window.start_window_resize(edge);
-                window.refresh();
-            }
+        .id(resize_handle_id(edge))
+        .absolute()
+        .left(px(handle.x))
+        .top(px(handle.y))
+        .w(px(handle.width))
+        .h(px(handle.height))
+        .cursor(resize_cursor(edge))
+        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            // The hit box owns the edge. Re-deriving it from the pointer
+            // disagrees with that box under fractional display scale, so the
+            // bottom never starts and the left edge jumps.
+            window.start_window_resize(edge);
             cx.stop_propagation();
         })
 }
 
 /// Edge and corner hit targets for client-side window decorations.
-/// The layer is window-sized and painted above the document so the edges
-/// receive hits. The right edge starts a [`ResizeEdge::Right`] resize.
+/// Each box calls [`Window::start_window_resize`] with its own edge on
+/// mouse-down. Boxes are placed in logical pixels from the viewport size.
 pub fn render_client_resize_borders(window: &Window) -> AnyElement {
     let Decorations::Client { tiling } = window.window_decorations() else {
         return div().into_any_element();
     };
-    let edge = px(EDGE_PX);
-    let corner = px(CORNER_PX);
-    div()
+    let size = window.viewport_size();
+    let width = f32::from(size.width);
+    let height = f32::from(size.height);
+    let mut layer = div()
         .id("client-resize-layer")
         .absolute()
         .top_0()
         .left_0()
-        .size_full()
-        .when(!tiling.top, |parent| {
-            parent.child(
-                resize_handle("resize-top", CursorStyle::ResizeUpDown)
-                    .absolute()
-                    .top_0()
-                    .left(corner)
-                    .right(corner)
-                    .h(edge),
-            )
-        })
-        .when(!tiling.bottom, |parent| {
-            parent.child(
-                resize_handle("resize-bottom", CursorStyle::ResizeUpDown)
-                    .absolute()
-                    .bottom_0()
-                    .left(corner)
-                    .right(corner)
-                    .h(edge),
-            )
-        })
-        .when(!tiling.left, |parent| {
-            parent.child(
-                resize_handle("resize-left", CursorStyle::ResizeLeftRight)
-                    .absolute()
-                    .left_0()
-                    .top(corner)
-                    .bottom(corner)
-                    .w(edge),
-            )
-        })
-        .when(!tiling.right, |parent| {
-            parent.child(
-                resize_handle("resize-right", CursorStyle::ResizeLeftRight)
-                    .absolute()
-                    .right_0()
-                    .top(corner)
-                    .bottom(corner)
-                    .w(edge),
-            )
-        })
-        .when(!tiling.top && !tiling.left, |parent| {
-            parent.child(
-                resize_handle("resize-top-left", CursorStyle::ResizeUpLeftDownRight)
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .w(corner)
-                    .h(corner),
-            )
-        })
-        .when(!tiling.top && !tiling.right, |parent| {
-            parent.child(
-                resize_handle("resize-top-right", CursorStyle::ResizeUpRightDownLeft)
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .w(corner)
-                    .h(corner),
-            )
-        })
-        .when(!tiling.bottom && !tiling.left, |parent| {
-            parent.child(
-                resize_handle("resize-bottom-left", CursorStyle::ResizeUpRightDownLeft)
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w(corner)
-                    .h(corner),
-            )
-        })
-        .when(!tiling.bottom && !tiling.right, |parent| {
-            parent.child(
-                resize_handle("resize-bottom-right", CursorStyle::ResizeUpLeftDownRight)
-                    .absolute()
-                    .bottom_0()
-                    .right_0()
-                    .w(corner)
-                    .h(corner),
-            )
-        })
-        .into_any_element()
+        .w(size.width)
+        .h(size.height);
+    for handle in resize_handle_boxes(width, height, EDGE_PX, CORNER_PX) {
+        if resize_edge_is_blocked(
+            handle.edge,
+            tiling.top,
+            tiling.right,
+            tiling.bottom,
+            tiling.left,
+        ) || handle.width <= 0.0
+            || handle.height <= 0.0
+        {
+            continue;
+        }
+        layer = layer.child(resize_handle(handle));
+    }
+    layer.into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        client_resize_edge, title_bar_pointer, ResizeHit, TitleBarPointer, CORNER_PX, EDGE_PX,
+        client_resize_edge, resize_edge_is_blocked, resize_handle_boxes, title_bar_pointer,
+        title_drag_should_move, ResizeHit, TitleBarPointer, CORNER_PX, EDGE_PX,
     };
     use gpui::ResizeEdge;
 
@@ -653,5 +711,96 @@ mod tests {
         assert_eq!(title_bar_pointer(1), TitleBarPointer::ArmDrag);
         assert_eq!(title_bar_pointer(2), TitleBarPointer::Zoom);
         assert_eq!(title_bar_pointer(3), TitleBarPointer::Zoom);
+        assert!(title_drag_should_move(true, true));
+        assert!(!title_drag_should_move(true, false));
+        assert!(!title_drag_should_move(false, true));
+    }
+
+    #[test]
+    fn every_resize_handle_owns_its_edge() {
+        let width = 800.0;
+        let height = 600.0;
+        let boxes = resize_handle_boxes(width, height, EDGE_PX, CORNER_PX);
+        let expected = [
+            ResizeEdge::Top,
+            ResizeEdge::Bottom,
+            ResizeEdge::Left,
+            ResizeEdge::Right,
+            ResizeEdge::TopLeft,
+            ResizeEdge::TopRight,
+            ResizeEdge::BottomLeft,
+            ResizeEdge::BottomRight,
+        ];
+        for edge in expected {
+            let handle = boxes.iter().find(|hit| hit.edge == edge).unwrap();
+            let x = handle.x + handle.width / 2.0;
+            let y = handle.y + handle.height / 2.0;
+            assert_eq!(
+                client_resize_edge(hit(x, y, width, height, false)),
+                Some(edge)
+            );
+        }
+    }
+
+    #[test]
+    fn resize_handles_stay_on_the_logical_window_at_fractional_scale() {
+        let scale = 1.5_f32;
+        let logical_w = 800.0;
+        let logical_h = 600.0;
+        let boxes = resize_handle_boxes(logical_w, logical_h, EDGE_PX, CORNER_PX);
+        let right = boxes
+            .iter()
+            .find(|hit| hit.edge == ResizeEdge::Right)
+            .unwrap();
+        let bottom = boxes
+            .iter()
+            .find(|hit| hit.edge == ResizeEdge::Bottom)
+            .unwrap();
+        let left = boxes
+            .iter()
+            .find(|hit| hit.edge == ResizeEdge::Left)
+            .unwrap();
+        let corner = boxes
+            .iter()
+            .find(|hit| hit.edge == ResizeEdge::BottomRight)
+            .unwrap();
+        assert!((right.x - (logical_w - EDGE_PX)).abs() < 0.01);
+        assert!((right.x + right.width - logical_w).abs() < 0.01);
+        assert!((bottom.y - (logical_h - EDGE_PX)).abs() < 0.01);
+        assert!((bottom.y + bottom.height - logical_h).abs() < 0.01);
+        assert!(left.x.abs() < 0.01);
+        assert_eq!(left.edge, ResizeEdge::Left);
+        assert!((corner.x - (logical_w - CORNER_PX)).abs() < 0.01);
+        assert!((corner.y - (logical_h - CORNER_PX)).abs() < 0.01);
+        assert!(right.x < logical_w * scale - EDGE_PX);
+        assert!(bottom.y < logical_h * scale - EDGE_PX);
+        assert!(resize_edge_is_blocked(
+            ResizeEdge::Right,
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(resize_edge_is_blocked(
+            ResizeEdge::BottomRight,
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!resize_edge_is_blocked(
+            ResizeEdge::Bottom,
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!resize_edge_is_blocked(
+            ResizeEdge::Left,
+            false,
+            true,
+            false,
+            false
+        ));
     }
 }
