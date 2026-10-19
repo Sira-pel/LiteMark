@@ -17,6 +17,8 @@ pub struct LiteMarkApp {
     pub show_find_replace: bool,
     pub show_shortcuts_modal: bool,
     pub show_pdf_modal: bool,
+    pub show_file_menu: bool,
+    pub show_overflow_menu: bool,
     pub zen_mode: bool,
     pub zen_notice: bool,
     pub saved_toast: Option<String>,
@@ -26,10 +28,11 @@ pub struct LiteMarkApp {
     pub replace_term: String,
     pub match_case: bool,
     pub not_found: bool,
+    pub focus_handle: FocusHandle,
 }
 
 impl LiteMarkApp {
-    pub fn new(initial_file: Option<PathBuf>) -> Self {
+    pub fn new(initial_file: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let settings = EditorSettings::load();
         let notes_dir = get_or_create_notes_dir();
         seed_welcome_note(&notes_dir);
@@ -58,6 +61,8 @@ impl LiteMarkApp {
             show_find_replace: false,
             show_shortcuts_modal: false,
             show_pdf_modal: false,
+            show_file_menu: false,
+            show_overflow_menu: false,
             zen_mode: false,
             zen_notice: false,
             saved_toast: None,
@@ -67,6 +72,7 @@ impl LiteMarkApp {
             replace_term: String::new(),
             match_case: false,
             not_found: false,
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -164,15 +170,19 @@ impl LiteMarkApp {
 
     pub fn handle_export(&mut self, format: &'static str) {
         if let Some(tab) = self.active_tab() {
-            let (content, ext, suggested) = match format {
-                "html" => (export_to_html(&tab.title, &tab.content), "html", format!("{}.html", tab.title.trim_end_matches(".md"))),
-                "txt" => (export_to_plaintext(&tab.content), "txt", format!("{}.txt", tab.title.trim_end_matches(".md"))),
-                _ => (tab.content.clone(), "md", tab.title.clone()),
-            };
-
-            if let Some(target) = pick_save_file(&suggested, ext) {
-                let _ = std::fs::write(&target, content);
-                self.saved_toast = Some(format!("Exported to {}", target.display()));
+            let default_name = format!("{}.{}", tab.title.trim_end_matches(".md"), format);
+            if let Some(dest) = pick_save_file(&default_name, format) {
+                match format {
+                    "html" => {
+                        let html = export_to_html(&tab.content, &tab.title);
+                        let _ = std::fs::write(&dest, html);
+                    }
+                    _ => {
+                        let txt = export_to_plaintext(&tab.content);
+                        let _ = std::fs::write(&dest, txt);
+                    }
+                }
+                self.saved_toast = Some(format!("Exported to {}", dest.file_name().unwrap_or_default().to_string_lossy()));
             }
         }
     }
@@ -180,66 +190,65 @@ impl LiteMarkApp {
     pub fn handle_format_cmd(&mut self, cmd: &'static str) {
         if let Some(tab) = self.active_tab_mut() {
             match cmd {
-                "undo" => { tab.undo(); },
-                "redo" => { tab.redo(); },
+                "undo" => { tab.undo(); }
+                "redo" => { tab.redo(); }
                 "bold" => {
                     let new_c = format!("{} **bold text**", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "italic" => {
                     let new_c = format!("{} *italic text*", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "underline" => {
                     let new_c = format!("{} <u>underlined</u>", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "strike" => {
                     let new_c = format!("{} ~~strikethrough~~", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "h1" => {
                     let new_c = format!("{}\n\n# Heading 1\n", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "h2" => {
                     let new_c = format!("{}\n\n## Heading 2\n", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "h3" => {
                     let new_c = format!("{}\n\n### Heading 3\n", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "ul" => {
                     let new_c = format!("{}\n- Item 1\n- Item 2\n", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "ol" => {
                     let new_c = format!("{}\n1. First\n2. Second\n", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "checklist" => {
                     let new_c = format!("{}\n- [ ] Task to complete\n- [x] Completed task\n", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "quote" => {
                     let new_c = format!("{}\n> Quoted reference\n", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "code" => {
                     let new_c = format!("{} `code`", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "codeblock" => {
                     let new_c = format!("{}\n```rust\nfn main() {{\n    println!(\"Hello, LiteMark!\");\n}}\n```\n", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "hr" => {
                     let new_c = format!("{}\n\n---\n\n", tab.content);
                     tab.set_content(new_c);
-                },
+                }
                 "clear" => {
-                    // strip common markdown
                     let cleaned = tab.content
                         .replace("**", "")
                         .replace('*', "")
@@ -248,7 +257,7 @@ impl LiteMarkApp {
                         .replace("~~", "")
                         .replace('`', "");
                     tab.set_content(cleaned);
-                },
+                }
                 _ => {}
             }
         }
@@ -315,8 +324,10 @@ impl LiteMarkApp {
 }
 
 impl Render for LiteMarkApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::new(self.settings.theme);
+        self.focus_handle.focus(window);
+
         let active_tab = self.active_tab().cloned().unwrap_or_else(|| {
             DocumentTab::new("tab-1".to_string(), "Welcome.md".to_string(), INITIAL_MARKDOWN.to_string(), None, None)
         });
@@ -330,6 +341,7 @@ impl Render for LiteMarkApp {
         let stats_read = active_tab.reading_time_min;
         let active_tab_has_pdf = active_tab.file_type == FileType::Pdf;
         let pdf_page_count = active_tab.pdf_page_count;
+        let is_max = window.is_maximized();
 
         let view = cx.entity().downgrade();
 
@@ -337,8 +349,9 @@ impl Render for LiteMarkApp {
         let on_select_tab = {
             let view = view.clone();
             move |id: String, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.active_tab_id = id;
+                    cx.notify();
                 });
             }
         };
@@ -346,8 +359,9 @@ impl Render for LiteMarkApp {
         let on_close_tab = {
             let view = view.clone();
             move |id: String, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_close_tab(id);
+                    cx.notify();
                 });
             }
         };
@@ -355,8 +369,9 @@ impl Render for LiteMarkApp {
         let on_new_tab = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_new_tab();
+                    cx.notify();
                 });
             }
         };
@@ -364,8 +379,9 @@ impl Render for LiteMarkApp {
         let on_toggle_sidebar = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_toggle_sidebar();
+                    cx.notify();
                 });
             }
         };
@@ -373,8 +389,9 @@ impl Render for LiteMarkApp {
         let on_save = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_save();
+                    cx.notify();
                 });
             }
         };
@@ -382,8 +399,9 @@ impl Render for LiteMarkApp {
         let on_open = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_open_file();
+                    cx.notify();
                 });
             }
         };
@@ -391,8 +409,9 @@ impl Render for LiteMarkApp {
         let on_export = {
             let view = view.clone();
             move |fmt: &'static str, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_export(fmt);
+                    cx.notify();
                 });
             }
         };
@@ -400,8 +419,9 @@ impl Render for LiteMarkApp {
         let on_toggle_theme = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_toggle_theme();
+                    cx.notify();
                 });
             }
         };
@@ -409,8 +429,9 @@ impl Render for LiteMarkApp {
         let on_toggle_zen = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_toggle_zen();
+                    cx.notify();
                 });
             }
         };
@@ -418,8 +439,9 @@ impl Render for LiteMarkApp {
         let on_open_shortcuts = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.show_shortcuts_modal = true;
+                    cx.notify();
                 });
             }
         };
@@ -427,8 +449,9 @@ impl Render for LiteMarkApp {
         let on_zoom_in = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_zoom_in();
+                    cx.notify();
                 });
             }
         };
@@ -436,8 +459,9 @@ impl Render for LiteMarkApp {
         let on_zoom_out = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_zoom_out();
+                    cx.notify();
                 });
             }
         };
@@ -445,8 +469,9 @@ impl Render for LiteMarkApp {
         let on_reset_zoom = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_reset_zoom();
+                    cx.notify();
                 });
             }
         };
@@ -454,18 +479,60 @@ impl Render for LiteMarkApp {
         let on_view_pdf = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.show_pdf_modal = true;
+                    cx.notify();
                 });
             }
         };
 
-        // Formatting toolbar callbacks
+        let on_toggle_file_menu = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.show_file_menu = !this.show_file_menu;
+                    this.show_overflow_menu = false;
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_toggle_overflow = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.show_overflow_menu = !this.show_overflow_menu;
+                    this.show_file_menu = false;
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_minimize = {
+            move |window: &mut Window, _: &mut App| {
+                window.minimize_window();
+            }
+        };
+
+        let on_maximize = {
+            move |window: &mut Window, _: &mut App| {
+                window.zoom_window();
+            }
+        };
+
+        let on_close_window = {
+            move |window: &mut Window, _: &mut App| {
+                window.remove_window();
+            }
+        };
+
+        // Callbacks for Formatting Toolbar
         let on_format = {
             let view = view.clone();
             move |cmd: &'static str, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_format_cmd(cmd);
+                    cx.notify();
                 });
             }
         };
@@ -473,8 +540,9 @@ impl Render for LiteMarkApp {
         let on_insert_table = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_insert_table();
+                    cx.notify();
                 });
             }
         };
@@ -482,8 +550,9 @@ impl Render for LiteMarkApp {
         let on_insert_link = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_insert_link();
+                    cx.notify();
                 });
             }
         };
@@ -491,94 +560,101 @@ impl Render for LiteMarkApp {
         let on_toggle_find = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = !this.show_find_replace;
+                    cx.notify();
                 });
             }
         };
 
-        // Find replace callbacks
+        let on_noop = |_cx: &mut App| {};
+
         let on_find_close = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = false;
+                    cx.notify();
                 });
             }
         };
 
-        let on_noop = move |_cx: &mut App| {};
-
-        // Sidebar callbacks
+        // Callbacks for Sidebar
         let on_select_file = {
             let view = view.clone();
             move |file: WorkspaceFile, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
-                    if let Ok(c) = std::fs::read_to_string(&file.path) {
+                let _ = view.update(cx, |this, cx| {
+                    let existing = this.tabs.iter().find(|t| t.file_path.as_ref() == Some(&file.path));
+                    if let Some(t) = existing {
+                        this.active_tab_id = t.id.clone();
+                    } else {
                         let new_id = format!("tab-{}", this.tabs.len() + 1);
-                        let tab = DocumentTab::new(new_id.clone(), file.name, c, Some(file.path), Some(file.id));
+                        let content = std::fs::read_to_string(&file.path).unwrap_or_default();
+                        let tab = DocumentTab::new(new_id.clone(), file.name.clone(), content, Some(file.path.clone()), Some(file.id.clone()));
                         this.tabs.push(tab);
                         this.active_tab_id = new_id;
                     }
+                    cx.notify();
                 });
             }
         };
 
         let on_create_file = {
             let view = view.clone();
-            move |folder_id: Option<String>, name: String, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
-                    let parent = if let Some(fid) = folder_id {
-                        this.workspace.folders.iter().find(|f| f.id == fid).map(|f| f.path.clone()).unwrap_or_else(|| this.workspace.folder_path.clone())
-                    } else {
-                        this.workspace.folder_path.clone()
-                    };
-                    if let Ok(p) = safe_create_file(&parent, &name, "# New Note\n\n") {
-                        this.workspace = scan_workspace_dir(&this.workspace.folder_path);
-                        let new_id = format!("tab-{}", this.tabs.len() + 1);
-                        let tab = DocumentTab::new(new_id.clone(), name, "# New Note\n\n".to_string(), Some(p.clone()), Some(format!("file-{}", p.display())));
-                        this.tabs.push(tab);
-                        this.active_tab_id = new_id;
-                    }
+            move |_folder_id: Option<String>, name: String, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    let new_file_path = this.workspace.folder_path.join(&name);
+                    let _ = std::fs::write(&new_file_path, "");
+                    this.workspace = scan_workspace_dir(&this.workspace.folder_path);
+                    let new_id = format!("tab-{}", this.tabs.len() + 1);
+                    let tab = DocumentTab::new(new_id.clone(), name, String::new(), Some(new_file_path), None);
+                    this.tabs.push(tab);
+                    this.active_tab_id = new_id;
+                    cx.notify();
                 });
             }
         };
 
         let on_create_folder = {
             let view = view.clone();
-            move |parent_id: Option<String>, name: String, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
-                    let parent = if let Some(pid) = parent_id {
-                        this.workspace.folders.iter().find(|f| f.id == pid).map(|f| f.path.clone()).unwrap_or_else(|| this.workspace.folder_path.clone())
-                    } else {
-                        this.workspace.folder_path.clone()
-                    };
-                    let _ = safe_create_folder(&parent, &name);
+            move |_parent_id: Option<String>, name: String, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    let new_dir_path = this.workspace.folder_path.join(&name);
+                    let _ = std::fs::create_dir_all(&new_dir_path);
                     this.workspace = scan_workspace_dir(&this.workspace.folder_path);
+                    cx.notify();
                 });
             }
         };
 
         let on_delete_file = {
             let view = view.clone();
-            move |fid: String, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
-                    if let Some(f) = this.workspace.files.iter().find(|f| f.id == fid).cloned() {
-                        let _ = safe_delete(&f.path, false);
+            move |id: String, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    if let Some(f) = this.workspace.files.iter().find(|f| f.id == id).cloned() {
+                        let _ = std::fs::remove_file(&f.path);
                         this.workspace = scan_workspace_dir(&this.workspace.folder_path);
+                        this.tabs.retain(|t| t.file_path.as_ref() != Some(&f.path));
+                        if this.tabs.is_empty() {
+                            this.handle_new_tab();
+                        } else if !this.tabs.iter().any(|t| t.id == this.active_tab_id) {
+                            this.active_tab_id = this.tabs[0].id.clone();
+                        }
                     }
+                    cx.notify();
                 });
             }
         };
 
         let on_delete_folder = {
             let view = view.clone();
-            move |fld_id: String, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
-                    if let Some(fld) = this.workspace.folders.iter().find(|f| f.id == fld_id).cloned() {
-                        let _ = safe_delete(&fld.path, true);
+            move |id: String, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    if let Some(f) = this.workspace.folders.iter().find(|f| f.id == id).cloned() {
+                        let _ = std::fs::remove_dir_all(&f.path);
                         this.workspace = scan_workspace_dir(&this.workspace.folder_path);
                     }
+                    cx.notify();
                 });
             }
         };
@@ -586,9 +662,10 @@ impl Render for LiteMarkApp {
         let on_choose_dir = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     if let Some(dir) = pick_directory() {
                         this.workspace = scan_workspace_dir(&dir);
+                        cx.notify();
                     }
                 });
             }
@@ -598,8 +675,9 @@ impl Render for LiteMarkApp {
         let on_content_change = {
             let view = view.clone();
             move |c: String, cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_content_change(c);
+                    cx.notify();
                 });
             }
         };
@@ -608,8 +686,9 @@ impl Render for LiteMarkApp {
         let on_toggle_mode = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_toggle_mode();
+                    cx.notify();
                 });
             }
         };
@@ -618,8 +697,9 @@ impl Render for LiteMarkApp {
         let on_close_shortcuts = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.show_shortcuts_modal = false;
+                    cx.notify();
                 });
             }
         };
@@ -627,8 +707,9 @@ impl Render for LiteMarkApp {
         let on_close_pdf = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.show_pdf_modal = false;
+                    cx.notify();
                 });
             }
         };
@@ -647,14 +728,17 @@ impl Render for LiteMarkApp {
         let on_exit_zen = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
+                let _ = view.update(cx, |this, cx| {
                     this.handle_exit_zen();
+                    cx.notify();
                 });
             }
         };
 
         div()
             .id("litemark-root")
+            .track_focus(&self.focus_handle)
+            .key_context("LiteMark")
             .flex()
             .flex_col()
             .size_full()
@@ -662,34 +746,56 @@ impl Render for LiteMarkApp {
             .text_color(theme.text_primary)
             .font_family(Theme::FONT_PROSE)
             // Keyboard shortcut bindings
-            .on_action(cx.listener(|this, _: &ToggleBold, _window, _cx| this.handle_format_cmd("bold")))
-            .on_action(cx.listener(|this, _: &ToggleItalic, _window, _cx| this.handle_format_cmd("italic")))
-            .on_action(cx.listener(|this, _: &ToggleUnderline, _window, _cx| this.handle_format_cmd("underline")))
-            .on_action(cx.listener(|this, _: &ToggleStrikethrough, _window, _cx| this.handle_format_cmd("strike")))
-            .on_action(cx.listener(|this, _: &SaveFile, _window, _cx| this.handle_save()))
-            .on_action(cx.listener(|this, _: &OpenFile, _window, _cx| this.handle_open_file()))
-            .on_action(cx.listener(|this, _: &NewTab, _window, _cx| this.handle_new_tab()))
-            .on_action(cx.listener(|this, _: &CloseActiveTab, _window, _cx| {
+            .on_action(cx.listener(|this, _: &ToggleBold, _window, cx| { this.handle_format_cmd("bold"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleItalic, _window, cx| { this.handle_format_cmd("italic"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleUnderline, _window, cx| { this.handle_format_cmd("underline"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleStrikethrough, _window, cx| { this.handle_format_cmd("strike"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &Heading1, _window, cx| { this.handle_format_cmd("h1"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &Heading2, _window, cx| { this.handle_format_cmd("h2"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &Heading3, _window, cx| { this.handle_format_cmd("h3"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleBulletList, _window, cx| { this.handle_format_cmd("ul"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleNumberedList, _window, cx| { this.handle_format_cmd("ol"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleChecklist, _window, cx| { this.handle_format_cmd("checklist"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleQuote, _window, cx| { this.handle_format_cmd("quote"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleInlineCode, _window, cx| { this.handle_format_cmd("code"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &InsertCodeBlock, _window, cx| { this.handle_format_cmd("codeblock"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &InsertDivider, _window, cx| { this.handle_format_cmd("hr"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &InsertTable, _window, cx| { this.handle_insert_table(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &InsertLink, _window, cx| { this.handle_insert_link(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ClearFormatting, _window, cx| { this.handle_format_cmd("clear"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &SaveFile, _window, cx| { this.handle_save(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &OpenFile, _window, cx| { this.handle_open_file(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &NewTab, _window, cx| { this.handle_new_tab(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &CloseActiveTab, _window, cx| {
                 let id = this.active_tab_id.clone();
                 this.handle_close_tab(id);
+                cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &FindReplace, _window, _cx| this.show_find_replace = !this.show_find_replace))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _window, _cx| this.handle_toggle_sidebar()))
-            .on_action(cx.listener(|this, _: &ToggleZenMode, _window, _cx| this.handle_toggle_zen()))
-            .on_action(cx.listener(|this, _: &ExitZenMode, _window, _cx| this.handle_exit_zen()))
-            .on_action(cx.listener(|this, _: &ZoomIn, _window, _cx| this.handle_zoom_in()))
-            .on_action(cx.listener(|this, _: &ZoomOut, _window, _cx| this.handle_zoom_out()))
-            .on_action(cx.listener(|this, _: &ResetZoom, _window, _cx| this.handle_reset_zoom()))
-            .on_action(cx.listener(|this, _: &ToggleViewMode, _window, _cx| this.handle_toggle_mode()))
-            .on_action(cx.listener(|this, _: &UndoAction, _window, _cx| this.handle_format_cmd("undo")))
-            .on_action(cx.listener(|this, _: &RedoAction, _window, _cx| this.handle_format_cmd("redo")))
-            .on_action(cx.listener(|this, _: &CloseModal, _window, _cx| {
-                this.show_shortcuts_modal = false;
-                this.show_pdf_modal = false;
-                this.show_find_replace = false;
-                if this.zen_mode {
+            .on_action(cx.listener(|this, _: &FindReplace, _window, cx| { this.show_find_replace = !this.show_find_replace; cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| { this.handle_toggle_sidebar(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleZenMode, _window, cx| { this.handle_toggle_zen(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ExitZenMode, _window, cx| { this.handle_exit_zen(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _window, cx| { this.handle_zoom_in(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _window, cx| { this.handle_zoom_out(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ResetZoom, _window, cx| { this.handle_reset_zoom(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleViewMode, _window, cx| { this.handle_toggle_mode(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &UndoAction, _window, cx| { this.handle_format_cmd("undo"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &RedoAction, _window, cx| { this.handle_format_cmd("redo"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
+                if this.show_file_menu {
+                    this.show_file_menu = false;
+                } else if this.show_overflow_menu {
+                    this.show_overflow_menu = false;
+                } else if this.show_shortcuts_modal {
+                    this.show_shortcuts_modal = false;
+                } else if this.show_pdf_modal {
+                    this.show_pdf_modal = false;
+                } else if this.show_find_replace {
+                    this.show_find_replace = false;
+                } else if this.zen_mode {
                     this.handle_exit_zen();
                 }
+                cx.notify();
             }))
             // Main App View
             .child(if !self.zen_mode {
@@ -703,8 +809,9 @@ impl Render for LiteMarkApp {
                             tabs: self.tabs.clone(),
                             active_tab_id: self.active_tab_id.clone(),
                             is_sidebar_open: self.show_sidebar,
-                            zoom_level: self.settings.zoom_level,
                             has_pdf: active_tab_has_pdf,
+                            is_maximized: is_max,
+                            show_file_menu: self.show_file_menu,
                             on_select_tab: on_select_tab.clone(),
                             on_close_tab: on_close_tab.clone(),
                             on_new_tab: on_new_tab.clone(),
@@ -715,10 +822,11 @@ impl Render for LiteMarkApp {
                             on_toggle_theme: on_toggle_theme.clone(),
                             on_toggle_zen: on_toggle_zen.clone(),
                             on_open_shortcuts: on_open_shortcuts.clone(),
-                            on_zoom_in: on_zoom_in.clone(),
-                            on_zoom_out: on_zoom_out.clone(),
-                            on_reset_zoom: on_reset_zoom.clone(),
                             on_view_pdf: on_view_pdf.clone(),
+                            on_toggle_file_menu: on_toggle_file_menu.clone(),
+                            on_minimize: on_minimize.clone(),
+                            on_maximize: on_maximize.clone(),
+                            on_close_window: on_close_window.clone(),
                         },
                         &theme,
                     ))
@@ -726,10 +834,12 @@ impl Render for LiteMarkApp {
                     .child(render_formatting_toolbar(
                         FormattingToolbarProps {
                             active_formats,
+                            show_overflow_menu: self.show_overflow_menu,
                             on_format: on_format.clone(),
                             on_insert_table: on_insert_table.clone(),
                             on_insert_link: on_insert_link.clone(),
                             on_toggle_find: on_toggle_find.clone(),
+                            on_toggle_overflow: on_toggle_overflow.clone(),
                         },
                         &theme,
                     ))
@@ -871,7 +981,7 @@ impl Render for LiteMarkApp {
                                 .w(px(8.0))
                                 .h(px(8.0))
                                 .rounded_full()
-                                .bg(theme.accent_emerald)
+                                .bg(theme.text_faint)
                         )
                         .child(toast)
                 )

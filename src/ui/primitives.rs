@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::*;
-use crate::theme::Theme;
+use crate::theme::{sz, Theme};
 
 pub fn icon_path(name: &str) -> SharedString {
     format!("icons/{}.svg", name).into()
@@ -13,10 +13,31 @@ pub fn render_icon(name: &str, size_px: f32, color: Rgba) -> impl IntoElement {
         .text_color(color)
 }
 
+struct SimpleTooltip {
+    text: &'static str,
+    theme: Theme,
+}
+
+impl Render for SimpleTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(sz::R_MD)
+            .bg(self.theme.menu_bg)
+            .border_1()
+            .border_color(self.theme.border_surface)
+            .shadow_md()
+            .text_size(px(11.0))
+            .text_color(self.theme.text_primary)
+            .child(self.text)
+    }
+}
+
 pub fn icon_button<F>(
     id: impl Into<ElementId>,
     icon_name: &'static str,
-    _tooltip: &'static str,
+    tooltip: &'static str,
     is_active: bool,
     theme: &Theme,
     on_click: F,
@@ -25,49 +46,50 @@ where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
     let base_color = if is_active {
-        if theme.mode.is_dark() {
-            rgb(0x0a0a0a)
-        } else {
-            rgb(0xffffff)
-        }
+        theme.text_strong
     } else {
-        theme.text_primary
+        theme.text_muted
     };
 
     let base_bg = if is_active {
-        if theme.mode.is_dark() {
-            rgb(0xf5f5f5)
-        } else {
-            rgb(0x171717)
-        }
+        theme.row_active
     } else {
         rgba(0x00000000)
     };
 
-    div()
+    let el = div()
         .id(id)
         .flex()
         .items_center()
         .justify_center()
-        .w(px(28.0))
-        .h(px(28.0))
-        .rounded(px(4.0))
+        .w(sz::BTN)
+        .h(sz::BTN)
+        .rounded(sz::R_MD)
         .cursor_pointer()
         .bg(base_bg)
         .when(!is_active, |s| {
-            s.hover(|h| h.bg(theme.bg_hover))
+            s.hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                 .active(|a| a.bg(theme.bg_active))
         })
         .on_click(on_click)
-        .child(render_icon(icon_name, 16.0, base_color))
+        .child(render_icon(icon_name, 16.0, base_color));
+
+    if !tooltip.is_empty() {
+        let th = *theme;
+        el.tooltip(move |_, cx| {
+            cx.new(|_| SimpleTooltip { text: tooltip, theme: th }).into()
+        })
+    } else {
+        el
+    }
 }
 
 pub fn divider(theme: &Theme) -> impl IntoElement {
     div()
         .w(px(1.0))
-        .h(px(20.0))
+        .h(px(16.0))
         .bg(theme.border_subtle)
-        .mx(px(4.0))
+        .mx(px(6.0))
         .flex_shrink_0()
 }
 
@@ -75,11 +97,11 @@ pub fn kbd_badge(label: &'static str, theme: &Theme) -> impl IntoElement {
     div()
         .px(px(6.0))
         .py(px(2.0))
-        .rounded(px(4.0))
-        .bg(if theme.mode.is_dark() { rgb(0x2b2b2b) } else { rgb(0xffffff) })
+        .rounded(sz::R_SM)
+        .bg(theme.tile_hover)
         .border_1()
-        .border_color(if theme.mode.is_dark() { rgb(0x444444) } else { rgb(0xd4d4d4) })
-        .text_color(if theme.mode.is_dark() { rgb(0xdfdbd2) } else { rgb(0x171717) })
+        .border_color(theme.border_subtle)
+        .text_color(theme.text_faint)
         .font_family(Theme::FONT_MONO)
         .text_size(px(11.0))
         .font_weight(FontWeight::SEMIBOLD)

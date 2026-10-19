@@ -46,11 +46,24 @@ fn main() {
     Application::new()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
+            // Register bundled Ubuntu fonts
+            let fonts: Vec<std::borrow::Cow<'static, [u8]>> = [
+                "fonts/Ubuntu-R.ttf",
+                "fonts/Ubuntu-RI.ttf",
+                "fonts/Ubuntu-M.ttf",
+                "fonts/UbuntuMono-R.ttf",
+            ]
+            .iter()
+            .filter_map(|p| Assets::get(p).map(|f| f.data))
+            .collect();
+            let _ = cx.text_system().add_fonts(fonts);
+
             // Bind global key shortcuts
             cx.bind_keys([
                 KeyBinding::new("ctrl-b", ToggleBold, None),
                 KeyBinding::new("ctrl-i", ToggleItalic, None),
                 KeyBinding::new("ctrl-u", ToggleUnderline, None),
+                KeyBinding::new("ctrl-shift-x", ToggleStrikethrough, None),
                 KeyBinding::new("ctrl-s", SaveFile, None),
                 KeyBinding::new("ctrl-o", OpenFile, None),
                 KeyBinding::new("ctrl-n", NewTab, None),
@@ -65,6 +78,13 @@ fn main() {
                 KeyBinding::new("ctrl-0", ResetZoom, None),
                 KeyBinding::new("ctrl-z", UndoAction, None),
                 KeyBinding::new("ctrl-y", RedoAction, None),
+                KeyBinding::new("ctrl-shift-z", RedoAction, None),
+                KeyBinding::new("ctrl-1", Heading1, None),
+                KeyBinding::new("ctrl-2", Heading2, None),
+                KeyBinding::new("ctrl-3", Heading3, None),
+                KeyBinding::new("ctrl-e", ToggleInlineCode, None),
+                KeyBinding::new("ctrl-k", InsertLink, None),
+                KeyBinding::new("ctrl-shift-c", InsertCodeBlock, None),
             ]);
 
             cx.open_window(
@@ -74,14 +94,13 @@ fn main() {
                         size(px(960.0), px(640.0)),
                         cx,
                     ))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("LiteMark".into()),
-                        appears_transparent: true,
-                        traffic_light_position: None,
-                    }),
+                    window_decorations: Some(WindowDecorations::Client),
+                    window_min_size: Some(size(px(480.0), px(360.0))),
+                    app_id: Some("litemark".into()),
+                    titlebar: None,
                     ..Default::default()
                 },
-                move |_, cx| cx.new(|_| LiteMarkApp::new(initial_file.clone())),
+                move |_, cx| cx.new(|cx| LiteMarkApp::new(initial_file.clone(), cx)),
             )
             .unwrap();
         });

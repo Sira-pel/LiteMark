@@ -71,6 +71,7 @@ pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
     }
 }
 
+#[allow(dead_code)]
 pub fn safe_create_file(parent: &Path, name: &str, content: &str) -> io::Result<PathBuf> {
     let clean_name = sanitize_name(name);
     let filename = if clean_name.contains('.') {
@@ -83,6 +84,7 @@ pub fn safe_create_file(parent: &Path, name: &str, content: &str) -> io::Result<
     Ok(target)
 }
 
+#[allow(dead_code)]
 pub fn safe_create_folder(parent: &Path, name: &str) -> io::Result<PathBuf> {
     let clean_name = sanitize_name(name);
     let target = parent.join(clean_name);
@@ -102,6 +104,7 @@ pub fn safe_rename(old_path: &Path, new_name: &str) -> io::Result<PathBuf> {
     }
 }
 
+#[allow(dead_code)]
 pub fn safe_delete(path: &Path, is_dir: bool) -> io::Result<()> {
     if is_dir {
         fs::remove_dir_all(path)

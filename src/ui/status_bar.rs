@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 use crate::model::ViewMode;
-use crate::theme::Theme;
+use crate::theme::{sz, Theme};
 use super::primitives::render_icon;
 
 pub struct StatusBarProps<FZoomIn, FZoomOut, FResetZoom, FToggleMode>
@@ -44,13 +44,13 @@ where
         .flex()
         .items_center()
         .justify_between()
-        .h(px(28.0))
-        .px(px(8.0))
+        .h(sz::STATUS)
+        .px(px(10.0))
         .bg(theme.bg_editor)
         .border_t_1()
-        .border_color(theme.border_subtle)
+        .border_color(theme.border_primary)
         .text_color(theme.text_muted)
-        .text_size(px(11.0))
+        .text_size(px(11.5))
         .font_family(Theme::FONT_MONO)
         .flex_shrink_0()
         // Left document metrics
@@ -60,13 +60,29 @@ where
                 .items_center()
                 .gap(px(8.0))
                 .child(format!("Ln {}, Col {}", props.line, props.col))
-                .child("·")
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child("·")
+                )
                 .child(format!("{}w", props.words))
-                .child("·")
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child("·")
+                )
                 .child(format!("{} lines", props.lines))
-                .child("·")
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child("·")
+                )
                 .child(format!("{} chars", props.chars))
-                .child("·")
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child("·")
+                )
                 .child(format!("~{}m read", props.reading_time_min))
         )
         // Right controls
@@ -75,26 +91,26 @@ where
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                // Zoom controls
+                // Zoom chip in menu_bg
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(2.0))
-                        .px(px(4.0))
-                        .py(px(1.0))
-                        .rounded(px(4.0))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(sz::R_SM)
                         .border_1()
                         .border_color(theme.border_primary)
-                        .bg(theme.bg_hover)
+                        .bg(theme.menu_bg)
                         .child({
                             let z_out = on_zoom_out.clone();
                             div()
                                 .id("sb-zoom-out")
                                 .p(px(2.0))
-                                .rounded(px(2.0))
+                                .rounded(sz::R_SM)
                                 .cursor_pointer()
-                                .hover(|h| h.text_color(theme.text_primary))
+                                .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                                 .on_click(move |_, _, cx| z_out(cx))
                                 .child(render_icon("zoom-out", 12.0, theme.text_muted))
                         })
@@ -104,8 +120,7 @@ where
                                 .id("sb-zoom-reset")
                                 .px(px(4.0))
                                 .cursor_pointer()
-                                .font_weight(if props.zoom_level != 100 { FontWeight::BOLD } else { FontWeight::NORMAL })
-                                .text_color(if props.zoom_level != 100 { theme.text_primary } else { theme.text_muted })
+                                .text_color(if props.zoom_level != 100 { theme.text_hi } else { theme.text_muted })
                                 .hover(|h| h.text_color(theme.text_primary))
                                 .on_click(move |_, _, cx| z_reset(cx))
                                 .child(format!("{}%", props.zoom_level))
@@ -115,42 +130,44 @@ where
                             div()
                                 .id("sb-zoom-in")
                                 .p(px(2.0))
-                                .rounded(px(2.0))
+                                .rounded(sz::R_SM)
                                 .cursor_pointer()
-                                .hover(|h| h.text_color(theme.text_primary))
+                                .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                                 .on_click(move |_, _, cx| z_in(cx))
                                 .child(render_icon("zoom-in", 12.0, theme.text_muted))
                         })
                 )
-                .child("·")
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child("·")
+                )
                 .child("UTF-8")
-                .child("·")
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child("·")
+                )
                 .child("LF")
-                .child("·")
-                // WYSIWYG / Raw toggle button
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child("·")
+                )
+                // WYSIWYG / Raw toggle pill
                 .child({
                     let t_mode = on_toggle_mode.clone();
-                    let is_wysiwyg = props.view_mode == ViewMode::Wysiwyg;
-                    let bg = if is_wysiwyg {
-                        if theme.mode.is_dark() { rgb(0xf5f5f5) } else { rgb(0x171717) }
-                    } else {
-                        theme.bg_hover
-                    };
-                    let text_color = if is_wysiwyg {
-                        if theme.mode.is_dark() { rgb(0x0a0a0a) } else { rgb(0xffffff) }
-                    } else {
-                        theme.text_primary
-                    };
-
                     div()
                         .id("sb-toggle-view-mode")
                         .px(px(8.0))
                         .py(px(2.0))
-                        .rounded(px(4.0))
-                        .bg(bg)
-                        .text_color(text_color)
-                        .font_weight(if is_wysiwyg { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                        .rounded(sz::R_SM)
+                        .border_1()
+                        .border_color(theme.pill_border)
+                        .bg(theme.tile_hover)
+                        .text_color(theme.pill_text)
                         .cursor_pointer()
+                        .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                         .on_click(move |_, _, cx| t_mode(cx))
                         .child(props.view_mode.label())
                 })

@@ -67,14 +67,12 @@ where
                         .rounded(px(4.0))
                         .bg(theme.bg_input)
                         .border_1()
-                        .border_color(if props.not_found {
-                            theme.accent_danger
-                        } else {
-                            theme.border_primary
-                        })
-                        .text_color(theme.text_primary)
+                        .border_color(theme.border_primary)
+                        .text_color(if props.not_found { theme.text_strong } else { theme.text_primary })
                         .flex_1()
-                        .child(if props.search_term.is_empty() {
+                        .child(if props.not_found {
+                            format!("Not found: {}", props.search_term)
+                        } else if props.search_term.is_empty() {
                             "Find in document...".to_string()
                         } else {
                             props.search_term.clone()

@@ -21,6 +21,26 @@ impl ThemeMode {
     }
 }
 
+pub mod sz {
+    use gpui::{px, Pixels};
+    pub const TITLE_BAR: Pixels = px(40.);
+    pub const TAB_H: Pixels = px(32.);
+    pub const PLUS: Pixels = px(28.);
+    pub const BTN: Pixels = px(32.);
+    pub const TB_TILE_H: Pixels = px(28.); // title-bar tiles, y 6–34
+    pub const WC_W: Pixels = px(36.);
+    pub const WC_H: Pixels = px(28.);
+    pub const TOOLBAR: Pixels = px(40.);
+    pub const STATUS: Pixels = px(28.);
+    pub const SIDEBAR_W: Pixels = px(304.);
+    pub const ROW_H: Pixels = px(32.);
+    pub const R_SM: Pixels = px(4.);
+    pub const R_MD: Pixels = px(6.);
+    pub const R_LG: Pixels = px(8.);
+    pub const BODY: f32 = 17.;
+    pub const MEASURE_FALLBACK: Pixels = px(672.);
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
@@ -41,10 +61,23 @@ pub struct Theme {
     pub border_surface: Rgba,
     pub text_primary: Rgba,
     pub text_muted: Rgba,
-    pub accent_ubuntu: Rgba,
-    pub accent_emerald: Rgba,
-    pub accent_danger: Rgba,
     pub selection_bg: Rgba,
+    pub close_hover: Rgba,
+    pub text_hi: Rgba,
+    pub text_strong: Rgba,
+    pub text_faint: Rgba,
+    pub row_text: Rgba,
+    pub row_active: Rgba,
+    pub row_hover: Rgba,
+    pub tile_hover: Rgba,
+    pub menu_bg: Rgba,
+    pub wc_glyph: Rgba,
+    pub h1: Rgba,
+    pub h2: Rgba,
+    pub code_text: Rgba,
+    pub pill_border: Rgba,
+    pub pill_text: Rgba,
+    pub placeholder: Rgba,
 }
 
 impl Theme {
@@ -53,49 +86,75 @@ impl Theme {
             Self {
                 mode,
                 bg_editor: rgb(0x1e1e1e),
-                bg_header: rgb(0x1b1b1b),
+                bg_header: rgb(0x181818),
                 bg_toolbar: rgb(0x242424),
-                bg_sidebar: rgb(0x202020),
+                bg_sidebar: rgb(0x1a1a1a),
                 bg_sidebar_header: rgb(0x1a1a1a),
                 bg_surface: rgb(0x292929),
                 bg_modal: rgb(0x222222),
                 bg_modal_header: rgb(0x1c1c1c),
-                bg_input: rgb(0x181818),
-                bg_hover: rgba(0xffffff1a), // white/10
-                bg_active: rgba(0xffffff26), // white/15
-                border_primary: rgb(0x383838),
+                bg_input: rgb(0x212121),
+                bg_hover: rgba(0xffffff0f), // 6%
+                bg_active: rgba(0xffffff26),
+                border_primary: rgb(0x2e2e2e),
                 border_subtle: rgb(0x333333),
-                border_surface: rgb(0x444444),
-                text_primary: rgb(0xdfdbd2),
-                text_muted: rgb(0x8f8b82),
-                accent_ubuntu: rgb(0xe95420),
-                accent_emerald: rgb(0x10b981),
-                accent_danger: rgb(0xef4444),
-                selection_bg: rgba(0x8f8b8259), // rgba(143, 139, 130, 0.35)
+                border_surface: rgb(0x383838),
+                text_primary: rgb(0xd4d4d4),
+                text_muted: rgb(0x9a9a9a),
+                selection_bg: rgba(0xffffff2e),
+                close_hover: rgb(0xcf2b35),
+                text_hi: rgb(0xe6e6e6),
+                text_strong: rgb(0xffffff),
+                text_faint: rgb(0x7c7c7c),
+                row_text: rgb(0xa8a8a8),
+                row_active: rgb(0x2c2c2c),
+                row_hover: rgb(0x242424),
+                tile_hover: rgb(0x2a2a2a),
+                menu_bg: rgb(0x262626),
+                wc_glyph: rgb(0xb0b0b0),
+                h1: rgb(0xe8e8e8),
+                h2: rgb(0xe2e2e2),
+                code_text: rgb(0xdcdcdc),
+                pill_border: rgb(0x3a3a3a),
+                pill_text: rgb(0xb4b4b4),
+                placeholder: rgb(0x8a8a8a),
             }
         } else {
             Self {
                 mode,
                 bg_editor: rgb(0xffffff),
-                bg_header: rgb(0xe0e0e0),
-                bg_toolbar: rgb(0xf4f4f4),
+                bg_header: rgb(0xf0f0f0),
+                bg_toolbar: rgb(0xf8f8f8),
                 bg_sidebar: rgb(0xf6f6f6),
-                bg_sidebar_header: rgb(0xececec),
+                bg_sidebar_header: rgb(0xf6f6f6),
                 bg_surface: rgb(0xffffff),
                 bg_modal: rgb(0xffffff),
                 bg_modal_header: rgb(0xf5f5f5),
                 bg_input: rgb(0xffffff),
-                bg_hover: rgba(0x0000000d), // black/5
-                bg_active: rgba(0x0000001a), // black/10
+                bg_hover: rgba(0x0000000d),
+                bg_active: rgba(0x0000001a),
                 border_primary: rgb(0xd4d4d4),
                 border_subtle: rgb(0xe5e5e5),
                 border_surface: rgb(0xd4d4d4),
                 text_primary: rgb(0x171717),
-                text_muted: rgb(0x525252),
-                accent_ubuntu: rgb(0xe95420),
-                accent_emerald: rgb(0x10b981),
-                accent_danger: rgb(0xdc2626),
-                selection_bg: rgba(0x8f8b8259),
+                text_muted: rgb(0x666666),
+                selection_bg: rgba(0x0000001a),
+                close_hover: rgb(0xcf2b35),
+                text_hi: rgb(0x111111),
+                text_strong: rgb(0x000000),
+                text_faint: rgb(0x888888),
+                row_text: rgb(0x444444),
+                row_active: rgb(0xe0e0e0),
+                row_hover: rgb(0xeeeeee),
+                tile_hover: rgb(0xe4e4e4),
+                menu_bg: rgb(0xffffff),
+                wc_glyph: rgb(0x4a4a4a),
+                h1: rgb(0x111111),
+                h2: rgb(0x222222),
+                code_text: rgb(0x242424),
+                pill_border: rgb(0xcccccc),
+                pill_text: rgb(0x555555),
+                placeholder: rgb(0x888888),
             }
         }
     }

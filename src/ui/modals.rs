@@ -11,20 +11,24 @@ where
         ("Ctrl + B", "Toggle Bold"),
         ("Ctrl + I", "Toggle Italic"),
         ("Ctrl + U", "Toggle Underline"),
+        ("Ctrl + Shift + X", "Toggle Strikethrough"),
+        ("Ctrl + 1 / 2 / 3", "Heading 1 / 2 / 3"),
+        ("Ctrl + E", "Toggle Inline Code"),
+        ("Ctrl + K", "Insert Link"),
+        ("Ctrl + Shift + C", "Insert Code Block"),
         ("Ctrl + S", "Save Document"),
         ("Ctrl + O", "Open File (.md, .txt, .pdf)"),
         ("Ctrl + N", "New Document Tab"),
+        ("Ctrl + W", "Close Active Tab"),
         ("Ctrl + F", "Find & Replace"),
-        ("Ctrl + +", "Zoom In"),
+        ("Ctrl + + / =", "Zoom In"),
         ("Ctrl + -", "Zoom Out"),
         ("Ctrl + 0", "Reset Zoom (100%)"),
         ("Ctrl + Z", "Undo"),
-        ("Ctrl + Y", "Redo"),
-        ("Tab", "Indent 2 spaces"),
-        ("Shift + Tab", "Outdent"),
+        ("Ctrl + Y / Ctrl + Shift + Z", "Redo"),
         ("Ctrl + \\", "Toggle Notes Folder Sidebar"),
         ("F11", "Toggle Zen Mode"),
-        ("Escape", "Exit Zen Mode / Close modals"),
+        ("Escape", "Exit Zen Mode / Close Modals & Menus"),
     ];
 
     let cls = on_close.clone();
@@ -137,8 +141,9 @@ where
                                 .px(px(16.0))
                                 .py(px(6.0))
                                 .rounded(px(6.0))
-                                .bg(if theme.mode.is_dark() { rgb(0xf5f5f5) } else { rgb(0x171717) })
-                                .text_color(if theme.mode.is_dark() { rgb(0x0a0a0a) } else { rgb(0xffffff) })
+                                .bg(theme.row_active)
+                                .text_color(theme.text_strong)
+                                .hover(|h| h.bg(theme.row_hover))
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(12.0))
                                 .cursor_pointer()
@@ -198,7 +203,7 @@ where
                                 .flex()
                                 .items_center()
                                 .gap(px(8.0))
-                                .child(render_icon("file-text", 18.0, theme.accent_danger))
+                                .child(render_icon("file-text", 18.0, theme.text_muted))
                                 .child(
                                     div()
                                         .font_weight(FontWeight::BOLD)
@@ -273,8 +278,9 @@ where
                                 .px(px(16.0))
                                 .py(px(6.0))
                                 .rounded(px(6.0))
-                                .bg(if theme.mode.is_dark() { rgb(0xf5f5f5) } else { rgb(0x171717) })
-                                .text_color(if theme.mode.is_dark() { rgb(0x0a0a0a) } else { rgb(0xffffff) })
+                                .bg(theme.row_active)
+                                .text_color(theme.text_strong)
+                                .hover(|h| h.bg(theme.row_hover))
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(12.0))
                                 .cursor_pointer()

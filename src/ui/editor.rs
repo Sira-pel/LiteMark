@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 use crate::markdown::{parse_markdown, Block, Span};
 use crate::model::ViewMode;
-use crate::theme::Theme;
+use crate::theme::{sz, Theme};
 
 #[allow(dead_code)]
 pub struct EditorProps<FContentChange>
@@ -25,7 +25,7 @@ where
     FContentChange: Fn(String, &mut App) + 'static + Clone,
 {
     let zoom_factor = props.zoom_level as f32 / 100.0;
-    let base_size = 15.0 * zoom_factor;
+    let base_size = sz::BODY * zoom_factor;
     let is_wysiwyg = props.view_mode == ViewMode::Wysiwyg;
 
     div()
@@ -45,188 +45,252 @@ where
                     .right(px(24.0))
                     .px(px(10.0))
                     .py(px(4.0))
-                    .rounded(px(6.0))
-                    .bg(if theme.mode.is_dark() { rgba(0x2d2d2de6) } else { rgba(0xfafafae6) })
+                    .rounded(sz::R_MD)
+                    .bg(theme.menu_bg)
                     .border_1()
-                    .border_color(theme.border_primary)
+                    .border_color(theme.border_surface)
                     .shadow_lg()
                     .text_size(px(11.0))
                     .font_family(Theme::FONT_MONO)
                     .font_weight(FontWeight::BOLD)
+                    .text_color(theme.text_primary)
                     .child(format!("Zoom {}%", props.zoom_level))
             )
         })
         .child(if is_wysiwyg {
-            render_wysiwyg_view(&props.content, base_size, theme)
+            render_wysiwyg_view(&props.content, base_size, zoom_factor, theme)
         } else {
             render_raw_view(&props.content, base_size, props.show_line_numbers, theme)
         })
 }
 
-fn render_spans(spans: &[Span], base_size: f32, theme: &Theme) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .children(spans.iter().map(|span| {
-            let mut el = div().text_size(px(base_size));
+fn render_spans(spans: &[Span], _text_size_px: f32, theme: &Theme, block_ix: usize) -> AnyElement {
+    let mut full_text = String::new();
+    let mut highlights = Vec::new();
+    let mut links = Vec::new();
+    let mut current_byte = 0;
 
-            if span.bold {
-                el = el.font_weight(FontWeight::BOLD);
-            }
-            if span.italic {
-                el = el.italic();
-            }
-            if span.underline {
-                el = el.underline();
-            }
+    for span in spans {
+        let span_len = span.text.len();
+        if span_len == 0 {
+            continue;
+        }
+        let range = current_byte..(current_byte + span_len);
+        current_byte += span_len;
+        full_text.push_str(&span.text);
 
-            if span.code {
-                div()
-                    .px(px(4.0))
-                    .py(px(1.0))
-                    .mx(px(2.0))
-                    .rounded(px(4.0))
-                    .bg(if theme.mode.is_dark() { rgba(0x8f8b8226) } else { rgba(0x0000000f) })
-                    .text_color(theme.text_primary)
-                    .font_family(Theme::FONT_MONO)
-                    .text_size(px(base_size * 0.9))
-                    .child(span.text.clone())
-            } else if let Some(ref _url) = span.link {
-                div()
-                    .text_color(theme.accent_ubuntu)
-                    .underline()
-                    .cursor_pointer()
-                    .child(span.text.clone())
-            } else {
-                el.child(span.text.clone())
-            }
-        }))
+        if let Some(ref url) = span.link {
+            links.push((range.clone(), url.clone()));
+        }
+
+        let mut hs = HighlightStyle::default();
+        let mut has_hs = false;
+
+        if span.bold {
+            hs.font_weight = Some(FontWeight::MEDIUM);
+            has_hs = true;
+        }
+        if span.italic {
+            hs.font_style = Some(FontStyle::Italic);
+            has_hs = true;
+        }
+        if span.underline {
+            hs.underline = Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(theme.text_primary.into()),
+                wavy: false,
+            });
+            has_hs = true;
+        }
+        if span.strike {
+            hs.strikethrough = Some(StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(theme.text_faint.into()),
+            });
+            has_hs = true;
+        }
+        if span.code {
+            hs.background_color = Some(theme.tile_hover.into());
+            hs.color = Some(theme.code_text.into());
+            has_hs = true;
+        }
+        if span.link.is_some() {
+            hs.color = Some(theme.text_hi.into());
+            hs.underline = Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(theme.text_hi.into()),
+                wavy: false,
+            });
+            has_hs = true;
+        }
+
+        if has_hs {
+            highlights.push((range, hs));
+        }
+    }
+
+    let styled = StyledText::new(full_text).with_highlights(highlights);
+
+    if !links.is_empty() {
+        let click_ranges = links.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
+        let url_targets = links.into_iter().map(|(_, u)| u).collect::<Vec<_>>();
+        InteractiveText::new(("interactive-span", block_ix), styled)
+            .on_click(click_ranges, move |ix, _, _| {
+                if let Some(url) = url_targets.get(ix) {
+                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                }
+            })
+            .into_any_element()
+    } else {
+        styled.into_any_element()
+    }
 }
 
-fn render_wysiwyg_view(content: &str, base_size: f32, theme: &Theme) -> AnyElement {
+fn render_wysiwyg_view(content: &str, base_size: f32, zoom_factor: f32, theme: &Theme) -> AnyElement {
     let blocks = parse_markdown(content);
+    let measure = sz::MEASURE_FALLBACK * zoom_factor;
 
     div()
         .id("wysiwyg-editor-scroll")
         .flex_1()
         .overflow_y_scroll()
-        .p(px(24.0))
+        .pt(px(48.0))
+        .pb(px(64.0))
+        .px(px(48.0))
         .font_family(Theme::FONT_PROSE)
-        .line_height(relative(1.7))
+        .line_height(relative(1.65))
         .child(
             div()
+                .w_full()
+                .max_w(measure)
+                .mx_auto()
                 .flex()
                 .flex_col()
-                .gap(px(10.0))
-                .max_w(px(880.0))
-                .mx_auto()
-                .children(blocks.into_iter().map(|block| match block {
+                .children(blocks.into_iter().enumerate().map(|(ix, block)| match block {
                     Block::Heading { level, spans } => {
-                        let scale = match level {
-                            1 => 2.0,
-                            2 => 1.5,
-                            _ => 1.25,
+                        let (h_size, h_top, h_bot) = match level {
+                            1 => (34.0 * zoom_factor, px(24.0), px(24.0)),
+                            2 => (23.0 * zoom_factor, px(40.0), px(16.0)),
+                            _ => (19.0 * zoom_factor, px(24.0), px(12.0)),
                         };
-                        let heading_size = base_size * scale;
                         let mut heading_el = div()
-                            .font_weight(if level == 1 { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
-                            .mt(px(if level == 1 { 20.0 } else { 14.0 }))
-                            .mb(px(if level == 1 { 10.0 } else { 6.0 }))
-                            .child(render_spans(&spans, heading_size, theme));
+                            .mt(h_top)
+                            .mb(h_bot)
+                            .text_size(px(h_size))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if level == 1 { theme.h1 } else { theme.h2 })
+                            .child(render_spans(&spans, h_size, theme, ix));
 
                         if level == 1 {
                             heading_el = heading_el
                                 .pb(px(8.0))
                                 .border_b_1()
-                                .border_color(rgba(0x8f8b8233));
+                                .border_color(theme.border_primary);
                         }
                         heading_el
                     }
                     Block::Paragraph { spans } => div()
-                        .my(px(4.0))
-                        .child(render_spans(&spans, base_size, theme)),
+                        .my(px(12.0))
+                        .text_size(px(base_size))
+                        .line_height(relative(1.65))
+                        .text_color(theme.text_primary)
+                        .child(render_spans(&spans, base_size, theme, ix)),
                     Block::Blockquote { spans } => div()
                         .pl(px(14.0))
-                        .my(px(10.0))
-                        .border_l_3()
-                        .border_color(rgba(0x8f8b8280))
-                        .italic()
-                        .child(render_spans(&spans, base_size, theme)),
-                    Block::CodeBlock { language: _, code } => div()
                         .my(px(12.0))
+                        .border_l_3()
+                        .border_color(theme.border_surface)
+                        .italic()
+                        .child(render_spans(&spans, base_size, theme, ix)),
+                    Block::CodeBlock { language: _, code } => div()
+                        .my(px(16.0))
                         .p(px(14.0))
-                        .rounded(px(6.0))
-                        .bg(if theme.mode.is_dark() { rgba(0x00000040) } else { rgba(0x00000008) })
+                        .rounded(sz::R_MD)
+                        .bg(theme.tile_hover)
                         .border_1()
                         .border_color(theme.border_subtle)
                         .font_family(Theme::FONT_MONO)
                         .text_size(px(base_size * 0.9))
+                        .text_color(theme.code_text)
                         .child(code),
                     Block::ListItem { is_task, checked, ordered, index, spans } => div()
                         .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .my(px(3.0))
-                        .child(if is_task {
+                        .items_start()
+                        .my(px(4.0))
+                        .line_height(relative(1.65))
+                        .child(
                             div()
-                                .w(px(14.0))
-                                .h(px(14.0))
-                                .rounded(px(3.0))
-                                .border_1()
-                                .border_color(if checked { theme.accent_emerald } else { theme.border_primary })
-                                .bg(if checked { theme.accent_emerald } else { rgba(0x00000000) })
+                                .w(px(24.0))
+                                .h(px(base_size * 1.65))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_size(px(10.0))
-                                .text_color(rgb(0xffffff))
-                                .child(if checked { "✓" } else { "" })
-                        } else if ordered {
+                                .flex_shrink_0()
+                                .child(if is_task {
+                                    div()
+                                        .w(px(14.0))
+                                        .h(px(14.0))
+                                        .rounded(sz::R_SM)
+                                        .border_1()
+                                        .border_color(if checked { theme.text_hi } else { theme.border_primary })
+                                        .bg(if checked { theme.text_hi } else { rgba(0x00000000) })
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(0x121212))
+                                        .child(if checked { "✓" } else { "" })
+                                } else if ordered {
+                                    div()
+                                        .text_size(px(base_size))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.text_faint)
+                                        .child(format!("{}.", index))
+                                } else {
+                                    div()
+                                        .text_size(px(base_size))
+                                        .text_color(theme.text_faint)
+                                        .child("•")
+                                })
+                        )
+                        .child(
                             div()
+                                .flex_1()
+                                .min_w_0()
                                 .text_size(px(base_size))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme.text_muted)
-                                .child(format!("{}.", index))
-                        } else {
-                            div()
-                                .text_size(px(base_size))
-                                .text_color(theme.text_muted)
-                                .child("•")
-                        })
-                        .child(render_spans(&spans, base_size, theme)),
+                                .text_color(theme.text_primary)
+                                .child(render_spans(&spans, base_size, theme, ix))
+                        ),
                     Block::Table { headers, rows } => div()
-                        .my(px(14.0))
+                        .my(px(16.0))
                         .child(
                             div()
                                 .id("table-scroll")
                                 .overflow_x_scroll()
                                 .border_1()
                                 .border_color(theme.border_subtle)
-                                .rounded(px(4.0))
+                                .rounded(sz::R_SM)
                                 .child(
                                     div()
                                         .flex()
                                         .flex_col()
-                                        // Header row
                                         .child(
                                             div()
                                                 .flex()
-                                                .bg(if theme.mode.is_dark() { rgba(0x8f8b821a) } else { rgba(0x00000008) })
+                                                .bg(theme.tile_hover)
                                                 .border_b_1()
                                                 .border_color(theme.border_subtle)
                                                 .children(headers.into_iter().map(|h| {
                                                     div()
                                                         .px(px(12.0))
                                                         .py(px(8.0))
-                                                        .font_weight(FontWeight::BOLD)
+                                                        .font_weight(FontWeight::MEDIUM)
                                                         .text_size(px(base_size))
                                                         .border_r_1()
                                                         .border_color(theme.border_subtle)
                                                         .child(h)
                                                 }))
                                         )
-                                        // Data rows
                                         .children(rows.into_iter().map(|row| {
                                             div()
                                                 .flex()
@@ -246,9 +310,9 @@ fn render_wysiwyg_view(content: &str, base_size: f32, theme: &Theme) -> AnyEleme
                         ),
                     Block::HorizontalRule => div()
                         .h(px(1.0))
-                        .my(px(18.0))
-                        .bg(theme.border_subtle),
-                    Block::EmptyLine => div().h(px(base_size)),
+                        .my(px(24.0))
+                        .bg(theme.border_primary),
+                    Block::EmptyLine => div().h(px(base_size * 0.8)),
                 }))
         )
         .into_any_element()
@@ -265,8 +329,7 @@ fn render_raw_view(content: &str, base_size: f32, show_line_numbers: bool, theme
         .overflow_y_scroll()
         .font_family(Theme::FONT_MONO)
         .text_size(px(base_size))
-        .line_height(relative(1.7))
-        // Line numbers gutter
+        .line_height(relative(1.65))
         .when(show_line_numbers, |s| {
             s.child(
                 div()
@@ -274,18 +337,18 @@ fn render_raw_view(content: &str, base_size: f32, show_line_numbers: bool, theme
                     .py(px(16.0))
                     .pr(px(12.0))
                     .text_align(TextAlign::Right)
-                    .bg(if theme.mode.is_dark() { rgb(0x181818) } else { rgb(0xf5f5f5) })
+                    .bg(theme.bg_sidebar)
                     .border_r_1()
                     .border_color(theme.border_subtle)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.text_faint)
                     .children((1..=total_lines).map(|n| div().child(format!("{}", n))))
             )
         })
-        // Raw content area
         .child(
             div()
                 .flex_1()
-                .p(px(16.0))
+                .p(px(24.0))
+                .text_color(theme.text_primary)
                 .child(content.to_string())
         )
         .into_any_element()
