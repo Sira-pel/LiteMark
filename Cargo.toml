@@ -1,0 +1,28 @@
+[package]
+name = "litemark"
+version = "1.0.0"
+edition = "2021"
+authors = ["LiteMark Contributors"]
+description = "Fast, distraction-free markdown & text editor with dedicated notes folder for Ubuntu"
+license = "MIT"
+
+[dependencies]
+gpui = "0.2.2"
+rust-embed = "8.5"
+rfd = "0.15"
+pulldown-cmark = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0"
+chrono = "0.4"
+lopdf = "0.34"
+
+[patch.crates-io]
+xattr = { path = "patches/xattr" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

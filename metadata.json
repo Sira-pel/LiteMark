@@ -1,6 +1,0 @@
-{
-  "name": "Ubuntu Yaru Text Editor",
-  "description": "Ultra-lightweight, high-performance Markdown and plain text editor with Ubuntu GNOME aesthetic, WYSIWYG formatting, and native C/Rust GTK guides.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

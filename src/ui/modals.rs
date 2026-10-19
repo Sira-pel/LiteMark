@@ -1,0 +1,286 @@
+use gpui::prelude::*;
+use gpui::*;
+use crate::theme::Theme;
+use super::primitives::{kbd_badge, render_icon};
+
+pub fn render_shortcuts_modal<FClose>(on_close: FClose, theme: &Theme) -> impl IntoElement
+where
+    FClose: Fn(&mut App) + 'static + Clone,
+{
+    let shortcuts = [
+        ("Ctrl + B", "Toggle Bold"),
+        ("Ctrl + I", "Toggle Italic"),
+        ("Ctrl + U", "Toggle Underline"),
+        ("Ctrl + S", "Save Document"),
+        ("Ctrl + O", "Open File (.md, .txt, .pdf)"),
+        ("Ctrl + N", "New Document Tab"),
+        ("Ctrl + F", "Find & Replace"),
+        ("Ctrl + +", "Zoom In"),
+        ("Ctrl + -", "Zoom Out"),
+        ("Ctrl + 0", "Reset Zoom (100%)"),
+        ("Ctrl + Z", "Undo"),
+        ("Ctrl + Y", "Redo"),
+        ("Tab", "Indent 2 spaces"),
+        ("Shift + Tab", "Outdent"),
+        ("Ctrl + \\", "Toggle Notes Folder Sidebar"),
+        ("F11", "Toggle Zen Mode"),
+        ("Escape", "Exit Zen Mode / Close modals"),
+    ];
+
+    let cls = on_close.clone();
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgba(0x00000099))
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(16.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w(px(520.0))
+                .max_h(px(560.0))
+                .rounded(px(12.0))
+                .bg(theme.bg_modal)
+                .border_1()
+                .border_color(theme.border_surface)
+                .shadow_2xl()
+                .overflow_hidden()
+                // Header
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(20.0))
+                        .py(px(14.0))
+                        .bg(theme.bg_modal_header)
+                        .border_b_1()
+                        .border_color(theme.border_subtle)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(render_icon("keyboard", 16.0, theme.text_primary))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_size(px(14.0))
+                                        .text_color(theme.text_primary)
+                                        .child("Keyboard Shortcuts")
+                                )
+                        )
+                        .child({
+                            let c = cls.clone();
+                            div()
+                                .id("shortcuts-close-x")
+                                .p(px(4.0))
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .hover(|h| h.bg(theme.bg_hover))
+                                .on_click(move |_, _, cx| c(cx))
+                                .child(render_icon("x", 16.0, theme.text_muted))
+                        })
+                )
+                // Grid of shortcuts
+                .child(
+                    div()
+                        .id("shortcuts-scroll")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .p(px(20.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.0))
+                                .children(shortcuts.into_iter().map(|(key, desc)| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .px(px(10.0))
+                                        .py(px(6.0))
+                                        .rounded(px(6.0))
+                                        .bg(if theme.mode.is_dark() { rgb(0x191919) } else { rgb(0xf9f9f9) })
+                                        .border_1()
+                                        .border_color(theme.border_subtle)
+                                        .child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .text_color(theme.text_muted)
+                                                .child(desc)
+                                        )
+                                        .child(kbd_badge(key, theme))
+                                }))
+                        )
+                )
+                // Footer
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .px(px(20.0))
+                        .py(px(12.0))
+                        .bg(theme.bg_modal_header)
+                        .border_t_1()
+                        .border_color(theme.border_subtle)
+                        .child({
+                            let c = cls.clone();
+                            div()
+                                .id("shortcuts-got-it-btn")
+                                .px(px(16.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(if theme.mode.is_dark() { rgb(0xf5f5f5) } else { rgb(0x171717) })
+                                .text_color(if theme.mode.is_dark() { rgb(0x0a0a0a) } else { rgb(0xffffff) })
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(12.0))
+                                .cursor_pointer()
+                                .on_click(move |_, _, cx| c(cx))
+                                .child("Got it")
+                        })
+                )
+        )
+}
+
+
+pub fn render_pdf_preview_modal<FClose, FOpenExternal>(
+    title: String,
+    page_count: Option<usize>,
+    on_close: FClose,
+    on_open_external: FOpenExternal,
+    theme: &Theme,
+) -> impl IntoElement
+where
+    FClose: Fn(&mut App) + 'static + Clone,
+    FOpenExternal: Fn(&mut App) + 'static + Clone,
+{
+    let cls = on_close.clone();
+    let ext = on_open_external.clone();
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgba(0x00000099))
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(16.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w(px(560.0))
+                .rounded(px(12.0))
+                .bg(theme.bg_modal)
+                .border_1()
+                .border_color(theme.border_surface)
+                .shadow_2xl()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(20.0))
+                        .py(px(14.0))
+                        .bg(theme.bg_modal_header)
+                        .border_b_1()
+                        .border_color(theme.border_subtle)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(render_icon("file-text", 18.0, theme.accent_danger))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_size(px(14.0))
+                                        .text_color(theme.text_primary)
+                                        .child(format!("PDF Document ({})", title))
+                                )
+                        )
+                        .child({
+                            let c = cls.clone();
+                            div()
+                                .id("pdf-modal-close-x")
+                                .p(px(4.0))
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .hover(|h| h.bg(theme.bg_hover))
+                                .on_click(move |_, _, cx| c(cx))
+                                .child(render_icon("x", 16.0, theme.text_muted))
+                        })
+                )
+                .child(
+                    div()
+                        .p(px(20.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .text_size(px(12.0))
+                        .text_color(theme.text_primary)
+                        .child(format!(
+                            "This PDF document contains {} pages. The text has been extracted into your active Markdown editor tab.",
+                            page_count.unwrap_or(1)
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(10.0))
+                                .child({
+                                    let oe = ext.clone();
+                                    div()
+                                        .id("pdf-open-ext-btn")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.0))
+                                        .px(px(14.0))
+                                        .py(px(8.0))
+                                        .rounded(px(6.0))
+                                        .bg(theme.bg_hover)
+                                        .border_1()
+                                        .border_color(theme.border_primary)
+                                        .cursor_pointer()
+                                        .hover(|h| h.bg(theme.bg_active))
+                                        .on_click(move |_, _, cx| oe(cx))
+                                        .child(render_icon("external-link", 14.0, theme.text_primary))
+                                        .child("Open in Ubuntu Document Viewer")
+                                })
+                        )
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .px(px(20.0))
+                        .py(px(12.0))
+                        .bg(theme.bg_modal_header)
+                        .border_t_1()
+                        .border_color(theme.border_subtle)
+                        .child({
+                            let c = cls.clone();
+                            div()
+                                .id("pdf-modal-close-btn")
+                                .px(px(16.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(if theme.mode.is_dark() { rgb(0xf5f5f5) } else { rgb(0x171717) })
+                                .text_color(if theme.mode.is_dark() { rgb(0x0a0a0a) } else { rgb(0xffffff) })
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(12.0))
+                                .cursor_pointer()
+                                .on_click(move |_, _, cx| c(cx))
+                                .child("Close")
+                        })
+                )
+        )
+}

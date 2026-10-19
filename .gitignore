@@ -1,8 +1,6 @@
-node_modules/
+/target
+**/*.rs.bk
 build/
-dist/
-coverage/
-.DS_Store
+*.deb
 *.log
-.env*
-!.env.example
+.DS_Store
