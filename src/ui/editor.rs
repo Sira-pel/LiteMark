@@ -1,11 +1,24 @@
 use crate::markdown::{parse_markdown, source_offset_for_click, Block, Span};
+use crate::model::settings::ContentAlignment;
 use crate::model::{text_ops::wysiwyg_list_row_height, ViewMode};
 use crate::theme::{sz, Theme};
 
 pub type WysiwygPlace = Arc<dyn for<'a, 'b> Fn(usize, &'a mut Window, &'b mut App) + 'static>;
+pub type TaskToggle = Arc<dyn for<'a, 'b> Fn(std::ops::Range<usize>, &'a mut Window, &'b mut App) + 'static>;
+pub type TableEdit = Arc<
+    dyn for<'a, 'b> Fn(
+            std::ops::Range<usize>,
+            Vec<String>,
+            Vec<Vec<String>>,
+            &'a mut Window,
+            &'b mut App,
+        ) + 'static,
+>;
+
 use gpui::prelude::*;
 use gpui::*;
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -14,11 +27,17 @@ pub struct EditorProps {
     pub view_mode: ViewMode,
     pub zoom_level: usize,
     pub base_font_size: f32,
+    pub content_alignment: ContentAlignment,
     pub show_zoom_hud: bool,
-    /// Interactive raw editor. WYSIWYG keeps the formatted preview and edits through this surface.
+    /// Interactive raw editor surface.
     pub raw_editor: AnyElement,
+    /// Invisible input surface for keystroke handling in WYSIWYG mode.
+    pub wysiwyg_input: AnyElement,
     pub wysiwyg_bounds: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
     pub on_wysiwyg_place: WysiwygPlace,
+    pub caret: Option<Range<usize>>,
+    pub on_toggle_task: TaskToggle,
+    pub on_table_edit: TableEdit,
 }
 
 pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
@@ -60,6 +79,13 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
                 .flex_1()
                 .size_full()
                 .overflow_hidden()
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .child(props.wysiwyg_input),
+                )
                 .child(render_wysiwyg_view(
                     &props.content,
                     base_size,
@@ -67,75 +93,171 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
                     theme,
                     props.wysiwyg_bounds.clone(),
                     props.on_wysiwyg_place.clone(),
+                    props.content_alignment,
+                    props.caret.clone(),
+                    props.on_toggle_task.clone(),
+                    props.on_table_edit.clone(),
                 ))
                 .into_any_element()
         } else {
             div()
+                .id("raw-editor-scroll")
                 .flex_1()
                 .size_full()
-                .flex()
-                .overflow_hidden()
+                .overflow_y_scroll()
                 .child(props.raw_editor)
                 .into_any_element()
         })
 }
 
-fn render_spans(spans: &[Span], text_size_px: f32, theme: &Theme, _block_ix: usize) -> AnyElement {
-    div()
-        .flex()
-        .flex_wrap()
-        .w_full()
-        .min_w_0()
-        .whitespace_normal()
-        .children(spans.iter().enumerate().filter_map(|(span_ix, span)| {
-            if span.text.is_empty() {
-                return None;
+fn render_spans(
+    spans: &[Span],
+    _text_size_px: f32,
+    theme: &Theme,
+    block_ix: usize,
+    caret: Option<Range<usize>>,
+) -> AnyElement {
+    let mut full_text = String::new();
+    let mut highlights = Vec::new();
+    let mut links = Vec::new();
+    let mut current_byte = 0;
+    let mut caret_char_pos: Option<usize> = None;
+
+    for span in spans {
+        let span_len = span.text.len();
+        if span_len == 0 {
+            continue;
+        }
+        let range = current_byte..(current_byte + span_len);
+
+        if let Some(ref sel) = caret {
+            if sel.is_empty() {
+                if sel.start >= span.source.start && sel.start <= span.source.end {
+                    let within = sel.start.saturating_sub(span.source.start).min(span_len);
+                    let char_count =
+                        full_text.chars().count() + span.text[..within].chars().count();
+                    caret_char_pos = Some(char_count);
+                }
+            } else if sel.end > span.source.start && sel.start < span.source.end {
+                let within_start = sel.start.saturating_sub(span.source.start).min(span_len);
+                let within_end = sel.end.saturating_sub(span.source.start).min(span_len);
+                if within_end > within_start {
+                    highlights.push((
+                        (current_byte + within_start)..(current_byte + within_end),
+                        HighlightStyle {
+                            background_color: Some(theme.selection_bg.into()),
+                            ..Default::default()
+                        },
+                    ));
+                }
             }
-            let mut piece = div()
-                .id(SharedString::from(format!(
-                    "wysiwyg-span-{_block_ix}-{span_ix}"
-                )))
-                .min_w_0()
-                .max_w_full()
-                .whitespace_normal()
-                .when(span.bold, |element| element.font_weight(FontWeight::MEDIUM))
-                .when(span.italic, |element| element.italic())
-                .when(span.underline || span.link.is_some(), |element| {
-                    element.underline()
-                })
-                .when(span.strike, |element| element.line_through().relative())
-                .when(span.code, |element| {
-                    element
-                        .px(px(3.0))
-                        .rounded(sz::R_SM)
-                        .bg(theme.tile_hover)
-                        .text_color(theme.code_text)
-                        .font_family(Theme::FONT_MONO)
-                })
-                .when(span.link.is_some(), |element| {
-                    element.text_color(theme.text_hi).cursor_pointer()
-                })
-                .child(span.text.clone());
-            if span.strike {
-                piece = piece.child(
-                    div()
-                        .absolute()
-                        .top(px(text_size_px * 0.55))
-                        .left_0()
-                        .right_0()
-                        .h(px(1.0))
-                        .bg(theme.text_primary),
-                );
+        }
+
+        current_byte += span_len;
+        full_text.push_str(&span.text);
+
+        if let Some(ref url) = span.link {
+            links.push((range.clone(), url.clone()));
+        }
+
+        let mut hs = HighlightStyle::default();
+        let mut has_hs = false;
+
+        if span.bold {
+            hs.font_weight = Some(FontWeight::BOLD);
+            has_hs = true;
+        }
+        if span.italic {
+            hs.font_style = Some(FontStyle::Italic);
+            has_hs = true;
+        }
+        if span.underline {
+            hs.underline = Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(theme.text_primary.into()),
+                wavy: false,
+            });
+            has_hs = true;
+        }
+        if span.strike {
+            hs.strikethrough = Some(StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(theme.text_faint.into()),
+            });
+            has_hs = true;
+        }
+        if span.code {
+            hs.background_color = Some(theme.tile_hover.into());
+            hs.color = Some(theme.code_text.into());
+            has_hs = true;
+        }
+        if span.link.is_some() {
+            hs.color = Some(theme.text_hi.into());
+            hs.underline = Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(theme.text_hi.into()),
+                wavy: false,
+            });
+            has_hs = true;
+        }
+
+        if has_hs {
+            highlights.push((range, hs));
+        }
+    }
+
+    if let Some(char_idx) = caret_char_pos {
+        let byte_idx = full_text
+            .char_indices()
+            .nth(char_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(full_text.len());
+        let cursor_str = "\u{258F}";
+        let cursor_len = cursor_str.len();
+
+        for (range, _) in &mut highlights {
+            if range.start >= byte_idx {
+                range.start += cursor_len;
             }
-            if let Some(url) = span.link.clone() {
-                piece = piece.on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    cx.stop_propagation();
-                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-                });
+            if range.end >= byte_idx {
+                range.end += cursor_len;
             }
-            Some(piece)
-        }))
-        .into_any_element()
+        }
+        for (range, _) in &mut links {
+            if range.start >= byte_idx {
+                range.start += cursor_len;
+            }
+            if range.end >= byte_idx {
+                range.end += cursor_len;
+            }
+        }
+
+        full_text.insert_str(byte_idx, cursor_str);
+        highlights.push((
+            byte_idx..byte_idx + cursor_len,
+            HighlightStyle {
+                color: Some(theme.text_hi.into()),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        ));
+    }
+
+    let styled = StyledText::new(full_text).with_highlights(highlights);
+
+    if !links.is_empty() {
+        let click_ranges = links.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
+        let url_targets = links.into_iter().map(|(_, u)| u).collect::<Vec<_>>();
+        InteractiveText::new(("interactive-span", block_ix), styled)
+            .on_click(click_ranges, move |ix, _, _| {
+                if let Some(url) = url_targets.get(ix) {
+                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                }
+            })
+            .into_any_element()
+    } else {
+        styled.into_any_element()
+    }
 }
 
 fn track_block(
@@ -143,7 +265,7 @@ fn track_block(
     index: usize,
     hits: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
     content: String,
-    base_size: f32,
+    font_size: f32,
     text_inset: f32,
     on_place: WysiwygPlace,
 ) -> Div {
@@ -168,8 +290,8 @@ fn track_block(
                     if local_y < px(0.0) {
                         local_y = px(0.0);
                     }
-                    let line_h = (base_size * 1.65).max(1.0);
-                    let char_w = (base_size * 0.5).max(1.0);
+                    let line_h = (font_size * 1.65).max(1.0);
+                    let char_w = (font_size * 0.5).max(1.0);
                     let width = (f32::from(bounds.size.width) - text_inset).max(char_w);
                     let columns = (width / char_w).floor().max(1.0) as usize;
                     let line = (f32::from(local_y) / line_h).floor().max(0.0) as usize;
@@ -201,6 +323,7 @@ fn track_block(
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_wysiwyg_view(
     content: &str,
     base_size: f32,
@@ -208,11 +331,16 @@ fn render_wysiwyg_view(
     theme: &Theme,
     hits: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
     on_place: WysiwygPlace,
+    content_alignment: ContentAlignment,
+    caret: Option<Range<usize>>,
+    on_toggle_task: TaskToggle,
+    on_table_edit: TableEdit,
 ) -> AnyElement {
     let blocks = parse_markdown(content);
     let measure = sz::MEASURE_FALLBACK * zoom_factor;
     let line_box = base_size * 1.65;
     let list_gap = (wysiwyg_list_row_height(base_size) - line_box).max(2.0);
+    let is_centered = content_alignment == ContentAlignment::Centered;
 
     div()
         .id("wysiwyg-editor-scroll")
@@ -222,11 +350,20 @@ fn render_wysiwyg_view(
         .pb(px(64.0))
         .px(px(48.0))
         .font_family(Theme::FONT_PROSE)
+        .on_mouse_down(MouseButton::Left, {
+            let on_place = on_place.clone();
+            let len = content.len();
+            move |_, window, cx| {
+                if !window.default_prevented() {
+                    on_place(len, window, cx);
+                }
+            }
+        })
         .child(
             div()
                 .w_full()
-                .max_w(measure)
-                .mx_auto()
+                .when(is_centered, |s| s.max_w(measure).mx_auto())
+                .when(!is_centered, |s| s.max_w_full().ml_0())
                 .flex()
                 .flex_col()
                 .min_w_0()
@@ -237,12 +374,12 @@ fn render_wysiwyg_view(
                         Block::Blockquote { .. } => 14.0,
                         _ => 0.0,
                     };
-                    let element = match block {
+                    let (element, block_font_size) = match block {
                         Block::Heading { level, spans, .. } => {
-                            let (h_size, h_top, h_bot) = match level {
-                                1 => (34.0 * zoom_factor, px(24.0), px(24.0)),
-                                2 => (23.0 * zoom_factor, px(40.0), px(16.0)),
-                                _ => (19.0 * zoom_factor, px(24.0), px(12.0)),
+                            let (h_size, h_weight, h_top, h_bot) = match level {
+                                1 => (34.0 * zoom_factor, FontWeight::EXTRA_BOLD, px(24.0), px(24.0)),
+                                2 => (24.0 * zoom_factor, FontWeight::BOLD, px(40.0), px(16.0)),
+                                _ => (19.0 * zoom_factor, FontWeight::BOLD, px(24.0), px(12.0)),
                             };
                             let mut heading_el = div()
                                 .flex_shrink_0()
@@ -252,9 +389,9 @@ fn render_wysiwyg_view(
                                 .mt(h_top)
                                 .mb(h_bot)
                                 .text_size(px(h_size))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(h_weight)
                                 .text_color(if level == 1 { theme.h1 } else { theme.h2 })
-                                .child(render_spans(&spans, h_size, theme, ix));
+                                .child(render_spans(&spans, h_size, theme, ix, caret.clone()));
 
                             if level == 1 {
                                 heading_el = heading_el
@@ -262,175 +399,389 @@ fn render_wysiwyg_view(
                                     .border_b_1()
                                     .border_color(theme.border_primary);
                             }
-                            heading_el
+                            (heading_el, h_size)
                         }
-                        Block::Paragraph { spans, .. } => div()
-                            .flex_shrink_0()
-                            .w_full()
-                            .min_w_0()
-                            .whitespace_normal()
-                            .my(px(12.0))
-                            .text_size(px(base_size))
-                            .line_height(px(base_size * 1.65))
-                            .text_color(theme.text_primary)
-                            .child(render_spans(&spans, base_size, theme, ix)),
-                        Block::Blockquote { spans, .. } => div()
-                            .flex_shrink_0()
-                            .pl(px(14.0))
-                            .my(px(12.0))
-                            .border_l_3()
-                            .border_color(theme.border_surface)
-                            .italic()
-                            .whitespace_normal()
-                            .w_full()
-                            .min_w_0()
-                            .child(render_spans(&spans, base_size, theme, ix)),
+                        Block::Paragraph { spans, .. } => (
+                            div()
+                                .flex_shrink_0()
+                                .w_full()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .my(px(12.0))
+                                .text_size(px(base_size))
+                                .line_height(px(base_size * 1.65))
+                                .text_color(theme.text_primary)
+                                .child(render_spans(&spans, base_size, theme, ix, caret.clone())),
+                            base_size,
+                        ),
+                        Block::Blockquote { spans, .. } => (
+                            div()
+                                .flex_shrink_0()
+                                .pl(px(14.0))
+                                .my(px(12.0))
+                                .border_l_3()
+                                .border_color(theme.border_surface)
+                                .italic()
+                                .whitespace_normal()
+                                .w_full()
+                                .min_w_0()
+                                .child(render_spans(&spans, base_size, theme, ix, caret.clone())),
+                            base_size,
+                        ),
                         Block::CodeBlock {
                             language: _, code, ..
-                        } => div()
-                            .flex_shrink_0()
-                            .my(px(16.0))
-                            .p(px(14.0))
-                            .rounded(sz::R_MD)
-                            .bg(theme.tile_hover)
-                            .border_1()
-                            .border_color(theme.border_subtle)
-                            .font_family(Theme::FONT_MONO)
-                            .text_size(px(base_size * 0.9))
-                            .text_color(theme.code_text)
-                            .whitespace_normal()
-                            .w_full()
-                            .min_w_0()
-                            .child(code),
+                        } => (
+                            div()
+                                .flex_shrink_0()
+                                .my(px(16.0))
+                                .p(px(14.0))
+                                .rounded(sz::R_MD)
+                                .bg(theme.tile_hover)
+                                .border_1()
+                                .border_color(theme.border_subtle)
+                                .font_family(Theme::FONT_MONO)
+                                .text_size(px(base_size * 0.9))
+                                .text_color(theme.code_text)
+                                .whitespace_normal()
+                                .w_full()
+                                .min_w_0()
+                                .child(code),
+                            base_size * 0.9,
+                        ),
                         Block::ListItem {
                             is_task,
                             checked,
                             ordered,
                             index,
                             spans,
-                            ..
-                        } => div()
-                            .flex()
-                            .flex_shrink_0()
-                            .items_start()
-                            .w_full()
-                            .min_w_0()
-                            .mt(px(list_gap / 2.0))
-                            .mb(px(list_gap / 2.0))
-                            .child(
+                            source,
+                        } => {
+                            let task_checkbox = if is_task {
+                                let on_toggle = on_toggle_task.clone();
+                                let src = source.clone();
                                 div()
-                                    .w(px(24.0))
-                                    .h(px(line_box))
+                                    .id(SharedString::from(format!("task-cb-{ix}")))
+                                    .w(px(15.0))
+                                    .h(px(15.0))
+                                    .rounded(sz::R_SM)
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(if checked {
+                                        theme.text_hi
+                                    } else {
+                                        theme.border_primary
+                                    })
+                                    .bg(if checked {
+                                        theme.text_hi
+                                    } else {
+                                        rgba(0x00000000)
+                                    })
                                     .flex()
                                     .items_center()
                                     .justify_center()
+                                    .text_size(px(10.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0x121212))
+                                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        on_toggle(src.clone(), window, cx);
+                                    })
+                                    .child(if checked { "✓" } else { "" })
+                                    .into_any_element()
+                            } else if ordered {
+                                div()
+                                    .text_size(px(base_size))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text_faint)
+                                    .child(format!("{}.", index))
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .text_size(px(base_size))
+                                    .text_color(theme.text_faint)
+                                    .child("•")
+                                    .into_any_element()
+                            };
+
+                            (
+                                div()
+                                    .flex()
                                     .flex_shrink_0()
-                                    .child(if is_task {
+                                    .items_start()
+                                    .w_full()
+                                    .min_w_0()
+                                    .mt(px(list_gap / 2.0))
+                                    .mb(px(list_gap / 2.0))
+                                    .child(
                                         div()
-                                            .w(px(14.0))
-                                            .h(px(14.0))
-                                            .rounded(sz::R_SM)
-                                            .border_1()
-                                            .border_color(if checked {
-                                                theme.text_hi
-                                            } else {
-                                                theme.border_primary
-                                            })
-                                            .bg(if checked {
-                                                theme.text_hi
-                                            } else {
-                                                rgba(0x00000000)
-                                            })
+                                            .w(px(24.0))
+                                            .h(px(line_box))
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(0x121212))
-                                            .child(if checked { "✓" } else { "" })
-                                    } else if ordered {
+                                            .flex_shrink_0()
+                                            .child(task_checkbox),
+                                    )
+                                    .child(
                                         div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .w_full()
+                                            .whitespace_normal()
                                             .text_size(px(base_size))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.text_faint)
-                                            .child(format!("{}.", index))
-                                    } else {
-                                        div()
-                                            .text_size(px(base_size))
-                                            .text_color(theme.text_faint)
-                                            .child("•")
-                                    }),
+                                            .line_height(px(line_box))
+                                            .text_color(theme.text_primary)
+                                            .child(render_spans(
+                                                &spans,
+                                                base_size,
+                                                theme,
+                                                ix,
+                                                caret.clone(),
+                                            )),
+                                    ),
+                                base_size,
                             )
-                            .child(
+                        }
+                        Block::Table {
+                            headers,
+                            rows,
+                            source,
+                        } => {
+                            let on_edit = on_table_edit.clone();
+                            let src = source.clone();
+                            let num_cols = headers.len();
+                            let num_rows = rows.len();
+
+                            let btn = |label: &'static str, id: String, t: &Theme| {
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .w_full()
-                                    .whitespace_normal()
-                                    .text_size(px(base_size))
-                                    .line_height(px(line_box))
-                                    .text_color(theme.text_primary)
-                                    .child(render_spans(&spans, base_size, theme, ix)),
-                            ),
-                        Block::Table { headers, rows, .. } => {
-                            div().flex_shrink_0().w_full().min_w_0().my(px(16.0)).child(
-                                div()
-                                    .id("table-scroll")
-                                    .overflow_x_scroll()
-                                    .border_1()
-                                    .border_color(theme.border_subtle)
+                                    .id(SharedString::from(id))
+                                    .px(px(6.0))
+                                    .py(px(2.0))
                                     .rounded(sz::R_SM)
+                                    .text_size(px(11.0))
+                                    .cursor_pointer()
+                                    .bg(t.tile_hover)
+                                    .text_color(t.text_muted)
+                                    .hover(|s| s.bg(t.border_subtle).text_color(t.text_hi))
+                                    .child(label)
+                            };
+
+                            (
+                                div()
+                                    .flex_shrink_0()
+                                    .w_full()
+                                    .min_w_0()
+                                    .my(px(16.0))
                                     .child(
                                         div()
                                             .flex()
-                                            .flex_col()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .mb(px(6.0))
+                                            .child({
+                                                let on_edit = on_edit.clone();
+                                                let src = src.clone();
+                                                let headers = headers.clone();
+                                                let rows = rows.clone();
+                                                btn("+ Row", format!("tbl-add-row-{ix}"), theme)
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_, window, cx| {
+                                                            cx.stop_propagation();
+                                                            let mut new_rows = rows.clone();
+                                                            new_rows.push(vec![
+                                                                String::new();
+                                                                headers.len()
+                                                            ]);
+                                                            on_edit(
+                                                                src.clone(),
+                                                                headers.clone(),
+                                                                new_rows,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )
+                                            })
+                                            .when(num_rows > 1, |s| {
+                                                let on_edit = on_edit.clone();
+                                                let src = src.clone();
+                                                let headers = headers.clone();
+                                                let rows = rows.clone();
+                                                s.child(
+                                                    btn("- Row", format!("tbl-del-row-{ix}"), theme)
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            move |_, window, cx| {
+                                                                cx.stop_propagation();
+                                                                let mut new_rows = rows.clone();
+                                                                new_rows.pop();
+                                                                on_edit(
+                                                                    src.clone(),
+                                                                    headers.clone(),
+                                                                    new_rows,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ),
+                                                )
+                                            })
+                                            .child({
+                                                let on_edit = on_edit.clone();
+                                                let src = src.clone();
+                                                let headers = headers.clone();
+                                                let rows = rows.clone();
+                                                btn("+ Col", format!("tbl-add-col-{ix}"), theme)
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        move |_, window, cx| {
+                                                            cx.stop_propagation();
+                                                            let mut new_headers = headers.clone();
+                                                            new_headers.push("Column".into());
+                                                            let mut new_rows = rows.clone();
+                                                            for r in &mut new_rows {
+                                                                r.push(String::new());
+                                                            }
+                                                            on_edit(
+                                                                src.clone(),
+                                                                new_headers,
+                                                                new_rows,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )
+                                            })
+                                            .when(num_cols > 1, |s| {
+                                                let on_edit = on_edit.clone();
+                                                let src = src.clone();
+                                                let headers = headers.clone();
+                                                let rows = rows.clone();
+                                                s.child(
+                                                    btn("- Col", format!("tbl-del-col-{ix}"), theme)
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            move |_, window, cx| {
+                                                                cx.stop_propagation();
+                                                                let mut new_headers = headers.clone();
+                                                                new_headers.pop();
+                                                                let mut new_rows = rows.clone();
+                                                                for r in &mut new_rows {
+                                                                    r.pop();
+                                                                }
+                                                                on_edit(
+                                                                    src.clone(),
+                                                                    new_headers,
+                                                                    new_rows,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("table-scroll-{ix}")))
+                                            .overflow_x_scroll()
+                                            .border_1()
+                                            .border_color(theme.border_subtle)
+                                            .rounded(sz::R_SM)
                                             .child(
                                                 div()
                                                     .flex()
-                                                    .bg(theme.tile_hover)
-                                                    .border_b_1()
-                                                    .border_color(theme.border_subtle)
-                                                    .children(headers.into_iter().map(|h| {
+                                                    .flex_col()
+                                                    .child(
                                                         div()
-                                                            .px(px(12.0))
-                                                            .py(px(8.0))
-                                                            .font_weight(FontWeight::MEDIUM)
-                                                            .text_size(px(base_size))
-                                                            .border_r_1()
+                                                            .flex()
+                                                            .bg(theme.tile_hover)
+                                                            .border_b_1()
                                                             .border_color(theme.border_subtle)
-                                                            .child(h)
+                                                            .children(
+                                                                headers.into_iter().map(|h| {
+                                                                    div()
+                                                                        .px(px(12.0))
+                                                                        .py(px(8.0))
+                                                                        .font_weight(
+                                                                            FontWeight::BOLD,
+                                                                        )
+                                                                        .text_size(px(base_size))
+                                                                        .border_r_1()
+                                                                        .border_color(
+                                                                            theme.border_subtle,
+                                                                        )
+                                                                        .child(if h.is_empty() {
+                                                                            "—".to_string()
+                                                                        } else {
+                                                                            h
+                                                                        })
+                                                                }),
+                                                            ),
+                                                    )
+                                                    .children(rows.into_iter().map(|row| {
+                                                        div()
+                                                            .flex()
+                                                            .border_b_1()
+                                                            .border_color(theme.border_subtle)
+                                                            .children(row.into_iter().map(|cell| {
+                                                                div()
+                                                                    .px(px(12.0))
+                                                                    .py(px(6.0))
+                                                                    .text_size(px(base_size))
+                                                                    .border_r_1()
+                                                                    .border_color(
+                                                                        theme.border_subtle,
+                                                                    )
+                                                                    .child(if cell.is_empty() {
+                                                                        " ".to_string()
+                                                                    } else {
+                                                                        cell
+                                                                    })
+                                                            }))
                                                     })),
-                                            )
-                                            .children(rows.into_iter().map(|row| {
-                                                div()
-                                                    .flex()
-                                                    .border_b_1()
-                                                    .border_color(theme.border_subtle)
-                                                    .children(row.into_iter().map(|cell| {
-                                                        div()
-                                                            .px(px(12.0))
-                                                            .py(px(6.0))
-                                                            .text_size(px(base_size))
-                                                            .border_r_1()
-                                                            .border_color(theme.border_subtle)
-                                                            .child(cell)
-                                                    }))
-                                            })),
+                                            ),
                                     ),
+                                base_size,
                             )
                         }
-                        Block::HorizontalRule { .. } => div()
-                            .flex_shrink_0()
-                            .h(px(1.0))
-                            .my(px(24.0))
-                            .bg(theme.border_primary),
-                        Block::EmptyLine { .. } => div().flex_shrink_0().h(px(base_size * 0.8)),
+                        Block::HorizontalRule { .. } => (
+                            div()
+                                .flex_shrink_0()
+                                .h(px(1.0))
+                                .my(px(24.0))
+                                .bg(theme.border_primary),
+                            base_size,
+                        ),
+                        Block::EmptyLine { source } => {
+                            let has_cursor = caret.as_ref().is_some_and(|c| {
+                                c.is_empty() && c.start >= source.start && c.start <= source.end
+                            });
+                            (
+                                div()
+                                    .flex_shrink_0()
+                                    .h(px(base_size * 0.9))
+                                    .flex()
+                                    .items_center()
+                                    .when(has_cursor, |s| {
+                                        s.child(
+                                            div()
+                                                .w(px(2.0))
+                                                .h(px(base_size * 0.9))
+                                                .bg(theme.text_hi),
+                                        )
+                                    }),
+                                base_size,
+                            )
+                        }
                     };
                     track_block(
                         element,
                         ix,
                         hits.clone(),
                         content.to_string(),
-                        base_size,
+                        block_font_size,
                         inset,
                         on_place.clone(),
                     )

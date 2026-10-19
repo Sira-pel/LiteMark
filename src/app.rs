@@ -1,11 +1,11 @@
 use crate::actions::*;
-use crate::markdown::{export_stem, render_export};
+use crate::markdown::{export_stem, format_markdown_table, render_export};
 use crate::model::text_ops::{
     next_grapheme, offset_to_utf16, previous_grapheme, range_from_utf16, range_to_utf16,
 };
 use crate::model::*;
 use crate::services::*;
-use crate::theme::{Theme, ThemeMode};
+use crate::theme::{sz, Theme, ThemeMode};
 use crate::ui::MenuItem;
 use crate::ui::*;
 use gpui::prelude::*;
@@ -579,6 +579,11 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_word_wrap(&mut self) {
         self.settings.word_wrap = !self.settings.word_wrap;
+        self.settings.save();
+    }
+
+    pub fn handle_set_content_alignment(&mut self, alignment: ContentAlignment) {
+        self.settings.content_alignment = alignment;
         self.settings.save();
     }
 
@@ -1630,6 +1635,8 @@ impl LiteMarkApp {
             active_find: self.find_index,
             show_line_numbers,
             word_wrap: self.settings.word_wrap,
+            centered: self.settings.content_alignment == ContentAlignment::Centered,
+            max_measure: Some(sz::MEASURE_FALLBACK * zoom),
             font_size: px(self.settings.base_font_size * zoom),
             text_color: theme.text_primary.into(),
             selection_color: theme.selection_bg.into(),
@@ -2083,6 +2090,16 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_set_content_alignment = {
+            let view = view.clone();
+            move |alignment: ContentAlignment, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_set_content_alignment(alignment);
+                    cx.notify();
+                });
+            }
+        };
+
         let on_undo = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -2517,6 +2534,54 @@ impl Render for LiteMarkApp {
             })
         };
 
+        let on_toggle_task: TaskToggle = {
+            let view = view.clone();
+            Arc::new(
+                move |block_source: Range<usize>, window: &mut Window, cx: &mut App| {
+                    let _ = view.update(cx, |this, cx| {
+                        if let Some(tab) = this.active_tab_mut() {
+                            if block_source.end <= tab.content.len() {
+                                let text = &tab.content[block_source.clone()];
+                                if let Some(pos) = text.find("[ ]") {
+                                    let r = (block_source.start + pos)..(block_source.start + pos + 3);
+                                    tab.edit(r, "[x]");
+                                } else if let Some(pos) =
+                                    text.find("[x]").or_else(|| text.find("[X]"))
+                                {
+                                    let r = (block_source.start + pos)..(block_source.start + pos + 3);
+                                    tab.edit(r, "[ ]");
+                                }
+                            }
+                        }
+                        window.refresh();
+                        cx.notify();
+                    });
+                },
+            )
+        };
+
+        let on_table_edit: TableEdit = {
+            let view = view.clone();
+            Arc::new(
+                move |source: Range<usize>,
+                      headers: Vec<String>,
+                      rows: Vec<Vec<String>>,
+                      window: &mut Window,
+                      cx: &mut App| {
+                    let formatted = format_markdown_table(&headers, &rows);
+                    let _ = view.update(cx, |this, cx| {
+                        if let Some(tab) = this.active_tab_mut() {
+                            if source.end <= tab.content.len() {
+                                tab.edit(source.clone(), &formatted);
+                            }
+                        }
+                        window.refresh();
+                        cx.notify();
+                    });
+                },
+            )
+        };
+
         let on_choose_dir = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -2704,9 +2769,11 @@ impl Render for LiteMarkApp {
                         self.settings.show_line_numbers,
                         self.settings.word_wrap,
                         self.show_sidebar,
+                        self.settings.content_alignment,
                         on_set_view_mode.clone(),
                         on_toggle_line_numbers.clone(),
                         on_toggle_word_wrap.clone(),
+                        on_set_content_alignment.clone(),
                         on_zoom_in.clone(),
                         on_zoom_out.clone(),
                         on_reset_zoom.clone(),
@@ -2757,9 +2824,11 @@ impl Render for LiteMarkApp {
                         self.settings.show_line_numbers,
                         self.settings.word_wrap,
                         self.show_sidebar,
+                        self.settings.content_alignment,
                         on_set_view_mode.clone(),
                         on_toggle_line_numbers.clone(),
                         on_toggle_word_wrap.clone(),
+                        on_set_content_alignment.clone(),
                         on_zoom_in.clone(),
                         on_zoom_out.clone(),
                         on_reset_zoom.clone(),
@@ -3378,14 +3447,23 @@ impl Render for LiteMarkApp {
                                     view_mode: self.settings.view_mode,
                                     zoom_level: self.settings.zoom_level,
                                     base_font_size: self.settings.base_font_size,
+                                    content_alignment: self.settings.content_alignment,
                                     show_zoom_hud: self.show_zoom_hud,
                                     raw_editor: self.raw_editor(
                                         cx,
                                         &theme,
                                         self.settings.show_line_numbers,
                                     ),
+                                    wysiwyg_input: WysiwygInputHook {
+                                        entity: cx.entity(),
+                                        focus: self.focus_handle.clone(),
+                                    }
+                                    .into_any_element(),
                                     wysiwyg_bounds: self.wysiwyg_bounds.clone(),
                                     on_wysiwyg_place: on_wysiwyg_place.clone(),
+                                    caret: Some(active_tab.selection_range()),
+                                    on_toggle_task: on_toggle_task.clone(),
+                                    on_table_edit: on_table_edit.clone(),
                                 },
                                 &theme,
                             )),
@@ -3419,10 +3497,19 @@ impl Render for LiteMarkApp {
                             view_mode: self.settings.view_mode,
                             zoom_level: self.settings.zoom_level,
                             base_font_size: self.settings.base_font_size,
+                            content_alignment: self.settings.content_alignment,
                             show_zoom_hud: self.show_zoom_hud,
                             raw_editor: self.raw_editor(cx, &theme, false),
+                            wysiwyg_input: WysiwygInputHook {
+                                entity: cx.entity(),
+                                focus: self.focus_handle.clone(),
+                            }
+                            .into_any_element(),
                             wysiwyg_bounds: self.wysiwyg_bounds.clone(),
                             on_wysiwyg_place: on_wysiwyg_place.clone(),
+                            caret: Some(active_tab.selection_range()),
+                            on_toggle_task: on_toggle_task.clone(),
+                            on_table_edit: on_table_edit.clone(),
                         },
                         &theme,
                     ))

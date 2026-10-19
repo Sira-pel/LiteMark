@@ -1,5 +1,6 @@
 use super::menu::MenuItem;
 use super::primitives::render_icon;
+use crate::model::settings::ContentAlignment;
 use crate::model::ViewMode;
 use crate::theme::{sz, Theme};
 use gpui::prelude::*;
@@ -268,9 +269,11 @@ pub fn build_view_menu_items(
     show_line_numbers: bool,
     word_wrap: bool,
     show_sidebar: bool,
+    content_alignment: ContentAlignment,
     on_set_view_mode: impl Fn(ViewMode, &mut App) + 'static + Clone,
     on_toggle_line_numbers: impl Fn(&mut App) + 'static + Clone,
     on_toggle_word_wrap: impl Fn(&mut App) + 'static + Clone,
+    on_set_content_alignment: impl Fn(ContentAlignment, &mut App) + 'static + Clone,
     on_zoom_in: impl Fn(&mut App) + 'static + Clone,
     on_zoom_out: impl Fn(&mut App) + 'static + Clone,
     on_reset_zoom: impl Fn(&mut App) + 'static + Clone,
@@ -301,6 +304,25 @@ pub fn build_view_menu_items(
             let f = on_toggle_word_wrap.clone();
             move |_, cx| f(cx)
         }),
+        MenuItem::divider(),
+        MenuItem::radio(
+            "Centered text",
+            content_alignment == ContentAlignment::Centered,
+            None,
+            {
+                let f = on_set_content_alignment.clone();
+                move |_, cx| f(ContentAlignment::Centered, cx)
+            },
+        ),
+        MenuItem::radio(
+            "Left-aligned text",
+            content_alignment == ContentAlignment::Left,
+            None,
+            {
+                let f = on_set_content_alignment.clone();
+                move |_, cx| f(ContentAlignment::Left, cx)
+            },
+        ),
         MenuItem::divider(),
         MenuItem::action("Zoom in", None, Some("Ctrl+="), {
             let f = on_zoom_in.clone();

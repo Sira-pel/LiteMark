@@ -160,4 +160,31 @@ mod tests {
         assert!(text.contains("Body Heading"));
         assert!(!text.contains('#'));
     }
+
+    #[test]
+    fn test_format_markdown_table() {
+        let headers = vec!["A".to_string(), "B".to_string()];
+        let rows = vec![vec!["1".to_string(), "2".to_string()]];
+        let out = format_markdown_table(&headers, &rows);
+        assert_eq!(out, "| A | B |\n| :--- | :--- |\n| 1 | 2 |\n");
+    }
+}
+
+pub fn format_markdown_table(headers: &[String], rows: &[Vec<String>]) -> String {
+    let mut out = String::new();
+    out.push_str("| ");
+    out.push_str(&headers.join(" | "));
+    out.push_str(" |\n| ");
+    let separators = vec![":---"; headers.len()];
+    out.push_str(&separators.join(" | "));
+    out.push_str(" |\n");
+    for row in rows {
+        out.push_str("| ");
+        let cells: Vec<String> = (0..headers.len())
+            .map(|i| row.get(i).cloned().unwrap_or_default())
+            .collect();
+        out.push_str(&cells.join(" | "));
+        out.push_str(" |\n");
+    }
+    out
 }

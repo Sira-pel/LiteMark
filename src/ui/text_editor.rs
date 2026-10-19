@@ -79,6 +79,8 @@ pub struct EditorElement<V: 'static> {
     pub active_find: Option<usize>,
     pub show_line_numbers: bool,
     pub word_wrap: bool,
+    pub centered: bool,
+    pub max_measure: Option<Pixels>,
     pub font_size: Pixels,
     pub text_color: Hsla,
     pub selection_color: Hsla,
@@ -106,6 +108,7 @@ pub struct Prepaint {
     cursor: Option<PaintQuad>,
     line_height: Pixels,
     wrap_cols: usize,
+    x_offset: Pixels,
 }
 
 impl<V: EntityInputHandler> Element for EditorElement<V> {
@@ -168,22 +171,23 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             None,
         );
         let char_width = sample.width.max(px(1.0));
-        let text_width = (bounds.size.width - self.gutter() - px(16.0)).max(px(32.0));
+        let gutter = self.gutter();
+        let available_width = (bounds.size.width - gutter - px(32.0)).max(px(32.0));
+        let (content_width, x_offset) = if self.centered {
+            let max_w = self.max_measure.unwrap_or(available_width).min(available_width);
+            let offset = ((available_width - max_w) / 2.0).max(px(0.0));
+            (max_w, offset)
+        } else {
+            (available_width, px(0.0))
+        };
         let wrap_cols = if self.word_wrap {
-            (text_width / char_width).floor() as usize
+            (content_width / char_width).floor() as usize
         } else {
             usize::MAX
         };
         let wrap_cols = wrap_cols.max(1);
-        let stored = self.paint.borrow().wrap_cols;
-        let effective_wrap = if self.word_wrap {
-            stored.max(1)
-        } else {
-            usize::MAX
-        };
-        let rows_src = visual_rows(&self.content, effective_wrap);
+        let rows_src = visual_rows(&self.content, wrap_cols);
         let line_height = self.font_size * 1.65;
-        let gutter = self.gutter();
 
         let mut rows = Vec::with_capacity(rows_src.len());
         let mut numbers = Vec::new();
@@ -198,18 +202,20 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 SharedString::from(self.content[start..end].to_string())
             };
             let display_len = if start == end { 0 } else { slice.len() };
+            let is_heading = slice.starts_with("# ") || slice.starts_with("## ") || slice.starts_with("### ");
             let runs = line_runs(
                 display_len.max(slice.len()),
                 start,
                 self.marked.clone(),
                 font.clone(),
                 self.text_color,
+                is_heading,
             );
             let shaped = window
                 .text_system()
                 .shape_line(slice, self.font_size, &runs, None);
             let origin = point(
-                bounds.left() + gutter,
+                bounds.left() + gutter + x_offset,
                 bounds.top() + px(12.0) + line_height * index as f32,
             );
             paint_ranges(
@@ -273,7 +279,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let at_line_start = start == 0
                     || self.content.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\n');
                 if at_line_start {
-                    numbers.push((point(bounds.left() + px(8.0), origin.y), shaped_num));
+                    numbers.push((point(bounds.left() + x_offset + px(8.0), origin.y), shaped_num));
                 }
                 rows.push(PaintRow {
                     byte_start: start,
@@ -292,8 +298,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             let _ = display_len;
         }
 
-        // Keep the measured column count so the next layout pass wraps to the real width.
-        let _ = wrap_cols;
         Prepaint {
             rows,
             numbers,
@@ -301,6 +305,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             cursor,
             line_height,
             wrap_cols,
+            x_offset,
         }
     }
 
@@ -321,7 +326,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         );
         if self.show_line_numbers {
             window.paint_quad(fill(
-                Bounds::new(bounds.origin, size(self.gutter(), bounds.size.height)),
+                Bounds::new(point(bounds.origin.x + prepaint.x_offset, bounds.origin.y), size(self.gutter(), bounds.size.height)),
                 self.gutter_bg,
             ));
         }
@@ -380,9 +385,13 @@ fn line_runs(
     len: usize,
     line_start: usize,
     marked: Option<Range<usize>>,
-    font: Font,
+    mut font: Font,
     color: Hsla,
+    is_heading: bool,
 ) -> Vec<TextRun> {
+    if is_heading {
+        font.weight = FontWeight::BOLD;
+    }
     let base = TextRun {
         len,
         font,
@@ -466,3 +475,70 @@ fn paint_ranges(
         color,
     ));
 }
+
+pub struct WysiwygInputHook<V: 'static> {
+    pub entity: Entity<V>,
+    pub focus: FocusHandle,
+}
+
+impl<V: EntityInputHandler> Element for WysiwygInputHook<V> {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some("wysiwyg-input-hook".into())
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.handle_input(
+            &self.focus,
+            ElementInputHandler::new(bounds, self.entity.clone()),
+            cx,
+        );
+    }
+}
+
+impl<V: EntityInputHandler> IntoElement for WysiwygInputHook<V> {
+    type Element = Self;
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
