@@ -154,18 +154,16 @@ impl DocumentTab {
     }
 
     pub fn cursor_offset(&self) -> usize {
-        self.caret.cursor().min(self.content.len())
+        floor_boundary(&self.content, self.caret.cursor())
     }
 
     pub fn selection_range(&self) -> Range<usize> {
-        let mut range = self.caret.range.clone();
-        let len = self.content.len();
-        range.start = range.start.min(len);
-        range.end = range.end.min(len);
-        if range.end < range.start {
-            range.end..range.start
+        let start = floor_boundary(&self.content, self.caret.range.start);
+        let end = floor_boundary(&self.content, self.caret.range.end);
+        if end < start {
+            end..start
         } else {
-            range
+            start..end
         }
     }
 
@@ -227,9 +225,9 @@ impl DocumentTab {
         let prefix_len = placeholder_prefix_len(cmd);
         self.edit(range.clone(), &replacement);
         if cursor_after_placeholder {
-            let start = range.start + prefix_len;
-            let end = start + placeholder_len(cmd);
-            self.caret.range = start..end.min(self.content.len());
+            let start = floor_boundary(&self.content, range.start + prefix_len);
+            let end = floor_boundary(&self.content, start + placeholder_len(cmd));
+            self.caret.range = start..end;
             self.caret.reversed = false;
             self.refresh_cursor();
         }
@@ -291,6 +289,22 @@ impl DocumentTab {
         self.refresh_cursor();
     }
 
+    pub fn select_word(&mut self) {
+        let range = super::text_ops::word_extent(&self.content, self.cursor_offset());
+        self.caret.range = range;
+        self.caret.reversed = false;
+        self.caret.preferred_col = None;
+        self.refresh_cursor();
+    }
+
+    pub fn select_line(&mut self) {
+        let range = super::text_ops::line_extent(&self.content, self.cursor_offset());
+        self.caret.range = range;
+        self.caret.reversed = false;
+        self.caret.preferred_col = None;
+        self.refresh_cursor();
+    }
+
     pub fn place(&mut self, offset: usize, extend: bool) {
         let offset = floor_boundary(&self.content, offset);
         if extend {
@@ -321,7 +335,7 @@ impl DocumentTab {
         let index = if forward {
             find_next(&hits, self.cursor_offset(), current)
         } else {
-            find_prev(&hits, self.cursor_offset(), current)
+            find_prev(&hits, self.selection_range().start, current)
         }?;
         let hit = hits.get(index)?.clone();
         self.caret.range = hit;
@@ -376,39 +390,38 @@ impl DocumentTab {
     }
 
     pub fn undo(&mut self) -> bool {
-        if self.history.undo(&mut self.content) {
-            self.caret.clamp(self.content.len());
-            self.marked_range = None;
-            self.is_modified = true;
-            self.refresh_stats();
-            self.refresh_cursor();
-            true
-        } else {
-            false
-        }
+        let Some(caret) = self.history.undo(&mut self.content) else {
+            return false;
+        };
+        self.place_after_history(caret);
+        true
     }
 
     pub fn redo(&mut self) -> bool {
-        if self.history.redo(&mut self.content) {
-            self.caret.clamp(self.content.len());
-            self.marked_range = None;
-            self.is_modified = true;
-            self.refresh_stats();
-            self.refresh_cursor();
-            true
-        } else {
-            false
-        }
+        let Some(caret) = self.history.redo(&mut self.content) else {
+            return false;
+        };
+        self.place_after_history(caret);
+        true
     }
 
-    fn clamp_range(&self, mut range: Range<usize>) -> Range<usize> {
-        let len = self.content.len();
-        range.start = range.start.min(len);
-        range.end = range.end.min(len);
-        if range.end < range.start {
-            range.end..range.start
+    fn place_after_history(&mut self, caret: usize) {
+        let caret = floor_boundary(&self.content, caret);
+        self.caret.move_to(caret);
+        self.caret.clamp(&self.content);
+        self.marked_range = None;
+        self.is_modified = true;
+        self.refresh_stats();
+        self.refresh_cursor();
+    }
+
+    fn clamp_range(&self, range: Range<usize>) -> Range<usize> {
+        let start = floor_boundary(&self.content, range.start);
+        let end = floor_boundary(&self.content, range.end);
+        if end < start {
+            end..start
         } else {
-            range
+            start..end
         }
     }
 }
@@ -574,5 +587,73 @@ mod tests {
         assert_eq!(doc.content, "dog dog dog");
         assert!(doc.undo());
         assert_eq!(doc.content, "cat cat cat");
+    }
+
+    #[test]
+    fn undo_redo_caret_stays_on_a_char_boundary() {
+        let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), "ab".into(), None, None);
+        doc.edit(0..2, "😀ក");
+        assert!(doc.undo());
+        assert_eq!(doc.content, "ab");
+        assert_eq!(doc.cursor_offset(), 2);
+        assert!(doc.content.is_char_boundary(doc.cursor_offset()));
+        assert!(doc.redo());
+        assert_eq!(doc.content, "😀ក");
+        assert_eq!(doc.cursor_offset(), "😀ក".len());
+        assert!(doc.content.is_char_boundary(doc.cursor_offset()));
+        assert!(doc.content.is_char_boundary(doc.selection_range().start));
+        assert!(doc.content.is_char_boundary(doc.selection_range().end));
+
+        doc.caret.range = 2..2;
+        doc.move_home(false);
+        doc.move_end(false);
+        doc.apply_format("bold");
+        assert!(doc.content.is_char_boundary(doc.cursor_offset()));
+        assert!(doc.content.is_char_boundary(doc.selection_range().start));
+        assert!(doc.content.is_char_boundary(doc.selection_range().end));
+    }
+
+    #[test]
+    fn shift_arrow_extends_from_the_anchor_and_clicks_select_word_and_line() {
+        let mut doc = DocumentTab::new(
+            "tab-1".into(),
+            "Doc.md".into(),
+            "abcd\nxy".into(),
+            None,
+            None,
+        );
+        doc.caret.move_to(3);
+        doc.move_left(true);
+        doc.move_left(true);
+        assert_eq!(doc.selection_range(), 1..3);
+        doc.move_right(true);
+        assert_eq!(doc.selection_range(), 2..3);
+        doc.move_right(true);
+        doc.move_right(true);
+        assert_eq!(doc.selected_text(), "d");
+
+        doc.caret.move_to(1);
+        doc.select_word();
+        assert_eq!(doc.selected_text(), "abcd");
+        doc.select_line();
+        assert_eq!(doc.selected_text(), "abcd\n");
+    }
+
+    #[test]
+    fn find_previous_leaves_the_current_match() {
+        let mut doc = DocumentTab::new(
+            "tab-1".into(),
+            "Doc.md".into(),
+            "cat cat cat".into(),
+            None,
+            None,
+        );
+        let first = doc.select_match("cat", true, None, true).unwrap();
+        assert_eq!(first, 0);
+        assert_eq!(doc.cursor_offset(), 3);
+        let previous = doc.select_match("cat", true, Some(first), false).unwrap();
+        assert_eq!(previous, 2);
+        assert_eq!(doc.selected_text(), "cat");
+        assert_ne!(doc.selection_range().start, 0);
     }
 }

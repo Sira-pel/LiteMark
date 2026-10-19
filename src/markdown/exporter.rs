@@ -13,8 +13,31 @@ pub fn markdown_to_html_body(markdown: &str) -> String {
     html_output
 }
 
+/// File stem with one extension removed. `a.txt` becomes `a`, not `a.txt`.
+pub fn export_stem(title: &str) -> &str {
+    match title.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && !ext.contains('/') => stem,
+        _ => title,
+    }
+}
+
+pub fn escape_html_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 pub fn export_to_html(title: &str, markdown: &str) -> String {
     let body_html = markdown_to_html_body(markdown);
+    let title = escape_html_text(title);
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -123,6 +146,13 @@ mod tests {
         assert!(html.contains("<h1>Body Heading</h1>"));
         assert!(!html.contains("<title># Body Heading</title>"));
         assert!(!html.contains("<h1>Page Title</h1>"));
+
+        let escaped = export_to_html(r#"a<b>&"quoted""#, "x");
+        assert!(escaped.contains("<title>a&lt;b&gt;&amp;&quot;quoted&quot;</title>"));
+        assert!(!escaped.contains("<title>a<b>"));
+        assert_eq!(export_stem("a.txt"), "a");
+        assert_eq!(export_stem("notes.md"), "notes");
+        assert_eq!(export_stem("README"), "README");
 
         let markdown = render_export("md", "Page Title", "# Body Heading").unwrap();
         assert_eq!(markdown, "# Body Heading");

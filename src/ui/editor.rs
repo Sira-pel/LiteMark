@@ -1,8 +1,13 @@
-use crate::markdown::{parse_markdown, Block, Span};
-use crate::model::{wysiwyg_list_row_height, ViewMode};
+use crate::markdown::{parse_markdown, source_offset_for_click, Block, Span};
+use crate::model::{text_ops::wysiwyg_list_row_height, ViewMode};
 use crate::theme::{sz, Theme};
+
+pub type WysiwygPlace = Arc<dyn for<'a, 'b> Fn(usize, &'a mut Window, &'b mut App) + 'static>;
 use gpui::prelude::*;
 use gpui::*;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 
 pub struct EditorProps {
     pub content: String,
@@ -12,6 +17,8 @@ pub struct EditorProps {
     pub show_zoom_hud: bool,
     /// Interactive raw editor. WYSIWYG keeps the formatted preview and edits through this surface.
     pub raw_editor: AnyElement,
+    pub wysiwyg_bounds: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
+    pub on_wysiwyg_place: WysiwygPlace,
 }
 
 pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
@@ -65,6 +72,8 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
                             base_size,
                             zoom_factor,
                             theme,
+                            props.wysiwyg_bounds.clone(),
+                            props.on_wysiwyg_place.clone(),
                         )),
                 )
                 .child(div().h(px(1.0)).bg(theme.border_subtle).flex_shrink_0())
@@ -89,86 +98,122 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
         })
 }
 
-fn render_spans(spans: &[Span], _text_size_px: f32, theme: &Theme, block_ix: usize) -> AnyElement {
-    let mut full_text = String::new();
-    let mut highlights = Vec::new();
-    let mut links = Vec::new();
-    let mut current_byte = 0;
+fn render_spans(spans: &[Span], text_size_px: f32, theme: &Theme, _block_ix: usize) -> AnyElement {
+    div()
+        .flex()
+        .flex_wrap()
+        .w_full()
+        .min_w_0()
+        .whitespace_normal()
+        .children(spans.iter().enumerate().filter_map(|(span_ix, span)| {
+            if span.text.is_empty() {
+                return None;
+            }
+            let mut piece = div()
+                .id(SharedString::from(format!(
+                    "wysiwyg-span-{_block_ix}-{span_ix}"
+                )))
+                .min_w_0()
+                .max_w_full()
+                .whitespace_normal()
+                .when(span.bold, |element| element.font_weight(FontWeight::MEDIUM))
+                .when(span.italic, |element| element.italic())
+                .when(span.underline || span.link.is_some(), |element| {
+                    element.underline()
+                })
+                .when(span.strike, |element| element.line_through().relative())
+                .when(span.code, |element| {
+                    element
+                        .px(px(3.0))
+                        .rounded(sz::R_SM)
+                        .bg(theme.tile_hover)
+                        .text_color(theme.code_text)
+                        .font_family(Theme::FONT_MONO)
+                })
+                .when(span.link.is_some(), |element| {
+                    element.text_color(theme.text_hi).cursor_pointer()
+                })
+                .child(span.text.clone());
+            if span.strike {
+                piece = piece.child(
+                    div()
+                        .absolute()
+                        .top(px(text_size_px * 0.55))
+                        .left_0()
+                        .right_0()
+                        .h(px(1.0))
+                        .bg(theme.text_primary),
+                );
+            }
+            if let Some(url) = span.link.clone() {
+                piece = piece.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                });
+            }
+            Some(piece)
+        }))
+        .into_any_element()
+}
 
-    for span in spans {
-        let span_len = span.text.len();
-        if span_len == 0 {
-            continue;
-        }
-        let range = current_byte..(current_byte + span_len);
-        current_byte += span_len;
-        full_text.push_str(&span.text);
-
-        if let Some(ref url) = span.link {
-            links.push((range.clone(), url.clone()));
-        }
-
-        let mut hs = HighlightStyle::default();
-        let mut has_hs = false;
-
-        if span.bold {
-            hs.font_weight = Some(FontWeight::MEDIUM);
-            has_hs = true;
-        }
-        if span.italic {
-            hs.font_style = Some(FontStyle::Italic);
-            has_hs = true;
-        }
-        if span.underline {
-            hs.underline = Some(UnderlineStyle {
-                thickness: px(1.0),
-                color: Some(theme.text_primary.into()),
-                wavy: false,
-            });
-            has_hs = true;
-        }
-        if span.strike {
-            hs.strikethrough = Some(StrikethroughStyle {
-                thickness: px(1.0),
-                color: Some(theme.text_faint.into()),
-            });
-            has_hs = true;
-        }
-        if span.code {
-            hs.background_color = Some(theme.tile_hover.into());
-            hs.color = Some(theme.code_text.into());
-            has_hs = true;
-        }
-        if span.link.is_some() {
-            hs.color = Some(theme.text_hi.into());
-            hs.underline = Some(UnderlineStyle {
-                thickness: px(1.0),
-                color: Some(theme.text_hi.into()),
-                wavy: false,
-            });
-            has_hs = true;
-        }
-
-        if has_hs {
-            highlights.push((range, hs));
-        }
-    }
-
-    let styled = StyledText::new(full_text).with_highlights(highlights);
-
-    if !links.is_empty() {
-        let click_ranges = links.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
-        let url_targets = links.into_iter().map(|(_, u)| u).collect::<Vec<_>>();
-        InteractiveText::new(("interactive-span", block_ix), styled)
-            .on_click(click_ranges, move |ix, _, _| {
-                if let Some(url) = url_targets.get(ix) {
-                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+fn track_block(
+    element: Div,
+    index: usize,
+    hits: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
+    content: String,
+    base_size: f32,
+    text_inset: f32,
+    on_place: WysiwygPlace,
+) -> Div {
+    element
+        .relative()
+        .w_full()
+        .min_w_0()
+        .whitespace_normal()
+        .on_mouse_down(MouseButton::Left, {
+            let hits = hits.clone();
+            move |event, window, cx| {
+                let bounds = hits.borrow().get(index).copied().flatten();
+                if let Some(bounds) = bounds {
+                    let mut local_x = event.position.x - bounds.left() - px(text_inset);
+                    let mut local_y = event.position.y - bounds.top();
+                    if local_x < px(0.0) {
+                        local_x = px(0.0);
+                    }
+                    if local_y < px(0.0) {
+                        local_y = px(0.0);
+                    }
+                    let line_h = (base_size * 1.65).max(1.0);
+                    let char_w = (base_size * 0.5).max(1.0);
+                    let width = (f32::from(bounds.size.width) - text_inset).max(char_w);
+                    let columns = (width / char_w).floor().max(1.0) as usize;
+                    let line = (f32::from(local_y) / line_h).floor().max(0.0) as usize;
+                    let column = (f32::from(local_x) / char_w).floor().max(0.0) as usize;
+                    let rendered = line.saturating_mul(columns).saturating_add(column);
+                    if let Some(offset) = source_offset_for_click(&content, index, rendered) {
+                        on_place(offset, window, cx);
+                    }
                 }
-            })
-            .into_any_element()
-    } else {
-        styled.into_any_element()
-    }
+                cx.stop_propagation();
+            }
+        })
+        .child(
+            canvas(
+                {
+                    let hits = hits.clone();
+                    move |bounds, _, _| {
+                        let mut hits = hits.borrow_mut();
+                        if hits.len() <= index {
+                            hits.resize(index + 1, None);
+                        }
+                        hits[index] = Some(bounds);
+                    }
+                },
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
 }
 
 fn render_wysiwyg_view(
@@ -176,10 +221,13 @@ fn render_wysiwyg_view(
     base_size: f32,
     zoom_factor: f32,
     theme: &Theme,
+    hits: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
+    on_place: WysiwygPlace,
 ) -> AnyElement {
     let blocks = parse_markdown(content);
     let measure = sz::MEASURE_FALLBACK * zoom_factor;
-    let list_row = wysiwyg_list_row_height(base_size);
+    let line_box = base_size * 1.65;
+    let list_gap = (wysiwyg_list_row_height(base_size) - line_box).max(2.0);
 
     div()
         .id("wysiwyg-editor-scroll")
@@ -196,9 +244,16 @@ fn render_wysiwyg_view(
                 .mx_auto()
                 .flex()
                 .flex_col()
+                .min_w_0()
+                .whitespace_normal()
                 .children(blocks.into_iter().enumerate().map(|(ix, block)| {
-                    match block {
-                        Block::Heading { level, spans } => {
+                    let inset = match &block {
+                        Block::ListItem { .. } => 24.0,
+                        Block::Blockquote { .. } => 14.0,
+                        _ => 0.0,
+                    };
+                    let element = match block {
+                        Block::Heading { level, spans, .. } => {
                             let (h_size, h_top, h_bot) = match level {
                                 1 => (34.0 * zoom_factor, px(24.0), px(24.0)),
                                 2 => (23.0 * zoom_factor, px(40.0), px(16.0)),
@@ -206,6 +261,9 @@ fn render_wysiwyg_view(
                             };
                             let mut heading_el = div()
                                 .flex_shrink_0()
+                                .w_full()
+                                .min_w_0()
+                                .whitespace_normal()
                                 .mt(h_top)
                                 .mb(h_bot)
                                 .text_size(px(h_size))
@@ -221,22 +279,30 @@ fn render_wysiwyg_view(
                             }
                             heading_el
                         }
-                        Block::Paragraph { spans } => div()
+                        Block::Paragraph { spans, .. } => div()
                             .flex_shrink_0()
+                            .w_full()
+                            .min_w_0()
+                            .whitespace_normal()
                             .my(px(12.0))
                             .text_size(px(base_size))
                             .line_height(px(base_size * 1.65))
                             .text_color(theme.text_primary)
                             .child(render_spans(&spans, base_size, theme, ix)),
-                        Block::Blockquote { spans } => div()
+                        Block::Blockquote { spans, .. } => div()
                             .flex_shrink_0()
                             .pl(px(14.0))
                             .my(px(12.0))
                             .border_l_3()
                             .border_color(theme.border_surface)
                             .italic()
+                            .whitespace_normal()
+                            .w_full()
+                            .min_w_0()
                             .child(render_spans(&spans, base_size, theme, ix)),
-                        Block::CodeBlock { language: _, code } => div()
+                        Block::CodeBlock {
+                            language: _, code, ..
+                        } => div()
                             .flex_shrink_0()
                             .my(px(16.0))
                             .p(px(14.0))
@@ -247,6 +313,9 @@ fn render_wysiwyg_view(
                             .font_family(Theme::FONT_MONO)
                             .text_size(px(base_size * 0.9))
                             .text_color(theme.code_text)
+                            .whitespace_normal()
+                            .w_full()
+                            .min_w_0()
                             .child(code),
                         Block::ListItem {
                             is_task,
@@ -254,18 +323,19 @@ fn render_wysiwyg_view(
                             ordered,
                             index,
                             spans,
+                            ..
                         } => div()
                             .flex()
                             .flex_shrink_0()
-                            .items_center()
-                            .min_h(px(list_row))
-                            .mt(px(4.0))
-                            .mb(px(4.0))
-                            .line_height(px(list_row))
+                            .items_start()
+                            .w_full()
+                            .min_w_0()
+                            .mt(px(list_gap / 2.0))
+                            .mb(px(list_gap / 2.0))
                             .child(
                                 div()
                                     .w(px(24.0))
-                                    .h(px(list_row))
+                                    .h(px(line_box))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -309,62 +379,76 @@ fn render_wysiwyg_view(
                                 div()
                                     .flex_1()
                                     .min_w_0()
+                                    .w_full()
+                                    .whitespace_normal()
                                     .text_size(px(base_size))
+                                    .line_height(px(line_box))
                                     .text_color(theme.text_primary)
                                     .child(render_spans(&spans, base_size, theme, ix)),
                             ),
-                        Block::Table { headers, rows } => div().flex_shrink_0().my(px(16.0)).child(
-                            div()
-                                .id("table-scroll")
-                                .overflow_x_scroll()
-                                .border_1()
-                                .border_color(theme.border_subtle)
-                                .rounded(sz::R_SM)
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .bg(theme.tile_hover)
-                                                .border_b_1()
-                                                .border_color(theme.border_subtle)
-                                                .children(headers.into_iter().map(|h| {
-                                                    div()
-                                                        .px(px(12.0))
-                                                        .py(px(8.0))
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .text_size(px(base_size))
-                                                        .border_r_1()
-                                                        .border_color(theme.border_subtle)
-                                                        .child(h)
-                                                })),
-                                        )
-                                        .children(rows.into_iter().map(|row| {
-                                            div()
-                                                .flex()
-                                                .border_b_1()
-                                                .border_color(theme.border_subtle)
-                                                .children(row.into_iter().map(|cell| {
-                                                    div()
-                                                        .px(px(12.0))
-                                                        .py(px(6.0))
-                                                        .text_size(px(base_size))
-                                                        .border_r_1()
-                                                        .border_color(theme.border_subtle)
-                                                        .child(cell)
-                                                }))
-                                        })),
-                                ),
-                        ),
-                        Block::HorizontalRule => div()
+                        Block::Table { headers, rows, .. } => {
+                            div().flex_shrink_0().w_full().min_w_0().my(px(16.0)).child(
+                                div()
+                                    .id("table-scroll")
+                                    .overflow_x_scroll()
+                                    .border_1()
+                                    .border_color(theme.border_subtle)
+                                    .rounded(sz::R_SM)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .bg(theme.tile_hover)
+                                                    .border_b_1()
+                                                    .border_color(theme.border_subtle)
+                                                    .children(headers.into_iter().map(|h| {
+                                                        div()
+                                                            .px(px(12.0))
+                                                            .py(px(8.0))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_size(px(base_size))
+                                                            .border_r_1()
+                                                            .border_color(theme.border_subtle)
+                                                            .child(h)
+                                                    })),
+                                            )
+                                            .children(rows.into_iter().map(|row| {
+                                                div()
+                                                    .flex()
+                                                    .border_b_1()
+                                                    .border_color(theme.border_subtle)
+                                                    .children(row.into_iter().map(|cell| {
+                                                        div()
+                                                            .px(px(12.0))
+                                                            .py(px(6.0))
+                                                            .text_size(px(base_size))
+                                                            .border_r_1()
+                                                            .border_color(theme.border_subtle)
+                                                            .child(cell)
+                                                    }))
+                                            })),
+                                    ),
+                            )
+                        }
+                        Block::HorizontalRule { .. } => div()
                             .flex_shrink_0()
                             .h(px(1.0))
                             .my(px(24.0))
                             .bg(theme.border_primary),
-                        Block::EmptyLine => div().flex_shrink_0().h(px(base_size * 0.8)),
-                    }
+                        Block::EmptyLine { .. } => div().flex_shrink_0().h(px(base_size * 0.8)),
+                    };
+                    track_block(
+                        element,
+                        ix,
+                        hits.clone(),
+                        content.to_string(),
+                        base_size,
+                        inset,
+                        on_place.clone(),
+                    )
                 })),
         )
         .into_any_element()

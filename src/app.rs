@@ -1,5 +1,5 @@
 use crate::actions::*;
-use crate::markdown::render_export;
+use crate::markdown::{export_stem, render_export};
 use crate::model::text_ops::{
     next_grapheme, offset_to_utf16, previous_grapheme, range_from_utf16, range_to_utf16,
 };
@@ -23,6 +23,8 @@ pub(crate) enum Prompt {
     CloseWindow,
     DeleteFile { id: String },
     DeleteFolder { id: String },
+    TrashDirtyFile { id: String },
+    TrashDirtyFolder { id: String },
 }
 
 pub struct LiteMarkApp {
@@ -65,6 +67,13 @@ pub struct LiteMarkApp {
     pub selecting: bool,
     pub zoom_epoch: u64,
     pub toast_epoch: u64,
+    pub pending_find_focus: bool,
+    pub pending_rename_focus: bool,
+    pub sidebar_menu: Option<SidebarMenu>,
+    pub rename_target: Option<SidebarTarget>,
+    pub rename_field: Entity<LineField>,
+    pub wysiwyg_bounds: Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>,
+    pub field_owns_keys: bool,
 }
 
 impl LiteMarkApp {
@@ -152,6 +161,28 @@ impl LiteMarkApp {
                 )
             }
         });
+        let rename_field = cx.new({
+            let app_handle = app_handle.clone();
+            move |cx| {
+                LineField::new(
+                    cx,
+                    "rename-field",
+                    "New name",
+                    Arc::new(|_, _| {}),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |_previous, app| {
+                            app_handle
+                                .update(app, |this, cx| {
+                                    this.commit_rename(cx);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    }),
+                )
+            }
+        });
 
         Self {
             tabs: vec![initial_tab],
@@ -192,6 +223,13 @@ impl LiteMarkApp {
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
+            pending_find_focus: false,
+            pending_rename_focus: false,
+            sidebar_menu: None,
+            rename_target: None,
+            rename_field,
+            wysiwyg_bounds: Rc::new(RefCell::new(Vec::new())),
+            field_owns_keys: false,
         }
     }
 
@@ -250,7 +288,17 @@ impl LiteMarkApp {
             .and_then(|f| f.to_str())
             .unwrap_or("Untitled.md")
             .to_string();
-        if name.to_lowercase().ends_with(".pdf") {
+        if is_pdf_path(&path) {
+            let paths: Vec<Option<&Path>> = self
+                .tabs
+                .iter()
+                .map(|tab| tab.file_path.as_deref())
+                .collect();
+            if let Some(index) = tab_index_for_path(&paths, &path) {
+                self.active_tab_id = self.tabs[index].id.clone();
+                self.show_pdf_modal = true;
+                return;
+            }
             match extract_text_from_pdf(&path) {
                 Ok((extracted_md, pages)) => {
                     let new_id = self.tab_ids.alloc();
@@ -287,10 +335,7 @@ impl LiteMarkApp {
                 return;
             }
         };
-        let stem = tab
-            .title
-            .trim_end_matches(".md")
-            .trim_end_matches(".markdown");
+        let stem = export_stem(&tab.title);
         let ext = match format {
             "markdown" => "md",
             "text" => "txt",
@@ -300,7 +345,7 @@ impl LiteMarkApp {
         let Some(dest) = pick_save_file(&default_name, ext) else {
             return;
         };
-        match std::fs::write(&dest, body) {
+        match atomic_save(&dest, &body) {
             Ok(()) => self.show_toast(
                 format!(
                     "Exported to {}",
@@ -313,6 +358,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_format_cmd(&mut self, cmd: &'static str) {
+        if self.field_owns_keys {
+            return;
+        }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) && cmd != "undo" && cmd != "redo"
         {
             self.show_error("PDF files are read-only.");
@@ -402,6 +450,20 @@ impl LiteMarkApp {
         let Some(path) = pick_save_file(&suggested_name, "md") else {
             return;
         };
+        let paths: Vec<Option<&Path>> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.file_path.as_deref())
+            .collect();
+        let active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == self.active_tab_id)
+            .unwrap_or(0);
+        if path_owned_by_other_tab(&paths, active, &path) {
+            self.show_error("That path is already open in another tab.");
+            return;
+        }
         let content = self
             .active_tab()
             .map(|tab| tab.content.clone())
@@ -419,6 +481,7 @@ impl LiteMarkApp {
                     self.show_toast(format!("Saved {title}"), cx);
                 }
                 self.workspace = scan_workspace_dir(&self.workspace.folder_path);
+                self.refresh_workspace_ids();
             }
             Err(err) => self.show_error(format!("Couldn't save {}: {err}", path.display())),
         }
@@ -534,6 +597,12 @@ impl LiteMarkApp {
 
     fn input_blocked(&self) -> bool {
         self.prompt.is_some()
+    }
+
+    fn text_field_focused(&self, window: &Window, cx: &App) -> bool {
+        self.find_field.read(cx).is_focused(window)
+            || self.replace_field.read(cx).is_focused(window)
+            || self.rename_field.read(cx).is_focused(window)
     }
 
     fn show_error(&mut self, message: impl Into<String>) {
@@ -690,11 +759,31 @@ impl LiteMarkApp {
             |name| folder.join(name).exists(),
         )?;
         let content = tab.content.clone();
-        atomic_save(&planned.path, &content)
-            .map_err(|err| format!("Couldn't save {}: {err}", planned.path.display()))?;
+        let saved_path = if planned.path.exists() {
+            atomic_save(&planned.path, &content)
+                .map_err(|err| format!("Couldn't save {}: {err}", planned.path.display()))?;
+            planned.path
+        } else {
+            let parent = planned
+                .path
+                .parent()
+                .map(|parent| parent.to_path_buf())
+                .unwrap_or_else(|| folder.clone());
+            let name = planned
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| planned.title.clone());
+            atomic_save_new(&parent, &name, &content)
+                .map_err(|err| format!("Couldn't save {}/{name}: {err}", parent.display()))?
+        };
+        let saved_title = saved_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or(planned.title);
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
-            tab.file_path = Some(planned.path);
-            tab.title = planned.title;
+            tab.file_path = Some(saved_path);
+            tab.title = saved_title;
             tab.file_type = FileType::from_filename(&tab.title);
             tab.is_modified = false;
         }
@@ -846,6 +935,181 @@ impl LiteMarkApp {
         }
     }
 
+    fn refresh_workspace_ids(&mut self) {
+        for tab in &mut self.tabs {
+            tab.workspace_file_id = tab.file_path.as_ref().and_then(|path| {
+                self.workspace
+                    .files
+                    .iter()
+                    .find(|file| &file.path == path)
+                    .map(|file| file.id.clone())
+            });
+        }
+    }
+
+    fn retarget_open_tabs(&mut self, old: &Path, new_path: &Path) {
+        for tab in &mut self.tabs {
+            let Some(path) = tab.file_path.clone() else {
+                continue;
+            };
+            if path == old {
+                tab.file_path = Some(new_path.to_path_buf());
+                if let Some(name) = new_path.file_name().and_then(|name| name.to_str()) {
+                    tab.title = name.to_string();
+                    tab.file_type = FileType::from_filename(&tab.title);
+                }
+            } else if let Ok(rest) = path.strip_prefix(old) {
+                tab.file_path = Some(new_path.join(rest));
+            }
+        }
+    }
+
+    fn request_trash_file(&mut self, id: String) {
+        let Some(file) = self
+            .workspace
+            .files
+            .iter()
+            .find(|file| file.id == id)
+            .cloned()
+        else {
+            self.show_error("That note is no longer in the folder.");
+            return;
+        };
+        let modified = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.file_path.as_ref() == Some(&file.path))
+            .map(|tab| tab.is_modified);
+        self.prompt = Some(match plan_trash(modified) {
+            TrashPlan::Prompt => Prompt::TrashDirtyFile { id },
+            TrashPlan::Proceed => Prompt::DeleteFile { id },
+        });
+    }
+
+    fn request_trash_folder(&mut self, id: String) {
+        let Some(folder) = self
+            .workspace
+            .folders
+            .iter()
+            .find(|folder| folder.id == id)
+            .cloned()
+        else {
+            self.show_error("That folder is no longer available.");
+            return;
+        };
+        let prefix = folder.path.clone();
+        let modified = self
+            .tabs
+            .iter()
+            .filter(|tab| {
+                tab.file_path
+                    .as_ref()
+                    .is_some_and(|path| path.starts_with(&prefix))
+            })
+            .map(|tab| tab.is_modified);
+        self.prompt = Some(match plan_trash(modified) {
+            TrashPlan::Prompt => Prompt::TrashDirtyFolder { id },
+            TrashPlan::Proceed => Prompt::DeleteFolder { id },
+        });
+    }
+
+    fn dirty_tab_ids_for_path(&self, path: &Path) -> Vec<String> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.is_modified && tab.file_path.as_deref() == Some(path))
+            .map(|tab| tab.id.clone())
+            .collect()
+    }
+
+    fn dirty_tab_ids_under(&self, prefix: &Path) -> Vec<String> {
+        self.tabs
+            .iter()
+            .filter(|tab| {
+                tab.is_modified
+                    && tab
+                        .file_path
+                        .as_ref()
+                        .is_some_and(|path| path.starts_with(prefix))
+            })
+            .map(|tab| tab.id.clone())
+            .collect()
+    }
+
+    fn save_ids(&mut self, ids: &[String]) -> Result<(), String> {
+        for id in ids {
+            self.save_tab(id)?;
+        }
+        Ok(())
+    }
+
+    fn begin_rename(&mut self, target: SidebarTarget, cx: &mut Context<Self>) {
+        let name = match &target {
+            SidebarTarget::File(id) => self
+                .workspace
+                .files
+                .iter()
+                .find(|file| &file.id == id)
+                .map(|file| file.name.clone()),
+            SidebarTarget::Folder(id) => self
+                .workspace
+                .folders
+                .iter()
+                .find(|folder| &folder.id == id)
+                .map(|folder| folder.name.clone()),
+        };
+        let Some(name) = name else {
+            self.show_error("That item is no longer in the folder.");
+            return;
+        };
+        self.sidebar_menu = None;
+        self.rename_target = Some(target);
+        self.pending_rename_focus = true;
+        self.rename_field.update(cx, |field, _cx| {
+            field.set_text(name);
+        });
+    }
+
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.rename_target.take() else {
+            return;
+        };
+        let name = self.rename_field.read(cx).content().trim().to_string();
+        if name.is_empty() {
+            self.show_error("Enter a name.");
+            self.rename_target = Some(target);
+            return;
+        }
+        let renamed = match &target {
+            SidebarTarget::File(id) => self
+                .workspace
+                .files
+                .iter()
+                .find(|file| &file.id == id)
+                .map(|file| file.path.clone()),
+            SidebarTarget::Folder(id) => self
+                .workspace
+                .folders
+                .iter()
+                .find(|folder| &folder.id == id)
+                .map(|folder| folder.path.clone()),
+        };
+        let Some(old) = renamed else {
+            self.show_error("That item is no longer in the folder.");
+            return;
+        };
+        match safe_rename(&old, &name) {
+            Ok(new_path) => {
+                self.retarget_open_tabs(&old, &new_path);
+                self.workspace = scan_workspace_dir(&self.workspace.folder_path);
+                self.refresh_workspace_ids();
+            }
+            Err(err) => {
+                self.show_error(format!("Couldn't rename: {err}"));
+                self.rename_target = Some(target);
+            }
+        }
+    }
+
     fn trash_file(&mut self, id: &str) {
         let Some(file) = self
             .workspace
@@ -960,6 +1224,60 @@ impl LiteMarkApp {
                     self.trash_folder(&id);
                 }
             }
+            Prompt::TrashDirtyFile { id } => match trash_action(match choice {
+                "Save" => TrashChoice::Save,
+                "Discard" => TrashChoice::Discard,
+                _ => TrashChoice::Cancel,
+            }) {
+                TrashAction::Abort => {}
+                TrashAction::DiscardThenTrash => self.trash_file(&id),
+                TrashAction::SaveThenTrash => {
+                    let path = self
+                        .workspace
+                        .files
+                        .iter()
+                        .find(|file| file.id == id)
+                        .map(|file| file.path.clone());
+                    let Some(path) = path else {
+                        self.show_error("That note is no longer in the folder.");
+                        return;
+                    };
+                    let ids = self.dirty_tab_ids_for_path(&path);
+                    if let Err(err) = self.save_ids(&ids) {
+                        self.show_error(err);
+                        self.prompt = Some(Prompt::TrashDirtyFile { id });
+                        return;
+                    }
+                    self.trash_file(&id);
+                }
+            },
+            Prompt::TrashDirtyFolder { id } => match trash_action(match choice {
+                "Save" => TrashChoice::Save,
+                "Discard" => TrashChoice::Discard,
+                _ => TrashChoice::Cancel,
+            }) {
+                TrashAction::Abort => {}
+                TrashAction::DiscardThenTrash => self.trash_folder(&id),
+                TrashAction::SaveThenTrash => {
+                    let prefix = self
+                        .workspace
+                        .folders
+                        .iter()
+                        .find(|folder| folder.id == id)
+                        .map(|folder| folder.path.clone());
+                    let Some(prefix) = prefix else {
+                        self.show_error("That folder is no longer available.");
+                        return;
+                    };
+                    let ids = self.dirty_tab_ids_under(&prefix);
+                    if let Err(err) = self.save_ids(&ids) {
+                        self.show_error(err);
+                        self.prompt = Some(Prompt::TrashDirtyFolder { id });
+                        return;
+                    }
+                    self.trash_folder(&id);
+                }
+            },
         }
     }
 
@@ -995,7 +1313,7 @@ impl LiteMarkApp {
     }
 
     fn editor_backspace(&mut self) {
-        if self.input_blocked() {
+        if self.field_owns_keys || self.input_blocked() {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
@@ -1015,7 +1333,7 @@ impl LiteMarkApp {
     }
 
     fn editor_delete(&mut self) {
-        if self.input_blocked() {
+        if self.field_owns_keys || self.input_blocked() {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
@@ -1035,7 +1353,7 @@ impl LiteMarkApp {
     }
 
     fn editor_newline(&mut self) {
-        if self.input_blocked() {
+        if self.field_owns_keys || self.input_blocked() {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
@@ -1050,7 +1368,7 @@ impl LiteMarkApp {
     }
 
     fn editor_move(&mut self, edit: impl FnOnce(&mut DocumentTab)) {
-        if self.input_blocked() {
+        if self.field_owns_keys || self.input_blocked() {
             return;
         }
         if let Some(tab) = self.active_tab_mut() {
@@ -1075,10 +1393,20 @@ impl LiteMarkApp {
             return;
         };
         self.focus_handle.focus(window);
+        self.applied_focus = Some(FocusSlot::Editor);
+        self.field_owns_keys = false;
         if let Some(tab) = self.active_tab_mut() {
-            tab.place(offset, event.modifiers.shift);
+            if event.click_count >= 3 {
+                tab.place(offset, false);
+                tab.select_line();
+            } else if event.click_count == 2 {
+                tab.place(offset, false);
+                tab.select_word();
+            } else {
+                tab.place(offset, event.modifiers.shift);
+            }
         }
-        self.selecting = true;
+        self.selecting = event.click_count <= 1;
         cx.notify();
     }
 
@@ -1197,10 +1525,10 @@ impl EntityInputHandler for LiteMarkApp {
         &mut self,
         range_utf16: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.input_blocked() {
+        if self.text_field_focused(window, cx) || self.input_blocked() {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
@@ -1324,6 +1652,15 @@ impl Render for LiteMarkApp {
             }
             self.applied_focus = Some(next_focus);
         }
+        if self.pending_find_focus && self.show_find_replace {
+            self.pending_find_focus = false;
+            self.find_field.read(cx).focus(window);
+        }
+        if self.pending_rename_focus && self.rename_target.is_some() {
+            self.pending_rename_focus = false;
+            self.rename_field.read(cx).focus(window);
+        }
+        self.field_owns_keys = self.text_field_focused(window, cx);
         let text_color = theme.text_primary;
         let placeholder_color = theme.placeholder;
         let field_bg = theme.bg_input;
@@ -1566,6 +1903,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = true;
+                    this.pending_find_focus = true;
                     this.open_menu = None;
                     cx.notify();
                 });
@@ -1758,6 +2096,13 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = !this.show_find_replace;
+                    if this.show_find_replace {
+                        this.pending_find_focus = true;
+                    } else {
+                        this.pending_find_focus = false;
+                        this.applied_focus = None;
+                        this.field_owns_keys = false;
+                    }
                     cx.notify();
                 });
             }
@@ -1816,6 +2161,9 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = false;
+                    this.pending_find_focus = false;
+                    this.applied_focus = None;
+                    this.field_owns_keys = false;
                     cx.notify();
                 });
             }
@@ -1864,7 +2212,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |id: String, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.prompt = Some(Prompt::DeleteFile { id });
+                    this.request_trash_file(id);
                     cx.notify();
                 });
             }
@@ -1874,10 +2222,89 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |id: String, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.prompt = Some(Prompt::DeleteFolder { id });
+                    this.request_trash_folder(id);
                     cx.notify();
                 });
             }
+        };
+
+        let on_sidebar_context = {
+            let view = view.clone();
+            move |target: SidebarTarget, position: Point<Pixels>, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.sidebar_menu = Some(SidebarMenu { target, position });
+                    cx.notify();
+                });
+            }
+        };
+        let on_sidebar_rename = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    if let Some(menu) = this.sidebar_menu.take() {
+                        this.begin_rename(menu.target, cx);
+                    }
+                    cx.notify();
+                });
+            }
+        };
+        let on_sidebar_delete = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    if let Some(menu) = this.sidebar_menu.take() {
+                        match menu.target {
+                            SidebarTarget::File(id) => this.request_trash_file(id),
+                            SidebarTarget::Folder(id) => this.request_trash_folder(id),
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        };
+        let on_sidebar_dismiss = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.sidebar_menu = None;
+                    cx.notify();
+                });
+            }
+        };
+        let on_rename_cancel = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.rename_target = None;
+                    this.field_owns_keys = false;
+                    this.applied_focus = None;
+                    cx.notify();
+                });
+            }
+        };
+        let on_rename_commit = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.commit_rename(cx);
+                    cx.notify();
+                });
+            }
+        };
+        let on_wysiwyg_place: WysiwygPlace = {
+            let view = view.clone();
+            Arc::new(move |offset: usize, window: &mut Window, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.sidebar_menu = None;
+                    this.focus_handle.focus(window);
+                    this.applied_focus = Some(FocusSlot::Editor);
+                    this.field_owns_keys = false;
+                    if let Some(tab) = this.active_tab_mut() {
+                        tab.place(offset, false);
+                    }
+                    cx.notify();
+                });
+            })
         };
 
         let on_choose_dir = {
@@ -2180,6 +2607,7 @@ impl Render for LiteMarkApp {
             .id("litemark-root")
             .track_focus(&self.focus_handle)
             .key_context("Editor")
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -2274,6 +2702,13 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &FindReplace, _window, cx| {
                 this.show_find_replace = !this.show_find_replace;
+                if this.show_find_replace {
+                    this.pending_find_focus = true;
+                } else {
+                    this.pending_find_focus = false;
+                    this.applied_focus = None;
+                    this.field_owns_keys = false;
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
@@ -2318,6 +2753,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &OpenReplace, _window, cx| {
                 this.show_find_replace = true;
+                this.pending_find_focus = true;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleLineNumbers, _window, cx| {
@@ -2520,8 +2956,12 @@ impl Render for LiteMarkApp {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _window, _cx| {
-                    this.selecting = false;
+                cx.listener(|this, _: &MouseUpEvent, window, cx| {
+                    if this.selecting {
+                        this.selecting = false;
+                        window.refresh();
+                        cx.notify();
+                    }
                 }),
             )
             .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
@@ -2637,6 +3077,7 @@ impl Render for LiteMarkApp {
                                         on_delete_folder: on_delete_folder.clone(),
                                         on_choose_dir: on_choose_dir.clone(),
                                         on_close: on_toggle_sidebar.clone(),
+                                        on_context_menu: on_sidebar_context.clone(),
                                     },
                                     &theme,
                                 ))
@@ -2653,6 +3094,8 @@ impl Render for LiteMarkApp {
                                         &theme,
                                         self.settings.show_line_numbers,
                                     ),
+                                    wysiwyg_bounds: self.wysiwyg_bounds.clone(),
+                                    on_wysiwyg_place: on_wysiwyg_place.clone(),
                                 },
                                 &theme,
                             )),
@@ -2688,6 +3131,8 @@ impl Render for LiteMarkApp {
                             base_font_size: self.settings.base_font_size,
                             show_zoom_hud: self.show_zoom_hud,
                             raw_editor: self.raw_editor(cx, &theme, false),
+                            wysiwyg_bounds: self.wysiwyg_bounds.clone(),
+                            on_wysiwyg_place: on_wysiwyg_place.clone(),
                         },
                         &theme,
                     ))
@@ -2852,6 +3297,34 @@ impl Render for LiteMarkApp {
                                 vec![("Cancel", false), ("Trash", true)],
                             )
                         }
+                        Prompt::TrashDirtyFile { id } => {
+                            let name = self
+                                .workspace
+                                .files
+                                .iter()
+                                .find(|file| &file.id == id)
+                                .map(|file| file.name.clone())
+                                .unwrap_or_else(|| "this note".into());
+                            (
+                                "Unsaved changes",
+                                format!("Save changes to {name} before moving it to the Trash?"),
+                                vec![("Cancel", false), ("Discard", false), ("Save", true)],
+                            )
+                        }
+                        Prompt::TrashDirtyFolder { id } => {
+                            let name = self
+                                .workspace
+                                .folders
+                                .iter()
+                                .find(|folder| &folder.id == id)
+                                .map(|folder| folder.name.clone())
+                                .unwrap_or_else(|| "this folder".into());
+                            (
+                                "Unsaved changes",
+                                format!("Save changes in {name} before moving it to the Trash?"),
+                                vec![("Cancel", false), ("Discard", false), ("Save", true)],
+                            )
+                        }
                     };
                 parent.child(render_prompt_modal(
                     title,
@@ -2860,6 +3333,79 @@ impl Render for LiteMarkApp {
                     on_prompt.clone(),
                     &theme,
                 ))
+            })
+            .child(render_client_resize_borders(window))
+            .when_some(self.sidebar_menu.clone(), |parent, menu| {
+                parent.child(render_sidebar_context_menu(
+                    &menu,
+                    on_sidebar_rename.clone(),
+                    on_sidebar_delete.clone(),
+                    on_sidebar_dismiss.clone(),
+                    &theme,
+                ))
+            })
+            .when(self.rename_target.is_some(), |parent| {
+                let cancel = on_rename_cancel.clone();
+                let commit = on_rename_commit.clone();
+                parent.child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .top_0()
+                        .left_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(hsla(0.0, 0.0, 0.0, 0.35))
+                        .child(
+                            div()
+                                .w(px(360.0))
+                                .p(px(16.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(10.0))
+                                .rounded(px(8.0))
+                                .bg(theme.menu_bg)
+                                .border_1()
+                                .border_color(theme.border_surface)
+                                .shadow_lg()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Rename"),
+                                )
+                                .child(self.rename_field.clone())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_end()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .id("rename-cancel")
+                                                .px(px(10.0))
+                                                .py(px(4.0))
+                                                .rounded(px(6.0))
+                                                .cursor_pointer()
+                                                .child("Cancel")
+                                                .on_click(move |_, _, cx| cancel(cx)),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("rename-commit")
+                                                .px(px(10.0))
+                                                .py(px(4.0))
+                                                .rounded(px(6.0))
+                                                .cursor_pointer()
+                                                .bg(theme.bg_hover)
+                                                .child("Rename")
+                                                .on_click(move |_, _, cx| commit(cx)),
+                                        ),
+                                ),
+                        ),
+                )
             })
     }
 }

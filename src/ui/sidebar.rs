@@ -4,6 +4,18 @@ use crate::theme::{sz, Theme};
 use gpui::prelude::*;
 use gpui::*;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarTarget {
+    File(String),
+    Folder(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct SidebarMenu {
+    pub target: SidebarTarget,
+    pub position: Point<Pixels>,
+}
+
 #[allow(dead_code)]
 pub struct SidebarProps<
     FSelect,
@@ -13,6 +25,7 @@ pub struct SidebarProps<
     FDeleteFolder,
     FChooseDir,
     FClose,
+    FContext,
 > where
     FSelect: Fn(WorkspaceFile, &mut App) + 'static + Clone,
     FCreateFile: Fn(Option<String>, String, &mut App) + 'static + Clone,
@@ -21,6 +34,7 @@ pub struct SidebarProps<
     FDeleteFolder: Fn(String, &mut App) + 'static + Clone,
     FChooseDir: Fn(&mut App) + 'static + Clone,
     FClose: Fn(&mut App) + 'static + Clone,
+    FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
 {
     pub workspace: WorkspaceDirectory,
     pub active_file_id: Option<String>,
@@ -34,6 +48,7 @@ pub struct SidebarProps<
     pub on_delete_folder: FDeleteFolder,
     pub on_choose_dir: FChooseDir,
     pub on_close: FClose,
+    pub on_context_menu: FContext,
 }
 
 pub fn render_sidebar<
@@ -44,6 +59,7 @@ pub fn render_sidebar<
     FDeleteFolder,
     FChooseDir,
     FClose,
+    FContext,
 >(
     props: SidebarProps<
         FSelect,
@@ -53,6 +69,7 @@ pub fn render_sidebar<
         FDeleteFolder,
         FChooseDir,
         FClose,
+        FContext,
     >,
     theme: &Theme,
 ) -> impl IntoElement
@@ -64,6 +81,7 @@ where
     FDeleteFolder: Fn(String, &mut App) + 'static + Clone,
     FChooseDir: Fn(&mut App) + 'static + Clone,
     FClose: Fn(&mut App) + 'static + Clone,
+    FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
 {
     let on_select = props.on_select_file;
     let on_create_file = props.on_create_file;
@@ -72,6 +90,7 @@ where
     let on_delete_folder = props.on_delete_folder;
     let on_choose_dir = props.on_choose_dir;
     let on_close = props.on_close;
+    let on_context = props.on_context_menu;
     let active_id = props.active_file_id;
     let open_ids = props.open_file_ids;
 
@@ -305,6 +324,7 @@ where
                             let create = on_create_file.clone();
                             let create_dir = on_create_folder.clone();
                             let delete = on_delete_folder.clone();
+                            let on_context = on_context.clone();
                             let name = folder.name.clone();
                             div()
                                 .id(SharedString::from(format!("folder-row-{}", folder_id)))
@@ -315,6 +335,17 @@ where
                                 .pl(px(12.0 + depth as f32 * 12.0))
                                 .pr(px(8.0))
                                 .rounded(sz::R_MD)
+                                .on_mouse_down(MouseButton::Right, {
+                                    let id = folder_id.clone();
+                                    move |event, _, cx| {
+                                        cx.stop_propagation();
+                                        on_context(
+                                            SidebarTarget::Folder(id.clone()),
+                                            event.position,
+                                            cx,
+                                        );
+                                    }
+                                })
                                 .child(
                                     div()
                                         .flex()
@@ -403,6 +434,7 @@ where
                             let file_clone = file.clone();
                             let sel = on_select.clone();
                             let del = on_delete_file.clone();
+                            let on_context = on_context.clone();
                             let fid = file.id.clone();
 
                             div()
@@ -432,6 +464,17 @@ where
                                     })
                                 })
                                 .on_click(move |_, _, cx| sel(file_clone.clone(), cx))
+                                .on_mouse_down(MouseButton::Right, {
+                                    let id = fid.clone();
+                                    move |event, _, cx| {
+                                        cx.stop_propagation();
+                                        on_context(
+                                            SidebarTarget::File(id.clone()),
+                                            event.position,
+                                            cx,
+                                        );
+                                    }
+                                })
                                 // Active 3px indicator bar
                                 .when(is_active, |s| {
                                     s.child(
@@ -564,4 +607,74 @@ fn folder_depth(folders: &[crate::model::WorkspaceFolder], id: &str) -> usize {
             .and_then(|folder| folder.parent_id.clone());
     }
     depth
+}
+
+pub fn render_sidebar_context_menu<FRename, FDelete, FDismiss>(
+    menu: &SidebarMenu,
+    on_rename: FRename,
+    on_delete: FDelete,
+    on_dismiss: FDismiss,
+    theme: &Theme,
+) -> impl IntoElement
+where
+    FRename: Fn(&mut App) + 'static + Clone,
+    FDelete: Fn(&mut App) + 'static + Clone,
+    FDismiss: Fn(&mut App) + 'static + Clone,
+{
+    let dismiss_left = on_dismiss.clone();
+    let dismiss_right = on_dismiss.clone();
+    div()
+        .absolute()
+        .size_full()
+        .top_0()
+        .left_0()
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            dismiss_left(cx);
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            dismiss_right(cx);
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .absolute()
+                .left(menu.position.x)
+                .top(menu.position.y)
+                .w(px(168.0))
+                .py(px(4.0))
+                .rounded(sz::R_MD)
+                .bg(theme.menu_bg)
+                .border_1()
+                .border_color(theme.border_surface)
+                .shadow_lg()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .child({
+                    let on_rename = on_rename.clone();
+                    div()
+                        .id("sidebar-menu-rename")
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .cursor_pointer()
+                        .text_size(px(13.0))
+                        .text_color(theme.text_primary)
+                        .hover(|style| style.bg(theme.bg_hover))
+                        .on_click(move |_, _, cx| on_rename(cx))
+                        .child("Rename")
+                })
+                .child({
+                    let on_delete = on_delete.clone();
+                    div()
+                        .id("sidebar-menu-delete")
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .cursor_pointer()
+                        .text_size(px(13.0))
+                        .text_color(theme.text_primary)
+                        .hover(|style| style.bg(theme.bg_hover))
+                        .on_click(move |_, _, cx| on_delete(cx))
+                        .child("Delete")
+                }),
+        )
 }

@@ -71,6 +71,52 @@ pub fn tab_index_for_path(paths: &[Option<&Path>], path: &Path) -> Option<usize>
     paths.iter().position(|existing| *existing == Some(path))
 }
 
+/// True when `dest` is the path of some tab other than `active`.
+pub fn path_owned_by_other_tab(paths: &[Option<&Path>], active: usize, dest: &Path) -> bool {
+    paths
+        .iter()
+        .enumerate()
+        .any(|(index, existing)| index != active && *existing == Some(dest))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrashPlan {
+    /// Every affected tab is clean. Deleting will not drop unsaved edits.
+    Proceed,
+    /// At least one affected tab has unsaved edits. Ask before deleting.
+    Prompt,
+}
+
+pub fn plan_trash(affected_modified: impl IntoIterator<Item = bool>) -> TrashPlan {
+    if affected_modified.into_iter().any(|modified| modified) {
+        TrashPlan::Prompt
+    } else {
+        TrashPlan::Proceed
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrashChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrashAction {
+    Abort,
+    SaveThenTrash,
+    DiscardThenTrash,
+}
+
+pub fn trash_action(choice: TrashChoice) -> TrashAction {
+    match choice {
+        TrashChoice::Save => TrashAction::SaveThenTrash,
+        TrashChoice::Discard => TrashAction::DiscardThenTrash,
+        TrashChoice::Cancel => TrashAction::Abort,
+    }
+}
+
 /// Clicking a tab id activates that tab, including a newly created untitled tab.
 pub fn active_after_click(tab_ids: &[&str], clicked: &str, current: &str) -> String {
     if tab_ids.contains(&clicked) {
@@ -350,5 +396,36 @@ mod tests {
         assert_eq!(FileType::from_filename("image.png"), FileType::PlainText);
         assert_eq!(FileType::from_filename("scan.PDF"), FileType::Pdf);
         assert_ne!(FileType::from_filename("image.png"), FileType::Markdown);
+    }
+
+    #[test]
+    fn trash_of_a_dirty_tab_prompts_before_discarding() {
+        assert_eq!(plan_trash([false, false]), TrashPlan::Proceed);
+        assert_eq!(plan_trash([false, true]), TrashPlan::Prompt);
+        assert_eq!(trash_action(TrashChoice::Cancel), TrashAction::Abort);
+        assert_eq!(trash_action(TrashChoice::Save), TrashAction::SaveThenTrash);
+        assert_eq!(
+            trash_action(TrashChoice::Discard),
+            TrashAction::DiscardThenTrash
+        );
+    }
+
+    #[test]
+    fn save_as_refuses_a_path_another_tab_already_has() {
+        let notes = Path::new("/notes/a.md");
+        let other = Path::new("/notes/b.md");
+        let open = [Some(notes), Some(other)];
+        assert!(path_owned_by_other_tab(&open, 0, other));
+        assert!(!path_owned_by_other_tab(&open, 0, notes));
+        assert!(!path_owned_by_other_tab(&open, 1, other));
+        assert_eq!(
+            tab_index_for_path(&open, Path::new("/notes/scan.pdf")),
+            None
+        );
+        let with_pdf = [Some(notes), Some(Path::new("/notes/scan.pdf"))];
+        assert_eq!(
+            tab_index_for_path(&with_pdf, Path::new("/notes/scan.pdf")),
+            Some(1)
+        );
     }
 }

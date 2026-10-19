@@ -53,45 +53,50 @@ impl UndoHistory {
         self.redo_bytes = 0;
     }
 
-    /// Undo the latest edit. Returns the inverse that was applied to `content`.
-    pub fn undo(&mut self, content: &mut String) -> bool {
-        let Some(edit) = self.undo.pop() else {
-            return false;
-        };
+    /// Undo the latest edit.
+    ///
+    /// The returned caret is `start + inserted.len()`, where `inserted` is the
+    /// text this undo wrote back into `content` (the popped edit's `deleted`
+    /// bytes). Callers still snap that offset onto a char boundary.
+    pub fn undo(&mut self, content: &mut String) -> Option<usize> {
+        let edit = self.undo.pop()?;
         self.undo_bytes = self.undo_bytes.saturating_sub(edit.cost());
         let end = edit.start + edit.inserted.len();
         if end > content.len() || content.get(edit.start..end).is_none() {
-            return false;
+            return None;
         }
-        content.replace_range(edit.start..end, &edit.deleted);
+        let inserted = edit.deleted;
+        content.replace_range(edit.start..end, &inserted);
+        let caret = edit.start + inserted.len();
         let inverse = DiffEdit {
             start: edit.start,
             deleted: edit.inserted,
-            inserted: edit.deleted,
+            inserted,
         };
         self.redo_bytes += inverse.cost();
         self.redo.push(inverse);
-        true
+        Some(caret)
     }
 
-    pub fn redo(&mut self, content: &mut String) -> bool {
-        let Some(edit) = self.redo.pop() else {
-            return false;
-        };
+    /// Redo the latest undone edit. The caret is the end of the text just written.
+    pub fn redo(&mut self, content: &mut String) -> Option<usize> {
+        let edit = self.redo.pop()?;
         self.redo_bytes = self.redo_bytes.saturating_sub(edit.cost());
         let end = edit.start + edit.inserted.len();
         if end > content.len() || content.get(edit.start..end).is_none() {
-            return false;
+            return None;
         }
-        content.replace_range(edit.start..end, &edit.deleted);
+        let inserted = edit.deleted;
+        content.replace_range(edit.start..end, &inserted);
+        let caret = edit.start + inserted.len();
         let inverse = DiffEdit {
             start: edit.start,
             deleted: edit.inserted,
-            inserted: edit.deleted,
+            inserted,
         };
         self.undo_bytes += inverse.cost();
         self.undo.push(inverse);
-        true
+        Some(caret)
     }
 }
 
@@ -129,21 +134,30 @@ impl Caret {
         self.preferred_col = None;
     }
 
+    /// Extend the selection to `offset`, keeping the anchor (the end that is not the caret).
     pub fn select_to(&mut self, offset: usize) {
-        let head = self.cursor();
-        if offset < head {
-            self.range = offset..head;
+        let anchor = if self.range.is_empty() {
+            self.cursor()
+        } else if self.reversed {
+            self.range.end
+        } else {
+            self.range.start
+        };
+        if offset < anchor {
+            self.range = offset..anchor;
             self.reversed = true;
         } else {
-            self.range = head..offset;
+            self.range = anchor..offset;
             self.reversed = false;
         }
         self.preferred_col = None;
     }
 
-    pub fn clamp(&mut self, len: usize) {
-        self.range.start = self.range.start.min(len);
-        self.range.end = self.range.end.min(len);
+    /// Clamp both ends to `content` and snap them onto char boundaries.
+    pub fn clamp(&mut self, content: &str) {
+        let len = content.len();
+        self.range.start = floor_char_boundary(content, self.range.start.min(len));
+        self.range.end = floor_char_boundary(content, self.range.end.min(len));
         if self.range.end < self.range.start {
             self.range = self.range.end..self.range.start;
         }
@@ -205,7 +219,7 @@ pub fn line_start(content: &str, line_1: usize) -> usize {
 }
 
 pub fn line_end(content: &str, offset: usize) -> usize {
-    let offset = offset.min(content.len());
+    let offset = floor_char_boundary(content, offset.min(content.len()));
     content[offset..]
         .find('\n')
         .map(|index| offset + index)
@@ -213,11 +227,58 @@ pub fn line_end(content: &str, offset: usize) -> usize {
 }
 
 pub fn home_offset(content: &str, offset: usize) -> usize {
-    let offset = offset.min(content.len());
+    let offset = floor_char_boundary(content, offset.min(content.len()));
     content[..offset]
         .rfind('\n')
         .map(|index| index + 1)
         .unwrap_or(0)
+}
+
+fn char_class(ch: char) -> u8 {
+    if ch.is_alphanumeric() || ch == '_' {
+        0
+    } else if ch.is_whitespace() {
+        1
+    } else {
+        2
+    }
+}
+
+/// Byte range of the word, whitespace run, or punctuation run containing `offset`.
+pub fn word_extent(content: &str, offset: usize) -> Range<usize> {
+    if content.is_empty() {
+        return 0..0;
+    }
+    let mut offset = floor_char_boundary(content, offset.min(content.len()));
+    if offset >= content.len() {
+        offset = previous_grapheme(content, content.len());
+    }
+    let Some(ch) = content[offset..].chars().next() else {
+        return offset..offset;
+    };
+    let kind = char_class(ch);
+    let start = content[..offset]
+        .char_indices()
+        .rev()
+        .find(|(_, candidate)| char_class(*candidate) != kind)
+        .map(|(index, candidate)| index + candidate.len_utf8())
+        .unwrap_or(0);
+    let rel = content[offset..]
+        .char_indices()
+        .find(|(_, candidate)| char_class(*candidate) != kind)
+        .map(|(index, _)| index)
+        .unwrap_or(content.len() - offset);
+    start..offset + rel
+}
+
+/// Byte range of the logical line containing `offset`, including its newline.
+pub fn line_extent(content: &str, offset: usize) -> Range<usize> {
+    let start = home_offset(content, offset);
+    let mut end = line_end(content, start);
+    if content.as_bytes().get(end) == Some(&b'\n') {
+        end += 1;
+    }
+    start..end
 }
 
 pub fn offset_at_line_col(content: &str, line_1: usize, col_1: usize) -> usize {
@@ -503,17 +564,29 @@ pub fn find_next(hits: &[Range<usize>], cursor: usize, current: Option<usize>) -
     Some(0)
 }
 
+/// Previous hit that ends before `cursor`.
+///
+/// Find leaves the caret at the end of the current match, so a search from
+/// that caret (`hit.end`) must not select the match it is sitting on. When
+/// `current` is that match, it is excluded even if the caller passes the
+/// selection start.
 pub fn find_prev(hits: &[Range<usize>], cursor: usize, current: Option<usize>) -> Option<usize> {
     if hits.is_empty() {
         return None;
     }
     let scan_end = match current {
-        Some(index) if hits.get(index).is_some_and(|hit| hit.start == cursor) => index,
+        Some(index)
+            if hits
+                .get(index)
+                .is_some_and(|hit| cursor >= hit.start && cursor <= hit.end) =>
+        {
+            index
+        }
         _ => hits.len(),
     };
     hits[..scan_end]
         .iter()
-        .rposition(|hit| hit.start < cursor)
+        .rposition(|hit| hit.end < cursor)
         .or(Some(hits.len() - 1))
 }
 
@@ -679,6 +752,14 @@ mod tests {
         assert!(caret.reversed);
         assert_eq!(&content[caret.range.clone()], "bcd");
 
+        let mut extended = Caret::default();
+        extended.move_to(3);
+        extended.select_to(2);
+        extended.select_to(1);
+        assert_eq!(extended.range, 1..3, "shift-left keeps the anchor");
+        extended.select_to(5);
+        assert_eq!(extended.range, 3..5, "shift-right extends past the anchor");
+
         caret.move_to(5);
         move_vertical_collapsed(content, &mut caret, 1, false);
         assert_eq!(line_col(content, caret.cursor()), (2, 3));
@@ -736,7 +817,9 @@ mod tests {
         assert_eq!(hits.len(), 3);
         assert_eq!(find_next(&hits, 0, None), Some(0));
         assert_eq!(find_next(&hits, hits[0].start, Some(0)), Some(1));
-        assert_eq!(find_prev(&hits, hits[1].start, Some(1)), Some(0));
+        // The caret sits at the end of the selected match, not at its start.
+        assert_eq!(find_prev(&hits, hits[1].end, Some(1)), Some(0));
+        assert_eq!(find_prev(&hits, hits[1].end, None), Some(0));
         assert_eq!(find_next(&hits, hits[2].start, Some(2)), Some(0));
 
         let case_hits = find_matches(content, "cat", true);
@@ -765,10 +848,50 @@ mod tests {
         assert!(history.stored_bytes() < full_copies / 4);
         assert!(history.stored_bytes() <= UNDO_BYTE_BUDGET + 64);
         let before = content.clone();
-        assert!(history.undo(&mut content));
+        assert!(history.undo(&mut content).is_some());
         assert_ne!(content, before);
-        assert!(history.redo(&mut content));
+        assert!(history.redo(&mut content).is_some());
         assert_eq!(content, before);
+    }
+
+    #[test]
+    fn undo_caret_is_the_end_of_the_restored_text() {
+        let mut history = UndoHistory::default();
+        let mut content = "ab".to_string();
+        history.push(DiffEdit {
+            start: 0,
+            deleted: "ab".into(),
+            inserted: "😀".into(),
+        });
+        content.replace_range(0..2, "😀");
+        let caret = history.undo(&mut content).unwrap();
+        assert_eq!(content, "ab");
+        assert_eq!(caret, 2);
+        assert!(content.is_char_boundary(caret));
+        let caret = history.redo(&mut content).unwrap();
+        assert_eq!(content, "😀");
+        assert_eq!(caret, "😀".len());
+        assert!(content.is_char_boundary(caret));
+    }
+
+    #[test]
+    fn home_end_and_word_line_extents_stay_on_char_boundaries() {
+        let content = "a😀b\nកខ";
+        let inside_emoji = "a".len() + 1;
+        assert!(!content.is_char_boundary(inside_emoji));
+        let home = home_offset(content, inside_emoji);
+        let end = line_end(content, inside_emoji);
+        assert!(content.is_char_boundary(home));
+        assert!(content.is_char_boundary(end));
+        assert_eq!(home, 0);
+        assert_eq!(&content[home..end], "a😀b");
+
+        assert_eq!(word_extent("hello, world", 1), 0..5);
+        assert_eq!(word_extent("hello, world", 5), 5..6);
+        assert_eq!(line_extent("ab\ncd", 1), 0..3);
+        assert_eq!(line_extent("ab\ncd", 4), 3..5);
+        let khmer = line_extent(content, content.len());
+        assert!(content.is_char_boundary(khmer.start) && content.is_char_boundary(khmer.end));
     }
 
     #[test]

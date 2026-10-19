@@ -2,10 +2,28 @@ use crate::model::{
     file_dialog_block_reason, unique_name, FileType, PortalProbe, WorkspaceDirectory,
     WorkspaceFile, WorkspaceFolder,
 };
+use std::ffi::{c_char, CString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const AT_FDCWD: i32 = -100;
+const RENAME_NOREPLACE: u32 = 1;
+
+unsafe extern "C" {
+    fn renameat2(
+        olddirfd: i32,
+        oldpath: *const c_char,
+        newdirfd: i32,
+        newpath: *const c_char,
+        flags: u32,
+    ) -> i32;
+}
 
 pub const INITIAL_MARKDOWN: &str = r#"# Welcome to LiteMark
 
@@ -93,10 +111,40 @@ fn fsync_parent(path: &Path) -> io::Result<()> {
     dir.sync_all()
 }
 
-pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
-    let target = resolve_symlink_chain(path)?;
-    let original_perms = fs::metadata(&target).ok().map(|meta| meta.permissions());
+fn random_suffix() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let tick = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (std::process::id() as u64)
+}
 
+/// `renameat2(RENAME_NOREPLACE)`. Fails with [`io::ErrorKind::AlreadyExists`]
+/// when `to` is already present, including across a race with another writer.
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let from_c = CString::new(from.as_os_str().as_bytes())
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    let to_c = CString::new(to.as_os_str().as_bytes())
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    let rc = unsafe {
+        renameat2(
+            AT_FDCWD,
+            from_c.as_ptr(),
+            AT_FDCWD,
+            to_c.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
     let parent = target.parent().unwrap_or(Path::new("."));
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
@@ -105,33 +153,111 @@ pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
     };
     fs::create_dir_all(parent)?;
 
+    let original = fs::metadata(target).ok();
+    let mode = original
+        .as_ref()
+        .map(|meta| meta.permissions().mode() & 0o777)
+        .unwrap_or(0o644);
     let file_name = target
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("tmp");
-    let temp_path = parent.join(format!(".{file_name}.litemark-tmp"));
-    if fs::symlink_metadata(&temp_path)
-        .ok()
-        .is_some_and(|meta| meta.file_type().is_symlink())
-    {
-        fs::remove_file(&temp_path)?;
-    }
 
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temp_path)?;
-    file.write_all(content.as_bytes())?;
-    file.sync_all()?;
-    if let Some(perms) = original_perms {
-        fs::set_permissions(&temp_path, perms)?;
+    let mut last_err = io::Error::other("couldn't create a temporary file");
+    for _ in 0..8 {
+        let temp_path = parent.join(format!(".{file_name}.{}.litemark-tmp", random_suffix()));
+        let opened = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&temp_path);
+        let mut file = match opened {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                last_err = err;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        let write_result = (|| {
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            if let Some(meta) = &original {
+                fs::set_permissions(&temp_path, meta.permissions())?;
+            }
+            Ok(())
+        })();
+        drop(file);
+        if let Err(err) = write_result {
+            let _ = fs::remove_file(&temp_path);
+            return Err(err);
+        }
+        return Ok(temp_path);
     }
-    drop(file);
+    Err(last_err)
+}
 
-    fs::rename(&temp_path, &target)?;
+pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
+    let target = resolve_symlink_chain(path)?;
+    let temp_path = write_temp(&target, content)?;
+    if let Err(err) = fs::rename(&temp_path, &target) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
     fsync_parent(&target)?;
     Ok(())
+}
+
+/// Create `dir/desired_name` without replacing an existing file.
+/// If the name is taken, or appears between the check and the rename, try the
+/// next free name.
+pub fn atomic_save_new(dir: &Path, desired_name: &str, content: &str) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let mut blocked = Vec::new();
+    for _ in 0..64 {
+        let name = unique_name(desired_name, &|candidate| {
+            blocked.iter().any(|taken: &String| taken == candidate) || dir.join(candidate).exists()
+        });
+        let path = dir.join(&name);
+        let temp_path = write_temp(&path, content)?;
+        match rename_noreplace(&temp_path, &path) {
+            Ok(()) => {
+                fsync_parent(&path)?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&temp_path);
+                blocked.push(name);
+            }
+            Err(err) if err.raw_os_error() == Some(38) => {
+                // ENOSYS: fall back to a same-directory hard link, which also
+                // fails when the destination exists.
+                match fs::hard_link(&temp_path, &path) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(&temp_path);
+                        fsync_parent(&path)?;
+                        return Ok(path);
+                    }
+                    Err(link_err) if link_err.kind() == io::ErrorKind::AlreadyExists => {
+                        let _ = fs::remove_file(&temp_path);
+                        blocked.push(name);
+                    }
+                    Err(link_err) => {
+                        let _ = fs::remove_file(&temp_path);
+                        return Err(link_err);
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = fs::remove_file(&temp_path);
+                return Err(err);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free file name",
+    ))
 }
 
 /// Read a note. Failure is an error — callers must not substitute an empty document.
@@ -171,15 +297,16 @@ pub fn safe_create_file(parent: &Path, name: &str, content: &str) -> io::Result<
     Ok(target)
 }
 
-#[allow(dead_code)]
 pub fn safe_create_folder(parent: &Path, name: &str) -> io::Result<PathBuf> {
     let clean_name = sanitize_name(name);
-    let target = parent.join(clean_name);
-    fs::create_dir_all(&target)?;
+    if clean_name.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty name"));
+    }
+    let target = parent.join(&clean_name);
+    fs::create_dir(&target)?;
     Ok(target)
 }
 
-#[allow(dead_code)]
 pub fn safe_rename(old_path: &Path, new_name: &str) -> io::Result<PathBuf> {
     let clean_name = sanitize_name(new_name);
     if clean_name.is_empty() {
@@ -199,7 +326,7 @@ pub fn safe_rename(old_path: &Path, new_name: &str) -> io::Result<PathBuf> {
         ));
     }
     if target != old_path {
-        fs::rename(old_path, &target)?;
+        rename_noreplace(old_path, &target)?;
         fsync_parent(&target)?;
     }
     Ok(target)
@@ -482,6 +609,68 @@ mod tests {
             next_available_filename(&temp_dir, "New Note.md"),
             "New Note 2.md"
         );
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn atomic_save_uses_a_random_temp_and_removes_it_on_failure() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-tmpfail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let target = temp_dir.join("blocked.md");
+        fs::create_dir(&target).unwrap();
+        let err = atomic_save(&target, "nope").unwrap_err();
+        assert!(err.kind() != io::ErrorKind::NotFound || err.raw_os_error().is_some());
+        let leftovers: Vec<_> = fs::read_dir(&temp_dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains("litemark-tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        assert!(!temp_dir.join(".blocked.md.litemark-tmp").exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn new_path_save_does_not_replace_and_retries_the_next_name() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-newpath-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("Untitled.md"), "keep").unwrap();
+
+        let written = atomic_save_new(&temp_dir, "Untitled.md", "fresh").unwrap();
+        assert_eq!(written.file_name().unwrap(), "Untitled 2.md");
+        assert_eq!(
+            fs::read_to_string(temp_dir.join("Untitled.md")).unwrap(),
+            "keep"
+        );
+        assert_eq!(fs::read_to_string(&written).unwrap(), "fresh");
+
+        let mode = fs::metadata(&written).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn create_folder_does_not_create_missing_parents_or_replace() {
+        let temp_dir = std::env::temp_dir().join(format!("litemark-mkdir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let err = safe_create_folder(&temp_dir.join("missing"), "child").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!temp_dir.join("missing").exists());
+
+        let created = safe_create_folder(&temp_dir, "child").unwrap();
+        assert!(created.is_dir());
+        let again = safe_create_folder(&temp_dir, "child").unwrap_err();
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

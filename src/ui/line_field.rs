@@ -69,6 +69,14 @@ impl LineField {
         self.marked_range = None;
     }
 
+    pub fn focus(&self, window: &mut Window) {
+        self.focus_handle.focus(window);
+    }
+
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
     pub fn set_colors(
         &mut self,
         text: impl Into<Hsla>,
@@ -271,7 +279,15 @@ impl LineField {
         callback(true, cx);
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_handle.focus(window);
+        window.prevent_default();
+        cx.stop_propagation();
         self.selecting = true;
         let index = self.index_for_mouse(event.position);
         if event.modifiers.shift {
@@ -281,8 +297,9 @@ impl LineField {
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.selecting = false;
+        cx.notify();
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {

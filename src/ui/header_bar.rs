@@ -1,8 +1,8 @@
-use gpui::prelude::*;
-use gpui::*;
+use super::primitives::render_icon;
 use crate::model::DocumentTab;
 use crate::theme::{sz, Theme};
-use super::primitives::render_icon;
+use gpui::prelude::*;
+use gpui::*;
 
 pub struct HeaderBarProps<
     FSelectTab,
@@ -12,8 +12,7 @@ pub struct HeaderBarProps<
     FMinimize,
     FMaximize,
     FCloseWindow,
->
-where
+> where
     FSelectTab: Fn(String, &mut App) + 'static + Clone,
     FCloseTab: Fn(String, &mut App) + 'static + Clone,
     FNewTab: Fn(&mut App) + 'static + Clone,
@@ -88,6 +87,7 @@ where
         .on_mouse_down(MouseButton::Left, |e, window, cx| {
             if e.click_count == 2 {
                 window.zoom_window();
+                window.refresh();
             } else {
                 window.start_window_move();
             }
@@ -105,7 +105,7 @@ where
                 .right_0()
                 .bottom_0()
                 .h(px(1.0))
-                .bg(theme.border_subtle)
+                .bg(theme.border_subtle),
         )
         // Left: Sidebar Toggle + Tabs + "+"
         .child(
@@ -115,28 +115,35 @@ where
                 .h_full()
                 .child(
                     // Sidebar Toggle: 32x28 at y 6-34, 8px gap to tabs
-                    div()
-                        .flex()
-                        .items_center()
-                        .h_full()
-                        .mr(px(8.0))
-                        .child({
-                            let t_sb = on_toggle_sidebar.clone();
-                            div()
-                                .id("hb-toggle-sidebar")
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w(sz::BTN)
-                                .h(sz::TB_TILE_H)
-                                .rounded(sz::R_MD)
-                                .cursor_pointer()
-                                .bg(if props.is_sidebar_open { theme.row_active } else { rgba(0x00000000) })
-                                .hover(|h| h.bg(theme.bg_hover))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(move |_, _, cx| t_sb(cx))
-                                .child(render_icon("sidebar-toggle", 16.0, if props.is_sidebar_open { theme.text_strong } else { theme.text_muted }))
-                        })
+                    div().flex().items_center().h_full().mr(px(8.0)).child({
+                        let t_sb = on_toggle_sidebar.clone();
+                        div()
+                            .id("hb-toggle-sidebar")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(sz::BTN)
+                            .h(sz::TB_TILE_H)
+                            .rounded(sz::R_MD)
+                            .cursor_pointer()
+                            .bg(if props.is_sidebar_open {
+                                theme.row_active
+                            } else {
+                                rgba(0x00000000)
+                            })
+                            .hover(|h| h.bg(theme.bg_hover))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, cx| t_sb(cx))
+                            .child(render_icon(
+                                "sidebar-toggle",
+                                16.0,
+                                if props.is_sidebar_open {
+                                    theme.text_strong
+                                } else {
+                                    theme.text_muted
+                                },
+                            ))
+                    }),
                 )
                 // Tabs strip: 32px tall, flush to bottom, active covers bottom line
                 .child(
@@ -164,8 +171,16 @@ where
                                 .h(sz::TAB_H)
                                 .rounded_t(sz::R_MD)
                                 .cursor_pointer()
-                                .bg(if is_active { theme.bg_toolbar } else { rgba(0x00000000) })
-                                .text_color(if is_active { theme.text_hi } else { theme.text_muted })
+                                .bg(if is_active {
+                                    theme.bg_toolbar
+                                } else {
+                                    rgba(0x00000000)
+                                })
+                                .text_color(if is_active {
+                                    theme.text_hi
+                                } else {
+                                    theme.text_muted
+                                })
                                 .font_weight(FontWeight::NORMAL)
                                 .text_size(px(13.0))
                                 .when(!is_active, |s| {
@@ -173,13 +188,21 @@ where
                                 })
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(move |_, _, cx| sel(tab_id.clone(), cx))
-                                .child(render_icon("file-text", 14.0, if is_active { theme.text_hi } else { theme.text_muted }))
+                                .child(render_icon(
+                                    "file-text",
+                                    14.0,
+                                    if is_active {
+                                        theme.text_hi
+                                    } else {
+                                        theme.text_muted
+                                    },
+                                ))
                                 .child(
                                     div()
                                         .max_w(px(200.0))
                                         .min_w(px(60.0))
                                         .truncate()
-                                        .child(tab.title)
+                                        .child(tab.title),
                                 )
                                 // Close slot (16px) with close button or modified dot
                                 .child(
@@ -192,7 +215,10 @@ where
                                         .child(
                                             // Close button on hover
                                             div()
-                                                .id(SharedString::from(format!("close-tab-{}", tid_for_close)))
+                                                .id(SharedString::from(format!(
+                                                    "close-tab-{}",
+                                                    tid_for_close
+                                                )))
                                                 .w(px(16.0))
                                                 .h(px(16.0))
                                                 .rounded(sz::R_SM)
@@ -203,12 +229,17 @@ where
                                                 .when(tab_count > 1, |s| {
                                                     s.group_hover("header-tab", |h| h.opacity(1.0))
                                                 })
-                                                .hover(|h| h.bg(theme.border_subtle).text_color(theme.text_strong))
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                .hover(|h| {
+                                                    h.bg(theme.border_subtle)
+                                                        .text_color(theme.text_strong)
+                                                })
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation()
+                                                })
                                                 .on_click(move |_, _, cx| {
                                                     cls(tid_for_close.clone(), cx);
                                                 })
-                                                .child(render_icon("x", 12.0, theme.text_muted))
+                                                .child(render_icon("x", 12.0, theme.text_muted)),
                                         )
                                         .when(tab.is_modified, |s| {
                                             // Modified dot when not hovered
@@ -218,42 +249,36 @@ where
                                                     .h(px(6.0))
                                                     .rounded_full()
                                                     .bg(theme.text_hi)
-                                                    .group_hover("header-tab", |h| h.invisible())
+                                                    .group_hover("header-tab", |h| h.invisible()),
                                             )
-                                        })
+                                        }),
                                 )
                         }))
                         // "+" button: 28x28 at y 6-34, 4px after last tab
                         .child({
                             let nt = on_new_tab.clone();
-                            div()
-                                .flex()
-                                .items_center()
-                                .h_full()
-                                .child(
-                                    div()
-                                        .id("hb-new-tab")
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .w(sz::PLUS)
-                                        .h(sz::PLUS)
-                                        .rounded(sz::R_MD)
-                                        .cursor_pointer()
-                                        .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                        .on_click(move |_, _, cx| nt(cx))
-                                        .child(render_icon("plus", 14.0, theme.text_muted))
-                                )
-                        })
-                )
+                            div().flex().items_center().h_full().child(
+                                div()
+                                    .id("hb-new-tab")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(sz::PLUS)
+                                    .h(sz::PLUS)
+                                    .rounded(sz::R_MD)
+                                    .cursor_pointer()
+                                    .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(move |_, _, cx| nt(cx))
+                                    .child(render_icon("plus", 14.0, theme.text_muted)),
+                            )
+                        }),
+                ),
         )
         // Center spacer (flex_1): clicking here drags the window
-        .child(
-            div()
-                .flex_1()
-                .h_full()
-        )
+        .child(div().flex_1().h_full())
         // Right: Window Controls (36x28, radius 6, 4px gaps, 8px from right edge)
         .child(
             div()
@@ -280,7 +305,11 @@ where
                 // Maximize / Restore
                 .child({
                     let m = on_max.clone();
-                    let icon = if props.is_maximized { "wc-restore" } else { "wc-max" };
+                    let icon = if props.is_maximized {
+                        "wc-restore"
+                    } else {
+                        "wc-max"
+                    };
                     div()
                         .id("wc-max-btn")
                         .flex()
@@ -309,6 +338,139 @@ where
                         .hover(|h| h.bg(theme.close_hover).text_color(rgb(0xffffff)))
                         .on_click(move |_, window, cx| c(window, cx))
                         .child(render_icon("wc-close", 10.0, theme.wc_glyph))
-                })
+                }),
         )
+}
+
+const RESIZE_PX: f32 = 6.0;
+
+fn resize_handle(id: &'static str, edge: ResizeEdge, cursor: CursorStyle) -> Stateful<Div> {
+    div()
+        .id(id)
+        .cursor(cursor)
+        .on_mouse_move(|_, window, _| window.refresh())
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            window.start_window_resize(edge);
+            window.refresh();
+            cx.stop_propagation();
+        })
+}
+
+/// Edge and corner hit targets for client-side window decorations.
+/// The wrapper stays empty so it does not steal clicks from the window body.
+pub fn render_client_resize_borders(window: &Window) -> AnyElement {
+    let Decorations::Client { tiling } = window.window_decorations() else {
+        return div().into_any_element();
+    };
+    let thickness = px(RESIZE_PX);
+    div()
+        .when(!tiling.top, |parent| {
+            parent.child(
+                resize_handle("resize-top", ResizeEdge::Top, CursorStyle::ResizeUpDown)
+                    .absolute()
+                    .top_0()
+                    .left(thickness)
+                    .right(thickness)
+                    .h(thickness),
+            )
+        })
+        .when(!tiling.bottom, |parent| {
+            parent.child(
+                resize_handle(
+                    "resize-bottom",
+                    ResizeEdge::Bottom,
+                    CursorStyle::ResizeUpDown,
+                )
+                .absolute()
+                .bottom_0()
+                .left(thickness)
+                .right(thickness)
+                .h(thickness),
+            )
+        })
+        .when(!tiling.left, |parent| {
+            parent.child(
+                resize_handle(
+                    "resize-left",
+                    ResizeEdge::Left,
+                    CursorStyle::ResizeLeftRight,
+                )
+                .absolute()
+                .left_0()
+                .top(thickness)
+                .bottom(thickness)
+                .w(thickness),
+            )
+        })
+        .when(!tiling.right, |parent| {
+            parent.child(
+                resize_handle(
+                    "resize-right",
+                    ResizeEdge::Right,
+                    CursorStyle::ResizeLeftRight,
+                )
+                .absolute()
+                .right_0()
+                .top(thickness)
+                .bottom(thickness)
+                .w(thickness),
+            )
+        })
+        .when(!tiling.top && !tiling.left, |parent| {
+            parent.child(
+                resize_handle(
+                    "resize-top-left",
+                    ResizeEdge::TopLeft,
+                    CursorStyle::ResizeUpLeftDownRight,
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(thickness)
+                .h(thickness),
+            )
+        })
+        .when(!tiling.top && !tiling.right, |parent| {
+            parent.child(
+                resize_handle(
+                    "resize-top-right",
+                    ResizeEdge::TopRight,
+                    CursorStyle::ResizeUpRightDownLeft,
+                )
+                .absolute()
+                .top_0()
+                .right_0()
+                .w(thickness)
+                .h(thickness),
+            )
+        })
+        .when(!tiling.bottom && !tiling.left, |parent| {
+            parent.child(
+                resize_handle(
+                    "resize-bottom-left",
+                    ResizeEdge::BottomLeft,
+                    CursorStyle::ResizeUpRightDownLeft,
+                )
+                .absolute()
+                .bottom_0()
+                .left_0()
+                .w(thickness)
+                .h(thickness),
+            )
+        })
+        .when(!tiling.bottom && !tiling.right, |parent| {
+            parent.child(
+                resize_handle(
+                    "resize-bottom-right",
+                    ResizeEdge::BottomRight,
+                    CursorStyle::ResizeUpLeftDownRight,
+                )
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .w(thickness)
+                .h(thickness),
+            )
+        })
+        .into_any_element()
 }
