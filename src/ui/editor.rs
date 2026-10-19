@@ -12,7 +12,9 @@ where
     pub content: String,
     pub view_mode: ViewMode,
     pub zoom_level: usize,
+    pub base_font_size: f32,
     pub show_line_numbers: bool,
+    pub word_wrap: bool,
     pub show_zoom_hud: bool,
     pub on_content_change: FContentChange,
 }
@@ -25,7 +27,7 @@ where
     FContentChange: Fn(String, &mut App) + 'static + Clone,
 {
     let zoom_factor = props.zoom_level as f32 / 100.0;
-    let base_size = sz::BODY * zoom_factor;
+    let base_size = props.base_font_size * zoom_factor;
     let is_wysiwyg = props.view_mode == ViewMode::Wysiwyg;
 
     div()
@@ -60,7 +62,7 @@ where
         .child(if is_wysiwyg {
             render_wysiwyg_view(&props.content, base_size, zoom_factor, theme)
         } else {
-            render_raw_view(&props.content, base_size, props.show_line_numbers, theme)
+            render_raw_view(&props.content, base_size, props.show_line_numbers, props.word_wrap, theme)
         })
 }
 
@@ -318,7 +320,7 @@ fn render_wysiwyg_view(content: &str, base_size: f32, zoom_factor: f32, theme: &
         .into_any_element()
 }
 
-fn render_raw_view(content: &str, base_size: f32, show_line_numbers: bool, theme: &Theme) -> AnyElement {
+fn render_raw_view(content: &str, base_size: f32, show_line_numbers: bool, word_wrap: bool, theme: &Theme) -> AnyElement {
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len().max(1);
 
@@ -327,6 +329,7 @@ fn render_raw_view(content: &str, base_size: f32, show_line_numbers: bool, theme
         .flex_1()
         .flex()
         .overflow_y_scroll()
+        .when(!word_wrap, |s| s.overflow_x_scroll())
         .font_family(Theme::FONT_MONO)
         .text_size(px(base_size))
         .line_height(relative(1.65))
@@ -349,6 +352,7 @@ fn render_raw_view(content: &str, base_size: f32, show_line_numbers: bool, theme
                 .flex_1()
                 .p(px(24.0))
                 .text_color(theme.text_primary)
+                .when(!word_wrap, |s| s.whitespace_nowrap())
                 .child(content.to_string())
         )
         .into_any_element()

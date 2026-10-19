@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use gpui::*;
 use rust_embed::RustEmbed;
 use std::env;
@@ -85,6 +87,29 @@ fn main() {
                 KeyBinding::new("ctrl-e", ToggleInlineCode, None),
                 KeyBinding::new("ctrl-k", InsertLink, None),
                 KeyBinding::new("ctrl-shift-c", InsertCodeBlock, None),
+                KeyBinding::new("ctrl-shift-s", SaveFileAs, None),
+                KeyBinding::new("ctrl-h", OpenReplace, None),
+                KeyBinding::new("ctrl-shift-m", ToggleViewMode, None),
+                KeyBinding::new("ctrl-shift-l", ToggleLineNumbers, None),
+                KeyBinding::new("ctrl-x", Cut, None),
+                KeyBinding::new("ctrl-c", Copy, None),
+                KeyBinding::new("ctrl-v", Paste, None),
+                KeyBinding::new("ctrl-a", SelectAll, None),
+                KeyBinding::new("f1", OpenShortcuts, None),
+                KeyBinding::new("alt-f", OpenFileMenu, None),
+                KeyBinding::new("alt-e", OpenEditMenu, None),
+                KeyBinding::new("alt-v", OpenViewMenu, None),
+                KeyBinding::new("f10", FocusMenuBar, None),
+                // Menu navigation
+                KeyBinding::new("up", SelectPrev, Some("Menu")),
+                KeyBinding::new("down", SelectNext, Some("Menu")),
+                KeyBinding::new("home", SelectFirst, Some("Menu")),
+                KeyBinding::new("end", SelectLast, Some("Menu")),
+                KeyBinding::new("enter", Confirm, Some("Menu")),
+                KeyBinding::new("space", Confirm, Some("Menu")),
+                KeyBinding::new("escape", CancelMenu, Some("Menu")),
+                KeyBinding::new("left", PrevMenu, Some("Menu")),
+                KeyBinding::new("right", NextMenu, Some("Menu")),
             ]);
 
             cx.open_window(

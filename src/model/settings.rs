@@ -4,14 +4,32 @@ use std::path::PathBuf;
 use crate::theme::ThemeMode;
 use super::document::ViewMode;
 
+fn default_word_wrap() -> bool {
+    true
+}
+
+fn default_base_font_size() -> f32 {
+    17.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorSettings {
+    #[serde(default)]
     pub theme: ThemeMode,
+    #[serde(default)]
     pub zoom_level: usize,
+    #[serde(default)]
     pub view_mode: ViewMode,
+    #[serde(default)]
     pub show_line_numbers: bool,
+    #[serde(default)]
     pub show_sidebar: bool,
+    #[serde(default)]
     pub zen_mode: bool,
+    #[serde(default = "default_word_wrap")]
+    pub word_wrap: bool,
+    #[serde(default = "default_base_font_size")]
+    pub base_font_size: f32,
 }
 
 impl Default for EditorSettings {
@@ -23,6 +41,8 @@ impl Default for EditorSettings {
             show_line_numbers: false,
             show_sidebar: true,
             zen_mode: false,
+            word_wrap: true,
+            base_font_size: 17.0,
         }
     }
 }

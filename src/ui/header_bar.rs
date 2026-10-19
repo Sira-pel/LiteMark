@@ -3,21 +3,12 @@ use gpui::*;
 use crate::model::DocumentTab;
 use crate::theme::{sz, Theme};
 use super::primitives::render_icon;
-use super::menu::{render_dropdown_menu, MenuItem};
 
 pub struct HeaderBarProps<
     FSelectTab,
     FCloseTab,
     FNewTab,
     FToggleSidebar,
-    FSave,
-    FOpen,
-    FExport,
-    FToggleTheme,
-    FToggleZen,
-    FOpenShortcuts,
-    FViewPdf,
-    FToggleFileMenu,
     FMinimize,
     FMaximize,
     FCloseWindow,
@@ -27,14 +18,6 @@ where
     FCloseTab: Fn(String, &mut App) + 'static + Clone,
     FNewTab: Fn(&mut App) + 'static + Clone,
     FToggleSidebar: Fn(&mut App) + 'static + Clone,
-    FSave: Fn(&mut App) + 'static + Clone,
-    FOpen: Fn(&mut App) + 'static + Clone,
-    FExport: Fn(&'static str, &mut App) + 'static + Clone,
-    FToggleTheme: Fn(&mut App) + 'static + Clone,
-    FToggleZen: Fn(&mut App) + 'static + Clone,
-    FOpenShortcuts: Fn(&mut App) + 'static + Clone,
-    FViewPdf: Fn(&mut App) + 'static + Clone,
-    FToggleFileMenu: Fn(&mut App) + 'static + Clone,
     FMinimize: Fn(&mut Window, &mut App) + 'static + Clone,
     FMaximize: Fn(&mut Window, &mut App) + 'static + Clone,
     FCloseWindow: Fn(&mut Window, &mut App) + 'static + Clone,
@@ -42,21 +25,11 @@ where
     pub tabs: Vec<DocumentTab>,
     pub active_tab_id: String,
     pub is_sidebar_open: bool,
-    pub has_pdf: bool,
     pub is_maximized: bool,
-    pub show_file_menu: bool,
     pub on_select_tab: FSelectTab,
     pub on_close_tab: FCloseTab,
     pub on_new_tab: FNewTab,
     pub on_toggle_sidebar: FToggleSidebar,
-    pub on_save: FSave,
-    pub on_open: FOpen,
-    pub on_export: FExport,
-    pub on_toggle_theme: FToggleTheme,
-    pub on_toggle_zen: FToggleZen,
-    pub on_open_shortcuts: FOpenShortcuts,
-    pub on_view_pdf: FViewPdf,
-    pub on_toggle_file_menu: FToggleFileMenu,
     pub on_minimize: FMinimize,
     pub on_maximize: FMaximize,
     pub on_close_window: FCloseWindow,
@@ -67,14 +40,6 @@ pub fn render_header_bar<
     FCloseTab,
     FNewTab,
     FToggleSidebar,
-    FSave,
-    FOpen,
-    FExport,
-    FToggleTheme,
-    FToggleZen,
-    FOpenShortcuts,
-    FViewPdf,
-    FToggleFileMenu,
     FMinimize,
     FMaximize,
     FCloseWindow,
@@ -84,14 +49,6 @@ pub fn render_header_bar<
         FCloseTab,
         FNewTab,
         FToggleSidebar,
-        FSave,
-        FOpen,
-        FExport,
-        FToggleTheme,
-        FToggleZen,
-        FOpenShortcuts,
-        FViewPdf,
-        FToggleFileMenu,
         FMinimize,
         FMaximize,
         FCloseWindow,
@@ -103,14 +60,6 @@ where
     FCloseTab: Fn(String, &mut App) + 'static + Clone,
     FNewTab: Fn(&mut App) + 'static + Clone,
     FToggleSidebar: Fn(&mut App) + 'static + Clone,
-    FSave: Fn(&mut App) + 'static + Clone,
-    FOpen: Fn(&mut App) + 'static + Clone,
-    FExport: Fn(&'static str, &mut App) + 'static + Clone,
-    FToggleTheme: Fn(&mut App) + 'static + Clone,
-    FToggleZen: Fn(&mut App) + 'static + Clone,
-    FOpenShortcuts: Fn(&mut App) + 'static + Clone,
-    FViewPdf: Fn(&mut App) + 'static + Clone,
-    FToggleFileMenu: Fn(&mut App) + 'static + Clone,
     FMinimize: Fn(&mut Window, &mut App) + 'static + Clone,
     FMaximize: Fn(&mut Window, &mut App) + 'static + Clone,
     FCloseWindow: Fn(&mut Window, &mut App) + 'static + Clone,
@@ -119,14 +68,6 @@ where
     let on_close_tab = props.on_close_tab;
     let on_new_tab = props.on_new_tab;
     let on_toggle_sidebar = props.on_toggle_sidebar;
-    let on_save = props.on_save;
-    let on_open = props.on_open;
-    let on_export = props.on_export;
-    let on_toggle_theme = props.on_toggle_theme;
-    let on_toggle_zen = props.on_toggle_zen;
-    let on_open_shortcuts = props.on_open_shortcuts;
-    let on_view_pdf = props.on_view_pdf;
-    let on_file_menu = props.on_toggle_file_menu;
     let on_min = props.on_minimize;
     let on_max = props.on_maximize;
     let on_close_win = props.on_close_window;
@@ -166,13 +107,12 @@ where
                 .h(px(1.0))
                 .bg(theme.border_subtle)
         )
-        // Left: Sidebar Toggle + Tabs
+        // Left: Sidebar Toggle + Tabs + "+"
         .child(
             div()
                 .flex()
                 .items_end()
                 .h_full()
-                .flex_1()
                 .child(
                     // Sidebar Toggle: 32x28 at y 6-34, 8px gap to tabs
                     div()
@@ -198,7 +138,7 @@ where
                                 .child(render_icon("sidebar-toggle", 16.0, if props.is_sidebar_open { theme.text_strong } else { theme.text_muted }))
                         })
                 )
-                // Center tabs: 32px tall, flush to bottom, active covers bottom line
+                // Tabs strip: 32px tall, flush to bottom, active covers bottom line
                 .child(
                     div()
                         .id("tabs-strip")
@@ -308,193 +248,67 @@ where
                         })
                 )
         )
-        // Right: File ▾ menu, Theme, Zen, Help, and Window Controls
+        // Center spacer (flex_1): clicking here drags the window
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+        )
+        // Right: Window Controls (36x28, radius 6, 4px gaps, 8px from right edge)
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(4.0))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                // File ▾ menu trigger
+                // Minimize
                 .child({
-                    let fm = on_file_menu.clone();
+                    let m = on_min.clone();
                     div()
-                        .relative()
-                        .child(
-                            div()
-                                .id("hb-file-menu-btn")
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .h(sz::TB_TILE_H)
-                                .px(px(8.0))
-                                .rounded(sz::R_MD)
-                                .cursor_pointer()
-                                .bg(if props.show_file_menu { theme.row_active } else { rgba(0x00000000) })
-                                .text_color(theme.text_muted)
-                                .text_size(px(13.0))
-                                .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
-                                .on_click(move |_, _, cx| fm(cx))
-                                .child("File")
-                                .child(render_icon("chevron-down", 12.0, theme.text_muted))
-                        )
-                        .when(props.show_file_menu, |s| {
-                            let s_act = on_save.clone();
-                            let o_act = on_open.clone();
-                            let e_html = on_export.clone();
-                            let e_txt = on_export.clone();
-                            let v_pdf = on_view_pdf.clone();
-                            let fm_close = on_file_menu.clone();
-                            let has_pdf = props.has_pdf;
-
-                            let mut items = vec![
-                                MenuItem::action("Save File", Some("save"), Some("Ctrl+S"), {
-                                    let s = s_act.clone();
-                                    let f = fm_close.clone();
-                                    move |_, cx| { s(cx); f(cx); }
-                                }),
-                                MenuItem::action("Open File...", Some("folder-open"), Some("Ctrl+O"), {
-                                    let o = o_act.clone();
-                                    let f = fm_close.clone();
-                                    move |_, cx| { o(cx); f(cx); }
-                                }),
-                                MenuItem::divider(),
-                                MenuItem::action("Export as HTML", Some("download"), None, {
-                                    let e = e_html.clone();
-                                    let f = fm_close.clone();
-                                    move |_, cx| { e("html", cx); f(cx); }
-                                }),
-                                MenuItem::action("Export as Plain Text", Some("file-text"), None, {
-                                    let e = e_txt.clone();
-                                    let f = fm_close.clone();
-                                    move |_, cx| { e("txt", cx); f(cx); }
-                                }),
-                            ];
-
-                            if has_pdf {
-                                items.push(MenuItem::divider());
-                                items.push(MenuItem::action("Original PDF", Some("file-text"), None, {
-                                    let p = v_pdf.clone();
-                                    let f = fm_close.clone();
-                                    move |_, cx| { p(cx); f(cx); }
-                                }));
-                            }
-
-                            s.child(
-                                div()
-                                    .absolute()
-                                    .top(px(32.0))
-                                    .left_0()
-                                    .child(render_dropdown_menu("hb-file-dropdown", items, theme))
-                            )
-                        })
-                })
-                // Theme toggle (32x28 ghost button)
-                .child({
-                    let tt = on_toggle_theme.clone();
-                    let icon = if theme.mode.is_dark() { "sun" } else { "moon" };
-                    div()
-                        .id("hb-theme")
+                        .id("wc-min-btn")
                         .flex()
                         .items_center()
                         .justify_center()
-                        .w(sz::BTN)
-                        .h(sz::TB_TILE_H)
+                        .w(sz::WC_W)
+                        .h(sz::WC_H)
                         .rounded(sz::R_MD)
                         .cursor_pointer()
-                        .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
-                        .on_click(move |_, _, cx| tt(cx))
-                        .child(render_icon(icon, 16.0, theme.text_muted))
+                        .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
+                        .on_click(move |_, window, cx| m(window, cx))
+                        .child(render_icon("wc-min", 10.0, theme.wc_glyph))
                 })
-                // Zen mode (32x28 ghost button)
+                // Maximize / Restore
                 .child({
-                    let tz = on_toggle_zen.clone();
+                    let m = on_max.clone();
+                    let icon = if props.is_maximized { "wc-restore" } else { "wc-max" };
                     div()
-                        .id("hb-zen")
+                        .id("wc-max-btn")
                         .flex()
                         .items_center()
                         .justify_center()
-                        .w(sz::BTN)
-                        .h(sz::TB_TILE_H)
+                        .w(sz::WC_W)
+                        .h(sz::WC_H)
                         .rounded(sz::R_MD)
                         .cursor_pointer()
-                        .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
-                        .on_click(move |_, _, cx| tz(cx))
-                        .child(render_icon("maximize-2", 16.0, theme.text_muted))
+                        .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
+                        .on_click(move |_, window, cx| m(window, cx))
+                        .child(render_icon(icon, 10.0, theme.wc_glyph))
                 })
-                // Help / Shortcuts (32x28 ghost button)
+                // Close (the only red in the app: close_hover with white glyph)
                 .child({
-                    let sc = on_open_shortcuts.clone();
+                    let c = on_close_win.clone();
                     div()
-                        .id("hb-help")
+                        .id("wc-close-btn")
                         .flex()
                         .items_center()
                         .justify_center()
-                        .w(sz::BTN)
-                        .h(sz::TB_TILE_H)
+                        .w(sz::WC_W)
+                        .h(sz::WC_H)
                         .rounded(sz::R_MD)
                         .cursor_pointer()
-                        .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
-                        .on_click(move |_, _, cx| sc(cx))
-                        .child(render_icon("help-circle", 16.0, theme.text_muted))
+                        .hover(|h| h.bg(theme.close_hover).text_color(rgb(0xffffff)))
+                        .on_click(move |_, window, cx| c(window, cx))
+                        .child(render_icon("wc-close", 10.0, theme.wc_glyph))
                 })
-                // 16px gap before window controls
-                .child(div().w(px(16.0)))
-                // Window Controls: 36x28 ghost buttons, radius 6, 4px gaps, 8px from right edge
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        // Minimize
-                        .child({
-                            let m = on_min.clone();
-                            div()
-                                .id("wc-min-btn")
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w(sz::WC_W)
-                                .h(sz::WC_H)
-                                .rounded(sz::R_MD)
-                                .cursor_pointer()
-                                .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
-                                .on_click(move |_, window, cx| m(window, cx))
-                                .child(render_icon("wc-min", 10.0, theme.wc_glyph))
-                        })
-                        // Maximize / Restore
-                        .child({
-                            let m = on_max.clone();
-                            let icon = if props.is_maximized { "wc-restore" } else { "wc-max" };
-                            div()
-                                .id("wc-max-btn")
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w(sz::WC_W)
-                                .h(sz::WC_H)
-                                .rounded(sz::R_MD)
-                                .cursor_pointer()
-                                .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
-                                .on_click(move |_, window, cx| m(window, cx))
-                                .child(render_icon(icon, 10.0, theme.wc_glyph))
-                        })
-                        // Close (the only red in the app: close_hover with white glyph)
-                        .child({
-                            let c = on_close_win.clone();
-                            div()
-                                .id("wc-close-btn")
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .w(sz::WC_W)
-                                .h(sz::WC_H)
-                                .rounded(sz::R_MD)
-                                .cursor_pointer()
-                                .hover(|h| h.bg(theme.close_hover).text_color(rgb(0xffffff)))
-                                .on_click(move |_, window, cx| c(window, cx))
-                                .child(render_icon("wc-close", 10.0, theme.wc_glyph))
-                        })
-                )
         )
 }

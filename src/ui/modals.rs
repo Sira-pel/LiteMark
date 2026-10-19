@@ -17,16 +17,23 @@ where
         ("Ctrl + K", "Insert Link"),
         ("Ctrl + Shift + C", "Insert Code Block"),
         ("Ctrl + S", "Save Document"),
+        ("Ctrl + Shift + S", "Save Document As"),
         ("Ctrl + O", "Open File (.md, .txt, .pdf)"),
         ("Ctrl + N", "New Document Tab"),
         ("Ctrl + W", "Close Active Tab"),
-        ("Ctrl + F", "Find & Replace"),
+        ("Ctrl + F", "Find in Document"),
+        ("Ctrl + H", "Find & Replace"),
+        ("Ctrl + Shift + M", "Toggle WYSIWYG / Raw Mode"),
+        ("Ctrl + Shift + L", "Toggle Line Numbers (Raw Mode)"),
         ("Ctrl + + / =", "Zoom In"),
         ("Ctrl + -", "Zoom Out"),
         ("Ctrl + 0", "Reset Zoom (100%)"),
         ("Ctrl + Z", "Undo"),
         ("Ctrl + Y / Ctrl + Shift + Z", "Redo"),
         ("Ctrl + \\", "Toggle Notes Folder Sidebar"),
+        ("F1", "Help & Shortcuts"),
+        ("Alt + F / E / V", "Open File / Edit / View Menu"),
+        ("F10", "Focus Menu Bar"),
         ("F11", "Toggle Zen Mode"),
         ("Escape", "Exit Zen Mode / Close Modals & Menus"),
     ];
@@ -275,6 +282,141 @@ where
                             let c = cls.clone();
                             div()
                                 .id("pdf-modal-close-btn")
+                                .px(px(16.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(theme.row_active)
+                                .text_color(theme.text_strong)
+                                .hover(|h| h.bg(theme.row_hover))
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(12.0))
+                                .cursor_pointer()
+                                .on_click(move |_, _, cx| c(cx))
+                                .child("Close")
+                        })
+                )
+        )
+}
+
+pub fn render_about_modal<FClose>(on_close: FClose, theme: &Theme) -> impl IntoElement
+where
+    FClose: Fn(&mut App) + 'static + Clone,
+{
+    let cls = on_close.clone();
+    let version = env!("CARGO_PKG_VERSION");
+
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgba(0x00000099))
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(16.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w(px(420.0))
+                .rounded(px(12.0))
+                .bg(theme.bg_modal)
+                .border_1()
+                .border_color(theme.border_surface)
+                .shadow_2xl()
+                .overflow_hidden()
+                // Header
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(20.0))
+                        .py(px(14.0))
+                        .bg(theme.bg_modal_header)
+                        .border_b_1()
+                        .border_color(theme.border_subtle)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(render_icon("help-circle", 16.0, theme.text_primary))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_size(px(14.0))
+                                        .text_color(theme.text_primary)
+                                        .child("About LiteMark")
+                                )
+                        )
+                        .child({
+                            let c = cls.clone();
+                            div()
+                                .id("about-close-x")
+                                .p(px(4.0))
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .hover(|h| h.bg(theme.bg_hover))
+                                .on_click(move |_, _, cx| c(cx))
+                                .child(render_icon("x", 16.0, theme.text_muted))
+                        })
+                )
+                // Content
+                .child(
+                    div()
+                        .p(px(24.0))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .text_center()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .w(px(56.0))
+                                .h(px(56.0))
+                                .rounded(px(12.0))
+                                .bg(theme.row_active)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(render_icon("folder-tree", 28.0, theme.text_hi))
+                        )
+                        .child(
+                            div()
+                                .text_size(px(18.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme.text_strong)
+                                .child("LiteMark")
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child(format!("Version {}", version))
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(theme.text_primary)
+                                .line_height(relative(1.5))
+                                .child("An ultra-fast native Linux Markdown editor built with Rust and GPUI.")
+                        )
+                )
+                // Footer
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .px(px(20.0))
+                        .py(px(12.0))
+                        .bg(theme.bg_modal_header)
+                        .border_t_1()
+                        .border_color(theme.border_subtle)
+                        .child({
+                            let c = cls.clone();
+                            div()
+                                .id("about-close-btn")
                                 .px(px(16.0))
                                 .py(px(6.0))
                                 .rounded(px(6.0))

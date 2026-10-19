@@ -3,7 +3,7 @@ use gpui::*;
 use crate::model::ActiveFormats;
 use crate::theme::{sz, Theme};
 use super::primitives::{divider, icon_button};
-use super::menu::{render_dropdown_menu, MenuItem};
+use super::menu::MenuItem;
 
 pub struct FormattingToolbarProps<FFormat, FTable, FLink, FToggleFind, FToggleOverflow>
 where
@@ -15,7 +15,11 @@ where
 {
     pub active_formats: ActiveFormats,
     pub show_overflow_menu: bool,
+    pub is_narrow: bool,
+    pub menu_bar_element: AnyElement,
+    pub settings_gear_element: AnyElement,
     pub on_format: FFormat,
+    #[allow(dead_code)]
     pub on_insert_table: FTable,
     pub on_insert_link: FLink,
     pub on_toggle_find: FToggleFind,
@@ -34,24 +38,19 @@ where
     FToggleOverflow: Fn(&mut App) + 'static + Clone,
 {
     let on_format = props.on_format;
-    let on_table = props.on_insert_table;
     let on_link = props.on_insert_link;
     let on_find = props.on_toggle_find;
     let on_overflow = props.on_toggle_overflow;
     let formats = props.active_formats;
+    let is_narrow = props.is_narrow;
 
-    div()
-        .relative()
+    // Formatting icons group: 13 icons + ⋯
+    let format_icons = div()
+        .id("toolbar-format-icons")
+        .flex_none()
         .flex()
         .items_center()
-        .justify_center()
         .gap(px(2.0))
-        .h(sz::TOOLBAR)
-        .px(px(8.0))
-        .bg(theme.bg_toolbar)
-        .border_b_1()
-        .border_color(theme.border_primary)
-        .flex_shrink_0()
         // 1 & 2: Undo / Redo
         .child({
             let f = on_format.clone();
@@ -112,66 +111,131 @@ where
         // 13: More (⋯)
         .child({
             let ov = on_overflow.clone();
-            div()
-                .relative()
-                .child(icon_button("tb-more", "ellipsis", "More Formatting", props.show_overflow_menu, theme, move |_, _, cx| ov(cx)))
-                .when(props.show_overflow_menu, |s| {
-                    let f = on_format.clone();
-                    let t = on_table.clone();
-                    let ov_close = on_overflow.clone();
+            icon_button("tb-more", "ellipsis", "More Formatting", props.show_overflow_menu, theme, move |_, _, cx| ov(cx))
+        });
 
-                    let items = vec![
-                        MenuItem::action("Underline", Some("underline"), Some("Ctrl+U"), {
-                            let f = f.clone();
-                            let ov_c = ov_close.clone();
-                            move |_, cx| { f("underline", cx); ov_c(cx); }
-                        }),
-                        MenuItem::action("Strikethrough", Some("strikethrough"), Some("Ctrl+Shift+X"), {
-                            let f = f.clone();
-                            let ov_c = ov_close.clone();
-                            move |_, cx| { f("strike", cx); ov_c(cx); }
-                        }),
-                        MenuItem::divider(),
-                        MenuItem::action("Quote Block", Some("quote"), None, {
-                            let f = f.clone();
-                            let ov_c = ov_close.clone();
-                            move |_, cx| { f("quote", cx); ov_c(cx); }
-                        }),
-                        MenuItem::action("Inline Code", Some("code"), Some("Ctrl+E"), {
-                            let f = f.clone();
-                            let ov_c = ov_close.clone();
-                            move |_, cx| { f("code", cx); ov_c(cx); }
-                        }),
-                        MenuItem::action("Code Block", Some("file-code"), Some("Ctrl+Shift+C"), {
-                            let f = f.clone();
-                            let ov_c = ov_close.clone();
-                            move |_, cx| { f("codeblock", cx); ov_c(cx); }
-                        }),
-                        MenuItem::action("Horizontal Divider", Some("minus"), None, {
-                            let f = f.clone();
-                            let ov_c = ov_close.clone();
-                            move |_, cx| { f("hr", cx); ov_c(cx); }
-                        }),
-                        MenuItem::action("Insert Table", Some("table"), None, {
-                            let t = t.clone();
-                            let ov_c = ov_close.clone();
-                            move |_, cx| { t(cx); ov_c(cx); }
-                        }),
-                        MenuItem::divider(),
-                        MenuItem::action("Clear Formatting", Some("remove-formatting"), None, {
-                            let f = f.clone();
-                            let ov_c = ov_close.clone();
-                            move |_, cx| { f("clear", cx); ov_c(cx); }
-                        }),
-                    ];
+    let toolbar = div()
+        .id("formatting-toolbar")
+        .relative()
+        .flex()
+        .items_center()
+        .justify_between()
+        .h(sz::TOOLBAR)
+        .px(px(8.0))
+        .pt(px(6.0))
+        .bg(theme.bg_toolbar)
+        .border_b_1()
+        .border_color(theme.border_primary)
+        .flex_shrink_0();
 
-                    s.child(
+    if !is_narrow {
+        toolbar
+            .child(
+                // 1. Left wrapper: menu bar buttons
+                div()
+                    .flex_1()
+                    .flex_basis(px(0.0))
+                    .flex()
+                    .items_center()
+                    .child(props.menu_bar_element),
+            )
+            // 2. Centered format icons group
+            .child(format_icons)
+            // 3. Right wrapper: settings gear
+            .child(
+                div()
+                    .flex_1()
+                    .flex_basis(px(0.0))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .child(props.settings_gear_element),
+            )
+    } else {
+        toolbar
+            .child(
+                // Narrow layout: ☰ menu button, then 1px divider, then format icons
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(props.menu_bar_element)
+                    .child(
                         div()
-                            .absolute()
-                            .top(px(36.0))
-                            .right_0()
-                            .child(render_dropdown_menu("tb-overflow-menu", items, theme))
+                            .w(px(1.0))
+                            .h(px(16.0))
+                            .bg(theme.border_surface),
                     )
-                })
-        })
+                    .child(format_icons),
+            )
+            .child(
+                // Right gear stays
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .child(props.settings_gear_element),
+            )
+    }
+}
+
+pub fn build_overflow_menu_items(
+    on_format: impl Fn(&'static str, &mut App) + 'static + Clone,
+    on_insert_table: impl Fn(&mut App) + 'static + Clone,
+    on_close: impl Fn(&mut App) + 'static + Clone,
+) -> Vec<MenuItem> {
+    let f1 = on_format.clone();
+    let f2 = on_format.clone();
+    let f3 = on_format.clone();
+    let f4 = on_format.clone();
+    let f5 = on_format.clone();
+    let f6 = on_format.clone();
+    let f7 = on_format.clone();
+    let t1 = on_insert_table.clone();
+
+    let c1 = on_close.clone();
+    let c2 = on_close.clone();
+    let c3 = on_close.clone();
+    let c4 = on_close.clone();
+    let c5 = on_close.clone();
+    let c6 = on_close.clone();
+    let c7 = on_close.clone();
+    let c8 = on_close.clone();
+
+    vec![
+        MenuItem::action("Underline", Some("underline"), Some("Ctrl+U"), move |_, cx| {
+            f1("underline", cx);
+            c1(cx);
+        }),
+        MenuItem::action("Strikethrough", Some("strikethrough"), Some("Ctrl+Shift+X"), move |_, cx| {
+            f2("strike", cx);
+            c2(cx);
+        }),
+        MenuItem::divider(),
+        MenuItem::action("Quote Block", Some("quote"), None, move |_, cx| {
+            f3("quote", cx);
+            c3(cx);
+        }),
+        MenuItem::action("Inline Code", Some("code"), Some("Ctrl+E"), move |_, cx| {
+            f4("code", cx);
+            c4(cx);
+        }),
+        MenuItem::action("Code Block", Some("file-code"), Some("Ctrl+Shift+C"), move |_, cx| {
+            f5("codeblock", cx);
+            c5(cx);
+        }),
+        MenuItem::action("Horizontal Divider", Some("minus"), None, move |_, cx| {
+            f6("hr", cx);
+            c6(cx);
+        }),
+        MenuItem::action("Insert Table", Some("table"), None, move |_, cx| {
+            t1(cx);
+            c7(cx);
+        }),
+        MenuItem::divider(),
+        MenuItem::action("Clear Formatting", Some("remove-formatting"), None, move |_, cx| {
+            f7("clear", cx);
+            c8(cx);
+        }),
+    ]
 }

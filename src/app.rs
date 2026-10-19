@@ -5,8 +5,9 @@ use crate::actions::*;
 use crate::markdown::{export_to_html, export_to_plaintext};
 use crate::model::*;
 use crate::services::*;
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeMode};
 use crate::ui::*;
+use crate::ui::MenuItem;
 
 pub struct LiteMarkApp {
     pub tabs: Vec<DocumentTab>,
@@ -17,8 +18,10 @@ pub struct LiteMarkApp {
     pub show_find_replace: bool,
     pub show_shortcuts_modal: bool,
     pub show_pdf_modal: bool,
-    pub show_file_menu: bool,
-    pub show_overflow_menu: bool,
+    pub show_about_modal: bool,
+    pub open_menu: Option<MenuId>,
+    pub menu_selected_ix: Option<usize>,
+    pub menu_open_submenu_ix: Option<usize>,
     pub zen_mode: bool,
     pub zen_notice: bool,
     pub saved_toast: Option<String>,
@@ -29,6 +32,9 @@ pub struct LiteMarkApp {
     pub match_case: bool,
     pub not_found: bool,
     pub focus_handle: FocusHandle,
+    pub menu_focus_handle: FocusHandle,
+    #[allow(dead_code)]
+    pub appearance_subscription: Option<Subscription>,
 }
 
 impl LiteMarkApp {
@@ -61,8 +67,10 @@ impl LiteMarkApp {
             show_find_replace: false,
             show_shortcuts_modal: false,
             show_pdf_modal: false,
-            show_file_menu: false,
-            show_overflow_menu: false,
+            show_about_modal: false,
+            open_menu: None,
+            menu_selected_ix: None,
+            menu_open_submenu_ix: None,
             zen_mode: false,
             zen_notice: false,
             saved_toast: None,
@@ -73,6 +81,8 @@ impl LiteMarkApp {
             match_case: false,
             not_found: false,
             focus_handle: cx.focus_handle(),
+            menu_focus_handle: cx.focus_handle(),
+            appearance_subscription: None,
         }
     }
 
@@ -282,6 +292,7 @@ impl LiteMarkApp {
         self.show_sidebar = !self.show_sidebar;
     }
 
+    #[allow(dead_code)]
     pub fn handle_toggle_theme(&mut self) {
         self.settings.theme = self.settings.theme.toggle();
         self.settings.save();
@@ -321,12 +332,98 @@ impl LiteMarkApp {
         self.settings.view_mode = self.settings.view_mode.toggle();
         self.settings.save();
     }
+
+    pub fn handle_save_as(&mut self) {
+        let suggested_name = if let Some(tab) = self.active_tab() {
+            if tab.title.contains('.') {
+                tab.title.clone()
+            } else {
+                format!("{}.md", tab.title)
+            }
+        } else {
+            "Untitled.md".to_string()
+        };
+
+        if let Some(path) = pick_save_file(&suggested_name, "md") {
+            if let Some(tab) = self.active_tab_mut() {
+                if let Ok(()) = atomic_save(&path, &tab.content) {
+                    tab.file_path = Some(path.clone());
+                    if let Some(name) = path.file_name().and_then(|f| f.to_str()) {
+                        tab.title = name.to_string();
+                    }
+                    tab.is_modified = false;
+                    self.saved_toast = Some(format!("Saved {}", tab.title));
+                    self.workspace = scan_workspace_dir(&self.workspace.folder_path);
+                }
+            }
+        }
+    }
+
+    pub fn handle_new_folder(&mut self) {
+        let _ = safe_create_folder(&self.workspace.folder_path, "New Folder");
+        self.workspace = scan_workspace_dir(&self.workspace.folder_path);
+    }
+
+    pub fn handle_toggle_word_wrap(&mut self) {
+        self.settings.word_wrap = !self.settings.word_wrap;
+        self.settings.save();
+    }
+
+    pub fn handle_toggle_line_numbers(&mut self) {
+        self.settings.show_line_numbers = !self.settings.show_line_numbers;
+        self.settings.save();
+    }
+
+    pub fn handle_set_view_mode(&mut self, mode: ViewMode) {
+        self.settings.view_mode = mode;
+        self.settings.save();
+    }
+
+    pub fn handle_set_theme(&mut self, theme: ThemeMode) {
+        self.settings.theme = theme;
+        self.settings.save();
+    }
+
+    pub fn handle_set_font_size(&mut self, size: f32) {
+        self.settings.base_font_size = size;
+        self.settings.save();
+    }
+
+    pub fn handle_cut(&mut self, _cx: &mut App) {
+        // Selection not yet implemented in editor
+    }
+
+    pub fn handle_copy(&mut self, cx: &mut App) {
+        if let Some(tab) = self.active_tab() {
+            cx.write_to_clipboard(ClipboardItem::new_string(tab.content.clone()));
+        }
+    }
+
+    pub fn handle_paste(&mut self, cx: &mut App) {
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                if let Some(tab) = self.active_tab_mut() {
+                    let mut new_c = tab.content.clone();
+                    new_c.push_str(&text);
+                    tab.set_content(new_c);
+                }
+            }
+        }
+    }
+
+    pub fn handle_select_all(&mut self) {
+        // Selection not yet implemented in editor
+    }
 }
 
 impl Render for LiteMarkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::new(self.settings.theme);
-        self.focus_handle.focus(window);
+        let theme = Theme::resolve(self.settings.theme, window.appearance());
+        if self.open_menu.is_some() {
+            self.menu_focus_handle.focus(window);
+        } else {
+            self.focus_handle.focus(window);
+        }
 
         let active_tab = self.active_tab().cloned().unwrap_or_else(|| {
             DocumentTab::new("tab-1".to_string(), "Welcome.md".to_string(), INITIAL_MARKDOWN.to_string(), None, None)
@@ -416,16 +513,6 @@ impl Render for LiteMarkApp {
             }
         };
 
-        let on_toggle_theme = {
-            let view = view.clone();
-            move |cx: &mut App| {
-                let _ = view.update(cx, |this, cx| {
-                    this.handle_toggle_theme();
-                    cx.notify();
-                });
-            }
-        };
-
         let on_toggle_zen = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -486,12 +573,147 @@ impl Render for LiteMarkApp {
             }
         };
 
-        let on_toggle_file_menu = {
+        let on_save_as = {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.show_file_menu = !this.show_file_menu;
-                    this.show_overflow_menu = false;
+                    this.handle_save_as();
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_new_folder = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_new_folder();
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_set_view_mode = {
+            let view = view.clone();
+            move |mode: ViewMode, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_set_view_mode(mode);
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_toggle_line_numbers = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_toggle_line_numbers();
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_toggle_word_wrap = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_toggle_word_wrap();
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_undo = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_format_cmd("undo");
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_redo = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_format_cmd("redo");
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_open_replace = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.show_find_replace = true;
+                    this.open_menu = None;
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_set_theme = {
+            let view = view.clone();
+            move |mode: ThemeMode, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_set_theme(mode);
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_set_font_size = {
+            let view = view.clone();
+            move |size: f32, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_set_font_size(size);
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_open_about = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.open_menu = None;
+                    this.show_about_modal = true;
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_close_about = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.show_about_modal = false;
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_open_menu = {
+            let view = view.clone();
+            move |id: MenuId, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.open_menu = Some(id);
+                    this.menu_selected_ix = None;
+                    this.menu_open_submenu_ix = None;
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_close_menu = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.open_menu = None;
+                    this.menu_selected_ix = None;
+                    this.menu_open_submenu_ix = None;
                     cx.notify();
                 });
             }
@@ -501,11 +723,55 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.show_overflow_menu = !this.show_overflow_menu;
-                    this.show_file_menu = false;
+                    if this.open_menu == Some(MenuId::Overflow) {
+                        this.open_menu = None;
+                    } else {
+                        this.open_menu = Some(MenuId::Overflow);
+                        this.menu_selected_ix = None;
+                        this.menu_open_submenu_ix = None;
+                    }
                     cx.notify();
                 });
             }
+        };
+
+        let on_toggle_settings = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    if this.open_menu == Some(MenuId::Settings) {
+                        this.open_menu = None;
+                    } else {
+                        this.open_menu = Some(MenuId::Settings);
+                        this.menu_selected_ix = None;
+                        this.menu_open_submenu_ix = None;
+                    }
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_set_submenu = {
+            let view = view.clone();
+            move |ix: Option<usize>, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    if this.menu_open_submenu_ix != ix {
+                        this.menu_open_submenu_ix = ix;
+                        cx.notify();
+                    }
+                });
+            }
+        };
+
+        let on_export_html = {
+            let on_export = on_export.clone();
+            move |cx: &mut App| on_export("html", cx)
+        };
+
+        let on_close_active_tab = {
+            let on_close_tab = on_close_tab.clone();
+            let tab_id = active_tab.id.clone();
+            move |cx: &mut App| on_close_tab(tab_id.clone(), cx)
         };
 
         let on_minimize = {
@@ -735,6 +1001,162 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let is_narrow = window.viewport_size().width < px(640.0);
+
+        let menu_bar_element = render_menu_bar(
+            MenuBarProps {
+                open_menu: self.open_menu,
+                is_narrow,
+                on_open_menu: on_open_menu.clone(),
+                on_close_menu: on_close_menu.clone(),
+            },
+            &theme,
+        ).into_any_element();
+
+        let settings_gear_element = render_settings_button(
+            self.open_menu == Some(MenuId::Settings),
+            on_toggle_settings.clone(),
+            &theme,
+        ).into_any_element();
+
+        let menu_overlay = if let Some(open_id) = self.open_menu {
+            let (point, anchor, width, items) = match open_id {
+                MenuId::File => (
+                    Point::new(px(8.0), px(76.0)),
+                    Corner::TopLeft,
+                    px(220.0),
+                    build_file_menu_items(
+                        active_tab_has_pdf,
+                        on_new_tab.clone(),
+                        on_new_folder.clone(),
+                        on_open.clone(),
+                        on_choose_dir.clone(),
+                        on_save.clone(),
+                        on_save_as.clone(),
+                        on_export_html.clone(),
+                        on_view_pdf.clone(),
+                        on_close_active_tab.clone(),
+                    ),
+                ),
+                MenuId::Edit => (
+                    Point::new(px(48.0), px(76.0)),
+                    Corner::TopLeft,
+                    px(200.0),
+                    build_edit_menu_items(
+                        on_undo.clone(),
+                        on_redo.clone(),
+                        on_toggle_find.clone(),
+                        on_open_replace.clone(),
+                    ),
+                ),
+                MenuId::View => (
+                    Point::new(px(92.0), px(76.0)),
+                    Corner::TopLeft,
+                    px(220.0),
+                    build_view_menu_items(
+                        self.settings.view_mode,
+                        self.settings.show_line_numbers,
+                        self.settings.word_wrap,
+                        self.show_sidebar,
+                        on_set_view_mode.clone(),
+                        on_toggle_line_numbers.clone(),
+                        on_toggle_word_wrap.clone(),
+                        on_zoom_in.clone(),
+                        on_zoom_out.clone(),
+                        on_reset_zoom.clone(),
+                        on_toggle_sidebar.clone(),
+                        on_toggle_zen.clone(),
+                    ),
+                ),
+                MenuId::Settings => (
+                    Point::new(window.viewport_size().width - px(8.0), px(76.0)),
+                    Corner::TopRight,
+                    px(220.0),
+                    build_settings_menu_items(
+                        self.settings.theme,
+                        self.settings.base_font_size,
+                        on_set_theme.clone(),
+                        on_set_font_size.clone(),
+                        on_open_shortcuts.clone(),
+                        on_open_about.clone(),
+                    ),
+                ),
+                MenuId::Hamburger => {
+                    let file_items = build_file_menu_items(
+                        active_tab_has_pdf,
+                        on_new_tab.clone(),
+                        on_new_folder.clone(),
+                        on_open.clone(),
+                        on_choose_dir.clone(),
+                        on_save.clone(),
+                        on_save_as.clone(),
+                        on_export_html.clone(),
+                        on_view_pdf.clone(),
+                        on_close_active_tab.clone(),
+                    );
+                    let edit_items = build_edit_menu_items(
+                        on_undo.clone(),
+                        on_redo.clone(),
+                        on_toggle_find.clone(),
+                        on_open_replace.clone(),
+                    );
+                    let view_items = build_view_menu_items(
+                        self.settings.view_mode,
+                        self.settings.show_line_numbers,
+                        self.settings.word_wrap,
+                        self.show_sidebar,
+                        on_set_view_mode.clone(),
+                        on_toggle_line_numbers.clone(),
+                        on_toggle_word_wrap.clone(),
+                        on_zoom_in.clone(),
+                        on_zoom_out.clone(),
+                        on_reset_zoom.clone(),
+                        on_toggle_sidebar.clone(),
+                        on_toggle_zen.clone(),
+                    );
+                    let items = vec![
+                        MenuItem::submenu("File", None, file_items),
+                        MenuItem::submenu("Edit", None, edit_items),
+                        MenuItem::submenu("View", None, view_items),
+                    ];
+                    (
+                        Point::new(px(8.0), px(76.0)),
+                        Corner::TopLeft,
+                        px(180.0),
+                        items,
+                    )
+                }
+                MenuId::Overflow => (
+                    Point::new((window.viewport_size().width / 2.0 + px(220.0)).min(window.viewport_size().width - px(8.0)), px(76.0)),
+                    Corner::TopRight,
+                    px(210.0),
+                    build_overflow_menu_items(
+                        on_format.clone(),
+                        on_insert_table.clone(),
+                        on_close_menu.clone(),
+                    ),
+                ),
+            };
+
+            Some(render_dropdown_menu(
+                MenuProps {
+                    id: ("menu-dropdown", open_id as usize).into(),
+                    point,
+                    anchor_corner: anchor,
+                    width,
+                    items,
+                    focus_handle: self.menu_focus_handle.clone(),
+                    selected_index: self.menu_selected_ix,
+                    open_submenu_ix: self.menu_open_submenu_ix,
+                    on_close: on_close_menu.clone(),
+                    on_set_submenu: on_set_submenu.clone(),
+                },
+                &theme,
+            ))
+        } else {
+            None
+        };
+
         div()
             .id("litemark-root")
             .track_focus(&self.focus_handle)
@@ -781,11 +1203,118 @@ impl Render for LiteMarkApp {
             .on_action(cx.listener(|this, _: &ToggleViewMode, _window, cx| { this.handle_toggle_mode(); cx.notify(); }))
             .on_action(cx.listener(|this, _: &UndoAction, _window, cx| { this.handle_format_cmd("undo"); cx.notify(); }))
             .on_action(cx.listener(|this, _: &RedoAction, _window, cx| { this.handle_format_cmd("redo"); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &SaveFileAs, _window, cx| { this.handle_save_as(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &OpenReplace, _window, cx| { this.show_find_replace = true; cx.notify(); }))
+            .on_action(cx.listener(|this, _: &ToggleLineNumbers, _window, cx| { this.handle_toggle_line_numbers(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &Cut, _window, cx| { this.handle_cut(cx); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &Copy, _window, cx| { this.handle_copy(cx); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &Paste, _window, cx| { this.handle_paste(cx); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &SelectAll, _window, cx| { this.handle_select_all(); cx.notify(); }))
+            .on_action(cx.listener(|this, _: &OpenShortcuts, _window, cx| { this.show_shortcuts_modal = true; cx.notify(); }))
+            .on_action(cx.listener(|this, _: &OpenFileMenu, _window, cx| {
+                this.open_menu = Some(MenuId::File);
+                this.menu_selected_ix = None;
+                this.menu_open_submenu_ix = None;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenEditMenu, _window, cx| {
+                this.open_menu = Some(MenuId::Edit);
+                this.menu_selected_ix = None;
+                this.menu_open_submenu_ix = None;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenViewMenu, _window, cx| {
+                this.open_menu = Some(MenuId::View);
+                this.menu_selected_ix = None;
+                this.menu_open_submenu_ix = None;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettingsMenu, _window, cx| {
+                this.open_menu = Some(MenuId::Settings);
+                this.menu_selected_ix = None;
+                this.menu_open_submenu_ix = None;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenHamburgerMenu, _window, cx| {
+                this.open_menu = Some(MenuId::Hamburger);
+                this.menu_selected_ix = None;
+                this.menu_open_submenu_ix = None;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &FocusMenuBar, window, cx| {
+                if this.open_menu.is_some() {
+                    this.open_menu = None;
+                    this.menu_selected_ix = None;
+                    this.menu_open_submenu_ix = None;
+                } else if window.viewport_size().width < px(640.0) {
+                    this.open_menu = Some(MenuId::Hamburger);
+                    this.menu_selected_ix = None;
+                    this.menu_open_submenu_ix = None;
+                } else {
+                    this.open_menu = Some(MenuId::File);
+                    this.menu_selected_ix = None;
+                    this.menu_open_submenu_ix = None;
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CancelMenu, _window, cx| {
+                if this.menu_open_submenu_ix.is_some() {
+                    this.menu_open_submenu_ix = None;
+                } else {
+                    this.open_menu = None;
+                    this.menu_selected_ix = None;
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PrevMenu, window, cx| {
+                let is_narrow = window.viewport_size().width < px(640.0);
+                if is_narrow {
+                    this.open_menu = match this.open_menu {
+                        Some(MenuId::Hamburger) => Some(MenuId::Settings),
+                        Some(MenuId::Settings) => Some(MenuId::Hamburger),
+                        _ => Some(MenuId::Hamburger),
+                    };
+                } else {
+                    this.open_menu = match this.open_menu {
+                        Some(MenuId::File) => Some(MenuId::Settings),
+                        Some(MenuId::Edit) => Some(MenuId::File),
+                        Some(MenuId::View) => Some(MenuId::Edit),
+                        Some(MenuId::Settings) => Some(MenuId::View),
+                        _ => Some(MenuId::File),
+                    };
+                }
+                this.menu_selected_ix = None;
+                this.menu_open_submenu_ix = None;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &NextMenu, window, cx| {
+                let is_narrow = window.viewport_size().width < px(640.0);
+                if is_narrow {
+                    this.open_menu = match this.open_menu {
+                        Some(MenuId::Hamburger) => Some(MenuId::Settings),
+                        Some(MenuId::Settings) => Some(MenuId::Hamburger),
+                        _ => Some(MenuId::Hamburger),
+                    };
+                } else {
+                    this.open_menu = match this.open_menu {
+                        Some(MenuId::File) => Some(MenuId::Edit),
+                        Some(MenuId::Edit) => Some(MenuId::View),
+                        Some(MenuId::View) => Some(MenuId::Settings),
+                        Some(MenuId::Settings) => Some(MenuId::File),
+                        _ => Some(MenuId::File),
+                    };
+                }
+                this.menu_selected_ix = None;
+                this.menu_open_submenu_ix = None;
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
-                if this.show_file_menu {
-                    this.show_file_menu = false;
-                } else if this.show_overflow_menu {
-                    this.show_overflow_menu = false;
+                if this.open_menu.is_some() {
+                    this.open_menu = None;
+                    this.menu_selected_ix = None;
+                    this.menu_open_submenu_ix = None;
+                } else if this.show_about_modal {
+                    this.show_about_modal = false;
                 } else if this.show_shortcuts_modal {
                     this.show_shortcuts_modal = false;
                 } else if this.show_pdf_modal {
@@ -809,24 +1338,14 @@ impl Render for LiteMarkApp {
                             tabs: self.tabs.clone(),
                             active_tab_id: self.active_tab_id.clone(),
                             is_sidebar_open: self.show_sidebar,
-                            has_pdf: active_tab_has_pdf,
                             is_maximized: is_max,
-                            show_file_menu: self.show_file_menu,
                             on_select_tab: on_select_tab.clone(),
                             on_close_tab: on_close_tab.clone(),
                             on_new_tab: on_new_tab.clone(),
                             on_toggle_sidebar: on_toggle_sidebar.clone(),
-                            on_save: on_save.clone(),
-                            on_open: on_open.clone(),
-                            on_export: on_export.clone(),
-                            on_toggle_theme: on_toggle_theme.clone(),
-                            on_toggle_zen: on_toggle_zen.clone(),
-                            on_open_shortcuts: on_open_shortcuts.clone(),
-                            on_view_pdf: on_view_pdf.clone(),
-                            on_toggle_file_menu: on_toggle_file_menu.clone(),
-                            on_minimize: on_minimize.clone(),
-                            on_maximize: on_maximize.clone(),
-                            on_close_window: on_close_window.clone(),
+                            on_minimize,
+                            on_maximize,
+                            on_close_window,
                         },
                         &theme,
                     ))
@@ -834,7 +1353,10 @@ impl Render for LiteMarkApp {
                     .child(render_formatting_toolbar(
                         FormattingToolbarProps {
                             active_formats,
-                            show_overflow_menu: self.show_overflow_menu,
+                            show_overflow_menu: self.open_menu == Some(MenuId::Overflow),
+                            is_narrow,
+                            menu_bar_element,
+                            settings_gear_element,
                             on_format: on_format.clone(),
                             on_insert_table: on_insert_table.clone(),
                             on_insert_link: on_insert_link.clone(),
@@ -851,10 +1373,10 @@ impl Render for LiteMarkApp {
                                 replace_term: self.replace_term.clone(),
                                 match_case: self.match_case,
                                 not_found: self.not_found,
-                                on_find_next: on_noop.clone(),
-                                on_find_prev: on_noop.clone(),
-                                on_replace: on_noop.clone(),
-                                on_replace_all: on_noop.clone(),
+                                on_find_next: on_noop,
+                                on_find_prev: on_noop,
+                                on_replace: on_noop,
+                                on_replace_all: on_noop,
                                 on_close: on_find_close.clone(),
                             },
                             &theme,
@@ -891,7 +1413,9 @@ impl Render for LiteMarkApp {
                                     content: active_tab.content.clone(),
                                     view_mode: self.settings.view_mode,
                                     zoom_level: self.settings.zoom_level,
+                                    base_font_size: self.settings.base_font_size,
                                     show_line_numbers: self.settings.show_line_numbers,
+                                    word_wrap: self.settings.word_wrap,
                                     show_zoom_hud: self.show_zoom_hud,
                                     on_content_change: on_content_change.clone(),
                                 },
@@ -926,7 +1450,9 @@ impl Render for LiteMarkApp {
                             content: active_tab.content.clone(),
                             view_mode: self.settings.view_mode,
                             zoom_level: self.settings.zoom_level,
+                            base_font_size: self.settings.base_font_size,
                             show_line_numbers: false,
+                            word_wrap: self.settings.word_wrap,
                             show_zoom_hud: self.show_zoom_hud,
                             on_content_change: on_content_change.clone(),
                         },
@@ -1002,6 +1528,15 @@ impl Render for LiteMarkApp {
                     on_open_external_pdf.clone(),
                     &theme,
                 ))
+            })
+            .when(self.show_about_modal, |s| {
+                s.child(render_about_modal(
+                    on_close_about.clone(),
+                    &theme,
+                ))
+            })
+            .when_some(menu_overlay, |s, overlay| {
+                s.child(overlay)
             })
     }
 }

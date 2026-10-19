@@ -7,6 +7,8 @@ pub mod editor;
 pub mod status_bar;
 pub mod modals;
 pub mod menu;
+pub mod menu_bar;
+pub mod settings_menu;
 
 pub use primitives::*;
 pub use header_bar::*;
@@ -16,3 +18,6 @@ pub use sidebar::*;
 pub use editor::*;
 pub use status_bar::*;
 pub use modals::*;
+pub use menu::*;
+pub use menu_bar::*;
+pub use settings_menu::*;

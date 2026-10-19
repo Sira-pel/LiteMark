@@ -6,17 +6,32 @@ pub enum ThemeMode {
     #[default]
     YaruDark,
     YaruLight,
+    System,
 }
 
 impl ThemeMode {
     pub fn is_dark(&self) -> bool {
-        matches!(self, ThemeMode::YaruDark)
+        match self {
+            ThemeMode::YaruDark => true,
+            ThemeMode::YaruLight => false,
+            ThemeMode::System => true,
+        }
     }
 
+    pub fn resolved_is_dark(&self, appearance: WindowAppearance) -> bool {
+        match self {
+            ThemeMode::YaruDark => true,
+            ThemeMode::YaruLight => false,
+            ThemeMode::System => matches!(appearance, WindowAppearance::Dark | WindowAppearance::VibrantDark),
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn toggle(&self) -> Self {
         match self {
             ThemeMode::YaruDark => ThemeMode::YaruLight,
             ThemeMode::YaruLight => ThemeMode::YaruDark,
+            ThemeMode::System => ThemeMode::YaruDark,
         }
     }
 }
@@ -37,6 +52,7 @@ pub mod sz {
     pub const R_SM: Pixels = px(4.);
     pub const R_MD: Pixels = px(6.);
     pub const R_LG: Pixels = px(8.);
+    #[allow(dead_code)]
     pub const BODY: f32 = 17.;
     pub const MEASURE_FALLBACK: Pixels = px(672.);
 }
@@ -78,11 +94,19 @@ pub struct Theme {
     pub pill_border: Rgba,
     pub pill_text: Rgba,
     pub placeholder: Rgba,
+    pub menu_text: Rgba,
+    pub menu_shortcut: Rgba,
+    pub menu_disabled: Rgba,
 }
 
 impl Theme {
+    #[allow(dead_code)]
     pub fn new(mode: ThemeMode) -> Self {
-        if mode.is_dark() {
+        Self::resolve(mode, WindowAppearance::Dark)
+    }
+
+    pub fn resolve(mode: ThemeMode, appearance: WindowAppearance) -> Self {
+        if mode.resolved_is_dark(appearance) {
             Self {
                 mode,
                 bg_editor: rgb(0x1e1e1e),
@@ -118,6 +142,9 @@ impl Theme {
                 pill_border: rgb(0x3a3a3a),
                 pill_text: rgb(0xb4b4b4),
                 placeholder: rgb(0x8a8a8a),
+                menu_text: rgb(0xc8c8c8),
+                menu_shortcut: rgb(0x8e8e8e),
+                menu_disabled: rgb(0x6e6e6e),
             }
         } else {
             Self {
@@ -155,6 +182,9 @@ impl Theme {
                 pill_border: rgb(0xcccccc),
                 pill_text: rgb(0x555555),
                 placeholder: rgb(0x888888),
+                menu_text: rgb(0x383838),
+                menu_shortcut: rgb(0x767676),
+                menu_disabled: rgb(0xa8a8a8),
             }
         }
     }
