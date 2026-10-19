@@ -213,6 +213,7 @@ pub fn build_file_menu_items(
     items
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_edit_menu_items(
     on_undo: impl Fn(&mut App) + 'static + Clone,
     on_redo: impl Fn(&mut App) + 'static + Clone,

@@ -431,6 +431,7 @@ fn line_runs(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_ranges(
     quads: &mut Vec<PaintQuad>,
     origin: Point<Pixels>,
@@ -441,7 +442,7 @@ fn paint_ranges(
     range: &Range<usize>,
     color: Hsla,
 ) {
-    if range.end <= row_start || range.start >= row_end && range.start != row_end {
+    if range.end <= row_start || range.start > row_end {
         return;
     }
     if range.is_empty() {

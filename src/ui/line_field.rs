@@ -7,6 +7,9 @@ use std::sync::Arc;
 use gpui::*;
 use unicode_segmentation::UnicodeSegmentation;
 
+type FieldChange = Arc<dyn Fn(&str, &mut App) + 'static>;
+type FieldSubmit = Arc<dyn Fn(bool, &mut App) + 'static>;
+
 pub struct LineField {
     field_id: SharedString,
     focus_handle: FocusHandle,
@@ -18,8 +21,8 @@ pub struct LineField {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     selecting: bool,
-    on_change: Arc<dyn Fn(&str, &mut App) + 'static>,
-    on_submit: Arc<dyn Fn(bool, &mut App) + 'static>,
+    on_change: FieldChange,
+    on_submit: FieldSubmit,
     text_color: Hsla,
     placeholder_color: Hsla,
     bg: Hsla,
@@ -31,8 +34,8 @@ impl LineField {
         cx: &mut Context<Self>,
         field_id: impl Into<SharedString>,
         placeholder: impl Into<SharedString>,
-        on_change: Arc<dyn Fn(&str, &mut App) + 'static>,
-        on_submit: Arc<dyn Fn(bool, &mut App) + 'static>,
+        on_change: FieldChange,
+        on_submit: FieldSubmit,
     ) -> Self {
         Self {
             field_id: field_id.into(),
@@ -115,7 +118,7 @@ impl LineField {
     fn previous_boundary(&self, offset: usize) -> usize {
         self.content[..offset.min(self.content.len())]
             .grapheme_indices(true)
-            .last()
+            .next_back()
             .map(|(index, _)| index)
             .unwrap_or(0)
     }

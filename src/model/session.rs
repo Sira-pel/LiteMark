@@ -73,7 +73,7 @@ pub fn tab_index_for_path(paths: &[Option<&Path>], path: &Path) -> Option<usize>
 
 /// Clicking a tab id activates that tab, including a newly created untitled tab.
 pub fn active_after_click(tab_ids: &[&str], clicked: &str, current: &str) -> String {
-    if tab_ids.iter().any(|id| *id == clicked) {
+    if tab_ids.contains(&clicked) {
         clicked.to_string()
     } else {
         current.to_string()

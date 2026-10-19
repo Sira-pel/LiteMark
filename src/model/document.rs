@@ -504,9 +504,15 @@ mod tests {
             doc.edit(end..end, "y");
         }
         assert!(doc.undo_stored_bytes() < 2_000 * 80);
+        assert_eq!(doc.content.len(), 2_080);
         assert_eq!(doc.content.chars().last(), Some('y'));
         assert!(doc.undo());
+        assert_eq!(doc.content.len(), 2_079);
+        for _ in 0..79 {
+            assert!(doc.undo());
+        }
         assert_eq!(doc.content.chars().last(), Some('x'));
+        assert!(!doc.undo());
     }
 
     #[test]

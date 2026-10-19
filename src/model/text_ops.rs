@@ -164,7 +164,7 @@ pub fn previous_grapheme(content: &str, offset: usize) -> usize {
     let offset = floor_char_boundary(content, offset.min(content.len()));
     content[..offset]
         .grapheme_indices(true)
-        .last()
+        .next_back()
         .map(|(index, _)| index)
         .unwrap_or(0)
 }
@@ -226,12 +226,10 @@ pub fn offset_at_line_col(content: &str, line_1: usize, col_1: usize) -> usize {
         return content.len();
     }
     let end = line_end(content, start);
-    let mut seen = 1usize;
-    for (index, _) in content[start..end].char_indices() {
+    for (seen, (index, _)) in (1usize..).zip(content[start..end].char_indices()) {
         if seen == col_1 {
             return start + index;
         }
-        seen += 1;
     }
     end
 }
@@ -406,8 +404,7 @@ fn strip_inline_marks(text: &str) -> String {
         .replace("<u>", "")
         .replace("</u>", "")
         .replace("~~", "")
-        .replace('`', "")
-        .replace('*', "")
+        .replace(['`', '*'], "")
 }
 
 fn clear_fragment(selected: &str, at_line_starts: &[bool]) -> String {
