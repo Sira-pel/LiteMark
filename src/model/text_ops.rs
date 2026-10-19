@@ -318,6 +318,77 @@ pub fn word_extent(content: &str, offset: usize) -> Range<usize> {
     start..offset + rel
 }
 
+/// Find the offset of the previous word boundary to the left of `offset`.
+pub fn word_left(content: &str, offset: usize) -> usize {
+    if offset == 0 || content.is_empty() {
+        return 0;
+    }
+    let offset = floor_char_boundary(content, offset.min(content.len()));
+    let mut iter = content[..offset].char_indices().rev().peekable();
+
+    while let Some(&(_, ch)) = iter.peek() {
+        if ch.is_whitespace() {
+            iter.next();
+        } else {
+            break;
+        }
+    }
+
+    let Some(&(first_idx, first_ch)) = iter.peek() else {
+        return 0;
+    };
+
+    let target_class = char_class(first_ch);
+    let mut result_offset = first_idx;
+
+    while let Some(&(idx, ch)) = iter.peek() {
+        if char_class(ch) == target_class {
+            result_offset = idx;
+            iter.next();
+        } else {
+            break;
+        }
+    }
+
+    result_offset
+}
+
+/// Find the offset of the next word boundary to the right of `offset`.
+pub fn word_right(content: &str, offset: usize) -> usize {
+    let len = content.len();
+    if offset >= len || content.is_empty() {
+        return len;
+    }
+    let offset = floor_char_boundary(content, offset.min(len));
+    let mut iter = content[offset..].char_indices().peekable();
+
+    while let Some(&(_, ch)) = iter.peek() {
+        if ch.is_whitespace() {
+            iter.next();
+        } else {
+            break;
+        }
+    }
+
+    let Some(&(_, first_ch)) = iter.peek() else {
+        return len;
+    };
+
+    let target_class = char_class(first_ch);
+    let mut result_offset = len;
+
+    while let Some(&(idx, ch)) = iter.peek() {
+        if char_class(ch) == target_class {
+            iter.next();
+            result_offset = offset + idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    result_offset
+}
+
 /// Byte range of the logical line containing `offset`, including its newline.
 pub fn line_extent(content: &str, offset: usize) -> Range<usize> {
     let start = home_offset(content, offset);
@@ -1072,5 +1143,22 @@ mod tests {
         assert!(second_top >= font * 1.65);
         assert!(second_top - 0.0 >= row - 0.01);
         assert!(row > font);
+    }
+
+    #[test]
+    fn test_word_left_and_right() {
+        let text = "hello, world! 123";
+        assert_eq!(word_right(text, 0), 5);
+        assert_eq!(word_right(text, 5), 6);
+        assert_eq!(word_right(text, 6), 12);
+        assert_eq!(word_right(text, 12), 13);
+        assert_eq!(word_right(text, 13), 17);
+
+        assert_eq!(word_left(text, 17), 14);
+        assert_eq!(word_left(text, 14), 12);
+        assert_eq!(word_left(text, 12), 7);
+        assert_eq!(word_left(text, 7), 5);
+        assert_eq!(word_left(text, 5), 0);
+        assert_eq!(word_left(text, 0), 0);
     }
 }

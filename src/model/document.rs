@@ -282,6 +282,84 @@ impl DocumentTab {
         self.place(target, extend);
     }
 
+    pub fn move_word_left(&mut self, extend: bool) {
+        let target = if !extend && !self.caret.range.is_empty() {
+            super::text_ops::word_left(&self.content, self.selection_range().start)
+        } else {
+            super::text_ops::word_left(&self.content, self.cursor_offset())
+        };
+        self.place(target, extend);
+    }
+
+    pub fn move_word_right(&mut self, extend: bool) {
+        let target = if !extend && !self.caret.range.is_empty() {
+            super::text_ops::word_right(&self.content, self.selection_range().end)
+        } else {
+            super::text_ops::word_right(&self.content, self.cursor_offset())
+        };
+        self.place(target, extend);
+    }
+
+    pub fn delete_word_left(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        if !self.caret.range.is_empty() {
+            self.edit(self.selection_range(), "");
+        } else {
+            let cursor = self.cursor_offset();
+            let target = super::text_ops::word_left(&self.content, cursor);
+            if target < cursor {
+                self.edit(target..cursor, "");
+            }
+        }
+    }
+
+    pub fn delete_word_right(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        if !self.caret.range.is_empty() {
+            self.edit(self.selection_range(), "");
+        } else {
+            let cursor = self.cursor_offset();
+            let target = super::text_ops::word_right(&self.content, cursor);
+            if target > cursor {
+                self.edit(cursor..target, "");
+            }
+        }
+    }
+
+    pub fn delete_to_line_start(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        if !self.caret.range.is_empty() {
+            self.edit(self.selection_range(), "");
+        } else {
+            let cursor = self.cursor_offset();
+            let target = super::text_ops::home_offset(&self.content, cursor);
+            if target < cursor {
+                self.edit(target..cursor, "");
+            }
+        }
+    }
+
+    pub fn delete_to_line_end(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        if !self.caret.range.is_empty() {
+            self.edit(self.selection_range(), "");
+        } else {
+            let cursor = self.cursor_offset();
+            let target = super::text_ops::line_end(&self.content, cursor);
+            if target > cursor {
+                self.edit(cursor..target, "");
+            }
+        }
+    }
+
     pub fn select_all(&mut self) {
         self.caret.range = 0..self.content.len();
         self.caret.reversed = false;
@@ -684,5 +762,30 @@ mod tests {
         assert_eq!(previous, 2);
         assert_eq!(doc.selected_text(), "cat");
         assert_ne!(doc.selection_range().start, 0);
+    }
+
+    #[test]
+    fn word_navigation_and_word_deletion() {
+        let mut doc = DocumentTab::new(
+            "tab-1".into(),
+            "Doc.md".into(),
+            "hello world test".into(),
+            None,
+            None,
+        );
+        doc.caret.move_to(0);
+        doc.move_word_right(false);
+        assert_eq!(doc.cursor_offset(), 5);
+        doc.move_word_right(true);
+        assert_eq!(doc.selection_range(), 5..11);
+
+        doc.caret.move_to(16);
+        doc.delete_word_left();
+        assert_eq!(doc.content, "hello world ");
+        doc.delete_word_left();
+        assert_eq!(doc.content, "hello ");
+
+        doc.select_all();
+        assert_eq!(doc.selection_range(), 0..6);
     }
 }

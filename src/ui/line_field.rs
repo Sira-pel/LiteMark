@@ -202,6 +202,46 @@ impl LineField {
         self.move_to(self.content.len(), cx);
     }
 
+    fn word_left(&mut self, _: &crate::actions::EditorWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let offset = crate::model::text_ops::word_left(&self.content, self.cursor_offset());
+            self.move_to(offset, cx);
+        } else {
+            let offset = crate::model::text_ops::word_left(&self.content, self.selected_range.start);
+            self.move_to(offset, cx);
+        }
+    }
+
+    fn word_right(&mut self, _: &crate::actions::EditorWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let offset = crate::model::text_ops::word_right(&self.content, self.cursor_offset());
+            self.move_to(offset, cx);
+        } else {
+            let offset = crate::model::text_ops::word_right(&self.content, self.selected_range.end);
+            self.move_to(offset, cx);
+        }
+    }
+
+    fn select_word_left(
+        &mut self,
+        _: &crate::actions::EditorSelectWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = crate::model::text_ops::word_left(&self.content, self.cursor_offset());
+        self.select_to(offset, cx);
+    }
+
+    fn select_word_right(
+        &mut self,
+        _: &crate::actions::EditorSelectWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = crate::model::text_ops::word_right(&self.content, self.cursor_offset());
+        self.select_to(offset, cx);
+    }
+
     fn backspace(
         &mut self,
         _: &crate::actions::EditorBackspace,
@@ -228,14 +268,65 @@ impl LineField {
         self.replace_text_in_range(None, "", window, cx);
     }
 
+    fn delete_word_left(
+        &mut self,
+        _: &crate::actions::EditorDeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let offset = crate::model::text_ops::word_left(&self.content, self.cursor_offset());
+            self.select_to(offset, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_word_right(
+        &mut self,
+        _: &crate::actions::EditorDeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let offset = crate::model::text_ops::word_right(&self.content, self.cursor_offset());
+            self.select_to(offset, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_line_start(
+        &mut self,
+        _: &crate::actions::EditorDeleteLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(0, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_line_end(
+        &mut self,
+        _: &crate::actions::EditorDeleteLineEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(self.content.len(), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
     fn select_all(
         &mut self,
         _: &crate::actions::SelectAll,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.selected_range = 0..self.content.len();
         self.selection_reversed = false;
+        window.refresh();
         cx.notify();
     }
 
@@ -509,8 +600,16 @@ impl Render for LineField {
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(Self::delete_line_start))
+            .on_action(cx.listener(Self::delete_line_end))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))

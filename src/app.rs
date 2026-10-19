@@ -1451,6 +1451,74 @@ impl LiteMarkApp {
         self.refresh_find();
     }
 
+    fn editor_delete_word_left(&mut self, _cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
+            self.show_error("PDF files are read-only.");
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.delete_word_left();
+        }
+        self.refresh_find();
+    }
+
+    fn editor_delete_word_right(&mut self, _cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
+            self.show_error("PDF files are read-only.");
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.delete_word_right();
+        }
+        self.refresh_find();
+    }
+
+    fn editor_delete_line_start(&mut self, _cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
+            self.show_error("PDF files are read-only.");
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.delete_to_line_start();
+        }
+        self.refresh_find();
+    }
+
+    fn editor_delete_line_end(&mut self, _cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
+            self.show_error("PDF files are read-only.");
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.delete_to_line_end();
+        }
+        self.refresh_find();
+    }
+
     fn editor_newline(&mut self, _cx: &mut App) {
         if !document_accepts_keystrokes(self.field_focus)
             || self.field_owns_keys
@@ -2921,20 +2989,24 @@ impl Render for LiteMarkApp {
                 this.handle_toggle_line_numbers();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Cut, _window, cx| {
+            .on_action(cx.listener(|this, _: &Cut, window, cx| {
                 this.handle_cut(cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Copy, _window, cx| {
+            .on_action(cx.listener(|this, _: &Copy, window, cx| {
                 this.handle_copy(cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Paste, _window, cx| {
+            .on_action(cx.listener(|this, _: &Paste, window, cx| {
                 this.handle_paste(cx);
+                window.refresh();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &SelectAll, _window, cx| {
+            .on_action(cx.listener(|this, _: &SelectAll, window, cx| {
                 this.handle_select_all();
+                window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenShortcuts, _window, cx| {
@@ -3095,6 +3167,46 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorSelectEnd, window, cx| {
                 this.editor_move(cx, |tab| tab.move_end(true));
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorWordLeft, window, cx| {
+                this.editor_move(cx, |tab| tab.move_word_left(false));
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorWordRight, window, cx| {
+                this.editor_move(cx, |tab| tab.move_word_right(false));
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorSelectWordLeft, window, cx| {
+                this.editor_move(cx, |tab| tab.move_word_left(true));
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorSelectWordRight, window, cx| {
+                this.editor_move(cx, |tab| tab.move_word_right(true));
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorDeleteWordLeft, window, cx| {
+                this.editor_delete_word_left(cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorDeleteWordRight, window, cx| {
+                this.editor_delete_word_right(cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorDeleteLineStart, window, cx| {
+                this.editor_delete_line_start(cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorDeleteLineEnd, window, cx| {
+                this.editor_delete_line_end(cx);
                 window.refresh();
                 cx.notify();
             }))
