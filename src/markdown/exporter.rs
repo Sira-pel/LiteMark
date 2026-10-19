@@ -48,6 +48,16 @@ pub fn export_to_html(title: &str, markdown: &str) -> String {
     )
 }
 
+/// Build an export body. `title` is the document title and `markdown` is the source.
+pub fn render_export(kind: &str, title: &str, markdown: &str) -> Result<String, String> {
+    match kind {
+        "html" => Ok(export_to_html(title, markdown)),
+        "md" | "markdown" => Ok(markdown.to_string()),
+        "txt" | "text" => Ok(export_to_plaintext(markdown)),
+        other => Err(format!("Unsupported export format: {other}")),
+    }
+}
+
 pub fn export_to_plaintext(markdown: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -61,11 +71,19 @@ pub fn export_to_plaintext(markdown: &str) -> String {
         match event {
             pulldown_cmark::Event::Text(t) => text_output.push_str(&t),
             pulldown_cmark::Event::Code(c) => text_output.push_str(&c),
-            pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => text_output.push('\n'),
-            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Paragraph) => text_output.push_str("\n\n"),
-            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Heading(_)) => text_output.push_str("\n\n"),
+            pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => {
+                text_output.push('\n')
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Paragraph) => {
+                text_output.push_str("\n\n")
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Heading(_)) => {
+                text_output.push_str("\n\n")
+            }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Item) => text_output.push('\n'),
-            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::BlockQuote(_)) => text_output.push('\n'),
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::BlockQuote(_)) => {
+                text_output.push('\n')
+            }
             _ => {}
         }
     }
@@ -97,5 +115,19 @@ mod tests {
         assert!(!plain.contains("<h1>"));
         assert!(!plain.contains("**"));
     }
-}
 
+    #[test]
+    fn export_html_uses_title_then_markdown() {
+        let html = render_export("html", "Page Title", "# Body Heading").unwrap();
+        assert!(html.contains("<title>Page Title</title>"));
+        assert!(html.contains("<h1>Body Heading</h1>"));
+        assert!(!html.contains("<title># Body Heading</title>"));
+        assert!(!html.contains("<h1>Page Title</h1>"));
+
+        let markdown = render_export("md", "Page Title", "# Body Heading").unwrap();
+        assert_eq!(markdown, "# Body Heading");
+        let text = render_export("txt", "Page Title", "# Body Heading").unwrap();
+        assert!(text.contains("Body Heading"));
+        assert!(!text.contains('#'));
+    }
+}

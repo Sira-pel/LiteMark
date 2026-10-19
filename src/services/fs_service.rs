@@ -1,7 +1,11 @@
-use std::fs;
+use crate::model::{
+    file_dialog_block_reason, unique_name, FileType, PortalProbe, WorkspaceDirectory,
+    WorkspaceFile, WorkspaceFolder,
+};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use crate::model::{FileType, WorkspaceDirectory, WorkspaceFile, WorkspaceFolder};
+use std::process::Command;
 
 pub const INITIAL_MARKDOWN: &str = r#"# Welcome to LiteMark
 
@@ -33,7 +37,8 @@ Running with **GPUI** hardware-accelerated Vulkan pipeline tailored for Ubuntu w
 "#;
 
 pub fn get_or_create_notes_dir() -> PathBuf {
-    let base = dirs::document_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
+    let base = dirs::document_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
     let notes = base.join("Notes");
     let _ = fs::create_dir_all(&notes);
     notes
@@ -53,34 +58,116 @@ pub fn sanitize_name(name: &str) -> String {
         .to_string()
 }
 
-pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("tmp");
-        let temp_path = parent.join(format!(".{}.litemark-tmp", file_name));
-
-        let mut file = fs::File::create(&temp_path)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-
-        fs::rename(&temp_path, path)?;
-        Ok(())
-    } else {
-        fs::write(path, content)
+/// Follow a symlink chain so a save replaces the target file and leaves the link in place.
+fn resolve_symlink_chain(path: &Path) -> io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..32 {
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let link = fs::read_link(&current)?;
+                current = if link.is_absolute() {
+                    link
+                } else {
+                    current.parent().unwrap_or(Path::new(".")).join(link)
+                };
+            }
+            _ => return Ok(current),
+        }
     }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "symlink chain too deep",
+    ))
 }
 
-#[allow(dead_code)]
+fn fsync_parent(path: &Path) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let dir = fs::File::open(parent)?;
+    dir.sync_all()
+}
+
+pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
+    let target = resolve_symlink_chain(path)?;
+    let original_perms = fs::metadata(&target).ok().map(|meta| meta.permissions());
+
+    let parent = target.parent().unwrap_or(Path::new("."));
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    fs::create_dir_all(parent)?;
+
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tmp");
+    let temp_path = parent.join(format!(".{file_name}.litemark-tmp"));
+    if fs::symlink_metadata(&temp_path)
+        .ok()
+        .is_some_and(|meta| meta.file_type().is_symlink())
+    {
+        fs::remove_file(&temp_path)?;
+    }
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temp_path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    if let Some(perms) = original_perms {
+        fs::set_permissions(&temp_path, perms)?;
+    }
+    drop(file);
+
+    fs::rename(&temp_path, &target)?;
+    fsync_parent(&target)?;
+    Ok(())
+}
+
+/// Read a note. Failure is an error — callers must not substitute an empty document.
+pub fn read_note(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|err| format!("Couldn't open {}: {err}", path.display()))
+}
+
+pub fn move_to_trash(path: &Path) -> Result<(), String> {
+    trash::delete(path).map_err(|err| format!("Couldn't move {} to Trash: {err}", path.display()))
+}
+
 pub fn safe_create_file(parent: &Path, name: &str, content: &str) -> io::Result<PathBuf> {
+    fs::create_dir_all(parent)?;
     let clean_name = sanitize_name(name);
-    let filename = if clean_name.contains('.') {
+    let filename = if clean_name.is_empty() {
+        "Untitled.md".to_string()
+    } else if clean_name.contains('.') {
         clean_name
     } else {
-        format!("{}.md", clean_name)
+        format!("{clean_name}.md")
     };
     let target = parent.join(filename);
-    atomic_save(&target, content)?;
+    if fs::symlink_metadata(&target).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "file already exists",
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    fsync_parent(&target)?;
     Ok(target)
 }
 
@@ -95,13 +182,94 @@ pub fn safe_create_folder(parent: &Path, name: &str) -> io::Result<PathBuf> {
 #[allow(dead_code)]
 pub fn safe_rename(old_path: &Path, new_name: &str) -> io::Result<PathBuf> {
     let clean_name = sanitize_name(new_name);
-    if let Some(parent) = old_path.parent() {
-        let target = parent.join(clean_name);
-        fs::rename(old_path, &target)?;
-        Ok(target)
-    } else {
-        Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid parent path"))
+    if clean_name.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty name"));
     }
+    let Some(parent) = old_path.parent() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid parent path",
+        ));
+    };
+    let target = parent.join(clean_name);
+    if target != old_path && fs::symlink_metadata(&target).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destination already exists",
+        ));
+    }
+    if target != old_path {
+        fs::rename(old_path, &target)?;
+        fsync_parent(&target)?;
+    }
+    Ok(target)
+}
+
+pub fn next_available_filename(dir: &Path, desired: &str) -> String {
+    let clean = sanitize_name(desired);
+    let desired = if clean.is_empty() {
+        "Untitled.md".to_string()
+    } else {
+        clean
+    };
+    unique_name(&desired, &|name| dir.join(name).exists())
+}
+
+/// Ask the session bus whether a file dialog can be shown.
+pub fn probe_file_dialog() -> PortalProbe {
+    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+        let uid = uzers_or_uid();
+        let bus = PathBuf::from(format!("/run/user/{uid}/bus"));
+        if !bus.exists() {
+            return PortalProbe::NoSessionBus;
+        }
+    }
+
+    let portal_installed = Path::new("/usr/libexec/xdg-desktop-portal").exists()
+        || Path::new("/usr/bin/xdg-desktop-portal").exists();
+
+    match Command::new("dbus-send")
+        .args([
+            "--session",
+            "--dest=org.freedesktop.DBus",
+            "--print-reply",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus.NameHasOwner",
+            "string:org.freedesktop.portal.Desktop",
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if text.contains("boolean true") {
+                PortalProbe::Ready
+            } else {
+                PortalProbe::NotOwned
+            }
+        }
+        Ok(_) => PortalProbe::HelperMissing { portal_installed },
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            PortalProbe::HelperMissing { portal_installed }
+        }
+        Err(_) => PortalProbe::HelperMissing { portal_installed },
+    }
+}
+
+fn uzers_or_uid() -> u32 {
+    // libc isn't a direct dependency; the session bus path uses the real uid via /proc.
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let rest = line.strip_prefix("Uid:")?;
+                rest.split_whitespace().next()?.parse().ok()
+            })
+        })
+        .unwrap_or(0)
+}
+
+pub fn file_dialog_error() -> Option<String> {
+    file_dialog_block_reason(probe_file_dialog()).map(str::to_string)
 }
 
 #[allow(dead_code)]
@@ -137,7 +305,10 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
                 let path = entry.path();
                 let file_name = entry.file_name().to_string_lossy().to_string();
 
-                if file_name.starts_with('.') || file_name == "node_modules" || file_name == "target" {
+                if file_name.starts_with('.')
+                    || file_name == "node_modules"
+                    || file_name == "target"
+                {
                     continue;
                 }
 
@@ -190,7 +361,10 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
 pub fn pick_open_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_title("Open Text, Markdown, or PDF File")
-        .add_filter("Text & Markdown Files", &["md", "markdown", "txt", "text", "log", "pdf"])
+        .add_filter(
+            "Text & Markdown Files",
+            &["md", "markdown", "txt", "text", "log", "pdf"],
+        )
         .pick_file()
 }
 
@@ -233,5 +407,81 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
-}
 
+    #[test]
+    fn atomic_save_keeps_permissions_and_follows_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp_dir = std::env::temp_dir().join(format!("litemark-atomic-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let target = temp_dir.join("real.md");
+        fs::write(&target, "old").unwrap();
+        let mut perms = fs::metadata(&target).unwrap().permissions();
+        perms.set_mode(0o640);
+        fs::set_permissions(&target, perms).unwrap();
+
+        let link = temp_dir.join("link.md");
+        symlink(&target, &link).unwrap();
+        atomic_save(&link, "updated").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn safe_create_and_rename_do_not_overwrite() {
+        let temp_dir = std::env::temp_dir().join(format!("litemark-safe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let created = safe_create_file(&temp_dir, "Note.md", "keep").unwrap();
+        assert!(safe_create_file(&temp_dir, "Note.md", "wipe").is_err());
+        assert_eq!(fs::read_to_string(&created).unwrap(), "keep");
+
+        fs::write(temp_dir.join("taken.md"), "taken").unwrap();
+        let err = safe_rename(&created, "taken.md").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(temp_dir.join("taken.md")).unwrap(),
+            "taken"
+        );
+        assert_eq!(fs::read_to_string(&created).unwrap(), "keep");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn unreadable_path_is_an_error_not_an_empty_note() {
+        let temp_dir = std::env::temp_dir().join(format!("litemark-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let result = read_note(&temp_dir);
+        assert!(
+            result.is_err(),
+            "a directory must not open as an empty document"
+        );
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn next_available_filename_skips_existing_notes() {
+        let temp_dir = std::env::temp_dir().join(format!("litemark-names-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("New Note.md"), "x").unwrap();
+        assert_eq!(
+            next_available_filename(&temp_dir, "New Note.md"),
+            "New Note 2.md"
+        );
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}

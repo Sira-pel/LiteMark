@@ -1,7 +1,7 @@
+use super::primitives::{kbd_badge, render_icon};
+use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::*;
-use crate::theme::Theme;
-use super::primitives::{kbd_badge, render_icon};
 
 pub fn render_shortcuts_modal<FClose>(on_close: FClose, theme: &Theme) -> impl IntoElement
 where
@@ -82,8 +82,8 @@ where
                                         .font_weight(FontWeight::BOLD)
                                         .text_size(px(14.0))
                                         .text_color(theme.text_primary)
-                                        .child("Keyboard Shortcuts")
-                                )
+                                        .child("Keyboard Shortcuts"),
+                                ),
                         )
                         .child({
                             let c = cls.clone();
@@ -95,7 +95,7 @@ where
                                 .hover(|h| h.bg(theme.bg_hover))
                                 .on_click(move |_, _, cx| c(cx))
                                 .child(render_icon("x", 16.0, theme.text_muted))
-                        })
+                        }),
                 )
                 // Grid of shortcuts
                 .child(
@@ -104,31 +104,31 @@ where
                         .flex_1()
                         .overflow_y_scroll()
                         .p(px(20.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.0))
-                                .children(shortcuts.into_iter().map(|(key, desc)| {
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .px(px(10.0))
-                                        .py(px(6.0))
-                                        .rounded(px(6.0))
-                                        .bg(if theme.mode.is_dark() { rgb(0x191919) } else { rgb(0xf9f9f9) })
-                                        .border_1()
-                                        .border_color(theme.border_subtle)
-                                        .child(
-                                            div()
-                                                .text_size(px(12.0))
-                                                .text_color(theme.text_muted)
-                                                .child(desc)
-                                        )
-                                        .child(kbd_badge(key, theme))
-                                }))
-                        )
+                        .child(div().flex().flex_col().gap(px(6.0)).children(
+                            shortcuts.into_iter().map(|(key, desc)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(10.0))
+                                    .py(px(6.0))
+                                    .rounded(px(6.0))
+                                    .bg(if theme.mode.is_dark() {
+                                        rgb(0x191919)
+                                    } else {
+                                        rgb(0xf9f9f9)
+                                    })
+                                    .border_1()
+                                    .border_color(theme.border_subtle)
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(theme.text_muted)
+                                            .child(desc),
+                                    )
+                                    .child(kbd_badge(key, theme))
+                            }),
+                        )),
                 )
                 // Footer
                 .child(
@@ -156,11 +156,10 @@ where
                                 .cursor_pointer()
                                 .on_click(move |_, _, cx| c(cx))
                                 .child("Got it")
-                        })
-                )
+                        }),
+                ),
         )
 }
-
 
 pub fn render_pdf_preview_modal<FClose, FOpenExternal>(
     title: String,
@@ -430,5 +429,94 @@ where
                                 .child("Close")
                         })
                 )
+        )
+}
+
+pub fn render_prompt_modal<FChoose>(
+    title: impl Into<SharedString>,
+    message: impl Into<SharedString>,
+    choices: Vec<(&'static str, bool)>,
+    on_choose: FChoose,
+    theme: &Theme,
+) -> impl IntoElement
+where
+    FChoose: Fn(&'static str, &mut App) + 'static + Clone,
+{
+    let title = title.into();
+    let message = message.into();
+    div()
+        .absolute()
+        .inset_0()
+        .bg(rgba(0x00000099))
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(16.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w(px(420.0))
+                .rounded(px(12.0))
+                .bg(theme.bg_modal)
+                .border_1()
+                .border_color(theme.border_surface)
+                .shadow_2xl()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .px(px(20.0))
+                        .py(px(14.0))
+                        .bg(theme.bg_modal_header)
+                        .border_b_1()
+                        .border_color(theme.border_subtle)
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(14.0))
+                        .text_color(theme.text_primary)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .px(px(20.0))
+                        .py(px(16.0))
+                        .text_size(px(13.0))
+                        .text_color(theme.text_primary)
+                        .child(message),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .px(px(16.0))
+                        .py(px(12.0))
+                        .bg(theme.bg_modal_header)
+                        .border_t_1()
+                        .border_color(theme.border_subtle)
+                        .children(choices.into_iter().map(|(label, primary)| {
+                            let choose = on_choose.clone();
+                            div()
+                                .id(SharedString::from(format!("prompt-{label}")))
+                                .px(px(14.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .cursor_pointer()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(12.0))
+                                .bg(if primary {
+                                    theme.text_hi
+                                } else {
+                                    theme.bg_hover
+                                })
+                                .text_color(if primary {
+                                    rgb(0x121212)
+                                } else {
+                                    theme.text_primary
+                                })
+                                .on_click(move |_, _, cx| choose(label, cx))
+                                .child(label)
+                        })),
+                ),
         )
 }

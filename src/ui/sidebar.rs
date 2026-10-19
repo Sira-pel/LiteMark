@@ -1,12 +1,19 @@
-use gpui::prelude::*;
-use gpui::*;
+use super::primitives::{icon_button, render_icon};
 use crate::model::{WorkspaceDirectory, WorkspaceFile};
 use crate::theme::{sz, Theme};
-use super::primitives::{icon_button, render_icon};
+use gpui::prelude::*;
+use gpui::*;
 
 #[allow(dead_code)]
-pub struct SidebarProps<FSelect, FCreateFile, FCreateFolder, FDeleteFile, FDeleteFolder, FChooseDir, FClose>
-where
+pub struct SidebarProps<
+    FSelect,
+    FCreateFile,
+    FCreateFolder,
+    FDeleteFile,
+    FDeleteFolder,
+    FChooseDir,
+    FClose,
+> where
     FSelect: Fn(WorkspaceFile, &mut App) + 'static + Clone,
     FCreateFile: Fn(Option<String>, String, &mut App) + 'static + Clone,
     FCreateFolder: Fn(Option<String>, String, &mut App) + 'static + Clone,
@@ -29,8 +36,24 @@ where
     pub on_close: FClose,
 }
 
-pub fn render_sidebar<FSelect, FCreateFile, FCreateFolder, FDeleteFile, FDeleteFolder, FChooseDir, FClose>(
-    props: SidebarProps<FSelect, FCreateFile, FCreateFolder, FDeleteFile, FDeleteFolder, FChooseDir, FClose>,
+pub fn render_sidebar<
+    FSelect,
+    FCreateFile,
+    FCreateFolder,
+    FDeleteFile,
+    FDeleteFolder,
+    FChooseDir,
+    FClose,
+>(
+    props: SidebarProps<
+        FSelect,
+        FCreateFile,
+        FCreateFolder,
+        FDeleteFile,
+        FDeleteFolder,
+        FChooseDir,
+        FClose,
+    >,
     theme: &Theme,
 ) -> impl IntoElement
 where
@@ -46,6 +69,7 @@ where
     let on_create_file = props.on_create_file;
     let on_create_folder = props.on_create_folder;
     let on_delete_file = props.on_delete_file;
+    let on_delete_folder = props.on_delete_folder;
     let on_choose_dir = props.on_choose_dir;
     let on_close = props.on_close;
     let active_id = props.active_file_id;
@@ -56,7 +80,9 @@ where
     let files: Vec<WorkspaceFile> = if query.is_empty() {
         props.workspace.files.clone()
     } else {
-        props.workspace.files
+        props
+            .workspace
+            .files
             .iter()
             .filter(|f| f.name.to_lowercase().contains(&query))
             .cloned()
@@ -103,7 +129,7 @@ where
                                 .h(sz::BTN)
                                 .rounded(sz::R_LG)
                                 .bg(theme.row_active)
-                                .child(render_icon("folder-tree", 16.0, theme.text_hi))
+                                .child(render_icon("folder-tree", 16.0, theme.text_hi)),
                         )
                         .child(
                             div()
@@ -114,7 +140,7 @@ where
                                         .text_size(px(14.0))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(theme.text_hi)
-                                        .child(props.workspace.folder_name.clone())
+                                        .child(props.workspace.folder_name.clone()),
                                 )
                                 .child(
                                     div()
@@ -126,20 +152,22 @@ where
                                                 .w(px(6.0))
                                                 .h(px(6.0))
                                                 .rounded_full()
-                                                .bg(theme.text_faint)
+                                                .bg(theme.text_faint),
                                         )
                                         .child(
                                             div()
                                                 .text_size(px(11.0))
                                                 .text_color(theme.text_muted)
-                                                .child(if props.workspace.is_linked_to_local_disk {
-                                                    "Local Disk Linked"
-                                                } else {
-                                                    "No folder linked"
-                                                })
-                                        )
-                                )
-                        )
+                                                .child(
+                                                    if props.workspace.is_linked_to_local_disk {
+                                                        "Local Disk Linked"
+                                                    } else {
+                                                        "No folder linked"
+                                                    },
+                                                ),
+                                        ),
+                                ),
+                        ),
                 )
                 // Action icons (32x32, gap 0)
                 .child(
@@ -149,21 +177,49 @@ where
                         .gap_0()
                         .child({
                             let cf = on_create_file.clone();
-                            icon_button("sb-add-file", "file-plus", "New Note (Ctrl+N)", false, theme, move |_, _, cx| cf(None, "New Note.md".to_string(), cx))
+                            icon_button(
+                                "sb-add-file",
+                                "file-plus",
+                                "New Note (Ctrl+N)",
+                                false,
+                                theme,
+                                move |_, _, cx| cf(None, "New Note.md".to_string(), cx),
+                            )
                         })
                         .child({
                             let cdir = on_create_folder.clone();
-                            icon_button("sb-add-folder", "folder-plus", "New Folder", false, theme, move |_, _, cx| cdir(None, "New Folder".to_string(), cx))
+                            icon_button(
+                                "sb-add-folder",
+                                "folder-plus",
+                                "New Folder",
+                                false,
+                                theme,
+                                move |_, _, cx| cdir(None, "New Folder".to_string(), cx),
+                            )
                         })
                         .child({
                             let pick = on_choose_dir.clone();
-                            icon_button("sb-pick-dir", "hard-drive", "Choose Folder on Disk", false, theme, move |_, _, cx| pick(cx))
+                            icon_button(
+                                "sb-pick-dir",
+                                "hard-drive",
+                                "Choose Folder on Disk",
+                                false,
+                                theme,
+                                move |_, _, cx| pick(cx),
+                            )
                         })
                         .child({
                             let cls = on_close.clone();
-                            icon_button("sb-close", "x", "Close Sidebar", false, theme, move |_, _, cx| cls(cx))
-                        })
-                )
+                            icon_button(
+                                "sb-close",
+                                "x",
+                                "Close Sidebar",
+                                false,
+                                theme,
+                                move |_, _, cx| cls(cx),
+                            )
+                        }),
+                ),
         )
         // Search bar (32px)
         .child(
@@ -188,9 +244,9 @@ where
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.placeholder)
-                                .child("Search notes in directory...")
-                        )
-                )
+                                .child("Search notes in directory..."),
+                        ),
+                ),
         )
         // Files list
         .child(
@@ -220,7 +276,7 @@ where
                                         "No folder linked"
                                     } else {
                                         "No notes yet"
-                                    })
+                                    }),
                             )
                             .when(query.is_empty(), |s| {
                                 s.child(
@@ -230,10 +286,12 @@ where
                                         .text_size(px(12.0))
                                         .text_color(theme.text_hi)
                                         .hover(|h| h.underline())
-                                        .on_click(move |_, _, cx| cf(None, "New Note.md".to_string(), cx))
-                                        .child("New note (Ctrl+N)")
+                                        .on_click(move |_, _, cx| {
+                                            cf(None, "New Note.md".to_string(), cx)
+                                        })
+                                        .child("New note (Ctrl+N)"),
                                 )
-                            })
+                            }),
                     )
                 })
                 .child(
@@ -241,6 +299,104 @@ where
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
+                        .children(props.workspace.folders.iter().map(|folder| {
+                            let depth = folder_depth(&props.workspace.folders, &folder.id);
+                            let folder_id = folder.id.clone();
+                            let create = on_create_file.clone();
+                            let create_dir = on_create_folder.clone();
+                            let delete = on_delete_folder.clone();
+                            let name = folder.name.clone();
+                            div()
+                                .id(SharedString::from(format!("folder-row-{}", folder_id)))
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .h(sz::ROW_H)
+                                .pl(px(12.0 + depth as f32 * 12.0))
+                                .pr(px(8.0))
+                                .rounded(sz::R_MD)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(render_icon("folder", 14.0, theme.text_muted))
+                                        .child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .text_color(theme.row_text)
+                                                .truncate()
+                                                .child(name),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .child({
+                                            let id = folder_id.clone();
+                                            let create = create.clone();
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "folder-add-{}",
+                                                    id
+                                                )))
+                                                .cursor_pointer()
+                                                .p(px(4.0))
+                                                .on_click(move |_, _, cx| {
+                                                    create(
+                                                        Some(id.clone()),
+                                                        "New Note.md".into(),
+                                                        cx,
+                                                    )
+                                                })
+                                                .child(render_icon(
+                                                    "file-plus",
+                                                    13.0,
+                                                    theme.text_muted,
+                                                ))
+                                        })
+                                        .child({
+                                            let id = folder_id.clone();
+                                            let create_dir = create_dir.clone();
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "folder-mkdir-{}",
+                                                    id
+                                                )))
+                                                .cursor_pointer()
+                                                .p(px(4.0))
+                                                .on_click(move |_, _, cx| {
+                                                    create_dir(
+                                                        Some(id.clone()),
+                                                        "New Folder".into(),
+                                                        cx,
+                                                    )
+                                                })
+                                                .child(render_icon(
+                                                    "folder-plus",
+                                                    13.0,
+                                                    theme.text_muted,
+                                                ))
+                                        })
+                                        .child({
+                                            let id = folder_id.clone();
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "folder-del-{}",
+                                                    id
+                                                )))
+                                                .cursor_pointer()
+                                                .p(px(4.0))
+                                                .on_click(move |_, _, cx| delete(id.clone(), cx))
+                                                .child(render_icon(
+                                                    "trash-2",
+                                                    13.0,
+                                                    theme.text_muted,
+                                                ))
+                                        }),
+                                )
+                        }))
                         .children(files.into_iter().map(|file| {
                             let is_active = active_id.as_deref() == Some(&file.id);
                             let is_open = open_ids.contains(&file.id);
@@ -260,10 +416,20 @@ where
                                 .px(px(12.0))
                                 .rounded(sz::R_MD)
                                 .cursor_pointer()
-                                .bg(if is_active { theme.row_active } else { rgba(0x00000000) })
-                                .text_color(if is_active { theme.text_strong } else { theme.row_text })
+                                .bg(if is_active {
+                                    theme.row_active
+                                } else {
+                                    rgba(0x00000000)
+                                })
+                                .text_color(if is_active {
+                                    theme.text_strong
+                                } else {
+                                    theme.row_text
+                                })
                                 .when(!is_active, |s| {
-                                    s.hover(|h| h.bg(theme.row_hover).text_color(theme.text_primary))
+                                    s.hover(|h| {
+                                        h.bg(theme.row_hover).text_color(theme.text_primary)
+                                    })
                                 })
                                 .on_click(move |_, _, cx| sel(file_clone.clone(), cx))
                                 // Active 3px indicator bar
@@ -276,7 +442,7 @@ where
                                             .bottom(px(4.0))
                                             .w(px(3.0))
                                             .rounded_r(px(2.0))
-                                            .bg(theme.text_hi)
+                                            .bg(theme.text_hi),
                                     )
                                 })
                                 .child(
@@ -284,14 +450,26 @@ where
                                         .flex()
                                         .items_center()
                                         .gap(px(8.0))
-                                        .child(render_icon("file-text", 14.0, if is_active { rgb(0xc8c8c8) } else { theme.text_muted }))
+                                        .child(render_icon(
+                                            "file-text",
+                                            14.0,
+                                            if is_active {
+                                                rgb(0xc8c8c8)
+                                            } else {
+                                                theme.text_muted
+                                            },
+                                        ))
                                         .child(
                                             div()
                                                 .text_size(px(13.0))
-                                                .font_weight(if is_active { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                                                .font_weight(if is_active {
+                                                    FontWeight::MEDIUM
+                                                } else {
+                                                    FontWeight::NORMAL
+                                                })
                                                 .truncate()
-                                                .child(file.name)
-                                        )
+                                                .child(file.name),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -304,7 +482,7 @@ where
                                                     .w(px(6.0))
                                                     .h(px(6.0))
                                                     .rounded_full()
-                                                    .bg(theme.text_faint)
+                                                    .bg(theme.text_faint),
                                             )
                                         })
                                         .child({
@@ -319,15 +497,22 @@ where
                                                 .cursor_pointer()
                                                 .opacity(0.0)
                                                 .group_hover("note-row", |s| s.opacity(1.0))
-                                                .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
+                                                .hover(|h| {
+                                                    h.bg(theme.bg_hover)
+                                                        .text_color(theme.text_primary)
+                                                })
                                                 .on_click(move |_, _, cx| {
                                                     del(fid.clone(), cx);
                                                 })
-                                                .child(render_icon("trash-2", 13.0, theme.text_muted))
-                                        })
+                                                .child(render_icon(
+                                                    "trash-2",
+                                                    13.0,
+                                                    theme.text_muted,
+                                                ))
+                                        }),
                                 )
-                        }))
-                )
+                        })),
+                ),
         )
         // Footer stats (40px)
         .child(
@@ -342,7 +527,11 @@ where
                 .border_color(theme.border_subtle)
                 .text_size(px(12.0))
                 .text_color(theme.text_muted)
-                .child(if total_notes == 1 { "1 note".to_string() } else { format!("{} notes", total_notes) })
+                .child(if total_notes == 1 {
+                    "1 note".to_string()
+                } else {
+                    format!("{} notes", total_notes)
+                })
                 .child(
                     div()
                         .id("sb-footer-change-dir")
@@ -353,7 +542,26 @@ where
                         .text_color(theme.pill_text)
                         .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                         .on_click(move |_, _, cx| on_choose_dir(cx))
-                        .child("Change Folder")
-                )
+                        .child("Change Folder"),
+                ),
         )
+}
+
+fn folder_depth(folders: &[crate::model::WorkspaceFolder], id: &str) -> usize {
+    let mut depth = 0usize;
+    let mut current = folders
+        .iter()
+        .find(|folder| folder.id == id)
+        .and_then(|folder| folder.parent_id.clone());
+    while let Some(parent) = current {
+        depth += 1;
+        if depth > 32 {
+            break;
+        }
+        current = folders
+            .iter()
+            .find(|folder| folder.id == parent)
+            .and_then(|folder| folder.parent_id.clone());
+    }
+    depth
 }

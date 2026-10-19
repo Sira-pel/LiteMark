@@ -4,7 +4,18 @@ use std::path::PathBuf;
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Check if libxkbcommon-x11.so is available in standard search paths
+    // gpui 0.2.2 enables the `x11` feature of the `xkbcommon` crate, and that
+    // crate links with `-lxkbcommon-x11`. The linker therefore needs the
+    // unversioned SONAME `libxkbcommon-x11.so`.
+    //
+    // Ubuntu's runtime package `libxkbcommon-x11-0` ships only
+    // `libxkbcommon-x11.so.0`. The unversioned name is installed by
+    // `libxkbcommon-x11-dev`. On a machine that has the runtime library but not
+    // the -dev package, rustc cannot resolve `-lxkbcommon-x11` unless we expose
+    // the versioned library under the name the linker asks for.
+    //
+    // When the -dev symlink is already present this block does nothing. It is
+    // still required for gpui 0.2.2; the dependency has not dropped xkbcommon.
     let lib_paths = [
         "/usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so",
         "/usr/lib/libxkbcommon-x11.so",
