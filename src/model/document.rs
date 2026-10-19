@@ -3,9 +3,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use super::text_ops::{
-    find_matches, find_next, find_prev, format_replacement, line_col, line_start_flags,
-    move_vertical_collapsed, next_grapheme, previous_grapheme, replace_all, Caret, DiffEdit,
-    UndoHistory,
+    find_matches, find_next, find_prev, format_replacement, home_offset, line_col, line_end,
+    line_start_flags, move_vertical_collapsed, next_grapheme, previous_grapheme, replace_all,
+    Caret, DiffEdit, UndoHistory,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -261,6 +261,294 @@ impl DocumentTab {
         let new_line_start = current_line_start + next_len + 1;
         let new_cursor = (new_line_start + col).min(new_line_start + curr_len);
         self.caret.move_to(new_cursor);
+        self.refresh_cursor();
+    }
+
+    pub fn smart_newline(&mut self, is_shift: bool) {
+        if self.is_read_only() {
+            return;
+        }
+        let range = self.selection_range();
+        if is_shift {
+            self.edit(range, "\n");
+            return;
+        }
+
+        let cursor = range.start;
+        let line_start = home_offset(&self.content, cursor);
+        let line_end_pos = line_end(&self.content, cursor);
+        let line = &self.content[line_start..line_end_pos];
+        let trimmed_start = line.trim_start();
+        let indent_len = line.len() - trimmed_start.len();
+        let indent = &line[..indent_len];
+
+        // 1. Task lists: "- [ ] ", "- [x] ", etc.
+        let task_prefixes = [
+            "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
+        ];
+        if let Some(&prefix) = task_prefixes.iter().find(|&&p| trimmed_start.starts_with(p)) {
+            let is_empty_task = trimmed_start.len() == prefix.len()
+                || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
+            if is_empty_task {
+                if indent.len() >= 2 {
+                    self.edit(line_start..line_start + 2, "");
+                } else {
+                    self.edit(line_start..line_end_pos, "");
+                }
+            } else {
+                let ins = format!("\n{}- [ ] ", indent);
+                self.edit(range, &ins);
+            }
+            return;
+        }
+
+        // 2. Bullet lists: "- ", "* ", "+ "
+        let bullet_prefixes = ["- ", "* ", "+ "];
+        if let Some(&prefix) = bullet_prefixes.iter().find(|&&p| trimmed_start.starts_with(p)) {
+            let is_empty_bullet = trimmed_start.len() == prefix.len()
+                || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
+            if is_empty_bullet {
+                if indent.len() >= 2 {
+                    self.edit(line_start..line_start + 2, "");
+                } else {
+                    self.edit(line_start..line_end_pos, "");
+                }
+            } else {
+                let ins = format!("\n{}{}", indent, prefix);
+                self.edit(range, &ins);
+            }
+            return;
+        }
+
+        // 3. Numbered lists: digits + ". "
+        if let Some(dot_pos) = trimmed_start.find(". ") {
+            if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(num) = trimmed_start[..dot_pos].parse::<usize>() {
+                    let marker_len = dot_pos + 2;
+                    let is_empty_num = trimmed_start.len() == marker_len
+                        || (trimmed_start.len() > marker_len && trimmed_start[marker_len..].trim().is_empty());
+                    if is_empty_num {
+                        if indent.len() >= 2 {
+                            self.edit(line_start..line_start + 2, "");
+                        } else {
+                            self.edit(line_start..line_end_pos, "");
+                        }
+                    } else {
+                        let ins = format!("\n{}{}. ", indent, num + 1);
+                        self.edit(range, &ins);
+                    }
+                    return;
+                }
+            }
+        }
+
+        // 4. Blockquotes: "> "
+        if trimmed_start.starts_with("> ") || trimmed_start == ">" {
+            let is_empty_quote = trimmed_start == ">"
+                || trimmed_start == "> "
+                || trimmed_start[1..].trim().is_empty();
+            if is_empty_quote {
+                self.edit(line_start..line_end_pos, "");
+            } else {
+                let ins = format!("\n{}> ", indent);
+                self.edit(range, &ins);
+            }
+            return;
+        }
+
+        // 5. Headings: "# ", "## ", etc. -> normal newline
+        let is_heading = indent.len() <= 3
+            && ["###### ", "##### ", "#### ", "### ", "## ", "# "]
+                .iter()
+                .any(|p| trimmed_start.starts_with(p));
+        if is_heading {
+            self.edit(range, "\n");
+            return;
+        }
+
+        // 6. Indented code/text: maintain indentation
+        if !indent.is_empty() && !trimmed_start.is_empty() {
+            let ins = format!("\n{}", indent);
+            self.edit(range, &ins);
+            return;
+        }
+
+        // 7. Default newline
+        self.edit(range, "\n");
+    }
+
+    pub fn smart_backspace(&mut self) -> bool {
+        if self.is_read_only() {
+            return false;
+        }
+        let range = self.selection_range();
+        if !range.is_empty() {
+            self.edit(range, "");
+            return true;
+        }
+
+        let cursor = self.cursor_offset();
+        if cursor == 0 {
+            return false;
+        }
+
+        // 1. Auto-pairing bracket/quote deletion: (|), [|], {|}, "|", '|', `|`
+        if cursor < self.content.len() {
+            let prev_char = self.content[..cursor].chars().next_back().unwrap();
+            let next_char = self.content[cursor..].chars().next().unwrap();
+            let is_paired = matches!(
+                (prev_char, next_char),
+                ('(', ')') | ('[', ']') | ('{', '}') | ('"', '"') | ('\'', '\'') | ('`', '`')
+            );
+            if is_paired {
+                let p_len = prev_char.len_utf8();
+                let n_len = next_char.len_utf8();
+                self.edit(cursor - p_len..cursor + n_len, "");
+                return true;
+            }
+        }
+
+        let line_start = home_offset(&self.content, cursor);
+        let line_before = &self.content[line_start..cursor];
+
+        // 2. Heading prefix at cursor boundary
+        for (prefix, demoted) in [
+            ("###### ", "##### "),
+            ("##### ", "#### "),
+            ("#### ", "### "),
+            ("### ", "## "),
+            ("## ", "# "),
+            ("# ", ""),
+        ] {
+            if line_before == prefix {
+                self.edit(line_start..cursor, demoted);
+                return true;
+            }
+        }
+
+        // 3. Task list prefix at cursor boundary
+        for prefix in [
+            "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
+        ] {
+            if line_before.ends_with(prefix) {
+                let start = cursor - 4;
+                self.edit(start..cursor, "");
+                return true;
+            }
+        }
+
+        // 4. Bullet list prefix at cursor boundary
+        for prefix in ["- ", "* ", "+ "] {
+            if line_before.ends_with(prefix) {
+                let trimmed = line_before.trim_start();
+                let indent_len = line_before.len() - trimmed.len();
+                if indent_len >= 2 {
+                    self.edit(line_start..line_start + 2, "");
+                } else {
+                    self.edit(line_start..cursor, "");
+                }
+                return true;
+            }
+        }
+
+        // 5. Numbered list prefix at cursor boundary
+        if line_before.ends_with(". ") {
+            let trimmed = line_before.trim_start();
+            let indent_len = line_before.len() - trimmed.len();
+            if let Some(dot_pos) = trimmed.find(". ") {
+                if dot_pos > 0
+                    && trimmed[..dot_pos].chars().all(|c| c.is_ascii_digit())
+                    && dot_pos + 2 == trimmed.len()
+                {
+                    if indent_len >= 2 {
+                        self.edit(line_start..line_start + 2, "");
+                    } else {
+                        self.edit(line_start..cursor, "");
+                    }
+                    return true;
+                }
+            }
+        }
+
+        // 6. Blockquote prefix at cursor boundary
+        if line_before == "> " {
+            self.edit(line_start..cursor, "");
+            return true;
+        }
+
+        // 7. Indentation spaces deletion (outdent 2 spaces if only spaces before cursor on this line)
+        if cursor >= line_start + 2 && line_before.chars().all(|c| c == ' ') {
+            self.edit(cursor - 2..cursor, "");
+            return true;
+        }
+
+        // 8. Normal backspace: previous grapheme
+        let prev = previous_grapheme(&self.content, cursor);
+        self.edit(prev..cursor, "");
+        true
+    }
+
+    pub fn indent(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let range = self.selection_range();
+        let start_line = home_offset(&self.content, range.start);
+        let end_line = line_end(&self.content, range.end);
+
+        let lines_str = self.content[start_line..end_line].to_string();
+        let mut modified = Vec::new();
+        for line in lines_str.split('\n') {
+            modified.push(format!("  {}", line));
+        }
+        let replacement = modified.join("\n");
+        let added_len = replacement.len() - lines_str.len();
+        self.edit(start_line..end_line, &replacement);
+        if range.is_empty() {
+            self.caret.move_to(range.start + 2);
+        } else {
+            self.caret.range = (range.start + 2)..(range.end + added_len);
+        }
+        self.refresh_cursor();
+    }
+
+    pub fn outdent(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let range = self.selection_range();
+        let start_line = home_offset(&self.content, range.start);
+        let end_line = line_end(&self.content, range.end);
+
+        let lines_str = self.content[start_line..end_line].to_string();
+        let mut modified = Vec::new();
+        let mut first_line_stripped = 0;
+        for (i, line) in lines_str.split('\n').enumerate() {
+            let stripped = if let Some(s) = line.strip_prefix("  ") {
+                s
+            } else if let Some(s) = line.strip_prefix(' ') {
+                s
+            } else if let Some(s) = line.strip_prefix('\t') {
+                s
+            } else {
+                line
+            };
+            if i == 0 {
+                first_line_stripped = line.len() - stripped.len();
+            }
+            modified.push(stripped.to_string());
+        }
+        let replacement = modified.join("\n");
+        let removed_total = lines_str.len() - replacement.len();
+        self.edit(start_line..end_line, &replacement);
+        if range.is_empty() {
+            let new_cursor = range.start.saturating_sub(first_line_stripped).max(start_line);
+            self.caret.move_to(new_cursor);
+        } else {
+            let new_start = range.start.saturating_sub(first_line_stripped).max(start_line);
+            let new_end = range.end.saturating_sub(removed_total).max(new_start);
+            self.caret.range = new_start..new_end;
+        }
         self.refresh_cursor();
     }
 
@@ -765,6 +1053,50 @@ fn outer_is_delimited(content: &str, start: usize, end: usize, prefix: &str, suf
     }
 }
 
+pub fn block_prefix_len(line: &str) -> usize {
+    let trimmed_start = line.trim_start();
+    let indent_len = line.len() - trimmed_start.len();
+
+    // Headings (up to 3 spaces before # in CommonMark)
+    if indent_len <= 3 {
+        for prefix in ["###### ", "##### ", "#### ", "### ", "## ", "# "] {
+            if trimmed_start.starts_with(prefix) {
+                return indent_len + prefix.len();
+            }
+        }
+    }
+
+    // Task lists
+    for prefix in [
+        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
+    ] {
+        if trimmed_start.starts_with(prefix) {
+            return indent_len + prefix.len();
+        }
+    }
+
+    // Bullet lists
+    for prefix in ["- ", "* ", "+ "] {
+        if trimmed_start.starts_with(prefix) {
+            return indent_len + prefix.len();
+        }
+    }
+
+    // Blockquote
+    if trimmed_start.starts_with("> ") {
+        return indent_len + 2;
+    }
+
+    // Numbered list: digits + ". "
+    if let Some(dot_pos) = trimmed_start.find(". ") {
+        if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
+            return indent_len + dot_pos + 2;
+        }
+    }
+
+    0
+}
+
 fn cmd_selects_placeholder(cmd: &str) -> bool {
     matches!(
         cmd,
@@ -1143,5 +1475,123 @@ mod tests {
 
         doc.select_all();
         assert_eq!(doc.selection_range(), 0..6);
+    }
+
+    #[test]
+    fn test_smart_newline_bullet_and_task_and_number() {
+        // 1. Bullet continuation and exit
+        let mut doc = DocumentTab::new("1".into(), "test.md".into(), "- Item 1".into(), None, None);
+        doc.caret.move_to(8);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "- Item 1\n- ");
+        assert_eq!(doc.cursor_offset(), 11);
+
+        // Press Enter again on empty bullet -> exits list
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "- Item 1\n");
+        assert_eq!(doc.cursor_offset(), 9);
+
+        // 2. Numbered list continuation and exit
+        let mut doc2 = DocumentTab::new("2".into(), "test.md".into(), "1. First".into(), None, None);
+        doc2.caret.move_to(8);
+        doc2.smart_newline(false);
+        assert_eq!(doc2.content, "1. First\n2. ");
+
+        // Press Enter on empty "2. " -> exits list
+        doc2.smart_newline(false);
+        assert_eq!(doc2.content, "1. First\n");
+
+        // 3. Task list continuation and exit
+        let mut doc3 = DocumentTab::new("3".into(), "test.md".into(), "- [ ] Todo".into(), None, None);
+        doc3.caret.move_to(10);
+        doc3.smart_newline(false);
+        assert_eq!(doc3.content, "- [ ] Todo\n- [ ] ");
+
+        // Press Enter on empty task -> exits task list
+        doc3.smart_newline(false);
+        assert_eq!(doc3.content, "- [ ] Todo\n");
+
+        // 4. Shift+Enter -> plain newline
+        let mut doc4 = DocumentTab::new("4".into(), "test.md".into(), "- Item".into(), None, None);
+        doc4.caret.move_to(6);
+        doc4.smart_newline(true);
+        assert_eq!(doc4.content, "- Item\n");
+
+        // 5. Heading -> plain newline (does not duplicate #)
+        let mut doc5 = DocumentTab::new("5".into(), "test.md".into(), "# Title".into(), None, None);
+        doc5.caret.move_to(7);
+        doc5.smart_newline(false);
+        assert_eq!(doc5.content, "# Title\n");
+    }
+
+    #[test]
+    fn test_smart_backspace_boundaries() {
+        // 1. Heading demotion
+        let mut doc = DocumentTab::new("1".into(), "test.md".into(), "# Heading".into(), None, None);
+        doc.caret.move_to(2); // right after "# "
+        doc.smart_backspace();
+        assert_eq!(doc.content, "Heading");
+        assert_eq!(doc.cursor_offset(), 0);
+
+        let mut doc_h2 = DocumentTab::new("2".into(), "test.md".into(), "## Heading".into(), None, None);
+        doc_h2.caret.move_to(3); // right after "## "
+        doc_h2.smart_backspace();
+        assert_eq!(doc_h2.content, "# Heading");
+
+        // 2. Bullet list prefix removal
+        let mut doc_bullet = DocumentTab::new("3".into(), "test.md".into(), "- Item".into(), None, None);
+        doc_bullet.caret.move_to(2); // right after "- "
+        doc_bullet.smart_backspace();
+        assert_eq!(doc_bullet.content, "Item");
+
+        // 3. Task list prefix demotion
+        let mut doc_task = DocumentTab::new("4".into(), "test.md".into(), "- [ ] Task".into(), None, None);
+        doc_task.caret.move_to(6); // right after "- [ ] "
+        doc_task.smart_backspace();
+        assert_eq!(doc_task.content, "- Task");
+
+        // 4. Auto-paired brackets deletion
+        let mut doc_pair = DocumentTab::new("5".into(), "test.md".into(), "()".into(), None, None);
+        doc_pair.caret.move_to(1); // between ( and )
+        doc_pair.smart_backspace();
+        assert_eq!(doc_pair.content, "");
+
+        // 5. Indented list item outdent on backspace
+        let mut doc_indent = DocumentTab::new("6".into(), "test.md".into(), "  - Subitem".into(), None, None);
+        doc_indent.caret.move_to(4); // right after "  - "
+        doc_indent.smart_backspace();
+        assert_eq!(doc_indent.content, "- Subitem");
+    }
+
+    #[test]
+    fn test_indent_and_outdent() {
+        let mut doc = DocumentTab::new("1".into(), "test.md".into(), "- Item 1\n- Item 2".into(), None, None);
+        doc.caret.move_to(0);
+        doc.indent();
+        assert_eq!(doc.content, "  - Item 1\n- Item 2");
+
+        doc.outdent();
+        assert_eq!(doc.content, "- Item 1\n- Item 2");
+
+        // Multi-line selection indent and outdent
+        doc.caret.range = 0..doc.content.len();
+        doc.indent();
+        assert_eq!(doc.content, "  - Item 1\n  - Item 2");
+
+        doc.outdent();
+        assert_eq!(doc.content, "- Item 1\n- Item 2");
+    }
+
+    #[test]
+    fn test_block_prefix_len() {
+        assert_eq!(block_prefix_len("# Title"), 2);
+        assert_eq!(block_prefix_len("### Title"), 4);
+        assert_eq!(block_prefix_len("- Item"), 2);
+        assert_eq!(block_prefix_len("  - Sub"), 4);
+        assert_eq!(block_prefix_len("- [ ] Task"), 6);
+        assert_eq!(block_prefix_len("1. One"), 3);
+        assert_eq!(block_prefix_len("10. Ten"), 4);
+        assert_eq!(block_prefix_len("> Quote"), 2);
+        assert_eq!(block_prefix_len("Plain paragraph"), 0);
     }
 }

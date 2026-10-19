@@ -445,6 +445,9 @@ pub fn source_offset_for_click(
     let blocks = parse_markdown(markdown);
     let block = blocks.get(block_index)?;
     if let Some(spans) = spans_of(block) {
+        if spans.is_empty() {
+            return Some(floor_source(markdown, block_source(block).end));
+        }
         let mut seen = 0usize;
         for span in spans {
             let chars = span.text.chars().count();

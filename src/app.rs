@@ -1,7 +1,7 @@
 use crate::actions::*;
 use crate::markdown::{export_stem, format_markdown_table, render_export};
 use crate::model::text_ops::{
-    next_grapheme, offset_to_utf16, previous_grapheme, range_from_utf16, range_to_utf16,
+    home_offset, line_end, next_grapheme, offset_to_utf16, range_from_utf16, range_to_utf16,
 };
 use crate::model::*;
 use crate::services::*;
@@ -1422,13 +1422,7 @@ impl LiteMarkApp {
             return;
         }
         if let Some(tab) = self.active_tab_mut() {
-            let range = if tab.selection_range().is_empty() {
-                let cursor = tab.cursor_offset();
-                previous_grapheme(&tab.content, cursor)..cursor
-            } else {
-                tab.selection_range()
-            };
-            tab.edit(range, "");
+            tab.smart_backspace();
         }
         self.refresh_find();
     }
@@ -1536,8 +1530,58 @@ impl LiteMarkApp {
             return;
         }
         if let Some(tab) = self.active_tab_mut() {
-            let range = tab.selection_range();
-            tab.edit(range, "\n");
+            tab.smart_newline(false);
+        }
+        self.refresh_find();
+    }
+
+    fn editor_plain_newline(&mut self, _cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
+            self.show_error("PDF files are read-only.");
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.smart_newline(true);
+        }
+        self.refresh_find();
+    }
+
+    fn editor_indent(&mut self, _cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
+            self.show_error("PDF files are read-only.");
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.indent();
+        }
+        self.refresh_find();
+    }
+
+    fn editor_outdent(&mut self, _cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
+            self.show_error("PDF files are read-only.");
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.outdent();
         }
         self.refresh_find();
     }
@@ -1720,12 +1764,118 @@ impl EntityInputHandler for LiteMarkApp {
             return;
         }
         let content = self.active_content();
-        let range = range_utf16
+        let mut range = range_utf16
             .as_ref()
             .map(|range| range_from_utf16(&content, range))
             .or_else(|| self.active_tab().and_then(|tab| tab.marked_range.clone()))
             .or_else(|| self.active_tab().map(|tab| tab.selection_range()))
             .unwrap_or(0..0);
+
+        // 1. In WYSIWYG mode, preserve block prefixes when typing at start of line
+        if self.settings.view_mode == ViewMode::Wysiwyg && range.is_empty() && text != "\n" {
+            let cursor = range.start;
+            let line_start = home_offset(&content, cursor);
+            let line_end_pos = line_end(&content, cursor);
+            let line = &content[line_start..line_end_pos];
+            let prefix_len = block_prefix_len(line);
+            if prefix_len > 0 && cursor < line_start + prefix_len {
+                let target = line_start + prefix_len;
+                range = target..target;
+            }
+        }
+
+        // 2. Handle Enter / Newline
+        if text == "\n" {
+            if let Some(tab) = self.active_tab_mut() {
+                tab.smart_newline(false);
+            }
+            self.refresh_find();
+            window.refresh();
+            cx.notify();
+            return;
+        }
+
+        // 3. Selection auto-wrapping or typing auto-pairing
+        if text.chars().count() == 1 {
+            let ch = text.chars().next().unwrap();
+            if !range.is_empty() {
+                let closing = match ch {
+                    '(' => Some(')'),
+                    '[' => Some(']'),
+                    '{' => Some('}'),
+                    '"' => Some('"'),
+                    '\'' => Some('\''),
+                    '`' => Some('`'),
+                    '*' => Some('*'),
+                    '_' => Some('_'),
+                    '~' => Some('~'),
+                    _ => None,
+                };
+                if let Some(close_ch) = closing {
+                    let selected = &content[range.clone()];
+                    let wrapped = format!("{}{}{}", ch, selected, close_ch);
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.edit(range.clone(), &wrapped);
+                        tab.caret.range = (range.start + 1)..(range.start + 1 + selected.len());
+                        tab.caret.reversed = false;
+                        tab.refresh_cursor();
+                    }
+                    self.refresh_find();
+                    window.refresh();
+                    cx.notify();
+                    return;
+                }
+            } else {
+                let cursor = range.start;
+                // Over-typing closing bracket or quote
+                if (ch == ')' || ch == ']' || ch == '}' || ch == '"' || ch == '\'' || ch == '`')
+                    && cursor < content.len()
+                    && content[cursor..].starts_with(ch)
+                {
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.caret.move_to(cursor + ch.len_utf8());
+                        tab.refresh_cursor();
+                    }
+                    window.refresh();
+                    cx.notify();
+                    return;
+                }
+
+                // Auto-closing brackets and backticks
+                let auto_pair = match ch {
+                    '(' => Some("()"),
+                    '[' => Some("[]"),
+                    '{' => Some("{}"),
+                    '`' => Some("``"),
+                    '"' => {
+                        let prev_is_alnum = cursor > 0
+                            && content[..cursor]
+                                .chars()
+                                .next_back()
+                                .is_some_and(|c| c.is_alphanumeric());
+                        if !prev_is_alnum {
+                            Some("\"\"")
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some(pair) = auto_pair {
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.edit(range, pair);
+                        tab.caret.move_to(cursor + ch.len_utf8());
+                        tab.refresh_cursor();
+                    }
+                    self.refresh_find();
+                    window.refresh();
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
         if let Some(tab) = self.active_tab_mut() {
             tab.edit(range, text);
         }
@@ -3291,6 +3441,21 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorNewline, window, cx| {
                 this.editor_newline(cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorPlainNewline, window, cx| {
+                this.editor_plain_newline(cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &IndentAction, window, cx| {
+                this.editor_indent(cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OutdentAction, window, cx| {
+                this.editor_outdent(cx);
                 window.refresh();
                 cx.notify();
             }))

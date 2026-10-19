@@ -120,10 +120,11 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
 
 fn render_spans(
     spans: &[Span],
-    _text_size_px: f32,
+    text_size_px: f32,
     theme: &Theme,
     block_ix: usize,
     caret: Option<Range<usize>>,
+    block_source: Range<usize>,
 ) -> AnyElement {
     let mut full_text = String::new();
     let mut highlights = Vec::new();
@@ -214,6 +215,33 @@ fn render_spans(
         }
     }
 
+    if let Some(ref sel) = caret {
+        if sel.is_empty()
+            && caret_char_pos.is_none()
+            && sel.start >= block_source.start
+            && sel.start <= block_source.end
+        {
+            if spans.is_empty() || sel.start <= spans[0].source.start {
+                caret_char_pos = Some(0);
+            } else if sel.start >= spans.last().unwrap().source.end {
+                caret_char_pos = Some(full_text.chars().count());
+            } else {
+                let mut running_chars = 0;
+                for span in spans {
+                    if sel.start <= span.source.end {
+                        let within = sel.start.saturating_sub(span.source.start).min(span.text.len());
+                        caret_char_pos = Some(running_chars + span.text[..within].chars().count());
+                        break;
+                    }
+                    running_chars += span.text.chars().count();
+                }
+                if caret_char_pos.is_none() {
+                    caret_char_pos = Some(running_chars);
+                }
+            }
+        }
+    }
+
     let caret_byte_idx = caret_char_pos.map(|char_idx| {
         full_text
             .char_indices()
@@ -239,13 +267,14 @@ fn render_spans(
         styled.into_any_element()
     };
 
+    let caret_h = px((text_size_px * 1.25).max(14.0));
     if let Some(byte_idx) = caret_byte_idx {
         let cursor_color = theme.text_hi;
-        let caret_h = px((_text_size_px * 1.25).max(14.0));
         div()
             .relative()
             .w_full()
             .min_w_0()
+            .min_h(caret_h)
             .child(text_element)
             .child(
                 canvas(
@@ -265,7 +294,13 @@ fn render_spans(
             )
             .into_any_element()
     } else {
-        text_element
+        div()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .min_h(caret_h)
+            .child(text_element)
+            .into_any_element()
     }
 }
 
@@ -384,7 +419,7 @@ fn render_wysiwyg_view(
                         _ => 0.0,
                     };
                     let (element, block_font_size) = match block {
-                        Block::Heading { level, spans, .. } => {
+                        Block::Heading { level, spans, source } => {
                             let (h_size, h_weight, h_top, h_bot) = match level {
                                 1 => (34.0 * zoom_factor, FontWeight::EXTRA_BOLD, px(24.0), px(24.0)),
                                 2 => (24.0 * zoom_factor, FontWeight::BOLD, px(40.0), px(16.0)),
@@ -400,7 +435,7 @@ fn render_wysiwyg_view(
                                 .text_size(px(h_size))
                                 .font_weight(h_weight)
                                 .text_color(if level == 1 { theme.h1 } else { theme.h2 })
-                                .child(render_spans(&spans, h_size, theme, ix, caret.clone()));
+                                .child(render_spans(&spans, h_size, theme, ix, caret.clone(), source));
 
                             if level == 1 {
                                 heading_el = heading_el
@@ -410,7 +445,7 @@ fn render_wysiwyg_view(
                             }
                             (heading_el, h_size)
                         }
-                        Block::Paragraph { spans, .. } => (
+                        Block::Paragraph { spans, source } => (
                             div()
                                 .flex_shrink_0()
                                 .w_full()
@@ -420,10 +455,10 @@ fn render_wysiwyg_view(
                                 .text_size(px(base_size))
                                 .line_height(px(base_size * 1.65))
                                 .text_color(theme.text_primary)
-                                .child(render_spans(&spans, base_size, theme, ix, caret.clone())),
+                                .child(render_spans(&spans, base_size, theme, ix, caret.clone(), source)),
                             base_size,
                         ),
-                        Block::Blockquote { spans, .. } => (
+                        Block::Blockquote { spans, source } => (
                             div()
                                 .flex_shrink_0()
                                 .pl(px(14.0))
@@ -434,7 +469,7 @@ fn render_wysiwyg_view(
                                 .whitespace_normal()
                                 .w_full()
                                 .min_w_0()
-                                .child(render_spans(&spans, base_size, theme, ix, caret.clone())),
+                                .child(render_spans(&spans, base_size, theme, ix, caret.clone(), source)),
                             base_size,
                         ),
                         Block::CodeBlock {
@@ -546,6 +581,7 @@ fn render_wysiwyg_view(
                                                 theme,
                                                 ix,
                                                 caret.clone(),
+                                                source,
                                             )),
                                     ),
                                 base_size,
