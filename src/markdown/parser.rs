@@ -1599,5 +1599,166 @@ mod tests {
             assert_eq!(line.offset_map.source_to_display(src_idx), disp_idx);
         }
     }
+
+    fn kind_report(md: &str, kind: &LineKind) -> String {
+        match kind {
+            LineKind::Empty => "Empty".to_string(),
+            LineKind::Paragraph => "Paragraph".to_string(),
+            LineKind::Heading { level } => format!("Heading level={level}"),
+            LineKind::Blockquote => "Blockquote".to_string(),
+            LineKind::ListItem {
+                ordered,
+                number,
+                task,
+                indent_cols,
+                checkbox_source,
+            } => {
+                let task = match task {
+                    None => "none",
+                    Some(false) => "unchecked",
+                    Some(true) => "checked",
+                };
+                let checkbox = match checkbox_source {
+                    Some(range) => format!("{:?}", &md[range.clone()]),
+                    None => "-".to_string(),
+                };
+                format!(
+                    "ListItem ordered={ordered} number={number} task={task} indent={indent_cols} checkbox={checkbox}"
+                )
+            }
+            LineKind::CodeFence { language, opening } => {
+                format!("CodeFence opening={opening} language={language:?}")
+            }
+            LineKind::CodeLine => "CodeLine".to_string(),
+            LineKind::HorizontalRule => "HorizontalRule".to_string(),
+            LineKind::TableDelimiter => "TableDelimiter".to_string(),
+            LineKind::TableRow {
+                is_header, cells, ..
+            } => format!("TableRow header={is_header} cells={}", cells.len()),
+        }
+    }
+
+    fn strike_report(md: &str, line: &ParsedLine) -> String {
+        let mut parts = Vec::new();
+        for segment in &line.styled_segments {
+            if segment.strike {
+                parts.push(format!("{:?}", &md[segment.source.clone()]));
+            }
+        }
+        if parts.is_empty() {
+            "-".to_string()
+        } else {
+            parts.join(",")
+        }
+    }
+
+    fn link_report(line: &ParsedLine) -> String {
+        let mut urls = Vec::new();
+        for segment in &line.styled_segments {
+            if let Some(url) = &segment.link_url {
+                urls.push(format!("{url:?}"));
+            }
+        }
+        if urls.is_empty() {
+            "-".to_string()
+        } else {
+            urls.join(",")
+        }
+    }
+
+    fn map_status(md: &str, line: &ParsedLine) -> String {
+        for (idx, ch) in line.display_text.char_indices() {
+            let src = line.offset_map.display_to_source(idx);
+            if !md.is_char_boundary(src) {
+                return format!("fail boundary {src}");
+            }
+            match md[src..].chars().next() {
+                Some(got) if got == ch => {}
+                other => {
+                    return format!("fail display {ch:?}@{idx} source {other:?}@{src}");
+                }
+            }
+        }
+        "ok".to_string()
+    }
+
+    fn observe_line(md: &str, index: usize) -> String {
+        let doc = parse_document(md);
+        let line = &doc.lines[index];
+        format!(
+            "{} display={:?} strike={} link={} map={}",
+            kind_report(md, &line.kind),
+            line.display_text,
+            strike_report(md, line),
+            link_report(line),
+            map_status(md, line),
+        )
+    }
+
+    fn observe_doc(label: &str, md: &str) -> String {
+        let doc = parse_document(md);
+        let mut out = String::new();
+        for index in 0..doc.lines.len() {
+            if index > 0 {
+                out.push('\n');
+            }
+            out.push_str(&format!("{label}[{index}] {}", observe_line(md, index)));
+        }
+        out
+    }
+
+    /// CommonMark examples 265, 266, 283, 296, and 302, plus GFM ordered tasks.
+    #[test]
+    fn markers_match_gfm() {
+        let observed = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            observe_doc("cm302", "1. foo\n2. bar\n3) baz"),
+            observe_doc("cm296", "10) foo\n    - bar"),
+            observe_doc("cm266", "1234567890. not ok"),
+            observe_doc("cm265", "123456789. ok"),
+            observe_doc("task", "1. [ ] first\n2. [x] second"),
+            observe_doc("ex283", "1. foo\n2.\n3. bar"),
+            observe_doc("eol_dot", "1."),
+            observe_doc("eol_paren", "1)"),
+            observe_doc("tab_dot", "1.\tfoo"),
+            observe_doc("tab_paren", "1)\tfoo"),
+            observe_doc("task_tab", "1. [ ]\tfoo"),
+            observe_doc("task_eol", "1. [ ]"),
+            observe_doc("task_x_eol", "1. [x]"),
+            observe_doc("task_sp_eol", "1. [ ] "),
+            observe_doc("task_tight", "1. [ ]foo"),
+            observe_doc("task_gap", "1.  [ ] foo"),
+            observe_doc("bullet_gap", "-  [ ] foo"),
+            observe_doc("task_spaces", "1. [ ]  foo"),
+            observe_doc("task_tabs", "1. [ ]\t\tbar"),
+        );
+        let expected = "\
+cm302[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+cm302[1] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"bar\" strike=- link=- map=ok
+cm302[2] ListItem ordered=true number=3 task=none indent=0 checkbox=- display=\"baz\" strike=- link=- map=ok
+cm296[0] ListItem ordered=true number=10 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+cm296[1] ListItem ordered=false number=0 task=none indent=4 checkbox=- display=\"bar\" strike=- link=- map=ok
+cm266[0] Paragraph display=\"1234567890. not ok\" strike=- link=- map=ok
+cm265[0] ListItem ordered=true number=123456789 task=none indent=0 checkbox=- display=\"ok\" strike=- link=- map=ok
+task[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"first\" strike=- link=- map=ok
+task[1] ListItem ordered=true number=2 task=checked indent=0 checkbox=\"[x]\" display=\"second\" strike=- link=- map=ok
+ex283[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+ex283[1] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok
+ex283[2] ListItem ordered=true number=3 task=none indent=0 checkbox=- display=\"bar\" strike=- link=- map=ok
+eol_dot[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok
+eol_paren[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok
+tab_dot[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+tab_paren[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+task_tab[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
+task_eol[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\" strike=- link=- map=ok
+task_x_eol[0] ListItem ordered=true number=1 task=checked indent=0 checkbox=\"[x]\" display=\"\" strike=- link=- map=ok
+task_sp_eol[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\" strike=- link=- map=ok
+task_tight[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]foo\" strike=- link=- map=ok
+task_gap[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\" [ ] foo\" strike=- link=- map=ok
+bullet_gap[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\" [ ] foo\" strike=- link=- map=ok
+task_spaces[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
+task_tabs[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"bar\" strike=- link=- map=ok";
+        assert_eq!(observed, expected);
+    }
 }
 
