@@ -956,9 +956,21 @@ fn parse_inline_syntax(
                 let ticks = raw_slice.bytes().take_while(|&b| b == b'`').count();
                 let open_d = abs_start..(abs_start + ticks).min(abs_end);
                 let close_d = abs_end.saturating_sub(ticks).max(open_d.end)..abs_end;
-                let inner = open_d.end..close_d.start;
+                let mut inner = open_d.end..close_d.start;
                 raw_hidden.push(open_d.clone());
                 raw_hidden.push(close_d.clone());
+                // CommonMark drops one leading and one trailing space when a
+                // code span both starts and ends with a space and is not all spaces.
+                let inner_text = &input[(inner.start - base)..(inner.end - base)];
+                if inner_text.len() >= 2
+                    && inner_text.starts_with(' ')
+                    && inner_text.ends_with(' ')
+                    && inner_text.bytes().any(|byte| byte != b' ')
+                {
+                    raw_hidden.push(inner.start..inner.start + 1);
+                    raw_hidden.push((inner.end - 1)..inner.end);
+                    inner = (inner.start + 1)..(inner.end - 1);
+                }
                 inline_pairs.push(InlinePair {
                     kind: InlineTagKind::Code,
                     open_delim: open_d,
@@ -1000,6 +1012,403 @@ fn parse_inline_syntax(
     (raw_hidden, inline_pairs, styled_segments)
 }
 
+struct OpenFence {
+    marker: u8,
+    len: usize,
+    indent: usize,
+    open_range: std::ops::Range<usize>,
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.bytes().take_while(|byte| *byte == b' ').count()
+}
+
+fn odd_backslashes(bytes: &[u8], index: usize) -> bool {
+    let mut slashes = 0usize;
+    let mut look = index;
+    while look > 0 && bytes[look - 1] == b'\\' {
+        slashes += 1;
+        look -= 1;
+    }
+    slashes % 2 == 1
+}
+
+/// Setext underline: 0–3 spaces, one or more `=` or `-`, then only spaces or tabs.
+fn setext_level(line: &str) -> Option<u8> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut spaces = 0;
+    while index < bytes.len() && bytes[index] == b' ' {
+        spaces += 1;
+        if spaces > 3 {
+            return None;
+        }
+        index += 1;
+    }
+    if index >= bytes.len() {
+        return None;
+    }
+    let marker = bytes[index];
+    if marker != b'=' && marker != b'-' {
+        return None;
+    }
+    let start = index;
+    while index < bytes.len() && bytes[index] == marker {
+        index += 1;
+    }
+    if index == start
+        || !bytes[index..]
+            .iter()
+            .all(|byte| *byte == b' ' || *byte == b'\t')
+    {
+        return None;
+    }
+    Some(if marker == b'=' { 1 } else { 2 })
+}
+
+/// Thematic break: 0–3 spaces, then three or more of one of `-` `_` `*`,
+/// with spaces or tabs allowed between them.
+fn is_thematic_break(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut spaces = 0;
+    while index < bytes.len() && bytes[index] == b' ' {
+        spaces += 1;
+        if spaces > 3 {
+            return false;
+        }
+        index += 1;
+    }
+    if index >= bytes.len() {
+        return false;
+    }
+    let marker = bytes[index];
+    if marker != b'-' && marker != b'_' && marker != b'*' {
+        return false;
+    }
+    let mut count = 0;
+    while index < bytes.len() {
+        if bytes[index] == b' ' || bytes[index] == b'\t' {
+            index += 1;
+        } else if bytes[index] == marker {
+            count += 1;
+            index += 1;
+        } else {
+            return false;
+        }
+    }
+    count >= 3
+}
+
+fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)> {
+    let indent = leading_spaces(line);
+    if indent > 3 {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    if indent >= bytes.len() {
+        return None;
+    }
+    let marker = bytes[indent];
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let mut index = indent;
+    while index < bytes.len() && bytes[index] == marker {
+        index += 1;
+    }
+    let len = index - indent;
+    if len < 3 {
+        return None;
+    }
+    let rest = &line[index..];
+    if marker == b'`' && rest.contains('`') {
+        return None;
+    }
+    let info = rest.trim_matches(|ch: char| ch == ' ' || ch == '\t');
+    let info = if info.is_empty() {
+        None
+    } else {
+        Some(info.to_string())
+    };
+    Some((marker, len, indent, info))
+}
+
+fn is_closing_fence(line: &str, marker: u8, min_len: usize) -> bool {
+    let indent = leading_spaces(line);
+    if indent > 3 {
+        return false;
+    }
+    let bytes = line.as_bytes();
+    if indent >= bytes.len() || bytes[indent] != marker {
+        return false;
+    }
+    let mut index = indent;
+    while index < bytes.len() && bytes[index] == marker {
+        index += 1;
+    }
+    if index - indent < min_len {
+        return false;
+    }
+    bytes[index..]
+        .iter()
+        .all(|byte| *byte == b' ' || *byte == b'\t')
+}
+
+fn fence_content_strip(line: &str, indent: usize) -> usize {
+    let bytes = line.as_bytes();
+    let mut stripped = 0;
+    while stripped < indent && stripped < bytes.len() && bytes[stripped] == b' ' {
+        stripped += 1;
+    }
+    stripped
+}
+
+/// Bytes to hide so the rest of the line starts at column 4. Tabs advance to
+/// the next stop of 4.
+fn indented_code_prefix(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut column = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() && column < 4 {
+        match bytes[index] {
+            b' ' => {
+                column += 1;
+                index += 1;
+            }
+            b'\t' => {
+                column += 4 - (column % 4);
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    if column >= 4 {
+        Some(index)
+    } else {
+        None
+    }
+}
+
+fn atx_heading(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && index < 3 && bytes[index] == b' ' {
+        index += 1;
+    }
+    if index < bytes.len() && bytes[index] == b' ' {
+        return None;
+    }
+    let mut level = 0u8;
+    while index < bytes.len() && bytes[index] == b'#' {
+        level += 1;
+        if level > 6 {
+            return None;
+        }
+        index += 1;
+    }
+    if level == 0 || (index < bytes.len() && bytes[index] != b' ') {
+        return None;
+    }
+    let mut content_start = index;
+    if index < bytes.len() {
+        content_start = index + 1;
+    }
+    let mut end = bytes.len();
+    while end > content_start && bytes[end - 1] == b' ' {
+        end -= 1;
+    }
+    let hash_end = end;
+    while end > content_start && bytes[end - 1] == b'#' {
+        end -= 1;
+    }
+    // A closing run may consume the whole content (`### ###`). The space that
+    // precedes it can be the opening separator, so `end` is allowed to land on
+    // `content_start` but not before it. An odd run of backslashes escapes that space.
+    let preceded_by_space = end > 0 && bytes[end - 1] == b' ' && !odd_backslashes(bytes, end - 1);
+    if end < hash_end && preceded_by_space {
+        if end > content_start {
+            end -= 1;
+            while end > content_start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+                end -= 1;
+            }
+        }
+    } else {
+        end = bytes.len();
+        while end > content_start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+            end -= 1;
+        }
+    }
+    while content_start < end && (bytes[content_start] == b' ' || bytes[content_start] == b'\t') {
+        content_start += 1;
+    }
+    Some((level, content_start..end))
+}
+
+fn promote_setext(prev: &mut ParsedLine, markdown: &str, level: u8) -> Vec<std::ops::Range<usize>> {
+    let line = &markdown[prev.source.clone()];
+    let bytes = line.as_bytes();
+    let mut lead = 0;
+    while lead < bytes.len() && lead < 3 && bytes[lead] == b' ' {
+        lead += 1;
+    }
+    let mut end = bytes.len();
+    while end > lead && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+        end -= 1;
+    }
+    let mut extra = Vec::new();
+    if lead > 0 {
+        extra.push(prev.source.start..prev.source.start + lead);
+    }
+    if end < bytes.len() {
+        extra.push(prev.source.start + end..prev.source.end);
+    }
+    prev.kind = LineKind::Heading { level };
+    if extra.is_empty() {
+        return extra;
+    }
+    prev.hidden_ranges.extend(extra.iter().cloned());
+    prev.hidden_ranges = merge_ranges(std::mem::take(&mut prev.hidden_ranges));
+    let (display_text, offset_map) = RowOffsetMap::from_hidden(
+        line,
+        prev.source.start,
+        prev.source.start + lead,
+        &prev.hidden_ranges,
+    );
+    prev.display_text = display_text;
+    prev.offset_map = offset_map;
+    if lead > 0 {
+        prev.prefix_range = prev.source.start..prev.source.start + lead;
+    }
+    extra
+}
+
+fn structural_line(
+    index: usize,
+    source: std::ops::Range<usize>,
+    line: &str,
+    kind: LineKind,
+) -> ParsedLine {
+    let line_start = source.start;
+    let line_end = source.end;
+    let mut hidden = Vec::new();
+    if line_end > line_start {
+        hidden.push(line_start..line_end);
+    }
+    let (display_text, offset_map) = RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
+    ParsedLine {
+        line_index: index,
+        source,
+        kind,
+        prefix_range: line_start..line_end,
+        hidden_ranges: hidden,
+        inline_pairs: Vec::new(),
+        display_text,
+        offset_map,
+        styled_segments: Vec::new(),
+    }
+}
+
+#[allow(clippy::single_range_in_vec_init)]
+fn code_content_line(
+    index: usize,
+    source: std::ops::Range<usize>,
+    line: &str,
+    strip: usize,
+) -> ParsedLine {
+    let line_start = source.start;
+    let line_end = source.end;
+    if strip == 0 {
+        return ParsedLine {
+            line_index: index,
+            source: source.clone(),
+            kind: LineKind::CodeLine,
+            prefix_range: line_start..line_start,
+            hidden_ranges: Vec::new(),
+            inline_pairs: Vec::new(),
+            display_text: line.to_string(),
+            offset_map: RowOffsetMap::identity(line_start, line_end),
+            styled_segments: vec![StyledSegment {
+                source,
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                code: true,
+                link_url: None,
+            }],
+        };
+    }
+    let content_start = line_start + strip;
+    let hidden = vec![line_start..content_start];
+    let (display_text, offset_map) =
+        RowOffsetMap::from_hidden(line, line_start, content_start, &hidden);
+    let mut styled_segments = Vec::new();
+    if content_start < line_end {
+        styled_segments.push(StyledSegment {
+            source: content_start..line_end,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            code: true,
+            link_url: None,
+        });
+    }
+    ParsedLine {
+        line_index: index,
+        source,
+        kind: LineKind::CodeLine,
+        prefix_range: line_start..content_start,
+        hidden_ranges: hidden,
+        inline_pairs: Vec::new(),
+        display_text,
+        offset_map,
+        styled_segments,
+    }
+}
+
+fn atx_line(
+    index: usize,
+    source: std::ops::Range<usize>,
+    line: &str,
+    level: u8,
+    content: std::ops::Range<usize>,
+) -> ParsedLine {
+    let line_start = source.start;
+    let line_end = source.end;
+    let mut hidden = Vec::new();
+    if content.start > 0 {
+        hidden.push(line_start..line_start + content.start);
+    }
+    if content.end < line.len() {
+        hidden.push(line_start + content.end..line_end);
+    }
+    let (inline_hidden, inline_pairs, styled_segments) = if content.is_empty() {
+        (Vec::new(), Vec::new(), Vec::new())
+    } else {
+        parse_inline_syntax(
+            &line[content.start..content.end],
+            line_start + content.start,
+        )
+    };
+    hidden.extend(inline_hidden);
+    let hidden = merge_ranges(hidden);
+    let (display_text, offset_map) =
+        RowOffsetMap::from_hidden(line, line_start, line_start + content.start, &hidden);
+    ParsedLine {
+        line_index: index,
+        source,
+        kind: LineKind::Heading { level },
+        prefix_range: line_start..line_start + content.start,
+        hidden_ranges: hidden,
+        inline_pairs,
+        display_text,
+        offset_map,
+        styled_segments,
+    }
+}
+
 #[allow(clippy::single_range_in_vec_init)]
 pub fn parse_document(markdown: &str) -> ParsedDocument {
     let raw_lines = if markdown.is_empty() {
@@ -1026,8 +1435,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     let mut all_pairs = Vec::new();
     let mut code_blocks = Vec::new();
 
-    let mut in_code_block = false;
-    let mut open_fence_range: Option<std::ops::Range<usize>> = None;
+    let mut open_fence: Option<OpenFence> = None;
 
     // Pre-detect table block ranges and column alignments
     let mut table_ranges: Vec<(usize, usize, std::ops::Range<usize>, Vec<TableColumnAlign>)> =
@@ -1076,89 +1484,56 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         let trimmed_start = line.trim_start();
         let indent_len = line.len() - trimmed_start.len();
 
-        // Check code block fences
-        if trimmed.starts_with("```") {
-            let full_with_nl = sline.start..sline.end;
-            if !in_code_block {
-                in_code_block = true;
-                open_fence_range = Some(full_with_nl);
-                let lang = trimmed
-                    .strip_prefix("```")
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-                let hidden = if line_end > line_start {
-                    vec![line_start..line_end]
-                } else {
-                    Vec::new()
-                };
-                all_hidden.extend(hidden.iter().cloned());
-                let (display_text, offset_map) =
-                    RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
-                lines.push(ParsedLine {
-                    line_index: i,
-                    source: line_source,
-                    kind: LineKind::CodeFence {
-                        language: lang,
-                        opening: true,
-                    },
-                    prefix_range: line_start..line_end,
-                    hidden_ranges: hidden,
-                    inline_pairs: Vec::new(),
-                    display_text,
-                    offset_map,
-                    styled_segments: Vec::new(),
-                });
-            } else {
-                in_code_block = false;
-                if let Some(open_r) = open_fence_range.take() {
-                    code_blocks.push((open_r, full_with_nl));
-                }
-                let hidden = if line_end > line_start {
-                    vec![line_start..line_end]
-                } else {
-                    Vec::new()
-                };
-                all_hidden.extend(hidden.iter().cloned());
-                let (display_text, offset_map) =
-                    RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
-                lines.push(ParsedLine {
-                    line_index: i,
-                    source: line_source,
-                    kind: LineKind::CodeFence {
+        let active_fence = open_fence.as_ref().map(|fence| {
+            (
+                fence.marker,
+                fence.len,
+                fence.indent,
+                fence.open_range.clone(),
+            )
+        });
+        if let Some((marker, len, indent, open_range)) = active_fence {
+            if is_closing_fence(line, marker, len) {
+                code_blocks.push((open_range, sline.start..sline.end));
+                open_fence = None;
+                let parsed = structural_line(
+                    i,
+                    line_source,
+                    line,
+                    LineKind::CodeFence {
                         language: None,
                         opening: false,
                     },
-                    prefix_range: line_start..line_end,
-                    hidden_ranges: hidden,
-                    inline_pairs: Vec::new(),
-                    display_text,
-                    offset_map,
-                    styled_segments: Vec::new(),
-                });
+                );
+                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                lines.push(parsed);
+            } else {
+                let parsed =
+                    code_content_line(i, line_source, line, fence_content_strip(line, indent));
+                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                lines.push(parsed);
             }
             continue;
         }
 
-        if in_code_block {
-            lines.push(ParsedLine {
-                line_index: i,
-                source: line_source.clone(),
-                kind: LineKind::CodeLine,
-                prefix_range: line_start..line_start,
-                hidden_ranges: Vec::new(),
-                inline_pairs: Vec::new(),
-                display_text: line.to_string(),
-                offset_map: RowOffsetMap::identity(line_start, line_end),
-                styled_segments: vec![StyledSegment {
-                    source: line_source,
-                    bold: false,
-                    italic: false,
-                    underline: false,
-                    strike: false,
-                    code: true,
-                    link_url: None,
-                }],
+        if let Some((marker, len, indent, language)) = match_opening_fence(line) {
+            open_fence = Some(OpenFence {
+                marker,
+                len,
+                indent,
+                open_range: sline.start..sline.end,
             });
+            let parsed = structural_line(
+                i,
+                line_source,
+                line,
+                LineKind::CodeFence {
+                    language,
+                    opening: true,
+                },
+            );
+            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+            lines.push(parsed);
             continue;
         }
 
@@ -1177,23 +1552,25 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
-        // Horizontal Rule
-        if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-            let hidden = vec![line_start..line_end];
-            all_hidden.extend(hidden.iter().cloned());
-            let (display_text, offset_map) =
-                RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
-            lines.push(ParsedLine {
-                line_index: i,
-                source: line_source,
-                kind: LineKind::HorizontalRule,
-                prefix_range: line_start..line_end,
-                hidden_ranges: hidden,
-                inline_pairs: Vec::new(),
-                display_text,
-                offset_map,
-                styled_segments: Vec::new(),
-            });
+        if let Some(level) = setext_level(line) {
+            let can_promote = matches!(
+                lines.last().map(|prev| &prev.kind),
+                Some(LineKind::Paragraph)
+            );
+            if can_promote {
+                let extra = promote_setext(lines.last_mut().unwrap(), markdown, level);
+                all_hidden.extend(extra);
+                let parsed = structural_line(i, line_source, line, LineKind::Empty);
+                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                lines.push(parsed);
+                continue;
+            }
+        }
+
+        if is_thematic_break(line) {
+            let parsed = structural_line(i, line_source, line, LineKind::HorizontalRule);
+            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+            lines.push(parsed);
             continue;
         }
 
@@ -1289,26 +1666,17 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             }
         }
 
+        if let Some((level, content)) = atx_heading(line) {
+            let parsed = atx_line(i, line_source, line, level, content);
+            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+            all_pairs.extend(parsed.inline_pairs.iter().cloned());
+            lines.push(parsed);
+            continue;
+        }
+
         // Determine block kind & prefix length
         let mut kind = LineKind::Paragraph;
         let mut prefix_len = 0usize;
-
-        if indent_len <= 3 {
-            for (lvl, pfx) in [
-                (6u8, "###### "),
-                (5, "##### "),
-                (4, "#### "),
-                (3, "### "),
-                (2, "## "),
-                (1, "# "),
-            ] {
-                if trimmed_start.starts_with(pfx) {
-                    kind = LineKind::Heading { level: lvl };
-                    prefix_len = indent_len + pfx.len();
-                    break;
-                }
-            }
-        }
 
         if prefix_len == 0 {
             if let Some(_rest) = trimmed_start
@@ -1354,9 +1722,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     checkbox_source: None,
                 };
                 prefix_len = indent_len + 2;
-            } else if trimmed_start.starts_with("> ") {
-                kind = LineKind::Blockquote;
-                prefix_len = indent_len + 2;
             } else if let Some(dot_pos) = trimmed_start.find(". ") {
                 if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
                     if let Ok(num) = trimmed_start[..dot_pos].parse::<usize>() {
@@ -1371,6 +1736,20 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     }
                 }
             }
+        }
+
+        if prefix_len == 0 {
+            if let Some(strip) = indented_code_prefix(line) {
+                let parsed = code_content_line(i, line_source, line, strip);
+                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                lines.push(parsed);
+                continue;
+            }
+        }
+
+        if prefix_len == 0 && trimmed_start.starts_with("> ") {
+            kind = LineKind::Blockquote;
+            prefix_len = indent_len + 2;
         }
 
         let prefix_range = line_start..(line_start + prefix_len);

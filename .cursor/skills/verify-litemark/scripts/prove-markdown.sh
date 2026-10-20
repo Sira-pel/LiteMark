@@ -152,6 +152,7 @@ green_names=(
   nested-lists
   tables
   fenced-code
+  leaf-blocks
   links
   images
   long-lines

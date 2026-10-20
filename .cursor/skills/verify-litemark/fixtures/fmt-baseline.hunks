@@ -6,8 +6,8 @@ src/app.rs:3113
 src/main.rs:140
 src/main.rs:180
 src/main.rs:206
-src/markdown/parser.rs:1244
-src/markdown/parser.rs:1543
+src/markdown/parser.rs:1621
+src/markdown/parser.rs:1922
 src/markdown/parser.rs:1600
 src/markdown/parser.rs:561
 src/markdown/parser.rs:731

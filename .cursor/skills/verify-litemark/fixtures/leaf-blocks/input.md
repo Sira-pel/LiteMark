@@ -1,0 +1,9 @@
+Foo
+---
+****
+    indented
+~~~
+tilde
+~~~
+## foo ##
+#

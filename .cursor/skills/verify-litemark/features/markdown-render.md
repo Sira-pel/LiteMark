@@ -9,6 +9,7 @@ Markdown render is the editor's view of a note: each source line becomes a kind,
 - `render-lists` keeps nested indent, tasks, and ordered numbers.
 - `render-tables` reads a header row, alignments, and body cells.
 - `render-code` reads a rust fence and the code line.
+- `render-leaf-blocks` reads a setext heading, a four-star break, an indented code line, a tilde fence, a closing-hash heading, and an empty ATX heading.
 - `render-links` keeps the URL `https://example.com/litemark` on the link text.
 - `render-images` keeps the image markup in the display string and the alt text on one segment.
 - `render-wrap` splits a long line at column 40.
@@ -32,6 +33,7 @@ Preconditions:
 - **Nested lists.** The `nested-lists` expect contains the exact line `line[1] kind=ListItem ordered=false number=0 task=none indent_cols=2 checkbox=- source=9..18 display="child"`.
 - **Tables.** The `tables` expect contains the exact line `line[0] kind=TableRow header=true cells=2 source=0..14 display="| Name | Qty |"` and `cell[0][1] source=9..12 align=right text="Qty"`.
 - **Fenced code.** The `fenced-code` expect contains the exact line `line[0] kind=CodeFence opening=true language="rust" source=0..7 display=""` and `line[1] kind=CodeLine source=8..20 display="fn main() {}"`.
+- **Leaf blocks.** The `leaf-blocks` expect contains the exact line `line[0] kind=Heading level=2 source=0..3 display="Foo"`, `line[2] kind=HorizontalRule source=8..12 display=""`, `line[3] kind=CodeLine source=13..25 display="indented"`, and `line[8] kind=Heading level=1 source=50..51 display=""`.
 - **Links.** The `links` expect contains the exact line `segment[0][1] source=5..13 bold=false italic=false underline=false strike=false code=false link="https://example.com/litemark" text="LiteMark"`.
 - **Images.** The `images` expect contains the exact line `line[0] kind=Paragraph source=0..41 display="![Alt text](https://example.com/note.png)"` and `segment[0][0] source=2..10 bold=false italic=false underline=false strike=false code=false link=- text="Alt text"`. The display string keeps the `![` markup. There is no image kind.
 - **Wrapping.** The `long-lines` expect contains the exact line `row[0][0] display=0..40 text="The quick brown fox jumps over the lazy "` and `row[2][0] display=0..40 text="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`.
