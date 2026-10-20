@@ -118,8 +118,8 @@ MUTANTS: dict[str, dict[str, str]] = {
     "trailing-empty": {
         "file": "src/markdown/parser.rs",
         "label": "trailing newline does not append an empty line",
-        "old": "        if markdown.ends_with('\\n') {\n",
-        "new": "        if false && markdown.ends_with('\\n') {\n",
+        "old": "        if markdown.ends_with('\\n') || markdown.ends_with('\\r') {\n",
+        "new": "        if false && (markdown.ends_with('\\n') || markdown.ends_with('\\r')) {\n",
     },
 }
 

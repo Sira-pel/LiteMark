@@ -159,19 +159,42 @@ struct SourceLine<'a> {
 
 fn source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
     let mut lines = Vec::new();
+    let bytes = markdown.as_bytes();
     let mut start = 0usize;
-    if markdown.is_empty() {
-        return lines;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        // A line ending is LF, a lone CR, or CRLF (CommonMark 0.31.2).
+        if bytes[index] == b'\n' {
+            lines.push(SourceLine {
+                start,
+                end: index + 1,
+                text: &markdown[start..index],
+            });
+            index += 1;
+            start = index;
+        } else if bytes[index] == b'\r' {
+            let end = if index + 1 < bytes.len() && bytes[index + 1] == b'\n' {
+                index + 2
+            } else {
+                index + 1
+            };
+            lines.push(SourceLine {
+                start,
+                end,
+                text: &markdown[start..index],
+            });
+            index = end;
+            start = end;
+        } else {
+            index += 1;
+        }
     }
-    for piece in markdown.split_inclusive('\n') {
-        let end = start + piece.len();
-        let text = piece.strip_suffix('\n').unwrap_or(piece);
-        // Classify the line without a trailing CR. The `\r` stays in `end`,
-        // outside this line's source, the same way `\n` does. A lone CR with
-        // no LF is not a line break.
-        let text = text.strip_suffix('\r').unwrap_or(text);
-        lines.push(SourceLine { start, end, text });
-        start = end;
+    if start < bytes.len() {
+        lines.push(SourceLine {
+            start,
+            end: bytes.len(),
+            text: &markdown[start..],
+        });
     }
     lines
 }
@@ -1023,6 +1046,7 @@ struct OpenFence {
     len: usize,
     indent: usize,
     open_range: std::ops::Range<usize>,
+    max_indent: usize,
 }
 
 fn leading_spaces(line: &str) -> usize {
@@ -1101,6 +1125,21 @@ fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)>
     if indent > 3 {
         return None;
     }
+    opening_fence_parts(line, indent)
+}
+
+fn match_opening_fence_limited(
+    line: &str,
+    max_indent: usize,
+) -> Option<(u8, usize, usize, Option<String>)> {
+    let indent = leading_spaces(line);
+    if indent > max_indent {
+        return None;
+    }
+    opening_fence_parts(line, indent)
+}
+
+fn opening_fence_parts(line: &str, indent: usize) -> Option<(u8, usize, usize, Option<String>)> {
     let bytes = line.as_bytes();
     if indent >= bytes.len() {
         return None;
@@ -1130,9 +1169,9 @@ fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)>
     Some((marker, len, indent, info))
 }
 
-fn is_closing_fence(line: &str, marker: u8, min_len: usize) -> bool {
+fn is_closing_fence(line: &str, marker: u8, min_len: usize, max_indent: usize) -> bool {
     let indent = leading_spaces(line);
-    if indent > 3 {
+    if indent > max_indent {
         return false;
     }
     let bytes = line.as_bytes();
@@ -1298,19 +1337,597 @@ fn continues_list(lines: &[ParsedLine], column: usize) -> bool {
     false
 }
 
-fn indented_code_resumes(lines: &[SourceLine<'_>], from: usize) -> bool {
+fn indented_code_resumes(lines: &[SourceLine<'_>], from: usize, min_col: usize) -> bool {
     for later in lines.iter().skip(from + 1) {
         if later.text.trim().is_empty() {
             continue;
         }
         let (index, column) = split_indent(later.text);
-        return index < later.text.len() && column >= 4;
+        return index < later.text.len() && column >= min_col;
     }
     false
 }
 
-fn whitespace_code_strip(line: &str) -> usize {
-    indented_code_prefix(line).unwrap_or(line.len())
+fn prefix_through_column(line: &str, min_col: usize) -> usize {
+    let bytes = line.as_bytes();
+    let mut column = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() && column < min_col {
+        match bytes[index] {
+            b' ' => {
+                column += 1;
+                index += 1;
+            }
+            b'\t' => {
+                column += 4 - (column % 4);
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    index
+}
+
+fn column_at_byte(line: &str, byte_index: usize) -> usize {
+    let end = byte_index.min(line.len());
+    let mut column = 0usize;
+    for ch in line[..end].chars() {
+        if ch == '\t' {
+            column += 4 - (column % 4);
+        } else {
+            column += 1;
+        }
+    }
+    column
+}
+
+fn line_indent_column(line: &str) -> Option<usize> {
+    let (index, column) = split_indent(line);
+    if index < line.len() {
+        Some(column)
+    } else {
+        None
+    }
+}
+
+fn list_content_column(line: &str, prefix_len: usize) -> usize {
+    let base = column_at_byte(line, prefix_len);
+    let after = line.get(prefix_len..).unwrap_or("");
+    let (extra, extra_col) = split_indent(after);
+    if extra < after.len() {
+        base + extra_col
+    } else {
+        base
+    }
+}
+
+/// `[label]:` at indent ≤ 3, with no unescaped `]` inside the label.
+fn is_link_definition_line(line: &str) -> bool {
+    let (index, column) = split_indent(line);
+    if column > 3 || index >= line.len() || !line.is_char_boundary(index) {
+        return false;
+    }
+    let bytes = line.as_bytes();
+    if bytes[index] != b'[' {
+        return false;
+    }
+    let mut cursor = index + 1;
+    let mut escaped = false;
+    let mut closed = false;
+    while cursor < bytes.len() {
+        if escaped {
+            escaped = false;
+            cursor += 1;
+            continue;
+        }
+        match bytes[cursor] {
+            b'\\' => {
+                escaped = true;
+                cursor += 1;
+            }
+            b']' => {
+                closed = true;
+                cursor += 1;
+                break;
+            }
+            _ => cursor += 1,
+        }
+    }
+    closed && cursor < bytes.len() && bytes[cursor] == b':'
+}
+
+fn is_paren_item_line(line: &str) -> bool {
+    let (index, column) = split_indent(line);
+    if column > 3 || index >= line.len() {
+        return false;
+    }
+    let bytes = line.as_bytes();
+    let mut cursor = index;
+    let mut digits = 0usize;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+        digits += 1;
+        cursor += 1;
+    }
+    if digits == 0 || digits > 9 || bytes.get(cursor) != Some(&b')') {
+        return false;
+    }
+    cursor += 1;
+    cursor == bytes.len() || bytes[cursor] == b' ' || bytes[cursor] == b'\t'
+}
+
+fn paren_marker_prefix_len(line: &str) -> Option<usize> {
+    if !is_paren_item_line(line) {
+        return None;
+    }
+    let (index, _) = split_indent(line);
+    let bytes = line.as_bytes();
+    let mut cursor = index;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+        cursor += 1;
+    }
+    cursor += 1;
+    if cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
+        cursor += 1;
+    }
+    Some(cursor)
+}
+
+fn paragraph_run_is_link_definition(lines: &[ParsedLine], markdown: &str) -> bool {
+    let Some(start) = paragraph_run_start(lines) else {
+        return false;
+    };
+    is_link_definition_line(&markdown[lines[start].source.clone()])
+}
+
+fn paragraph_run_is_paren_item(lines: &[ParsedLine], markdown: &str) -> bool {
+    let Some(start) = paragraph_run_start(lines) else {
+        return false;
+    };
+    is_paren_item_line(&markdown[lines[start].source.clone()])
+}
+
+fn skip_link_definition_lines(lines: &[ParsedLine], markdown: &str, mut index: usize) -> usize {
+    while index < lines.len() {
+        let text = &markdown[lines[index].source.clone()];
+        if !is_link_definition_line(text) {
+            break;
+        }
+        index += 1;
+        while index < lines.len() {
+            let cont = &markdown[lines[index].source.clone()];
+            if is_link_definition_line(cont) {
+                break;
+            }
+            let (indent_bytes, _) = split_indent(cont);
+            if indent_bytes > 0 && indent_bytes < cont.len() {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    index
+}
+
+/// Setext promotes the paragraph suffix after leading link definitions.
+/// An HTML-block opener at the start of the run promotes nothing.
+fn setext_promote_from(lines: &[ParsedLine], markdown: &str, run_start: usize) -> Option<usize> {
+    let first = &markdown[lines[run_start].source.clone()];
+    if html_block_kind(first).is_some() || is_paren_item_line(first) {
+        return None;
+    }
+    let mut index = run_start;
+    if is_link_definition_line(first) {
+        index = skip_link_definition_lines(lines, markdown, run_start);
+    }
+    if index >= lines.len() {
+        None
+    } else {
+        Some(index)
+    }
+}
+
+fn starts_with_ignore_ascii_case(text: &str, prefix: &str) -> bool {
+    let text = text.as_bytes();
+    let prefix = prefix.as_bytes();
+    text.len() >= prefix.len()
+        && text[..prefix.len()]
+            .iter()
+            .zip(prefix)
+            .all(|(left, right)| left.to_ascii_lowercase() == *right)
+}
+
+fn html_type1_open(rest: &str) -> bool {
+    for tag in ["pre", "script", "style", "textarea"] {
+        let open = format!("<{tag}");
+        if !starts_with_ignore_ascii_case(rest, &open) {
+            continue;
+        }
+        let next = rest.as_bytes().get(open.len()).copied();
+        if next.is_none() || matches!(next, Some(b' ' | b'\t' | b'>')) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_html_block_tag(name: &str) -> bool {
+    const TAGS: &[&str] = &[
+        "address",
+        "article",
+        "aside",
+        "base",
+        "basefont",
+        "blockquote",
+        "body",
+        "caption",
+        "center",
+        "col",
+        "colgroup",
+        "dd",
+        "details",
+        "dialog",
+        "dir",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "frame",
+        "frameset",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "head",
+        "header",
+        "hr",
+        "html",
+        "iframe",
+        "legend",
+        "li",
+        "link",
+        "main",
+        "menu",
+        "menuitem",
+        "nav",
+        "noframes",
+        "ol",
+        "optgroup",
+        "option",
+        "p",
+        "param",
+        "search",
+        "section",
+        "summary",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "title",
+        "tr",
+        "track",
+        "ul",
+    ];
+    TAGS.iter().any(|tag| name.eq_ignore_ascii_case(tag))
+}
+
+fn html_type6_open(rest: &str) -> bool {
+    let bytes = rest.as_bytes();
+    if bytes.first() != Some(&b'<') {
+        return false;
+    }
+    let mut index = 1usize;
+    if bytes.get(index) == Some(&b'/') {
+        index += 1;
+    }
+    let name_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_alphanumeric() {
+        index += 1;
+    }
+    if index == name_start || !rest.is_char_boundary(name_start) || !rest.is_char_boundary(index) {
+        return false;
+    }
+    if !is_html_block_tag(&rest[name_start..index]) {
+        return false;
+    }
+    match bytes.get(index).copied() {
+        None | Some(b' ' | b'\t' | b'>') => true,
+        Some(b'/') => bytes.get(index + 1) == Some(&b'>'),
+        _ => false,
+    }
+}
+
+fn is_attr_name_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte == b':'
+}
+
+fn is_attr_name_byte(byte: u8) -> bool {
+    is_attr_name_start(byte) || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+}
+
+fn skip_ascii_ws(index: &mut usize, bytes: &[u8]) {
+    while *index < bytes.len() && matches!(bytes[*index], b' ' | b'\t') {
+        *index += 1;
+    }
+}
+
+fn skip_attr_value(index: &mut usize, bytes: &[u8]) -> bool {
+    if *index >= bytes.len() {
+        return false;
+    }
+    match bytes[*index] {
+        b'"' | b'\'' => {
+            let quote = bytes[*index];
+            *index += 1;
+            while *index < bytes.len() && bytes[*index] != quote {
+                *index += 1;
+            }
+            if *index >= bytes.len() {
+                return false;
+            }
+            *index += 1;
+            true
+        }
+        b' ' | b'\t' | b'=' | b'<' | b'>' | b'`' => false,
+        _ => {
+            *index += 1;
+            while *index < bytes.len()
+                && !matches!(bytes[*index], b' ' | b'\t' | b'"' | b'\'' | b'=' | b'<' | b'>' | b'`')
+            {
+                *index += 1;
+            }
+            true
+        }
+    }
+}
+
+fn skip_html_attribute(index: &mut usize, bytes: &[u8]) -> bool {
+    let start = *index;
+    skip_ascii_ws(index, bytes);
+    if *index == start || *index >= bytes.len() || !is_attr_name_start(bytes[*index]) {
+        return false;
+    }
+    *index += 1;
+    while *index < bytes.len() && is_attr_name_byte(bytes[*index]) {
+        *index += 1;
+    }
+    let after_name = *index;
+    skip_ascii_ws(index, bytes);
+    if *index < bytes.len() && bytes[*index] == b'=' {
+        *index += 1;
+        skip_ascii_ws(index, bytes);
+        skip_attr_value(index, bytes)
+    } else {
+        *index = after_name;
+        true
+    }
+}
+
+fn html_type7_open(rest: &str) -> bool {
+    let bytes = rest.as_bytes();
+    if bytes.first() != Some(&b'<') {
+        return false;
+    }
+    let mut index = 1usize;
+    let closing = if bytes.get(index) == Some(&b'/') {
+        index += 1;
+        true
+    } else {
+        false
+    };
+    let name_start = index;
+    if index >= bytes.len() || !bytes[index].is_ascii_alphabetic() {
+        return false;
+    }
+    index += 1;
+    while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'-') {
+        index += 1;
+    }
+    if !rest.is_char_boundary(name_start) || !rest.is_char_boundary(index) {
+        return false;
+    }
+    let name = &rest[name_start..index];
+    if name.eq_ignore_ascii_case("pre")
+        || name.eq_ignore_ascii_case("script")
+        || name.eq_ignore_ascii_case("style")
+        || name.eq_ignore_ascii_case("textarea")
+    {
+        return false;
+    }
+    if closing {
+        skip_ascii_ws(&mut index, bytes);
+        if bytes.get(index) != Some(&b'>') {
+            return false;
+        }
+        index += 1;
+    } else {
+        while skip_html_attribute(&mut index, bytes) {}
+        skip_ascii_ws(&mut index, bytes);
+        if bytes.get(index) == Some(&b'/') {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'>') {
+            return false;
+        }
+        index += 1;
+    }
+    bytes[index..]
+        .iter()
+        .all(|byte| *byte == b' ' || *byte == b'\t')
+}
+
+/// CommonMark HTML block start conditions 1–7, after at most three columns.
+fn html_block_kind(line: &str) -> Option<u8> {
+    let (index, column) = split_indent(line);
+    if column > 3 || index >= line.len() || !line.is_char_boundary(index) {
+        return None;
+    }
+    let rest = &line[index..];
+    if html_type1_open(rest) {
+        return Some(1);
+    }
+    if rest.starts_with("<!--") {
+        return Some(2);
+    }
+    if rest.starts_with("<?") {
+        return Some(3);
+    }
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'<' && bytes[1] == b'!' && bytes[2].is_ascii_alphabetic() {
+        return Some(4);
+    }
+    if rest.starts_with("<![CDATA[") {
+        return Some(5);
+    }
+    if html_type6_open(rest) {
+        return Some(6);
+    }
+    if html_type7_open(rest) {
+        Some(7)
+    } else {
+        None
+    }
+}
+
+fn html_block_ends(kind: u8, line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    match kind {
+        1 => ["</pre>", "</script>", "</style>", "</textarea>"]
+            .iter()
+            .any(|tag| lower.contains(tag)),
+        2 => line.contains("-->"),
+        3 => line.contains("?>"),
+        4 => line.contains('>'),
+        5 => line.contains("]]>"),
+        6 | 7 => false,
+        _ => false,
+    }
+}
+
+fn line_interrupts_list(line: &str) -> bool {
+    if is_thematic_break(line) || atx_heading(line).is_some() || html_block_kind(line).is_some() {
+        return true;
+    }
+    list_marker(line).is_some() || match_opening_fence(line).is_some()
+}
+
+#[derive(Clone, Copy)]
+struct ListFrame {
+    marker_col: usize,
+    content_col: usize,
+    fence_marker: Option<(u8, usize)>,
+}
+
+fn push_list_frame(
+    lists: &mut Vec<ListFrame>,
+    marker_col: usize,
+    content_col: usize,
+    fence_marker: Option<(u8, usize)>,
+) {
+    while lists
+        .last()
+        .is_some_and(|frame| frame.marker_col >= marker_col)
+    {
+        lists.pop();
+    }
+    lists.push(ListFrame {
+        marker_col,
+        content_col,
+        fence_marker,
+    });
+}
+
+fn list_relative_rule(line: &str, lists: &[ListFrame]) -> bool {
+    let Some(frame) = lists.last() else {
+        return false;
+    };
+    let Some(column) = line_indent_column(line) else {
+        return false;
+    };
+    column >= frame.content_col
+        && column <= frame.content_col + 3
+        && is_thematic_break(line.trim_start())
+}
+
+fn close_finished_lists(lists: &mut Vec<ListFrame>, previous_blank: bool, line: &str) {
+    let Some(column) = line_indent_column(line) else {
+        return;
+    };
+    let interrupts = line_interrupts_list(line);
+    while let Some(frame) = lists.last() {
+        if column >= frame.content_col {
+            break;
+        }
+        if previous_blank || interrupts {
+            lists.pop();
+        } else {
+            break;
+        }
+    }
+}
+
+fn nearest_nonempty(lines: &[ParsedLine]) -> Option<&ParsedLine> {
+    lines
+        .iter()
+        .rev()
+        .find(|line| !matches!(line.kind, LineKind::Empty))
+}
+
+fn item_opens_fence(line: &str, prefix_len: usize) -> Option<(u8, usize)> {
+    let rest = line.get(prefix_len..)?.trim_start_matches([' ', '\t']);
+    let bytes = rest.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let marker = bytes[0];
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let len = bytes.iter().take_while(|byte| **byte == marker).count();
+    if len >= 3 {
+        Some((marker, len))
+    } else {
+        None
+    }
+}
+
+fn flow_text_line(
+    index: usize,
+    line_source: std::ops::Range<usize>,
+    line: &str,
+    kind: LineKind,
+    prefix_len: usize,
+) -> ParsedLine {
+    let line_start = line_source.start;
+    let prefix_range = line_start..(line_start + prefix_len);
+    let body = &line[prefix_len..];
+    let body_base = line_start + prefix_len;
+    let (mut inline_hidden, inline_pairs, styled_segments) = parse_inline_syntax(body, body_base);
+    if prefix_len > 0 {
+        inline_hidden.push(prefix_range.clone());
+    }
+    let merged_hidden = merge_ranges(inline_hidden);
+    let mapped = RowOffsetMap::from_hidden(line, line_start, body_base, &merged_hidden);
+    let (display_text, offset_map) = mapped;
+    ParsedLine {
+        line_index: index,
+        source: line_source,
+        kind,
+        prefix_range,
+        hidden_ranges: merged_hidden,
+        inline_pairs,
+        display_text,
+        offset_map,
+        styled_segments,
+    }
 }
 
 fn paragraph_run_start(lines: &[ParsedLine]) -> Option<usize> {
@@ -1603,7 +2220,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }]
     } else {
         let mut v = source_lines(markdown);
-        if markdown.ends_with('\n') {
+        if markdown.ends_with('\n') || markdown.ends_with('\r') {
             let end = markdown.len();
             v.push(SourceLine {
                 start: end,
@@ -1621,6 +2238,9 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 
     let mut open_fence: Option<OpenFence> = None;
     let mut in_indented_code = false;
+    let mut code_min_col = 4usize;
+    let mut html_open: Option<u8> = None;
+    let mut lists: Vec<ListFrame> = Vec::new();
 
     // Pre-detect table block ranges and column alignments
     let mut table_ranges: Vec<(usize, usize, std::ops::Range<usize>, Vec<TableColumnAlign>)> =
@@ -1674,11 +2294,12 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 fence.marker,
                 fence.len,
                 fence.indent,
+                fence.max_indent,
                 fence.open_range.clone(),
             )
         });
-        if let Some((marker, len, indent, open_range)) = active_fence {
-            if is_closing_fence(line, marker, len) {
+        if let Some((marker, len, indent, max_indent, open_range)) = active_fence {
+            if is_closing_fence(line, marker, len, max_indent) {
                 code_blocks.push((open_range, sline.start..sline.end));
                 open_fence = None;
                 let parsed = structural_line(
@@ -1701,14 +2322,45 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
+        if let Some(html_kind) = html_open {
+            let blank = trimmed.is_empty();
+            if matches!(html_kind, 6 | 7) && blank {
+                html_open = None;
+            } else {
+                if blank {
+                    lines.push(ParsedLine {
+                        line_index: i,
+                        source: line_source.clone(),
+                        kind: LineKind::Empty,
+                        prefix_range: line_start..line_start,
+                        hidden_ranges: Vec::new(),
+                        inline_pairs: Vec::new(),
+                        display_text: line.to_string(),
+                        offset_map: RowOffsetMap::identity(line_start, line_end),
+                        styled_segments: Vec::new(),
+                    });
+                } else {
+                    let parsed = flow_text_line(i, line_source, line, LineKind::Paragraph, 0);
+                    all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                    all_pairs.extend(parsed.inline_pairs.iter().cloned());
+                    lines.push(parsed);
+                }
+                if html_block_ends(html_kind, line) {
+                    html_open = None;
+                }
+                in_indented_code = false;
+                continue;
+            }
+        }
+
         if in_indented_code {
             if trimmed.is_empty() {
-                if indented_code_resumes(&raw_lines, i) {
+                if indented_code_resumes(&raw_lines, i, code_min_col) {
                     let parsed = code_content_line(
                         i,
                         line_source.clone(),
                         line,
-                        whitespace_code_strip(line),
+                        prefix_through_column(line, code_min_col),
                     );
                     all_hidden.extend(parsed.hidden_ranges.iter().cloned());
                     lines.push(parsed);
@@ -1717,8 +2369,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 in_indented_code = false;
             } else {
                 let (index, column) = split_indent(line);
-                if index < line.len() && column >= 4 {
-                    let strip = indented_code_prefix(line).unwrap_or(index);
+                if index < line.len() && column >= code_min_col {
+                    let strip = prefix_through_column(line, code_min_col);
                     let parsed = code_content_line(i, line_source.clone(), line, strip);
                     all_hidden.extend(parsed.hidden_ranges.iter().cloned());
                     lines.push(parsed);
@@ -1726,27 +2378,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 }
                 in_indented_code = false;
             }
-        }
-
-        if let Some((marker, len, indent, language)) = match_opening_fence(line) {
-            open_fence = Some(OpenFence {
-                marker,
-                len,
-                indent,
-                open_range: sline.start..sline.end,
-            });
-            let parsed = structural_line(
-                i,
-                line_source,
-                line,
-                LineKind::CodeFence {
-                    language,
-                    opening: true,
-                },
-            );
-            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-            lines.push(parsed);
-            continue;
         }
 
         if trimmed.is_empty() {
@@ -1764,23 +2395,89 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
+        let previous_blank = lines
+            .last()
+            .is_some_and(|prev| matches!(prev.kind, LineKind::Empty));
+        close_finished_lists(&mut lists, previous_blank, line);
+
+        let fence_limit = lists
+            .last()
+            .map(|frame| frame.content_col.saturating_add(3))
+            .unwrap_or(3);
+        let skip_item_closer = lists.last().is_some_and(|frame| {
+            frame.fence_marker.is_some_and(|(marker, len)| {
+                is_closing_fence(line, marker, len, frame.content_col.saturating_add(3))
+            })
+        });
+        if skip_item_closer {
+            if let Some(frame) = lists.last_mut() {
+                frame.fence_marker = None;
+            }
+            // The list item already opened this fence. Emit the closer and do
+            // not start a new fence, so the following line stays a paragraph.
+            let parsed = structural_line(
+                i,
+                line_source,
+                line,
+                LineKind::CodeFence {
+                    language: None,
+                    opening: false,
+                },
+            );
+            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+            lines.push(parsed);
+            continue;
+        }
+        let opening_fence = if fence_limit <= 3 {
+            match_opening_fence(line)
+        } else {
+            match_opening_fence_limited(line, fence_limit)
+        };
+        if let Some((marker, len, indent, language)) = opening_fence {
+            open_fence = Some(OpenFence {
+                marker,
+                len,
+                indent,
+                open_range: sline.start..sline.end,
+                max_indent: fence_limit,
+            });
+            let parsed = structural_line(
+                i,
+                line_source,
+                line,
+                LineKind::CodeFence {
+                    language,
+                    opening: true,
+                },
+            );
+            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+            lines.push(parsed);
+            continue;
+        }
+
         if let Some(level) = setext_level(line) {
             if let Some(run_start) = paragraph_run_start(&lines) {
                 if !setext_is_lazy(&lines, markdown, run_start) {
-                    for prev in &mut lines[run_start..] {
-                        let extra = promote_setext(prev, markdown, level);
-                        all_hidden.extend(extra);
+                    if let Some(promote_from) = setext_promote_from(&lines, markdown, run_start) {
+                        for prev in &mut lines[promote_from..] {
+                            let extra = promote_setext(prev, markdown, level);
+                            all_hidden.extend(extra);
+                        }
+                        let parsed = structural_line(
+                            i,
+                            line_source.clone(),
+                            line,
+                            LineKind::SetextUnderline,
+                        );
+                        all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                        lines.push(parsed);
+                        continue;
                     }
-                    let parsed =
-                        structural_line(i, line_source.clone(), line, LineKind::SetextUnderline);
-                    all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-                    lines.push(parsed);
-                    continue;
                 }
             }
         }
 
-        if is_thematic_break(line) {
+        if is_thematic_break(line) || list_relative_rule(line, &lists) {
             let parsed = structural_line(i, line_source, line, LineKind::HorizontalRule);
             all_hidden.extend(parsed.hidden_ranges.iter().cloned());
             lines.push(parsed);
@@ -1895,7 +2592,15 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             // A marker at column 4 or more is indented code, unless it continues
             // a list item whose marker sits in a smaller column.
             let nested = marker.column >= 4 && continues_list(&lines, marker.column);
-            if marker.column < 4 || nested {
+            let paren_parent = marker.column >= 4
+                && nearest_nonempty(&lines).is_some_and(|prev| {
+                    matches!(prev.kind, LineKind::Paragraph)
+                        && is_paren_item_line(&markdown[prev.source.clone()])
+                });
+            let quote_parent = marker.column >= 4
+                && nearest_nonempty(&lines)
+                    .is_some_and(|prev| matches!(prev.kind, LineKind::Blockquote));
+            if marker.column < 4 || nested || paren_parent || quote_parent {
                 let checkbox_source = marker.checkbox_rel.map(|rel| {
                     let start = line_start + rel;
                     start..(start + 3)
@@ -1908,11 +2613,14 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     checkbox_source,
                 };
                 prefix_len = marker.prefix_len;
+                let content_col = list_content_column(line, marker.prefix_len);
+                let fence = item_opens_fence(line, marker.prefix_len);
+                push_list_frame(&mut lists, marker.column, content_col, fence);
             }
         }
 
         if prefix_len == 0 {
-            if let Some(strip) = indented_code_prefix(line) {
+            if let Some(_strip) = indented_code_prefix(line) {
                 let previous_is_paragraph = lines.last().is_some_and(|prev| {
                     if !matches!(prev.kind, LineKind::Paragraph) {
                         return false;
@@ -1923,14 +2631,36 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 });
                 if previous_is_paragraph {
                     // Indented code does not interrupt a paragraph. Hide the
-                    // whole leading run of spaces and tabs.
-                    prefix_len = split_indent(line).0;
-                } else {
-                    let parsed = code_content_line(i, line_source.clone(), line, strip);
-                    all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-                    lines.push(parsed);
-                    in_indented_code = true;
-                    continue;
+                    // whole leading run of spaces and tabs, except inside a
+                    // link definition or a `)` item whose continuation keeps
+                    // its indent.
+                    if !paragraph_run_is_link_definition(&lines, markdown)
+                        && !paragraph_run_is_paren_item(&lines, markdown)
+                    {
+                        prefix_len = split_indent(line).0;
+                    }
+                } else if let Some(column) = line_indent_column(line) {
+                    let threshold = lists
+                        .last()
+                        .map(|frame| frame.content_col + 4)
+                        .unwrap_or(4);
+                    let quote_holds = lists.is_empty()
+                        && nearest_nonempty(&lines)
+                            .is_some_and(|prev| matches!(prev.kind, LineKind::Blockquote));
+                    let previous_item_holds = !previous_blank
+                        && lines.last().is_some_and(|prev| {
+                            matches!(prev.kind, LineKind::ListItem { .. })
+                                && !is_bare_list_marker_line(&markdown[prev.source.clone()])
+                        });
+                    if column >= threshold && !quote_holds && !previous_item_holds {
+                        let strip = prefix_through_column(line, threshold);
+                        let parsed = code_content_line(i, line_source.clone(), line, strip);
+                        all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                        lines.push(parsed);
+                        in_indented_code = true;
+                        code_min_col = threshold;
+                        continue;
+                    }
                 }
             }
         }
@@ -1955,6 +2685,34 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 
         let (display_text, offset_map) =
             RowOffsetMap::from_hidden(line, line_start, body_base, &merged_hidden);
+
+        if matches!(kind, LineKind::Paragraph) && is_paren_item_line(line) {
+            let starts_block = !lines
+                .last()
+                .is_some_and(|prev| matches!(prev.kind, LineKind::Paragraph));
+            if starts_block {
+                if let Some(prefix) = paren_marker_prefix_len(line) {
+                    let content_col = list_content_column(line, prefix);
+                    let marker_col = column_at_byte(line, line.len() - line.trim_start().len());
+                    push_list_frame(&mut lists, marker_col, content_col, None);
+                }
+            }
+        }
+
+        if html_open.is_none() && prefix_len == 0 && matches!(kind, LineKind::Paragraph) {
+            if let Some(html_kind) = html_block_kind(line) {
+                let previous_paragraph = lines
+                    .last()
+                    .is_some_and(|prev| matches!(prev.kind, LineKind::Paragraph));
+                if html_kind != 7 || !previous_paragraph {
+                    html_open = if html_block_ends(html_kind, line) {
+                        None
+                    } else {
+                        Some(html_kind)
+                    };
+                }
+            }
+        }
 
         lines.push(ParsedLine {
             line_index: i,
@@ -2333,6 +3091,7 @@ mod tests {
     fn leaf_blocks_match_commonmark_examples() {
         let mut cases: Vec<(&str, &str, Vec<LeafExpect>)> = leaf_block_cases();
         cases.extend(leaf_block_cases_round2());
+        cases.extend(leaf_block_cases_round3());
         let mut failures = Vec::new();
         for (name, md, expected) in &cases {
             let want = expect_dump(expected);
@@ -3328,10 +4087,10 @@ mod tests {
                 vec![
                     leaf("ul:0", "Foo", "- Foo"),
                     leaf("empty", "", ""),
-                    leaf_marks("code", "  bar", "      bar", "C:  bar"),
+                    leaf_marks("code", "bar", "      bar", "C:bar"),
                     leaf("code", "", ""),
                     leaf("code", "", ""),
-                    leaf_marks("code", "  baz", "      baz", "C:  baz"),
+                    leaf_marks("code", "baz", "      baz", "C:baz"),
                 ],
             ),
             // Example 289. The ordered marker is indented code, blanks included.
@@ -3418,6 +4177,275 @@ mod tests {
                 ],
             ),
         ]
+    }
+
+    fn leaf_block_cases_round3() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
+        vec![
+            (
+                "lone-cr-hrs",
+                "---\r***\r",
+                vec![
+                    leaf("hr", "", "---"),
+                    leaf("hr", "", "***"),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            (
+                "lone-cr-setext",
+                "Foo\r---\rbar\r",
+                vec![
+                    leaf("h2", "Foo", "Foo"),
+                    leaf("setext", "", "---"),
+                    leaf("p", "bar", "bar"),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            (
+                "ex215-link-def-then-setext",
+                "[foo]: /url\nbar\n===\n[foo]",
+                vec![
+                    leaf("p", "[foo]: /url", "[foo]: /url"),
+                    leaf("h1", "bar", "bar"),
+                    leaf("setext", "", "==="),
+                    leaf("p", "[foo]", "[foo]"),
+                ],
+            ),
+            (
+                "ex216-link-def-equals-stays",
+                "[foo]: /url\n===\n[foo]",
+                vec![
+                    leaf("p", "[foo]: /url", "[foo]: /url"),
+                    leaf("p", "===", "==="),
+                    leaf("p", "[foo]", "[foo]"),
+                ],
+            ),
+            (
+                "link-def-then-hr",
+                "[foo]: /url\n---\n",
+                vec![
+                    leaf("p", "[foo]: /url", "[foo]: /url"),
+                    leaf("hr", "", "---"),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            (
+                "html-setext-not-heading",
+                "<div>\n===\n",
+                vec![
+                    leaf("p", "<div>", "<div>"),
+                    leaf("p", "===", "==="),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            (
+                "ex296-paren-nested-marker",
+                "10) foo\n    - bar",
+                vec![
+                    leaf("p", "10) foo", "10) foo"),
+                    leaf("ul:4", "bar", "    - bar"),
+                ],
+            ),
+            (
+                "ex238-quote-indented-marker",
+                "> foo\n    - bar",
+                vec![
+                    leaf("quote", "foo", "> foo"),
+                    leaf("ul:4", "bar", "    - bar"),
+                ],
+            ),
+            (
+                "ex108-list-continuation-not-code",
+                "  - foo\n\n    bar",
+                vec![
+                    leaf("ul:2", "foo", "  - foo"),
+                    leaf("empty", "", ""),
+                    leaf("p", "    bar", "    bar"),
+                ],
+            ),
+            (
+                "ex4-tab-continuation-not-code",
+                "  - foo\n\n\tbar",
+                vec![
+                    leaf("ul:2", "foo", "  - foo"),
+                    leaf("empty", "", ""),
+                    leaf("p", "\tbar", "\tbar"),
+                ],
+            ),
+            (
+                "list-continuation-not-code-without-blank",
+                "- foo\n      two",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("p", "      two", "      two"),
+                ],
+            ),
+            (
+                "list-code-after-blank",
+                "- foo\n\n      two",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("empty", "", ""),
+                    leaf_marks("code", "two", "      two", "C:two"),
+                ],
+            ),
+            (
+                "list-indented-hr",
+                "- foo\n    ***\n\n    ---",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("hr", "", "    ***"),
+                    leaf("empty", "", ""),
+                    leaf("hr", "", "    ---"),
+                ],
+            ),
+            (
+                "paren-item-hr-not-setext",
+                "10) foo\n---\n10) foo\n===",
+                vec![
+                    leaf("p", "10) foo", "10) foo"),
+                    leaf("hr", "", "---"),
+                    leaf("p", "10) foo", "10) foo"),
+                    leaf("p", "===", "==="),
+                ],
+            ),
+            (
+                "paren-item-continuation-not-code",
+                "10) foo\n\n    bar",
+                vec![
+                    leaf("p", "10) foo", "10) foo"),
+                    leaf("empty", "", ""),
+                    leaf("p", "    bar", "    bar"),
+                ],
+            ),
+            (
+                "ex309-notcode",
+                "-   foo\n\n    notcode\n\n-   foo\n\n<!-- -->\n\n    code",
+                vec![
+                    leaf("ul:0", "  foo", "-   foo"),
+                    leaf("empty", "", ""),
+                    leaf("p", "    notcode", "    notcode"),
+                    leaf("empty", "", ""),
+                    leaf("ul:0", "  foo", "-   foo"),
+                    leaf("empty", "", ""),
+                    leaf("p", "<!-- -->", "<!-- -->"),
+                    leaf("empty", "", ""),
+                    leaf_marks("code", "code", "    code", "C:code"),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn lone_cr_source_ranges() {
+        let md = "---\r***\r";
+        let doc = parse_document(md);
+        assert_eq!(doc.lines[0].source, 0..3);
+        assert_eq!(doc.lines[1].source, 4..7);
+        assert_eq!(&md[doc.lines[0].source.clone()], "---");
+        assert_eq!(&md[doc.lines[1].source.clone()], "***");
+        let setext = parse_document("Foo\r---\rbar");
+        assert_eq!(setext.lines[0].source, 0..3);
+        assert_eq!(setext.lines[1].source, 4..7);
+        assert_eq!(setext.lines[2].source, 8..11);
+        assert!(matches!(setext.lines[1].kind, LineKind::SetextUnderline));
+    }
+
+    #[test]
+    fn html_lines_keep_red_display() {
+        let table = "<table>\n  <tr>\n    <td>\n           hi\n    </td>\n  </tr>\n</table>\n\nokay.";
+        let doc = parse_document(table);
+        let td = doc
+            .lines
+            .iter()
+            .find(|line| line.display_text.contains("<td>"))
+            .expect("td");
+        assert!(matches!(td.kind, LineKind::Paragraph));
+        assert_eq!(td.display_text, "    <td>");
+        let hi = doc
+            .lines
+            .iter()
+            .find(|line| line.display_text.contains("hi"))
+            .expect("hi");
+        assert!(matches!(hi.kind, LineKind::Paragraph));
+        assert!(
+            hi.display_text.starts_with("           hi"),
+            "{:?}",
+            hi.display_text
+        );
+        assert!(!doc.lines.iter().any(|line| matches!(line.kind, LineKind::CodeLine)));
+
+        let div = parse_document(" <div>\n  *hello*\n         <foo><a>");
+        let foo = div
+            .lines
+            .iter()
+            .find(|line| line.display_text.contains("<foo>"))
+            .expect("foo");
+        assert!(matches!(foo.kind, LineKind::Paragraph));
+        assert_eq!(foo.display_text, "         <foo><a>");
+
+        let cdata = "<![CDATA[\nfunction matchwo(a,b)\n{\n  if (a < b && a < 0) then {\n    return 1;\n\n  } else {\n\n    return 0;\n  }\n}\n]]>\nokay";
+        let doc = parse_document(cdata);
+        for needle in ["    return 1;", "    return 0;"] {
+            let line = doc
+                .lines
+                .iter()
+                .find(|line| line.display_text.contains(needle.trim()))
+                .unwrap_or_else(|| panic!("missing {needle}"));
+            assert!(
+                matches!(line.kind, LineKind::Paragraph),
+                "{needle} {:?}",
+                line.kind
+            );
+            assert_eq!(line.display_text, needle);
+        }
+        assert!(!doc.lines.iter().any(|line| matches!(line.kind, LineKind::CodeLine)));
+    }
+
+    #[test]
+    fn indented_code_stays_out_of_list_continuations() {
+        let ex254 = "1.  A paragraph\n    with two lines.\n\n        indented code\n\n    > A block quote.";
+        let doc = parse_document(ex254);
+        let kinds: Vec<String> = doc.lines.iter().map(|line| leaf_kind_token(&line.kind)).collect();
+        assert_eq!(
+            kinds,
+            vec!["ol:1:0", "p", "empty", "code", "empty", "quote"]
+        );
+        assert_eq!(doc.lines[1].display_text, "    with two lines.");
+        assert_eq!(doc.lines[3].display_text, "indented code");
+        assert!(!matches!(doc.lines[5].kind, LineKind::CodeLine));
+
+        let ex263 = "1.  foo\n\n    ```\n    bar\n    ```\n\n    baz\n\n    > bam";
+        let doc = parse_document(ex263);
+        assert!(matches!(doc.lines[2].kind, LineKind::CodeFence { opening: true, .. }));
+        assert!(matches!(doc.lines[3].kind, LineKind::CodeLine));
+        assert_eq!(doc.lines[3].display_text, "bar");
+        assert!(matches!(doc.lines[4].kind, LineKind::CodeFence { opening: false, .. }));
+        assert!(matches!(doc.lines[6].kind, LineKind::Paragraph));
+        assert!(!matches!(doc.lines[6].kind, LineKind::CodeLine));
+        assert!(matches!(doc.lines[8].kind, LineKind::Blockquote));
+
+        let ex324 = "1. ```\n   foo\n   ```\n\n   bar";
+        let doc = parse_document(ex324);
+        assert!(matches!(
+            doc.lines[2].kind,
+            LineKind::CodeFence { opening: false, .. }
+        ));
+        let bar = doc.lines.last().expect("bar");
+        assert!(
+            matches!(bar.kind, LineKind::Paragraph),
+            "bar became {:?}",
+            bar.kind
+        );
+        assert_eq!(bar.display_text, "   bar");
+
+        let ex318 = "- a\n- ```\n  b\n\n\n  ```\n- c";
+        let doc = parse_document(ex318);
+        assert!(matches!(
+            doc.lines[5].kind,
+            LineKind::CodeFence { opening: false, .. }
+        ));
+        assert!(matches!(doc.lines[6].kind, LineKind::ListItem { .. }));
+        assert_eq!(doc.lines[6].display_text, "c");
     }
 
     #[test]
