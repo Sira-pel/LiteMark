@@ -80,11 +80,13 @@ MUTANTS: dict[str, dict[str, str]] = {
     "fenced-code-no-fence": {
         "file": "src/markdown/parser.rs",
         "label": "fence detector also matches line rust",
-        "old": """        // Check code block fences
-        if trimmed.starts_with("```") {
+        "old": """        // Check code block fences. Same `opening_fence` as `table_block`:
+        // a backtick info string may not contain a backtick (GFM fenced code).
+        if opening_fence(line).is_some_and(|(marker, _)| marker == b'`') {
 """,
-        "new": """        // Check code block fences
-        if trimmed.starts_with("```") || trimmed == "rust" {
+        "new": """        // Check code block fences. Same `opening_fence` as `table_block`:
+        // a backtick info string may not contain a backtick (GFM fenced code).
+        if opening_fence(line).is_some_and(|(marker, _)| marker == b'`') || trimmed == "rust" {
 """,
     },
     "links-plain": {
