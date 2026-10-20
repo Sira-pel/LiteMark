@@ -491,8 +491,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use core::prelude::v1::test;
+    use super::{
+        calculate_submenu_width, calculate_submenu_y_offset, MenuItem, MENU_DIVIDER_H,
+        MENU_HEADING_H, MENU_ITEM_H, MENU_PANEL_PAD,
+    };
+    use gpui::px;
 
     #[test]
     fn test_calculate_submenu_y_offset() {

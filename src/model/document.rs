@@ -316,7 +316,7 @@ impl DocumentTab {
         // 0. Table rows: continuation or exit
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow { ref cells, is_header, ref table_source } = pline.kind {
+            if let LineKind::TableRow { ref cells, is_header, .. } = pline.kind {
                 let col_count = cells.len().max(2);
                 let is_empty_row = cells.iter().all(|c| {
                     if c.end <= self.content.len() && c.start <= c.end {
@@ -350,47 +350,78 @@ impl DocumentTab {
                     }
                 }
 
-                // Count body rows in this table
-                let body_rows_count = parsed.lines.iter().filter(|l| {
-                    if let LineKind::TableRow { is_header, table_source: ref ts, .. } = l.kind {
-                        !is_header && ts.start == table_source.start && ts.end == table_source.end
-                    } else {
-                        false
-                    }
-                }).count();
-
                 if is_empty_row {
-                    // Empty row: exit table!
-                    if body_rows_count <= 1 {
-                        // This is the only body row: remove the whole empty table cleanly!
-                        let t_start = table_source.start;
-                        let t_end = table_source.end;
-                        self.edit(t_start..t_end, "");
-                        self.caret.move_to(t_start);
-                        self.refresh_cursor();
-                        return;
+                    // Empty row: remove this empty row, keeping header, and exit table to a new line below
+                    let remove_start = if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' {
+                        line_start - 1
                     } else {
-                        // Multiple body rows: remove this empty row and exit table to a new line below
-                        let remove_start = if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' {
-                            line_start - 1
-                        } else {
-                            line_start
-                        };
-                        let remove_end = line_end_pos;
-                        self.edit(remove_start..remove_end, "");
+                        line_start
+                    };
+                    let remove_end = line_end_pos;
+                    self.edit(remove_start..remove_end, "");
 
-                        // After removing empty row, ensure there is a blank line below the table
-                        let after_table = remove_start;
-                        let has_newline_after = after_table < self.content.len() && self.content.as_bytes()[after_table] == b'\n';
-                        if !has_newline_after {
-                            self.edit(after_table..after_table, "\n");
+                    // After removing empty row, ensure there is a blank line below the table
+                    let after_table = remove_start;
+                    let has_newline_after = after_table < self.content.len() && self.content.as_bytes()[after_table] == b'\n';
+                    if !has_newline_after {
+                        self.edit(after_table..after_table, "\n");
+                    }
+                    self.caret.move_to(after_table + 1);
+                    self.refresh_cursor();
+                    return;
+                } else {
+                    // Non-empty row: check if cursor is inside a cell with content to split
+                    let row_text = &self.content[line_start..line_end_pos];
+                    let pipe_indices: Vec<usize> = row_text
+                        .match_indices('|')
+                        .map(|(idx, _)| line_start + idx)
+                        .collect();
+
+                    let mut split_cell_info: Option<(usize, usize, usize, String, String)> = None;
+                    if pipe_indices.len() >= 2 {
+                        for k in 0..pipe_indices.len() - 1 {
+                            let cell_start = pipe_indices[k] + 1;
+                            let cell_end = pipe_indices[k + 1];
+                            if cursor >= cell_start && cursor <= cell_end {
+                                let before = &self.content[cell_start..range.start];
+                                let after = &self.content[range.end..cell_end];
+                                if !after.trim().is_empty() {
+                                    split_cell_info = Some((k, cell_start, cell_end, before.to_string(), after.trim().to_string()));
+                                }
+                                break;
+                            }
                         }
-                        self.caret.move_to(after_table + 1);
+                    }
+
+                    if let Some((col_idx, _c_start, c_end, before_str, after_str)) = split_cell_info {
+                        // Split the cell into current row and a new row below
+                        let repl = if before_str.ends_with(' ') { "" } else { " " };
+                        self.edit(range.start..c_end, repl);
+
+                        let new_line_end = line_end(&self.content, line_start);
+                        let mut new_cells = Vec::new();
+                        for i in 0..col_count {
+                            if i == col_idx {
+                                new_cells.push(format!(" {} ", after_str));
+                            } else {
+                                new_cells.push("  ".to_string());
+                            }
+                        }
+                        let new_row = format!("\n|{}|", new_cells.join("|"));
+                        self.edit(new_line_end..new_line_end, &new_row);
+
+                        let new_row_start = new_line_end + 1;
+                        let mut target = new_row_start + 1;
+                        for cell in new_cells.iter().take(col_idx) {
+                            target += cell.len() + 1;
+                        }
+                        target += 1;
+                        let caret_pos = floor_boundary(&self.content, target);
+                        self.caret.move_to(caret_pos);
                         self.refresh_cursor();
                         return;
                     }
-                } else {
-                    // Non-empty row: insert a new row below current line
+
                     let new_row = format!("\n|{}", "  |".repeat(col_count));
                     self.edit(line_end_pos..line_end_pos, &new_row);
                     let target = (line_end_pos + 3).min(self.content.len());
@@ -414,6 +445,10 @@ impl DocumentTab {
             let is_empty_task = trimmed_start.len() == prefix.len()
                 || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
             if is_empty_task {
+                if !range.is_empty() {
+                    self.edit(range, "\n");
+                    return;
+                }
                 if !indent.is_empty() {
                     let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
                     self.edit(line_start..line_start + outdent_len, "");
@@ -421,7 +456,8 @@ impl DocumentTab {
                     self.edit(line_start..line_end_pos, "");
                 }
             } else {
-                let ins = format!("\n{}- [ ] ", indent);
+                let bullet_char = prefix.chars().next().unwrap_or('-');
+                let ins = format!("\n{}{} [ ] ", indent, bullet_char);
                 self.edit(range, &ins);
             }
             return;
@@ -433,6 +469,10 @@ impl DocumentTab {
             let is_empty_bullet = trimmed_start.len() == prefix.len()
                 || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
             if is_empty_bullet {
+                if !range.is_empty() {
+                    self.edit(range, "\n");
+                    return;
+                }
                 if !indent.is_empty() {
                     let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
                     self.edit(line_start..line_start + outdent_len, "");
@@ -454,6 +494,10 @@ impl DocumentTab {
                     let is_empty_num = trimmed_start.len() == marker_len
                         || (trimmed_start.len() > marker_len && trimmed_start[marker_len..].trim().is_empty());
                     if is_empty_num {
+                        if !range.is_empty() {
+                            self.edit(range, "\n");
+                            return;
+                        }
                         if !indent.is_empty() {
                             let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
                             self.edit(line_start..line_start + outdent_len, "");
@@ -475,9 +519,8 @@ impl DocumentTab {
                 || trimmed_start == "> "
                 || trimmed_start[1..].trim().is_empty();
             if is_empty_quote {
-                if !indent.is_empty() {
-                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
-                    self.edit(line_start..line_start + outdent_len, "");
+                if !range.is_empty() {
+                    self.edit(range, "\n");
                 } else {
                     self.edit(line_start..line_end_pos, "");
                 }
@@ -1812,46 +1855,34 @@ fn compute_active_formats(
 }
 
 fn skip_hidden_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
-    loop {
-        if let Some(h) = parsed
-            .hidden_ranges
-            .iter()
-            .find(|r| pos > r.start && pos <= r.end)
-        {
-            pos = h.start;
-        } else {
-            break;
-        }
+    while let Some(h) = parsed
+        .hidden_ranges
+        .iter()
+        .find(|r| pos > r.start && pos <= r.end)
+    {
+        pos = h.start;
     }
     pos
 }
 
 fn skip_hidden_interior_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
-    loop {
-        if let Some(h) = parsed
-            .hidden_ranges
-            .iter()
-            .find(|r| pos > r.start && pos < r.end)
-        {
-            pos = h.start;
-        } else {
-            break;
-        }
+    while let Some(h) = parsed
+        .hidden_ranges
+        .iter()
+        .find(|r| pos > r.start && pos < r.end)
+    {
+        pos = h.start;
     }
     pos
 }
 
 fn skip_hidden_right(parsed: &ParsedDocument, mut pos: usize) -> usize {
-    loop {
-        if let Some(h) = parsed
-            .hidden_ranges
-            .iter()
-            .find(|r| pos >= r.start && pos < r.end)
-        {
-            pos = h.end;
-        } else {
-            break;
-        }
+    while let Some(h) = parsed
+        .hidden_ranges
+        .iter()
+        .find(|r| pos >= r.start && pos < r.end)
+    {
+        pos = h.end;
     }
     pos
 }
@@ -2733,15 +2764,61 @@ mod tests {
     }
 
     #[test]
-    fn test_table_single_empty_row_exit_removes_table_cleanly() {
+    fn test_table_single_empty_row_exit_keeps_header_and_removes_empty_row() {
         // Table with only a single empty body row
         let table = "| Col 1 | Col 2 |\n| :--- | :--- |\n|  |  |";
         let mut doc = DocumentTab::new("t".into(), "test.md".into(), table.into(), None, None);
         doc.place(table.len(), false); // inside empty row
 
         doc.smart_newline(false);
-        // Exiting the only empty row removes the table cleanly rather than leaving an orphaned header
+        // Exiting the only empty row keeps the header and only removes the empty row!
+        assert_eq!(doc.content, "| Col 1 | Col 2 |\n| :--- | :--- |\n");
+        assert_eq!(doc.cursor_offset(), doc.content.len());
+    }
+
+    #[test]
+    fn test_table_enter_splits_cell() {
+        let table = "| Col 1 | Col 2 |\n| :--- | :--- |\n| First item | Second item |";
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), table.into(), None, None);
+        // Place cursor between "First " and "item" in Col 1
+        let pos = table.find("First ").unwrap() + "First ".len();
+        doc.place(pos, false);
+
+        doc.smart_newline(false);
+        let expected = "| Col 1 | Col 2 |\n| :--- | :--- |\n| First | Second item |\n| item |  |";
+        assert_eq!(doc.content, expected);
+        assert_eq!(doc.cursor_offset(), expected.find("item |  |").unwrap());
+    }
+
+    #[test]
+    fn test_enter_on_indented_empty_quote_leaves_quote() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), "  > ".into(), None, None);
+        doc.place("  > ".len(), false);
+
+        // Enter on indented empty quote removes the quote line, leaving the quote completely
+        doc.smart_newline(false);
         assert_eq!(doc.content, "");
+    }
+
+    #[test]
+    fn test_enter_on_empty_list_item_with_selection() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), "- ".into(), None, None);
+        // Select the whole "- "
+        doc.caret.range = 0..2;
+
+        // Enter on empty list item with selection must replace selection with newline
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "\n");
+    }
+
+    #[test]
+    fn test_task_list_asterisk_continuation() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), "* [x] done".into(), None, None);
+        doc.place("* [x] done".len(), false);
+
+        // Enter on "* [x] done" must continue with "* [ ] ", not "- [ ] "
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "* [x] done\n* [ ] ");
     }
 
     #[test]

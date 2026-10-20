@@ -120,7 +120,6 @@ mod tests {
     use super::build_settings_menu_items;
     use crate::theme::ThemeMode;
     use crate::ui::MenuItemKind;
-    use core::prelude::v1::test;
 
     #[test]
     fn test_font_size_options_and_selection() {

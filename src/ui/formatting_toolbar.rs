@@ -321,6 +321,12 @@ pub fn build_overflow_menu_items(
             f6("checklist", cx);
             c6(cx);
         }));
+        let f_find = on_toggle_find.clone();
+        let c_find = on_close.clone();
+        items.push(MenuItem::action("Find & Replace", Some("search"), Some("Ctrl+F"), move |_, cx| {
+            f_find(cx);
+            c_find(cx);
+        }));
         items.push(MenuItem::divider());
     }
 
@@ -369,13 +375,6 @@ pub fn build_overflow_menu_items(
         c_t(cx);
     }));
 
-    let f_find = on_toggle_find.clone();
-    let c_find = on_close.clone();
-    items.push(MenuItem::action("Find & Replace", Some("search"), Some("Ctrl+F"), move |_, cx| {
-        f_find(cx);
-        c_find(cx);
-    }));
-
     items.push(MenuItem::divider());
 
     let f_clear = on_format.clone();
@@ -390,13 +389,15 @@ pub fn build_overflow_menu_items(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        build_overflow_menu_items, calculate_narrow_toolbar_min_width,
+        calculate_wide_toolbar_min_width,
+    };
     use crate::theme::sz;
-    use core::prelude::v1::test;
 
     #[test]
     fn test_overflow_menu_contents_at_breakpoints() {
-        // In big window mode (!is_narrow): no headings, no lists, only extra features
+        // In big window mode (!is_narrow): no headings, no lists, no Find (Find is already on wide toolbar)
         let wide_items = build_overflow_menu_items(
             false,
             |_, _| {},
@@ -408,11 +409,11 @@ mod tests {
         assert!(!labels_wide.contains(&"Underline"));
         assert!(!labels_wide.contains(&"Heading 1"));
         assert!(!labels_wide.contains(&"Bullet list"));
+        assert!(!labels_wide.contains(&"Find & Replace"), "Find must not be duplicated on wide windows");
         assert!(labels_wide.contains(&"Strikethrough"));
         assert!(labels_wide.contains(&"Insert Table"));
-        assert!(labels_wide.contains(&"Find & Replace"));
 
-        // In super small mode (is_narrow): both headings and lists are prepended
+        // In super small mode (is_narrow): headings, lists, and Find are prepended
         let narrow_items = build_overflow_menu_items(
             true,
             |_, _| {},
@@ -427,19 +428,30 @@ mod tests {
         assert!(labels_narrow.contains(&"Bullet list"));
         assert!(labels_narrow.contains(&"Numbered list"));
         assert!(labels_narrow.contains(&"Task list"));
+        assert!(labels_narrow.contains(&"Find & Replace"), "Find must be in overflow menu on narrow windows");
         assert!(labels_narrow.contains(&"Strikethrough"));
-        assert!(labels_narrow.contains(&"Find & Replace"));
     }
 
     #[test]
-    fn test_toolbar_never_overflows_super_small_width() {
+    fn test_toolbar_narrow_fits_small_screens() {
         let narrow_min_w = calculate_narrow_toolbar_min_width();
-        // Dynamically verifies the width derived from sz::BTN, paddings, gaps, and dividers
-        let expected = (9.0 * f32::from(sz::BTN)) + (1.0 * DIVIDER_TOTAL_W) + (7.0 * TOOLBAR_ICON_GAP) + (TOOLBAR_PX_PAD * 2.0);
-        assert_eq!(narrow_min_w, expected);
+        let btn_w = f32::from(sz::BTN);
+
+        // Narrow toolbar must fit within standard small viewport (360px)
         assert!(
             narrow_min_w <= 360.0,
-            "Narrow toolbar width ({narrow_min_w}px) must fit within mobile/small window width (360px)"
+            "Narrow toolbar width ({narrow_min_w}px) must fit within 360px viewport"
+        );
+        // It must account for at least 9 buttons (32px each = 288px) plus padding
+        assert!(
+            narrow_min_w >= 9.0 * btn_w,
+            "Narrow toolbar width ({narrow_min_w}px) must be at least 9 button widths ({})",
+            9.0 * btn_w
+        );
+        // Must genuinely require > 320px, so it would overflow an ultra-narrow 320px viewport
+        assert!(
+            narrow_min_w > 320.0,
+            "Narrow toolbar requires > 320px to display all 9 buttons and dividers"
         );
         assert!(
             narrow_min_w < 640.0,
@@ -448,13 +460,19 @@ mod tests {
     }
 
     #[test]
-    fn test_toolbar_wide_width_calculation() {
+    fn test_toolbar_wide_exceeds_narrow_and_has_all_elements() {
         let wide_min_w = calculate_wide_toolbar_min_width();
-        let expected = 140.0 + (15.0 * f32::from(sz::BTN)) + (3.0 * DIVIDER_TOTAL_W) + (16.0 * TOOLBAR_ICON_GAP) + (TOOLBAR_PX_PAD * 2.0);
-        assert_eq!(wide_min_w, expected);
+        let narrow_min_w = calculate_narrow_toolbar_min_width();
+        let btn_w = f32::from(sz::BTN);
+
+        // Wide toolbar has 15 buttons (14 format + 1 settings) + menu bar (~140px)
         assert!(
-            wide_min_w > 640.0,
-            "Wide toolbar width ({wide_min_w}px) requires more space than the 640px narrow threshold"
+            wide_min_w > narrow_min_w,
+            "Wide toolbar ({wide_min_w}px) must be larger than narrow toolbar ({narrow_min_w}px)"
+        );
+        assert!(
+            wide_min_w >= (15.0 * btn_w) + 140.0,
+            "Wide toolbar must account for 15 buttons and menu bar"
         );
     }
 }

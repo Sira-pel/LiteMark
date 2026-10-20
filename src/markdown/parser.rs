@@ -943,6 +943,7 @@ fn parse_inline_syntax(
     (raw_hidden, inline_pairs, styled_segments)
 }
 
+#[allow(clippy::single_range_in_vec_init)]
 pub fn parse_document(markdown: &str) -> ParsedDocument {
     let raw_lines = if markdown.is_empty() {
         vec![SourceLine {
