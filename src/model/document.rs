@@ -3,7 +3,10 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::markdown::{parse_document, InlineTagKind, LineKind, ParsedDocument, TableColumnAlign};
+use crate::markdown::{
+    parse_document, split_table_cells, unescaped_pipe_offsets, InlineTagKind, LineKind,
+    ParsedDocument, TableColumnAlign,
+};
 
 use super::text_ops::{
     find_matches, find_next, find_prev, format_replacement, home_offset, line_col, line_end,
@@ -369,9 +372,9 @@ impl DocumentTab {
                 } else {
                     // Non-empty row: check if cursor is inside a cell with content to split
                     let row_text = &self.content[line_start..line_end_pos];
-                    let pipe_indices: Vec<usize> = row_text
-                        .match_indices('|')
-                        .map(|(idx, _)| line_start + idx)
+                    let pipe_indices: Vec<usize> = unescaped_pipe_offsets(row_text)
+                        .into_iter()
+                        .map(|idx| line_start + idx)
                         .collect();
 
                     let mut split_cell_info: Option<(usize, usize, usize, String, String)> = None;
@@ -1547,12 +1550,11 @@ impl DocumentTab {
         for l in &parsed.lines {
             if l.source.start >= table_source.start && l.source.end <= table_source.end {
                 if let LineKind::TableRow {
-                    ref cells,
-                    alignments: ref al,
-                    ..
+                    alignments: ref al, ..
                 } = l.kind
                 {
-                    num_cols = num_cols.max(cells.len());
+                    let line_text = self.content.get(l.source.clone()).unwrap_or("");
+                    num_cols = num_cols.max(split_table_cells(line_text).len());
                     if alignments.is_empty() {
                         alignments = al.clone();
                     }
@@ -1560,7 +1562,7 @@ impl DocumentTab {
             }
         }
         while alignments.len() < num_cols {
-            alignments.push(TableColumnAlign::Left);
+            alignments.push(TableColumnAlign::None);
         }
 
         let mut rows: Vec<Vec<String>> = Vec::new();
@@ -1569,21 +1571,14 @@ impl DocumentTab {
 
         for l in &parsed.lines {
             if l.source.start >= table_source.start && l.source.end <= table_source.end {
-                if let LineKind::TableRow {
-                    ref cells,
-                    ref raw_cells,
-                    ..
-                } = l.kind
+                if let LineKind::TableRow { ref raw_cells, .. } = l.kind
                 {
                     let r_idx = rows.len();
+                    let line_text = self.content.get(l.source.clone()).unwrap_or("");
+                    let split_cells = split_table_cells(line_text);
                     let mut row_vals = Vec::with_capacity(num_cols);
                     for c_idx in 0..num_cols {
-                        let txt = cells
-                            .get(c_idx)
-                            .and_then(|r| self.content.get(r.clone()))
-                            .unwrap_or("")
-                            .to_string();
-                        row_vals.push(txt);
+                        row_vals.push(split_cells.get(c_idx).cloned().unwrap_or_default());
                     }
                     if cursor >= l.source.start && cursor <= l.source.end {
                         active_row = r_idx;
@@ -1718,7 +1713,7 @@ impl DocumentTab {
             return;
         };
         let insert_col = ctx.active_col.min(ctx.alignments.len());
-        ctx.alignments.insert(insert_col, TableColumnAlign::Left);
+        ctx.alignments.insert(insert_col, TableColumnAlign::None);
         for row in ctx.rows.iter_mut() {
             row.insert(insert_col.min(row.len()), String::new());
         }
@@ -1739,7 +1734,7 @@ impl DocumentTab {
             return;
         };
         let insert_col = (ctx.active_col + 1).min(ctx.alignments.len());
-        ctx.alignments.insert(insert_col, TableColumnAlign::Left);
+        ctx.alignments.insert(insert_col, TableColumnAlign::None);
         for row in ctx.rows.iter_mut() {
             row.insert(insert_col.min(row.len()), String::new());
         }
@@ -2255,10 +2250,10 @@ fn format_markdown_table(
         }
         out.push('|');
         for c_idx in 0..num_cols {
-            let cell_text = row.get(c_idx).map(|s| s.as_str()).unwrap_or("");
+            let cell_text = table_cell_source(row.get(c_idx).map(|s| s.as_str()).unwrap_or(""));
             out.push(' ');
             let c_start = out.len();
-            out.push_str(cell_text);
+            out.push_str(&cell_text);
             let c_end = out.len();
             out.push_str(" |");
             if r_idx == target_row && c_idx == target_col {
@@ -2268,8 +2263,12 @@ fn format_markdown_table(
         if r_idx == 0 {
             out.push_str("\n|");
             for c_idx in 0..num_cols {
-                let align = alignments.get(c_idx).copied().unwrap_or(TableColumnAlign::Left);
+                let align = alignments
+                    .get(c_idx)
+                    .copied()
+                    .unwrap_or(TableColumnAlign::None);
                 let delim = match align {
+                    TableColumnAlign::None => " --- |",
                     TableColumnAlign::Left => " :--- |",
                     TableColumnAlign::Center => " :---: |",
                     TableColumnAlign::Right => " ---: |",
@@ -2280,6 +2279,25 @@ fn format_markdown_table(
     }
 
     (out, target_cell_range)
+}
+
+/// Write a cell back to Markdown. An existing `\|` stays escaped, and a bare `|` becomes `\|`.
+fn table_cell_source(cell: &str) -> String {
+    let mut out = String::with_capacity(cell.len());
+    let mut chars = cell.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && chars.peek() == Some(&'|') {
+            out.push('\\');
+            out.push('|');
+            chars.next();
+        } else if ch == '|' {
+            out.push('\\');
+            out.push('|');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3405,6 +3423,40 @@ mod tests {
         assert_eq!(doc.content, "");
         assert!(doc.undo());
         assert_eq!(doc.content, initial_table);
+    }
+
+    #[test]
+    fn test_table_edit_keeps_escaped_pipe() {
+        let table = "| a \\| b | c |\n| --- | --- |\n| d | e |";
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), table.into(), None, None);
+        doc.place(doc.content.find('a').unwrap(), false);
+        doc.table_add_col_right();
+        assert_eq!(
+            doc.content,
+            "| a \\| b |  | c |\n| --- | --- | --- |\n| d |  | e |"
+        );
+        assert!(!doc.content.contains("| a \\ |"));
+    }
+
+    #[test]
+    fn test_table_edit_keeps_unset_alignment() {
+        let table = "| a | b |\n| --- | --- |\n| 1 | 2 |";
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), table.into(), None, None);
+        doc.place(doc.content.find('a').unwrap(), false);
+        doc.table_add_col_right();
+        assert!(doc.content.contains("| --- | --- | --- |"));
+        assert!(!doc.content.contains(":---"));
+
+        let mixed = "| a | b |\n| :--- | --- |\n| 1 | 2 |";
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), mixed.into(), None, None);
+        doc.place(doc.content.find('1').unwrap(), false);
+        doc.table_add_row_below();
+        assert!(doc.content.contains("| :--- | --- |"));
+        assert!(!doc.content.contains("| :--- | :--- |"));
+        assert_eq!(
+            doc.content,
+            "| a | b |\n| :--- | --- |\n| 1 | 2 |\n|  |  |"
+        );
     }
 
     #[test]

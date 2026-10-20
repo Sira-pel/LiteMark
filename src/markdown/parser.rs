@@ -294,12 +294,7 @@ pub fn parse_markdown(markdown: &str) -> Vec<Block> {
                         .chars()
                         .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
                     if !is_separator {
-                        let cells: Vec<String> = cur
-                            .trim_matches('|')
-                            .split('|')
-                            .map(|c| c.trim().to_string())
-                            .collect();
-                        table_rows.push(cells);
+                        table_rows.push(split_table_cells(cur));
                     }
                     i += 1;
                 } else {
@@ -506,10 +501,60 @@ fn floor_source(markdown: &str, mut offset: usize) -> usize {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TableColumnAlign {
+    /// Delimiter is plain `---`. A table edit must not turn this into `:---`.
     #[default]
+    None,
     Left,
     Center,
     Right,
+}
+
+/// Byte offsets of `|` that are not escaped with a backslash.
+pub fn unescaped_pipe_offsets(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let mut offsets = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'|' {
+            let mut slashes = 0usize;
+            let mut look = index;
+            while look > 0 && bytes[look - 1] == b'\\' {
+                slashes += 1;
+                look -= 1;
+            }
+            if slashes.is_multiple_of(2) {
+                offsets.push(index);
+            }
+        }
+        index += 1;
+    }
+    offsets
+}
+
+/// Cell text between unescaped pipes. `\|` stays inside the cell.
+pub fn split_table_cells(line: &str) -> Vec<String> {
+    let pipes = unescaped_pipe_offsets(line);
+    if pipes.len() < 2 {
+        return Vec::new();
+    }
+    pipes
+        .windows(2)
+        .map(|pair| line[pair[0] + 1..pair[1]].trim().to_string())
+        .collect()
+}
+
+/// `---` is unset, `:---` is left, `:---:` is center, and `---:` is right.
+pub fn table_column_align(cell: &str) -> TableColumnAlign {
+    let cell = cell.trim();
+    if !cell.contains('-') {
+        return TableColumnAlign::None;
+    }
+    match (cell.starts_with(':'), cell.ends_with(':')) {
+        (true, true) => TableColumnAlign::Center,
+        (true, false) => TableColumnAlign::Left,
+        (false, true) => TableColumnAlign::Right,
+        (false, false) => TableColumnAlign::None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1005,19 +1050,9 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                                 .chars()
                                 .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
                         if is_sep && alignments.is_empty() {
-                            alignments = cur
-                                .trim_matches('|')
-                                .split('|')
-                                .map(|cell| {
-                                    let c = cell.trim();
-                                    if c.starts_with(':') && c.ends_with(':') && c.len() >= 2 {
-                                        TableColumnAlign::Center
-                                    } else if c.ends_with(':') {
-                                        TableColumnAlign::Right
-                                    } else {
-                                        TableColumnAlign::Left
-                                    }
-                                })
+                            alignments = split_table_cells(cur)
+                                .iter()
+                                .map(|cell| table_column_align(cell))
                                 .collect();
                         }
                         idx += 1;
@@ -1195,12 +1230,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 let mut row_hidden = Vec::new();
                 let mut row_pairs = Vec::new();
                 let mut row_segments = Vec::new();
-                let mut pipe_positions = Vec::new();
-                for (b_idx, ch) in line.char_indices() {
-                    if ch == '|' {
-                        pipe_positions.push(b_idx);
-                    }
-                }
+                let pipe_positions = unescaped_pipe_offsets(line);
                 for w in pipe_positions.windows(2) {
                     let raw_c_start = w[0] + 1;
                     let raw_c_end = w[1];
@@ -1458,6 +1488,35 @@ mod tests {
                 assert!(checked);
             }
             _ => panic!("Expected completed task item"),
+        }
+    }
+
+    #[test]
+    fn escaped_pipe_is_not_a_column_break() {
+        assert_eq!(
+            split_table_cells(r"| a \| b | c |"),
+            vec!["a \\| b".to_string(), "c".to_string()]
+        );
+        assert_eq!(table_column_align("---"), TableColumnAlign::None);
+        assert_eq!(table_column_align(":---"), TableColumnAlign::Left);
+        assert_eq!(table_column_align(":---:"), TableColumnAlign::Center);
+        assert_eq!(table_column_align("---:"), TableColumnAlign::Right);
+
+        let md = "| a \\| b | c |\n| --- | --- |\n| d | e |";
+        let doc = parse_document(md);
+        match &doc.lines[0].kind {
+            LineKind::TableRow {
+                cells, alignments, ..
+            } => {
+                assert_eq!(cells.len(), 2);
+                assert_eq!(&md[cells[0].clone()], "a \\| b");
+                assert_eq!(&md[cells[1].clone()], "c");
+                assert_eq!(
+                    alignments,
+                    &[TableColumnAlign::None, TableColumnAlign::None]
+                );
+            }
+            other => panic!("expected a table row, got {other:?}"),
         }
     }
 

@@ -697,7 +697,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     };
                     let avail_inner = (col_w - pad_x * 2.0).max(px(0.0));
                     let text_x = match align {
-                        TableColumnAlign::Left => cell_x + pad_x,
+                        TableColumnAlign::None | TableColumnAlign::Left => cell_x + pad_x,
                         TableColumnAlign::Center => {
                             cell_x + pad_x + ((avail_inner - text_w) * 0.5).max(px(0.0))
                         }
