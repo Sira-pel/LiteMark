@@ -7,7 +7,7 @@ description = "Fast, distraction-free markdown & text editor with dedicated note
 license = "MIT"
 
 [dependencies]
-gpui = "0.2.2"
+gpui = "=0.2.2"
 rust-embed = "8.5"
 rfd = "0.15"
 pulldown-cmark = "0.12"
@@ -16,6 +16,8 @@ serde_json = "1.0"
 dirs = "5.0"
 chrono = "0.4"
 lopdf = "0.34"
+unicode-segmentation = "1.12"
+trash = "5"
 
 [patch.crates-io]
 xattr = { path = "patches/xattr" }

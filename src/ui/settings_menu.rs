@@ -64,19 +64,27 @@ pub fn build_settings_menu_items(
     let t_light = on_set_theme.clone();
     let t_sys = on_set_theme.clone();
 
-    let fs_15 = on_set_font_size.clone();
-    let fs_17 = on_set_font_size.clone();
-    let fs_19 = on_set_font_size.clone();
-
-    let is_15 = (base_font_size - 15.0).abs() < 0.5;
-    let is_17 = (base_font_size - 17.0).abs() < 0.5;
-    let is_19 = (base_font_size - 19.0).abs() < 0.5;
-
-    let font_sub_items = vec![
-        MenuItem::radio("15 px", is_15, None, move |_, cx| fs_15(15.0, cx)),
-        MenuItem::radio("17 px (Default)", is_17, None, move |_, cx| fs_17(17.0, cx)),
-        MenuItem::radio("19 px", is_19, None, move |_, cx| fs_19(19.0, cx)),
+    let font_sizes: &[(f32, &str)] = &[
+        (13.0, "13 px"),
+        (14.0, "14 px"),
+        (15.0, "15 px"),
+        (16.0, "16 px"),
+        (17.0, "17 px (Default)"),
+        (18.0, "18 px"),
+        (19.0, "19 px"),
+        (20.0, "20 px"),
+        (22.0, "22 px"),
+        (24.0, "24 px"),
     ];
+
+    let font_sub_items: Vec<MenuItem> = font_sizes
+        .iter()
+        .map(|&(size, label)| {
+            let is_selected = (base_font_size - size).abs() < 0.5;
+            let fs = on_set_font_size.clone();
+            MenuItem::radio(label, is_selected, None, move |_, cx| fs(size, cx))
+        })
+        .collect();
 
     let current_size_label = format!("{} px", base_font_size as usize);
 
@@ -105,4 +113,47 @@ pub fn build_settings_menu_items(
             move |_, cx| a(cx)
         }),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_settings_menu_items;
+    use crate::theme::ThemeMode;
+    use crate::ui::MenuItemKind;
+
+    #[test]
+    fn test_font_size_options_and_selection() {
+        let items = build_settings_menu_items(
+            ThemeMode::YaruDark,
+            17.0,
+            |_, _| {},
+            |_, _| {},
+            |_| {},
+            |_| {},
+        );
+
+        let font_item = items.iter().find(|i| i.label == "Font size").expect("Font size menu item exists");
+        assert_eq!(font_item.hint, Some("17 px"));
+
+        if let MenuItemKind::Submenu(sub) = &font_item.kind {
+            let labels: Vec<&str> = sub.iter().map(|s| s.label).collect();
+            assert_eq!(
+                labels,
+                vec![
+                    "13 px", "14 px", "15 px", "16 px", "17 px (Default)",
+                    "18 px", "19 px", "20 px", "22 px", "24 px"
+                ]
+            );
+
+            // 17 px should be checked
+            let checked_17 = sub.iter().find(|s| s.label == "17 px (Default)").unwrap();
+            assert!(matches!(checked_17.kind, MenuItemKind::Radio(true)));
+
+            // 15 px should not be checked
+            let checked_15 = sub.iter().find(|s| s.label == "15 px").unwrap();
+            assert!(matches!(checked_15.kind, MenuItemKind::Radio(false)));
+        } else {
+            panic!("Expected submenu for Font size");
+        }
+    }
 }

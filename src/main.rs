@@ -1,4 +1,4 @@
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 
 use gpui::*;
 use rust_embed::RustEmbed;
@@ -53,7 +53,12 @@ fn main() {
                 "fonts/Ubuntu-R.ttf",
                 "fonts/Ubuntu-RI.ttf",
                 "fonts/Ubuntu-M.ttf",
+                "fonts/Ubuntu-B.ttf",
+                "fonts/Ubuntu-BI.ttf",
                 "fonts/UbuntuMono-R.ttf",
+                "fonts/UbuntuMono-RI.ttf",
+                "fonts/UbuntuMono-B.ttf",
+                "fonts/UbuntuMono-BI.ttf",
             ]
             .iter()
             .filter_map(|p| Assets::get(p).map(|f| f.data))
@@ -110,6 +115,77 @@ fn main() {
                 KeyBinding::new("escape", CancelMenu, Some("Menu")),
                 KeyBinding::new("left", PrevMenu, Some("Menu")),
                 KeyBinding::new("right", NextMenu, Some("Menu")),
+                // Text editing. Menu arrows stay on the Menu context.
+                KeyBinding::new("left", EditorLeft, Some("Editor")),
+                KeyBinding::new("right", EditorRight, Some("Editor")),
+                KeyBinding::new("up", EditorUp, Some("Editor")),
+                KeyBinding::new("down", EditorDown, Some("Editor")),
+                KeyBinding::new("shift-left", EditorSelectLeft, Some("Editor")),
+                KeyBinding::new("shift-right", EditorSelectRight, Some("Editor")),
+                KeyBinding::new("shift-up", EditorSelectUp, Some("Editor")),
+                KeyBinding::new("shift-down", EditorSelectDown, Some("Editor")),
+                KeyBinding::new("home", EditorHome, Some("Editor")),
+                KeyBinding::new("end", EditorEnd, Some("Editor")),
+                KeyBinding::new("shift-home", EditorSelectHome, Some("Editor")),
+                KeyBinding::new("shift-end", EditorSelectEnd, Some("Editor")),
+                KeyBinding::new("ctrl-left", EditorWordLeft, Some("Editor")),
+                KeyBinding::new("ctrl-right", EditorWordRight, Some("Editor")),
+                KeyBinding::new("ctrl-shift-left", EditorSelectWordLeft, Some("Editor")),
+                KeyBinding::new("ctrl-shift-right", EditorSelectWordRight, Some("Editor")),
+                KeyBinding::new("ctrl-shift-up", EditorSelectLineUp, Some("Editor")),
+                KeyBinding::new("ctrl-shift-down", EditorSelectLineDown, Some("Editor")),
+                KeyBinding::new("ctrl-home", EditorDocStart, Some("Editor")),
+                KeyBinding::new("ctrl-end", EditorDocEnd, Some("Editor")),
+                KeyBinding::new("ctrl-shift-home", EditorSelectDocStart, Some("Editor")),
+                KeyBinding::new("ctrl-shift-end", EditorSelectDocEnd, Some("Editor")),
+                KeyBinding::new("ctrl-backspace", EditorDeleteWordLeft, Some("Editor")),
+                KeyBinding::new("ctrl-delete", EditorDeleteWordRight, Some("Editor")),
+                KeyBinding::new("ctrl-shift-backspace", EditorDeleteLineStart, Some("Editor")),
+                KeyBinding::new("ctrl-shift-delete", EditorDeleteLineEnd, Some("Editor")),
+                KeyBinding::new("backspace", EditorBackspace, Some("Editor")),
+                KeyBinding::new("delete", EditorDelete, Some("Editor")),
+                KeyBinding::new("enter", EditorNewline, Some("Editor")),
+                KeyBinding::new("shift-enter", EditorPlainNewline, Some("Editor")),
+                KeyBinding::new("tab", IndentAction, Some("Editor")),
+                KeyBinding::new("shift-tab", OutdentAction, Some("Editor")),
+                KeyBinding::new("ctrl-up", EditorMoveLineUp, Some("Editor")),
+                KeyBinding::new("ctrl-down", EditorMoveLineDown, Some("Editor")),
+                KeyBinding::new("ctrl-b", ToggleBold, Some("Editor")),
+                KeyBinding::new("ctrl-i", ToggleItalic, Some("Editor")),
+                KeyBinding::new("ctrl-u", ToggleUnderline, Some("Editor")),
+                KeyBinding::new("ctrl-shift-x", ToggleStrikethrough, Some("Editor")),
+                KeyBinding::new("ctrl-1", Heading1, Some("Editor")),
+                KeyBinding::new("ctrl-2", Heading2, Some("Editor")),
+                KeyBinding::new("ctrl-3", Heading3, Some("Editor")),
+                KeyBinding::new("ctrl-e", ToggleInlineCode, Some("Editor")),
+                KeyBinding::new("ctrl-k", InsertLink, Some("Editor")),
+                KeyBinding::new("ctrl-shift-c", InsertCodeBlock, Some("Editor")),
+                KeyBinding::new("left", EditorLeft, Some("LineField")),
+                KeyBinding::new("right", EditorRight, Some("LineField")),
+                KeyBinding::new("shift-left", EditorSelectLeft, Some("LineField")),
+                KeyBinding::new("shift-right", EditorSelectRight, Some("LineField")),
+                KeyBinding::new("home", EditorHome, Some("LineField")),
+                KeyBinding::new("end", EditorEnd, Some("LineField")),
+                KeyBinding::new("shift-home", EditorSelectHome, Some("LineField")),
+                KeyBinding::new("shift-end", EditorSelectEnd, Some("LineField")),
+                KeyBinding::new("ctrl-home", EditorHome, Some("LineField")),
+                KeyBinding::new("ctrl-end", EditorEnd, Some("LineField")),
+                KeyBinding::new("ctrl-shift-home", EditorSelectHome, Some("LineField")),
+                KeyBinding::new("ctrl-shift-end", EditorSelectEnd, Some("LineField")),
+                KeyBinding::new("ctrl-shift-up", EditorSelectHome, Some("LineField")),
+                KeyBinding::new("ctrl-shift-down", EditorSelectEnd, Some("LineField")),
+                KeyBinding::new("ctrl-left", EditorWordLeft, Some("LineField")),
+                KeyBinding::new("ctrl-right", EditorWordRight, Some("LineField")),
+                KeyBinding::new("ctrl-shift-left", EditorSelectWordLeft, Some("LineField")),
+                KeyBinding::new("ctrl-shift-right", EditorSelectWordRight, Some("LineField")),
+                KeyBinding::new("ctrl-backspace", EditorDeleteWordLeft, Some("LineField")),
+                KeyBinding::new("ctrl-delete", EditorDeleteWordRight, Some("LineField")),
+                KeyBinding::new("ctrl-shift-backspace", EditorDeleteLineStart, Some("LineField")),
+                KeyBinding::new("ctrl-shift-delete", EditorDeleteLineEnd, Some("LineField")),
+                KeyBinding::new("backspace", EditorBackspace, Some("LineField")),
+                KeyBinding::new("delete", EditorDelete, Some("LineField")),
+                KeyBinding::new("enter", FindNextMatch, Some("LineField")),
+                KeyBinding::new("shift-enter", FindPrevMatch, Some("LineField")),
             ]);
 
             cx.open_window(
@@ -130,3 +206,4 @@ fn main() {
             .unwrap();
         });
 }
+

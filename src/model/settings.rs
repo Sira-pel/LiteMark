@@ -12,6 +12,13 @@ fn default_base_font_size() -> f32 {
     17.0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ContentAlignment {
+    #[default]
+    Centered,
+    Left,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorSettings {
     #[serde(default)]
@@ -30,6 +37,8 @@ pub struct EditorSettings {
     pub word_wrap: bool,
     #[serde(default = "default_base_font_size")]
     pub base_font_size: f32,
+    #[serde(default)]
+    pub content_alignment: ContentAlignment,
 }
 
 impl Default for EditorSettings {
@@ -43,6 +52,7 @@ impl Default for EditorSettings {
             zen_mode: false,
             word_wrap: true,
             base_font_size: 17.0,
+            content_alignment: ContentAlignment::Centered,
         }
     }
 }
@@ -77,3 +87,23 @@ impl EditorSettings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_content_alignment_serde() {
+        let default_settings = EditorSettings::default();
+        assert_eq!(default_settings.content_alignment, ContentAlignment::Centered);
+
+        let json = serde_json::to_string(&default_settings).expect("serialize");
+        let parsed: EditorSettings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.content_alignment, ContentAlignment::Centered);
+
+        let custom = r#"{"content_alignment": "Left"}"#;
+        let parsed_custom: EditorSettings = serde_json::from_str(custom).expect("deserialize custom");
+        assert_eq!(parsed_custom.content_alignment, ContentAlignment::Left);
+    }
+}
+

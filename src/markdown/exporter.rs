@@ -13,8 +13,31 @@ pub fn markdown_to_html_body(markdown: &str) -> String {
     html_output
 }
 
+/// File stem with one extension removed. `a.txt` becomes `a`, not `a.txt`.
+pub fn export_stem(title: &str) -> &str {
+    match title.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && !ext.contains('/') => stem,
+        _ => title,
+    }
+}
+
+pub fn escape_html_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 pub fn export_to_html(title: &str, markdown: &str) -> String {
     let body_html = markdown_to_html_body(markdown);
+    let title = escape_html_text(title);
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -48,6 +71,16 @@ pub fn export_to_html(title: &str, markdown: &str) -> String {
     )
 }
 
+/// Build an export body. `title` is the document title and `markdown` is the source.
+pub fn render_export(kind: &str, title: &str, markdown: &str) -> Result<String, String> {
+    match kind {
+        "html" => Ok(export_to_html(title, markdown)),
+        "md" | "markdown" => Ok(markdown.to_string()),
+        "txt" | "text" => Ok(export_to_plaintext(markdown)),
+        other => Err(format!("Unsupported export format: {other}")),
+    }
+}
+
 pub fn export_to_plaintext(markdown: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -61,16 +94,44 @@ pub fn export_to_plaintext(markdown: &str) -> String {
         match event {
             pulldown_cmark::Event::Text(t) => text_output.push_str(&t),
             pulldown_cmark::Event::Code(c) => text_output.push_str(&c),
-            pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => text_output.push('\n'),
-            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Paragraph) => text_output.push_str("\n\n"),
-            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Heading(_)) => text_output.push_str("\n\n"),
+            pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => {
+                text_output.push('\n')
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Paragraph) => {
+                text_output.push_str("\n\n")
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Heading(_)) => {
+                text_output.push_str("\n\n")
+            }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Item) => text_output.push('\n'),
-            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::BlockQuote(_)) => text_output.push('\n'),
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::BlockQuote(_)) => {
+                text_output.push('\n')
+            }
             _ => {}
         }
     }
 
     text_output.trim().to_string()
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn format_markdown_table(headers: &[String], rows: &[Vec<String>]) -> String {
+    let mut out = String::new();
+    out.push_str("| ");
+    out.push_str(&headers.join(" | "));
+    out.push_str(" |\n| ");
+    let separators = vec![":---"; headers.len()];
+    out.push_str(&separators.join(" | "));
+    out.push_str(" |\n");
+    for row in rows {
+        out.push_str("| ");
+        let cells: Vec<String> = (0..headers.len())
+            .map(|i| row.get(i).cloned().unwrap_or_default())
+            .collect();
+        out.push_str(&cells.join(" | "));
+        out.push_str(" |\n");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -97,5 +158,34 @@ mod tests {
         assert!(!plain.contains("<h1>"));
         assert!(!plain.contains("**"));
     }
-}
 
+    #[test]
+    fn export_html_uses_title_then_markdown() {
+        let html = render_export("html", "Page Title", "# Body Heading").unwrap();
+        assert!(html.contains("<title>Page Title</title>"));
+        assert!(html.contains("<h1>Body Heading</h1>"));
+        assert!(!html.contains("<title># Body Heading</title>"));
+        assert!(!html.contains("<h1>Page Title</h1>"));
+
+        let escaped = export_to_html(r#"a<b>&"quoted""#, "x");
+        assert!(escaped.contains("<title>a&lt;b&gt;&amp;&quot;quoted&quot;</title>"));
+        assert!(!escaped.contains("<title>a<b>"));
+        assert_eq!(export_stem("a.txt"), "a");
+        assert_eq!(export_stem("notes.md"), "notes");
+        assert_eq!(export_stem("README"), "README");
+
+        let markdown = render_export("md", "Page Title", "# Body Heading").unwrap();
+        assert_eq!(markdown, "# Body Heading");
+        let text = render_export("txt", "Page Title", "# Body Heading").unwrap();
+        assert!(text.contains("Body Heading"));
+        assert!(!text.contains('#'));
+    }
+
+    #[test]
+    fn test_format_markdown_table() {
+        let headers = vec!["A".to_string(), "B".to_string()];
+        let rows = vec![vec!["1".to_string(), "2".to_string()]];
+        let out = format_markdown_table(&headers, &rows);
+        assert_eq!(out, "| A | B |\n| :--- | :--- |\n| 1 | 2 |\n");
+    }
+}

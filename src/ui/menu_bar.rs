@@ -1,9 +1,10 @@
-use gpui::prelude::*;
-use gpui::*;
-use crate::model::ViewMode;
-use crate::theme::{sz, Theme};
 use super::menu::MenuItem;
 use super::primitives::render_icon;
+use crate::model::settings::ContentAlignment;
+use crate::model::ViewMode;
+use crate::theme::{sz, Theme};
+use gpui::prelude::*;
+use gpui::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuId {
@@ -12,6 +13,7 @@ pub enum MenuId {
     View,
     Settings,
     Overflow,
+    Table,
     Hamburger,
 }
 
@@ -54,8 +56,16 @@ where
             .h(sz::TB_TILE_H)
             .rounded(sz::R_MD)
             .cursor_pointer()
-            .bg(if is_open { theme.border_subtle } else { rgba(0x00000000) })
-            .text_color(if is_open { theme.text_strong } else { theme.text_muted })
+            .bg(if is_open {
+                theme.border_subtle
+            } else {
+                rgba(0x00000000)
+            })
+            .text_color(if is_open {
+                theme.text_strong
+            } else {
+                theme.text_muted
+            })
             .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, _, cx| {
@@ -65,7 +75,15 @@ where
                     op(MenuId::Hamburger, cx);
                 }
             })
-            .child(render_icon("menu", 16.0, if is_open { theme.text_strong } else { theme.text_muted }))
+            .child(render_icon(
+                "menu",
+                16.0,
+                if is_open {
+                    theme.text_strong
+                } else {
+                    theme.text_muted
+                },
+            ))
     } else {
         // Normal layout: File  Edit  View
         let menus = [
@@ -96,8 +114,16 @@ where
                     .cursor_pointer()
                     .text_size(px(13.0))
                     .font_weight(FontWeight::NORMAL)
-                    .bg(if is_open { theme.border_subtle } else { rgba(0x00000000) })
-                    .text_color(if is_open { theme.text_strong } else { theme.menu_text })
+                    .bg(if is_open {
+                        theme.border_subtle
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .text_color(if is_open {
+                        theme.text_strong
+                    } else {
+                        theme.menu_text
+                    })
                     .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_mouse_move(move |_, _, cx| {
@@ -127,6 +153,8 @@ pub fn build_file_menu_items(
     on_save: impl Fn(&mut App) + 'static + Clone,
     on_save_as: impl Fn(&mut App) + 'static + Clone,
     on_export_html: impl Fn(&mut App) + 'static + Clone,
+    on_export_md: impl Fn(&mut App) + 'static + Clone,
+    on_export_txt: impl Fn(&mut App) + 'static + Clone,
     on_view_pdf: impl Fn(&mut App) + 'static + Clone,
     on_close_tab: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
@@ -160,6 +188,14 @@ pub fn build_file_menu_items(
             let f = on_export_html.clone();
             move |_, cx| f(cx)
         }),
+        MenuItem::action("Export as Markdown", None, None, {
+            let f = on_export_md.clone();
+            move |_, cx| f(cx)
+        }),
+        MenuItem::action("Export as Plain Text", None, None, {
+            let f = on_export_txt.clone();
+            move |_, cx| f(cx)
+        }),
         MenuItem::disabled_action("Export as PDF", None, Some("Soon")),
     ];
 
@@ -179,9 +215,14 @@ pub fn build_file_menu_items(
     items
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_edit_menu_items(
     on_undo: impl Fn(&mut App) + 'static + Clone,
     on_redo: impl Fn(&mut App) + 'static + Clone,
+    on_cut: impl Fn(&mut App) + 'static + Clone,
+    on_copy: impl Fn(&mut App) + 'static + Clone,
+    on_paste: impl Fn(&mut App) + 'static + Clone,
+    on_select_all: impl Fn(&mut App) + 'static + Clone,
     on_find: impl Fn(&mut App) + 'static + Clone,
     on_replace: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
@@ -195,10 +236,22 @@ pub fn build_edit_menu_items(
             move |_, cx| f(cx)
         }),
         MenuItem::divider(),
-        MenuItem::disabled_action("Cut", Some("Ctrl+X"), None),
-        MenuItem::disabled_action("Copy", Some("Ctrl+C"), None),
-        MenuItem::disabled_action("Paste", Some("Ctrl+V"), None),
-        MenuItem::disabled_action("Select all", Some("Ctrl+A"), None),
+        MenuItem::action("Cut", None, Some("Ctrl+X"), {
+            let f = on_cut.clone();
+            move |_, cx| f(cx)
+        }),
+        MenuItem::action("Copy", None, Some("Ctrl+C"), {
+            let f = on_copy.clone();
+            move |_, cx| f(cx)
+        }),
+        MenuItem::action("Paste", None, Some("Ctrl+V"), {
+            let f = on_paste.clone();
+            move |_, cx| f(cx)
+        }),
+        MenuItem::action("Select all", None, Some("Ctrl+A"), {
+            let f = on_select_all.clone();
+            move |_, cx| f(cx)
+        }),
         MenuItem::divider(),
         MenuItem::action("Find", None, Some("Ctrl+F"), {
             let f = on_find.clone();
@@ -217,9 +270,11 @@ pub fn build_view_menu_items(
     show_line_numbers: bool,
     word_wrap: bool,
     show_sidebar: bool,
+    content_alignment: ContentAlignment,
     on_set_view_mode: impl Fn(ViewMode, &mut App) + 'static + Clone,
     on_toggle_line_numbers: impl Fn(&mut App) + 'static + Clone,
     on_toggle_word_wrap: impl Fn(&mut App) + 'static + Clone,
+    on_set_content_alignment: impl Fn(ContentAlignment, &mut App) + 'static + Clone,
     on_zoom_in: impl Fn(&mut App) + 'static + Clone,
     on_zoom_out: impl Fn(&mut App) + 'static + Clone,
     on_reset_zoom: impl Fn(&mut App) + 'static + Clone,
@@ -250,6 +305,25 @@ pub fn build_view_menu_items(
             let f = on_toggle_word_wrap.clone();
             move |_, cx| f(cx)
         }),
+        MenuItem::divider(),
+        MenuItem::radio(
+            "Centered text",
+            content_alignment == ContentAlignment::Centered,
+            None,
+            {
+                let f = on_set_content_alignment.clone();
+                move |_, cx| f(ContentAlignment::Centered, cx)
+            },
+        ),
+        MenuItem::radio(
+            "Left-aligned text",
+            content_alignment == ContentAlignment::Left,
+            None,
+            {
+                let f = on_set_content_alignment.clone();
+                move |_, cx| f(ContentAlignment::Left, cx)
+            },
+        ),
         MenuItem::divider(),
         MenuItem::action("Zoom in", None, Some("Ctrl+="), {
             let f = on_zoom_in.clone();

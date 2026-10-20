@@ -26,7 +26,7 @@ rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR/DEBIAN"
 mkdir -p "$STAGING_DIR/usr/bin"
 mkdir -p "$STAGING_DIR/usr/share/applications"
-mkdir -p "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps"
+mkdir -p "$STAGING_DIR/usr/share/icons"
 mkdir -p "$OUTPUT_DIR"
 
 # 1. Copy native binary to /usr/bin/litemark
@@ -34,10 +34,11 @@ echo "📦 Installing native binary..."
 cp "$RELEASE_BIN" "$STAGING_DIR/usr/bin/litemark"
 chmod 755 "$STAGING_DIR/usr/bin/litemark"
 
-# 2. Copy scalable icon
-echo "🎨 Installing application icon..."
-cp "$ROOT_DIR/assets/icons/litemark.svg" "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/litemark.svg"
-chmod 644 "$STAGING_DIR/usr/share/icons/hicolor/scalable/apps/litemark.svg"
+# 2. Install the hicolor icon theme (16–512 PNG, scalable, and symbolic)
+echo "🎨 Installing application icons..."
+cp -a "$ROOT_DIR/assets/icons/hicolor" "$STAGING_DIR/usr/share/icons/hicolor"
+find "$STAGING_DIR/usr/share/icons/hicolor" -type d -exec chmod 755 {} +
+find "$STAGING_DIR/usr/share/icons/hicolor" -type f -exec chmod 644 {} +
 
 # 3. Create desktop launcher
 echo "🖥️ Generating desktop launcher..."
@@ -74,7 +75,7 @@ Depends: libc6, libxcb1, libxkbcommon0, libxkbcommon-x11-0
 Description: Ultra-fast native GPUI markdown and text editor for Ubuntu
  LiteMark is a pure native Linux desktop application built with
  Rust and GPUI (Vulkan hardware acceleration). It starts in under
- 30ms, idles at ~20MB RAM, features exact Yaru dark and light themes,
+ 30ms, features minimal resource footprint, exact Yaru dark and light themes,
  automatic ~/Documents/Notes folder management, instant WYSIWYG
  rendering, pure-Rust PDF extraction, and atomic file saving.
 EOF
