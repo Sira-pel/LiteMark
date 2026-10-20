@@ -1367,6 +1367,18 @@ mod tests {
     }
 
     #[test]
+    fn test_styled_segments_bold() {
+        let input = "Normal **bold** text";
+        let doc = parse_document(input);
+        assert_eq!(doc.lines.len(), 1);
+        let line = &doc.lines[0];
+        println!("display: {:?}", line.display_text);
+        println!("segments: {:?}", line.styled_segments);
+        let bold_seg = line.styled_segments.iter().find(|s| s.bold);
+        assert!(bold_seg.is_some(), "Expected bold styled segment");
+    }
+
+    #[test]
     fn test_task_list() {
         let md = "- [ ] Task to do\n- [x] Completed task";
         let blocks = parse_markdown(md);

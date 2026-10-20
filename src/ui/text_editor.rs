@@ -1013,7 +1013,7 @@ fn wysiwyg_slice_runs<V: 'static>(
     let (default_weight, default_color, use_mono) = match &parsed_line.kind {
         LineKind::Heading { level: 1 } => (FontWeight::BOLD, editor.h1_color, false),
         LineKind::Heading { level: 2 } => (FontWeight::BOLD, editor.h2_color, false),
-        LineKind::Heading { .. } => (FontWeight::SEMIBOLD, editor.strong_color, false),
+        LineKind::Heading { .. } => (FontWeight::BOLD, editor.strong_color, false),
         LineKind::CodeLine | LineKind::CodeFence { .. } => {
             (FontWeight::NORMAL, editor.code_color, true)
         }

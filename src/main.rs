@@ -56,6 +56,7 @@ fn main() {
                 "fonts/Ubuntu-B.ttf",
                 "fonts/Ubuntu-BI.ttf",
                 "fonts/UbuntuMono-R.ttf",
+                "fonts/UbuntuMono-RI.ttf",
                 "fonts/UbuntuMono-B.ttf",
                 "fonts/UbuntuMono-BI.ttf",
             ]
@@ -205,3 +206,4 @@ fn main() {
             .unwrap();
         });
 }
+
