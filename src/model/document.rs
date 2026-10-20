@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::markdown::{parse_document, InlineTagKind, LineKind, ParsedDocument};
+use crate::markdown::{parse_document, InlineTagKind, LineKind, ParsedDocument, TableColumnAlign};
 
 use super::text_ops::{
     find_matches, find_next, find_prev, format_replacement, home_offset, line_col, line_end,
@@ -71,6 +71,7 @@ pub struct ActiveFormats {
     pub quote: bool,
     pub code: bool,
     pub link: bool,
+    pub table: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -358,15 +359,11 @@ impl DocumentTab {
                         line_start
                     };
                     let remove_end = line_end_pos;
-                    self.edit(remove_start..remove_end, "");
-
-                    // After removing empty row, ensure there is a blank line below the table
-                    let after_table = remove_start;
-                    let has_newline_after = after_table < self.content.len() && self.content.as_bytes()[after_table] == b'\n';
-                    if !has_newline_after {
-                        self.edit(after_table..after_table, "\n");
-                    }
-                    self.caret.move_to(after_table + 1);
+                    let has_newline_after = remove_end < self.content.len() && self.content.as_bytes()[remove_end] == b'\n';
+                    let replacement = if has_newline_after { "" } else { "\n" };
+                    self.edit(remove_start..remove_end, replacement);
+                    let target = (remove_start + 1).min(self.content.len());
+                    self.caret.move_to(floor_boundary(&self.content, target));
                     self.refresh_cursor();
                     return;
                 } else {
@@ -394,11 +391,9 @@ impl DocumentTab {
                     }
 
                     if let Some((col_idx, _c_start, c_end, before_str, after_str)) = split_cell_info {
-                        // Split the cell into current row and a new row below
+                        // Split the cell into current row and a new row below in a single undo step
                         let repl = if before_str.ends_with(' ') { "" } else { " " };
-                        self.edit(range.start..c_end, repl);
-
-                        let new_line_end = line_end(&self.content, line_start);
+                        let rest_of_line = &self.content[c_end..line_end_pos];
                         let mut new_cells = Vec::new();
                         for i in 0..col_count {
                             if i == col_idx {
@@ -408,9 +403,10 @@ impl DocumentTab {
                             }
                         }
                         let new_row = format!("\n|{}|", new_cells.join("|"));
-                        self.edit(new_line_end..new_line_end, &new_row);
+                        let combined = format!("{}{}{}", repl, rest_of_line, new_row);
+                        let new_row_start = range.start + repl.len() + rest_of_line.len() + 1;
+                        self.edit(range.start..line_end_pos, &combined);
 
-                        let new_row_start = new_line_end + 1;
                         let mut target = new_row_start + 1;
                         for cell in new_cells.iter().take(col_idx) {
                             target += cell.len() + 1;
@@ -1258,6 +1254,52 @@ impl DocumentTab {
             return;
         }
         if let Some(pline) = parsed.line_at_offset(pos) {
+            if let LineKind::TableRow {
+                ref cells,
+                ref raw_cells,
+                ref table_source,
+                ..
+            } = pline.kind
+            {
+                if let Some(c_idx) = raw_cells
+                    .iter()
+                    .position(|rc| pos >= rc.start && pos <= rc.end)
+                {
+                    if pos <= cells[c_idx].start {
+                        if c_idx > 0 {
+                            let target = skip_hidden_left(&parsed, cells[c_idx - 1].end);
+                            self.place(target, extend);
+                        } else {
+                            let prev_row_cell_end = parsed.lines[..pline.line_index]
+                                .iter()
+                                .rev()
+                                .find_map(|l| {
+                                    if let LineKind::TableRow {
+                                        cells: ref pcells,
+                                        table_source: ref pts,
+                                        ..
+                                    } = l.kind
+                                    {
+                                        if pts == table_source {
+                                            return pcells.last().map(|c| c.end);
+                                        }
+                                    }
+                                    None
+                                });
+                            if let Some(prev_end) = prev_row_cell_end {
+                                let target = skip_hidden_left(&parsed, prev_end);
+                                self.place(target, extend);
+                            } else if table_source.start > 0 {
+                                let target = skip_hidden_left(&parsed, table_source.start - 1);
+                                self.place(target, extend);
+                            } else {
+                                self.place(0, extend);
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
             if pos <= pline.prefix_range.end && pos >= pline.source.start {
                 if pline.source.start > 0 {
                     let prev_end = pline.source.start - 1;
@@ -1297,6 +1339,51 @@ impl DocumentTab {
             return;
         }
         if let Some(pline) = parsed.line_at_offset(pos) {
+            if let LineKind::TableRow {
+                ref cells,
+                ref raw_cells,
+                ref table_source,
+                ..
+            } = pline.kind
+            {
+                if let Some(c_idx) = raw_cells
+                    .iter()
+                    .position(|rc| pos >= rc.start && pos <= rc.end)
+                {
+                    if pos >= cells[c_idx].end {
+                        if c_idx + 1 < cells.len() {
+                            let target = skip_hidden_right(&parsed, cells[c_idx + 1].start);
+                            self.place(target, extend);
+                        } else {
+                            let next_row_cell_start = parsed.lines
+                                .get(pline.line_index + 1..)
+                                .and_then(|rest| {
+                                    rest.iter().find_map(|l| {
+                                        if let LineKind::TableRow {
+                                            cells: ref ncells,
+                                            table_source: ref nts,
+                                            ..
+                                        } = l.kind
+                                        {
+                                            if nts == table_source {
+                                                return ncells.first().map(|c| c.start);
+                                            }
+                                        }
+                                        None
+                                    })
+                                });
+                            if let Some(next_start) = next_row_cell_start {
+                                let target = skip_hidden_right(&parsed, next_start);
+                                self.place(target, extend);
+                            } else {
+                                let after = (table_source.end + 1).min(self.content.len());
+                                self.place(after, extend);
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
             if pos < pline.prefix_range.end {
                 pos = pline.prefix_range.end;
             }
@@ -1338,6 +1425,26 @@ impl DocumentTab {
         }
         let parsed = self.parsed();
 
+        // Guard table pipe delimiters in WYSIWYG mode
+        if let Some(pline) = parsed.line_at_offset(cursor) {
+            if let LineKind::TableRow {
+                ref cells,
+                ref raw_cells,
+                ..
+            } = pline.kind
+            {
+                let at_cell_start_or_pipe = raw_cells
+                    .iter()
+                    .zip(cells.iter())
+                    .find(|(rc, _)| cursor >= rc.start && cursor <= rc.end)
+                    .map(|(_, c)| cursor <= c.start)
+                    .unwrap_or(true);
+                if at_cell_start_or_pipe {
+                    return false;
+                }
+            }
+        }
+
         // 1. Check if cursor is inside or immediately after an InlinePair
         for pair in parsed.inline_pairs.iter().rev() {
             let prev_vis = if cursor == pair.close_delim.end {
@@ -1368,6 +1475,367 @@ impl DocumentTab {
         }
 
         self.smart_backspace()
+    }
+
+    pub fn delete_forward_in_mode(&mut self, mode: ViewMode) {
+        if self.is_read_only() {
+            return;
+        }
+        if !self.selection_range().is_empty() {
+            let range = self.selection_range();
+            self.edit(range, "");
+            return;
+        }
+        let cursor = self.cursor_offset();
+        if cursor >= self.content.len() {
+            return;
+        }
+        if mode == ViewMode::Wysiwyg {
+            let parsed = self.parsed();
+            if let Some(pline) = parsed.line_at_offset(cursor) {
+                if let LineKind::TableRow {
+                    ref cells,
+                    ref raw_cells,
+                    ..
+                } = pline.kind
+                {
+                    let at_cell_end_or_pipe = raw_cells
+                        .iter()
+                        .zip(cells.iter())
+                        .find(|(rc, _)| cursor >= rc.start && cursor <= rc.end)
+                        .map(|(_, c)| cursor >= c.end)
+                        .unwrap_or(true);
+                    if at_cell_end_or_pipe {
+                        return;
+                    }
+                }
+            }
+        }
+        let next = next_grapheme(&self.content, cursor);
+        self.edit(cursor..next, "");
+    }
+
+    #[allow(dead_code)]
+    pub fn is_in_table(&mut self) -> bool {
+        let cursor = self.cursor_offset();
+        let parsed = self.parsed();
+        parsed.lines.iter().any(|l| match l.kind {
+            LineKind::TableRow {
+                ref table_source, ..
+            } => cursor >= table_source.start && cursor <= table_source.end,
+            _ => false,
+        })
+    }
+
+    fn extract_active_table(&mut self) -> Option<TableEditContext> {
+        let cursor = self.cursor_offset();
+        let parsed = self.parsed();
+        let table_source = parsed.lines.iter().find_map(|l| {
+            if let LineKind::TableRow {
+                ref table_source, ..
+            } = l.kind
+            {
+                if cursor >= table_source.start && cursor <= table_source.end {
+                    return Some(table_source.clone());
+                }
+            }
+            None
+        })?;
+
+        let mut num_cols = 1usize;
+        let mut alignments = Vec::new();
+        for l in &parsed.lines {
+            if l.source.start >= table_source.start && l.source.end <= table_source.end {
+                if let LineKind::TableRow {
+                    ref cells,
+                    alignments: ref al,
+                    ..
+                } = l.kind
+                {
+                    num_cols = num_cols.max(cells.len());
+                    if alignments.is_empty() {
+                        alignments = al.clone();
+                    }
+                }
+            }
+        }
+        while alignments.len() < num_cols {
+            alignments.push(TableColumnAlign::Left);
+        }
+
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut active_row = 0usize;
+        let mut active_col = 0usize;
+
+        for l in &parsed.lines {
+            if l.source.start >= table_source.start && l.source.end <= table_source.end {
+                if let LineKind::TableRow {
+                    ref cells,
+                    ref raw_cells,
+                    ..
+                } = l.kind
+                {
+                    let r_idx = rows.len();
+                    let mut row_vals = Vec::with_capacity(num_cols);
+                    for c_idx in 0..num_cols {
+                        let txt = cells
+                            .get(c_idx)
+                            .and_then(|r| self.content.get(r.clone()))
+                            .unwrap_or("")
+                            .to_string();
+                        row_vals.push(txt);
+                    }
+                    if cursor >= l.source.start && cursor <= l.source.end {
+                        active_row = r_idx;
+                        if let Some(c_idx) = raw_cells
+                            .iter()
+                            .position(|rc| cursor >= rc.start && cursor <= rc.end)
+                        {
+                            active_col = c_idx.min(num_cols - 1);
+                        } else if let Some(c_idx) = raw_cells.iter().rposition(|rc| rc.start <= cursor) {
+                            active_col = c_idx.min(num_cols - 1);
+                        }
+                    }
+                    rows.push(row_vals);
+                }
+            }
+        }
+
+        if rows.is_empty() {
+            return None;
+        }
+
+        Some(TableEditContext {
+            table_source,
+            rows,
+            alignments,
+            active_row,
+            active_col,
+        })
+    }
+
+    pub fn insert_table_with_size(&mut self, cols: usize, rows: usize) {
+        if self.is_read_only() {
+            return;
+        }
+        let cols = cols.clamp(1, 10);
+        let rows = rows.clamp(1, 20);
+
+        let mut range = self.selection_range();
+        let parsed = self.parsed();
+        if let Some(table_end) = parsed.lines.iter().find_map(|l| {
+            if let LineKind::TableRow {
+                ref table_source, ..
+            } = l.kind
+            {
+                if range.start >= table_source.start && range.start <= table_source.end {
+                    return Some(table_source.end);
+                }
+            }
+            None
+        }) {
+            range = table_end..table_end;
+        }
+
+        let mut prefix = String::new();
+        if range.start > 0 {
+            let prev_char = self.content[..range.start].chars().next_back();
+            if let Some(c) = prev_char {
+                if c != '\n' {
+                    prefix.push_str("\n\n");
+                } else if !self.content[..range.start].ends_with("\n\n") {
+                    prefix.push('\n');
+                }
+            }
+        }
+        let mut suffix = String::new();
+        if range.end < self.content.len() {
+            let next_char = self.content[range.end..].chars().next();
+            if let Some(c) = next_char {
+                if c != '\n' {
+                    suffix.push_str("\n\n");
+                } else if !self.content[range.end..].starts_with("\n\n") {
+                    suffix.push('\n');
+                }
+            }
+        }
+
+        let mut table_rows: Vec<Vec<String>> = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            table_rows.push(vec![String::new(); cols]);
+        }
+        let alignments = vec![TableColumnAlign::Left; cols];
+        let (table_str, first_cell_rel) = format_markdown_table(&table_rows, &alignments, 0, 0);
+        let full_insert = format!("{}{}{}", prefix, table_str, suffix);
+        let base = range.start + prefix.len();
+        self.edit(range, &full_insert);
+        self.caret.range = (base + first_cell_rel.start)..(base + first_cell_rel.end);
+        self.caret.reversed = false;
+        self.refresh_cursor();
+    }
+
+    pub fn table_add_row_above(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let Some(mut ctx) = self.extract_active_table() else {
+            return;
+        };
+        let num_cols = ctx.alignments.len().max(1);
+        let insert_idx = ctx.active_row.min(ctx.rows.len());
+        ctx.rows.insert(insert_idx, vec![String::new(); num_cols]);
+        let (new_table, cell_rel) =
+            format_markdown_table(&ctx.rows, &ctx.alignments, insert_idx, ctx.active_col);
+        let base = ctx.table_source.start;
+        self.edit(ctx.table_source, &new_table);
+        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.refresh_cursor();
+    }
+
+    pub fn table_add_row_below(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let Some(mut ctx) = self.extract_active_table() else {
+            return;
+        };
+        let num_cols = ctx.alignments.len().max(1);
+        let insert_idx = (ctx.active_row + 1).min(ctx.rows.len());
+        ctx.rows.insert(insert_idx, vec![String::new(); num_cols]);
+        let (new_table, cell_rel) =
+            format_markdown_table(&ctx.rows, &ctx.alignments, insert_idx, ctx.active_col);
+        let base = ctx.table_source.start;
+        self.edit(ctx.table_source, &new_table);
+        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.refresh_cursor();
+    }
+
+    pub fn table_add_col_left(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let Some(mut ctx) = self.extract_active_table() else {
+            return;
+        };
+        let insert_col = ctx.active_col.min(ctx.alignments.len());
+        ctx.alignments.insert(insert_col, TableColumnAlign::Left);
+        for row in ctx.rows.iter_mut() {
+            row.insert(insert_col.min(row.len()), String::new());
+        }
+        let (new_table, cell_rel) =
+            format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, insert_col);
+        let base = ctx.table_source.start;
+        self.edit(ctx.table_source, &new_table);
+        self.caret.range = (base + cell_rel.start)..(base + cell_rel.end);
+        self.caret.reversed = false;
+        self.refresh_cursor();
+    }
+
+    pub fn table_add_col_right(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let Some(mut ctx) = self.extract_active_table() else {
+            return;
+        };
+        let insert_col = (ctx.active_col + 1).min(ctx.alignments.len());
+        ctx.alignments.insert(insert_col, TableColumnAlign::Left);
+        for row in ctx.rows.iter_mut() {
+            row.insert(insert_col.min(row.len()), String::new());
+        }
+        let (new_table, cell_rel) =
+            format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, insert_col);
+        let base = ctx.table_source.start;
+        self.edit(ctx.table_source, &new_table);
+        self.caret.range = (base + cell_rel.start)..(base + cell_rel.end);
+        self.caret.reversed = false;
+        self.refresh_cursor();
+    }
+
+    pub fn table_delete_row(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let Some(mut ctx) = self.extract_active_table() else {
+            return;
+        };
+        if ctx.rows.len() <= 1 {
+            self.table_delete_table();
+            return;
+        }
+        let remove_idx = ctx.active_row.min(ctx.rows.len() - 1);
+        ctx.rows.remove(remove_idx);
+        let target_row = remove_idx.min(ctx.rows.len() - 1);
+        let (new_table, cell_rel) =
+            format_markdown_table(&ctx.rows, &ctx.alignments, target_row, ctx.active_col);
+        let base = ctx.table_source.start;
+        self.edit(ctx.table_source, &new_table);
+        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.refresh_cursor();
+    }
+
+    pub fn table_delete_col(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let Some(mut ctx) = self.extract_active_table() else {
+            return;
+        };
+        if ctx.alignments.len() <= 1 {
+            self.table_delete_table();
+            return;
+        }
+        let remove_col = ctx.active_col.min(ctx.alignments.len() - 1);
+        ctx.alignments.remove(remove_col);
+        for row in &mut ctx.rows {
+            if remove_col < row.len() {
+                row.remove(remove_col);
+            }
+        }
+        let target_col = remove_col.min(ctx.alignments.len() - 1);
+        let (new_table, cell_rel) =
+            format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, target_col);
+        let base = ctx.table_source.start;
+        self.edit(ctx.table_source, &new_table);
+        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.refresh_cursor();
+    }
+
+    pub fn table_delete_table(&mut self) {
+        if self.is_read_only() {
+            return;
+        }
+        let Some(ctx) = self.extract_active_table() else {
+            return;
+        };
+        let mut del_range = ctx.table_source.clone();
+        if del_range.end < self.content.len() && self.content.as_bytes()[del_range.end] == b'\n' {
+            del_range.end += 1;
+        } else if del_range.start > 0 && self.content.as_bytes()[del_range.start - 1] == b'\n' {
+            del_range.start -= 1;
+        }
+        let target = del_range.start;
+        self.edit(del_range, "");
+        self.caret.move_to(floor_boundary(&self.content, target));
+        self.refresh_cursor();
+    }
+
+    pub fn table_align_column(&mut self, align: TableColumnAlign) {
+        if self.is_read_only() {
+            return;
+        }
+        let Some(mut ctx) = self.extract_active_table() else {
+            return;
+        };
+        if let Some(slot) = ctx.alignments.get_mut(ctx.active_col) {
+            *slot = align;
+        }
+        let (new_table, cell_rel) =
+            format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, ctx.active_col);
+        let base = ctx.table_source.start;
+        self.edit(ctx.table_source, &new_table);
+        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.refresh_cursor();
     }
 
     pub fn tab_table_cell(&mut self, backwards: bool) -> bool {
@@ -1465,6 +1933,22 @@ impl DocumentTab {
         let cursor = self.cursor_offset();
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
+            if let LineKind::TableRow {
+                ref cells,
+                ref raw_cells,
+                ..
+            } = pline.kind
+            {
+                if let Some((_, cell)) = raw_cells
+                    .iter()
+                    .zip(cells.iter())
+                    .find(|(rc, _)| cursor >= rc.start && cursor <= rc.end)
+                {
+                    let vis_start = skip_hidden_right(&parsed, cell.start).min(cell.end);
+                    self.place(vis_start, extend);
+                    return;
+                }
+            }
             let vis_start = skip_hidden_right(&parsed, pline.prefix_range.end).min(pline.source.end);
             self.place(vis_start, extend);
         } else {
@@ -1746,6 +2230,58 @@ impl DocumentTab {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TableEditContext {
+    table_source: Range<usize>,
+    rows: Vec<Vec<String>>,
+    alignments: Vec<TableColumnAlign>,
+    active_row: usize,
+    active_col: usize,
+}
+
+fn format_markdown_table(
+    rows: &[Vec<String>],
+    alignments: &[TableColumnAlign],
+    target_row: usize,
+    target_col: usize,
+) -> (String, Range<usize>) {
+    let num_cols = alignments.len().max(1);
+    let mut out = String::new();
+    let mut target_cell_range = 0..0;
+
+    for (r_idx, row) in rows.iter().enumerate() {
+        if r_idx > 0 {
+            out.push('\n');
+        }
+        out.push('|');
+        for c_idx in 0..num_cols {
+            let cell_text = row.get(c_idx).map(|s| s.as_str()).unwrap_or("");
+            out.push(' ');
+            let c_start = out.len();
+            out.push_str(cell_text);
+            let c_end = out.len();
+            out.push_str(" |");
+            if r_idx == target_row && c_idx == target_col {
+                target_cell_range = c_start..c_end;
+            }
+        }
+        if r_idx == 0 {
+            out.push_str("\n|");
+            for c_idx in 0..num_cols {
+                let align = alignments.get(c_idx).copied().unwrap_or(TableColumnAlign::Left);
+                let delim = match align {
+                    TableColumnAlign::Left => " :--- |",
+                    TableColumnAlign::Center => " :---: |",
+                    TableColumnAlign::Right => " ---: |",
+                };
+                out.push_str(delim);
+            }
+        }
+    }
+
+    (out, target_cell_range)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlockFormatTarget {
     Heading(u8),
@@ -1836,6 +2372,7 @@ fn compute_active_formats(
             }
             LineKind::Blockquote => fmt.quote = true,
             LineKind::CodeFence { .. } | LineKind::CodeLine => fmt.code = true,
+            LineKind::TableRow { .. } | LineKind::TableDelimiter => fmt.table = true,
             _ => {}
         }
         for pair in &line.inline_pairs {
@@ -2788,6 +3325,110 @@ mod tests {
         let expected = "| Col 1 | Col 2 |\n| :--- | :--- |\n| First | Second item |\n| item |  |";
         assert_eq!(doc.content, expected);
         assert_eq!(doc.cursor_offset(), expected.find("item |  |").unwrap());
+    }
+
+    #[test]
+    fn test_insert_table_with_size_and_undo() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), String::new(), None, None);
+        doc.insert_table_with_size(3, 4);
+        assert_eq!(
+            doc.content,
+            "|  |  |  |\n| :--- | :--- | :--- |\n|  |  |  |\n|  |  |  |\n|  |  |  |"
+        );
+        assert_eq!(doc.selected_text(), "");
+        assert_eq!(doc.cursor_offset(), 2);
+
+        // Undo in a single step restores initial state
+        assert!(doc.undo());
+        assert_eq!(doc.content, "");
+    }
+
+    #[test]
+    fn test_table_row_and_column_manipulations_and_undo() {
+        let initial_table = "| Column 1 | Column 2 |\n| :--- | :--- |\n| Item 1 | Item 2 |";
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), initial_table.into(), None, None);
+
+        // Place cursor in Item 1
+        let pos = doc.content.find("Item 1").unwrap() + 2;
+        doc.place(pos, false);
+
+        // Add row above
+        doc.table_add_row_above();
+        assert!(doc.content.contains("| Column 1 | Column 2 |\n| :--- | :--- |\n|  |  |\n| Item 1 | Item 2 |"));
+        assert!(doc.undo());
+        assert_eq!(doc.content, initial_table);
+
+        // Add row below
+        let pos = doc.content.find("Item 1").unwrap() + 2;
+        doc.place(pos, false);
+        doc.table_add_row_below();
+        assert!(doc.content.ends_with("\n|  |  |"));
+        assert!(doc.undo());
+        assert_eq!(doc.content, initial_table);
+
+        // Add column right
+        let pos = doc.content.find("Item 1").unwrap() + 2;
+        doc.place(pos, false);
+        doc.table_add_col_right();
+        assert!(doc.content.contains("| Item 1 |  | Item 2 |"));
+        assert!(doc.undo());
+        assert_eq!(doc.content, initial_table);
+
+        // Add column left
+        let pos = doc.content.find("Item 1").unwrap() + 2;
+        doc.place(pos, false);
+        doc.table_add_col_left();
+        assert!(doc.content.contains("|  | Item 1 | Item 2 |"));
+        assert!(doc.undo());
+        assert_eq!(doc.content, initial_table);
+
+        // Align column right
+        let pos = doc.content.find("Item 1").unwrap() + 2;
+        doc.place(pos, false);
+        doc.table_align_column(TableColumnAlign::Right);
+        assert!(doc.content.contains("| ---: | :--- |"));
+        assert!(doc.undo());
+        assert!(doc.content.contains("| :--- | :--- |"));
+
+        // Delete row
+        let pos = doc.content.find("Item 1").unwrap() + 2;
+        doc.place(pos, false);
+        doc.table_delete_row();
+        assert_eq!(doc.content, "| Column 1 | Column 2 |\n| :--- | :--- |");
+        assert!(doc.undo());
+        assert_eq!(doc.content, initial_table);
+
+        // Delete table
+        let pos = doc.content.find("Item 1").unwrap() + 2;
+        doc.place(pos, false);
+        doc.table_delete_table();
+        assert_eq!(doc.content, "");
+        assert!(doc.undo());
+        assert_eq!(doc.content, initial_table);
+    }
+
+    #[test]
+    fn test_wysiwyg_table_boundary_guards() {
+        let table = "| Col 1 | Col 2 |\n| :--- | :--- |\n| Item 1 | Item 2 |";
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), table.into(), None, None);
+
+        // Position at start of "Item 1" (right after leading pipe/space)
+        let pos = table.find("Item 1").unwrap();
+        doc.place(pos, false);
+
+        // smart_backspace in WYSIWYG mode should NOT delete the delimiter or merge with previous cell
+        doc.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, table);
+        assert_eq!(doc.cursor_offset(), pos);
+
+        // Position at end of "Item 1"
+        let pos = table.find("Item 1").unwrap() + "Item 1".len();
+        doc.place(pos, false);
+
+        // delete_forward in WYSIWYG mode should NOT delete the delimiter
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, table);
+        assert_eq!(doc.cursor_offset(), pos);
     }
 
     #[test]

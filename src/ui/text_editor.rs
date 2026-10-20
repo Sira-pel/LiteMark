@@ -10,9 +10,21 @@ use std::sync::Arc;
 
 use gpui::*;
 
-use crate::markdown::{LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment};
+use crate::markdown::{
+    LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
+};
 use crate::model::text_ops::{visual_rows, Caret};
 use crate::model::ViewMode;
+
+#[derive(Clone)]
+pub struct PaintCell {
+    pub raw_range: Range<usize>,
+    pub inner_range: Range<usize>,
+    pub box_bounds: Bounds<Pixels>,
+    pub text_origin: Point<Pixels>,
+    pub shaped: ShapedLine,
+    pub offset_map: RowOffsetMap,
+}
 
 #[derive(Clone)]
 pub struct PaintRow {
@@ -25,6 +37,7 @@ pub struct PaintRow {
     pub offset_map: RowOffsetMap,
     pub checkbox_hit: Option<(Bounds<Pixels>, Range<usize>)>,
     pub link_hits: Vec<(Range<usize>, String)>,
+    pub cells: Vec<PaintCell>,
 }
 
 #[derive(Clone)]
@@ -126,9 +139,29 @@ pub fn move_vertical_visual(
     }
 
     let current_row = &paint.rows[current_row_ix];
-    let display_idx = current_row.offset_map.source_to_display(cursor);
-    let x_in_row = current_row.shaped.x_for_index(display_idx);
-    let target_screen_x = current_row.origin.x + x_in_row;
+    let target_screen_x = if !current_row.cells.is_empty() {
+        let cell = current_row
+            .cells
+            .iter()
+            .find(|c| cursor >= c.raw_range.start && cursor <= c.raw_range.end)
+            .or_else(|| {
+                current_row
+                    .cells
+                    .iter()
+                    .rev()
+                    .find(|c| c.raw_range.start <= cursor)
+            })
+            .unwrap_or(&current_row.cells[0]);
+        let clamped = cursor.clamp(cell.inner_range.start, cell.inner_range.end);
+        let display_idx = cell.offset_map.source_to_display(clamped);
+        let x_in_cell = cell.shaped.x_for_index(display_idx);
+        (cell.text_origin.x + x_in_cell)
+            .clamp(cell.box_bounds.left() + px(1.0), (cell.box_bounds.right() - px(1.0)).max(cell.box_bounds.left() + px(1.0)))
+    } else {
+        let display_idx = current_row.offset_map.source_to_display(cursor);
+        let x_in_row = current_row.shaped.x_for_index(display_idx);
+        current_row.origin.x + x_in_row
+    };
 
     let target_ix = if delta < 0 {
         if current_row_ix == 0 {
@@ -155,13 +188,35 @@ pub fn move_vertical_visual(
     };
 
     let target_row = &paint.rows[target_ix];
-    let local_x = (target_screen_x - target_row.origin.x).max(px(0.0));
-    let target_display = target_row.shaped.closest_index_for_x(local_x);
-    let target_source = target_row
-        .offset_map
-        .display_to_source(target_display)
-        .clamp(target_row.byte_start, target_row.byte_end)
-        .min(content.len());
+    let target_source = if !target_row.cells.is_empty() {
+        let cell = target_row
+            .cells
+            .iter()
+            .find(|c| {
+                target_screen_x >= c.box_bounds.left() && target_screen_x < c.box_bounds.right()
+            })
+            .unwrap_or_else(|| {
+                if target_screen_x < target_row.cells[0].box_bounds.left() {
+                    &target_row.cells[0]
+                } else {
+                    target_row.cells.last().unwrap()
+                }
+            });
+        let local_x = (target_screen_x - cell.text_origin.x).max(px(0.0));
+        let target_display = cell.shaped.closest_index_for_x(local_x);
+        cell.offset_map
+            .display_to_source(target_display)
+            .clamp(cell.inner_range.start, cell.inner_range.end)
+            .min(content.len())
+    } else {
+        let local_x = (target_screen_x - target_row.origin.x).max(px(0.0));
+        let target_display = target_row.shaped.closest_index_for_x(local_x);
+        target_row
+            .offset_map
+            .display_to_source(target_display)
+            .clamp(target_row.byte_start, target_row.byte_end)
+            .min(content.len())
+    };
 
     if extend {
         caret.select_to(target_source);
@@ -177,6 +232,9 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
     }
     if position.y < paint.rows[0].origin.y {
         let first = &paint.rows[0];
+        if let Some(first_cell) = first.cells.first() {
+            return first_cell.inner_range.start;
+        }
         return first.offset_map.display_to_source(0);
     }
     let mut chosen = 0usize;
@@ -188,6 +246,25 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
         }
     }
     let row = &paint.rows[chosen];
+    if !row.cells.is_empty() {
+        let cell = row
+            .cells
+            .iter()
+            .find(|c| position.x >= c.box_bounds.left() && position.x < c.box_bounds.right())
+            .unwrap_or_else(|| {
+                if position.x < row.cells[0].box_bounds.left() {
+                    &row.cells[0]
+                } else {
+                    row.cells.last().unwrap()
+                }
+            });
+        let local_x = (position.x - cell.text_origin.x).max(px(0.0));
+        let display_idx = cell.shaped.closest_index_for_x(local_x);
+        return cell
+            .offset_map
+            .display_to_source(display_idx)
+            .clamp(cell.inner_range.start, cell.inner_range.end);
+    }
     let local_x = position.x - row.origin.x;
     if local_x <= px(0.0) {
         return row.offset_map.display_to_source(0);
@@ -482,6 +559,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     offset_map,
                     checkbox_hit: None,
                     link_hits: Vec::new(),
+                    cells: Vec::new(),
                 });
             }
 
@@ -519,6 +597,248 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 wysiwyg_line_metrics(&parsed_line.kind, self.font_size);
             cur_y += top_gap;
 
+            let link_hits = collect_line_links(parsed_line);
+
+            if let LineKind::TableRow {
+                is_header,
+                ref cells,
+                ref raw_cells,
+                ref alignments,
+                ..
+            } = parsed_line.kind
+            {
+                let num_cols = cells.len().max(1);
+                let table_w = content_width;
+                let col_w = table_w / (num_cols as f32);
+                let pad_x = px(12.0);
+
+                // Table row horizontal borders
+                if is_header {
+                    bg_quads.push(fill(
+                        Bounds::new(point(base_x, cur_y), size(table_w, px(1.0))),
+                        self.border_color,
+                    ));
+                }
+                bg_quads.push(fill(
+                    Bounds::new(
+                        point(base_x, cur_y + row_line_height - px(1.0)),
+                        size(table_w, px(1.0)),
+                    ),
+                    self.border_color,
+                ));
+
+                // Vertical borders (left outer, inner dividers, right outer)
+                for c_border in 0..=num_cols {
+                    let vx = if c_border == num_cols {
+                        base_x + table_w - px(1.0)
+                    } else {
+                        base_x + col_w * (c_border as f32)
+                    };
+                    bg_quads.push(fill(
+                        Bounds::new(point(vx, cur_y), size(px(1.0), row_line_height)),
+                        self.border_color,
+                    ));
+                }
+
+                let mut paint_cells = Vec::with_capacity(num_cols);
+                for col_idx in 0..num_cols {
+                    let cell_range = cells
+                        .get(col_idx)
+                        .cloned()
+                        .unwrap_or(parsed_line.source.start..parsed_line.source.start);
+                    let raw_range = raw_cells
+                        .get(col_idx)
+                        .cloned()
+                        .unwrap_or_else(|| cell_range.clone());
+                    let align = alignments
+                        .get(col_idx)
+                        .copied()
+                        .unwrap_or(TableColumnAlign::Left);
+
+                    let cell_x = base_x + col_w * (col_idx as f32);
+                    let box_bounds =
+                        Bounds::new(point(cell_x, cur_y), size(col_w, row_line_height));
+
+                    let cell_raw_str = self.content.get(cell_range.clone()).unwrap_or("");
+                    let (cell_display, cell_map) = RowOffsetMap::from_hidden(
+                        cell_raw_str,
+                        cell_range.start,
+                        cell_range.start,
+                        &parsed_line.hidden_ranges,
+                    );
+                    let disp_len = cell_display.len();
+                    let shaped_str: SharedString = if disp_len == 0 {
+                        SharedString::from(" ")
+                    } else {
+                        SharedString::from(cell_display)
+                    };
+
+                    let runs = wysiwyg_cell_runs(
+                        parsed_line,
+                        disp_len,
+                        shaped_str.len(),
+                        &cell_map,
+                        self.marked.as_ref(),
+                        &base_font,
+                        &mono_font,
+                        self,
+                    );
+                    let shaped_cell = window.text_system().shape_line(
+                        shaped_str,
+                        row_font_size,
+                        &runs,
+                        None,
+                    );
+
+                    let text_w = if disp_len == 0 {
+                        px(0.0)
+                    } else {
+                        shaped_cell.width
+                    };
+                    let avail_inner = (col_w - pad_x * 2.0).max(px(0.0));
+                    let text_x = match align {
+                        TableColumnAlign::Left => cell_x + pad_x,
+                        TableColumnAlign::Center => {
+                            cell_x + pad_x + ((avail_inner - text_w) * 0.5).max(px(0.0))
+                        }
+                        TableColumnAlign::Right => {
+                            cell_x + pad_x + (avail_inner - text_w).max(px(0.0))
+                        }
+                    };
+                    let text_origin = point(text_x, cur_y);
+
+                    // Selection and Find highlights inside cell
+                    paint_ranges_mapped(
+                        &mut quads,
+                        text_origin,
+                        row_line_height,
+                        cell_map.line_start,
+                        cell_map.line_end,
+                        &cell_map,
+                        &shaped_cell,
+                        &self.selection,
+                        self.selection_color,
+                    );
+                    for (hit_index, hit) in self.find_hits.iter().enumerate() {
+                        let color = if self.active_find == Some(hit_index) {
+                            self.cursor_color
+                        } else {
+                            self.find_color
+                        };
+                        paint_ranges_mapped(
+                            &mut quads,
+                            text_origin,
+                            row_line_height,
+                            cell_map.line_start,
+                            cell_map.line_end,
+                            &cell_map,
+                            &shaped_cell,
+                            hit,
+                            color,
+                        );
+                    }
+
+                    // Strikethrough inside cell
+                    for seg in &parsed_line.styled_segments {
+                        if !seg.strike
+                            || seg.source.end <= cell_range.start
+                            || seg.source.start >= cell_range.end
+                        {
+                            continue;
+                        }
+                        let s_start =
+                            cell_map.source_to_display(seg.source.start.max(cell_range.start));
+                        let s_end =
+                            cell_map.source_to_display(seg.source.end.min(cell_range.end));
+                        if s_end > s_start {
+                            let x1 = shaped_cell.x_for_index(s_start);
+                            let x2 = shaped_cell.x_for_index(s_end);
+                            let strike_x = (text_origin.x + x1 - px(2.0)).max(cell_x + px(2.0));
+                            let strike_w = (x2 - x1) + px(4.0);
+                            let pad = (row_line_height - shaped_cell.ascent - shaped_cell.descent)
+                                .max(px(0.0))
+                                / 2.0;
+                            let strike_y = text_origin.y + (pad + shaped_cell.ascent * 1.5) * 0.5;
+                            let color = if seg.bold {
+                                self.strong_color
+                            } else {
+                                self.text_color
+                            };
+                            let thickness = if seg.bold {
+                                px(2.0)
+                            } else {
+                                px(1.75)
+                            };
+                            strike_quads.push(fill(
+                                Bounds::new(point(strike_x, strike_y), size(strike_w, thickness)),
+                                color,
+                            ));
+                        }
+                    }
+
+                    // Caret inside cell
+                    let caret_in_cell = (self.selection.start >= raw_range.start
+                        && self.selection.start <= raw_range.end)
+                        || (col_idx == 0
+                            && self.selection.start >= parsed_line.source.start
+                            && self.selection.start < raw_range.start)
+                        || (col_idx + 1 == num_cols
+                            && self.selection.start > raw_range.end
+                            && self.selection.start <= parsed_line.source.end);
+                    if focused && self.selection.is_empty() && caret_in_cell && cursor.is_none() {
+                        let clamped_src =
+                            self.selection.start.clamp(cell_range.start, cell_range.end);
+                        let display_idx = cell_map.source_to_display(clamped_src).min(disp_len);
+                        let x = if disp_len == 0 {
+                            px(0.0)
+                        } else {
+                            shaped_cell.x_for_index(display_idx)
+                        };
+                        let pad = (row_line_height - shaped_cell.ascent - shaped_cell.descent)
+                            .max(px(0.0))
+                            / 2.0;
+                        let caret_y = text_origin.y + pad;
+                        let caret_h =
+                            (shaped_cell.ascent + shaped_cell.descent).max(row_font_size);
+                        cursor = Some(fill(
+                            Bounds::new(
+                                point(text_origin.x + x, caret_y),
+                                size(px(2.0), caret_h),
+                            ),
+                            self.cursor_color,
+                        ));
+                    }
+
+                    paint_cells.push(PaintCell {
+                        raw_range,
+                        inner_range: cell_range,
+                        box_bounds,
+                        text_origin,
+                        shaped: shaped_cell,
+                        offset_map: cell_map,
+                    });
+                }
+
+                let dummy_shaped = paint_cells
+                    .first()
+                    .map(|c| c.shaped.clone())
+                    .unwrap_or_else(|| sample.clone());
+                rows.push(PaintRow {
+                    line_index: line_idx,
+                    byte_start: parsed_line.source.start,
+                    byte_end: parsed_line.source.end,
+                    origin: point(base_x, cur_y),
+                    line_height: row_line_height,
+                    shaped: dummy_shaped,
+                    offset_map: parsed_line.offset_map.clone(),
+                    checkbox_hit: None,
+                    link_hits,
+                    cells: paint_cells,
+                });
+                cur_y += row_line_height;
+                continue;
+            }
+
             let row_char_width = char_width * (row_font_size / self.font_size);
             let row_avail_width = (content_width - indent_x).max(px(32.0));
             let row_wrap_cols = if self.word_wrap {
@@ -528,7 +848,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             };
 
             let sub_rows = visual_rows(&parsed_line.display_text, row_wrap_cols);
-            let link_hits = collect_line_links(parsed_line);
 
             for (sub_idx, (d_start, d_end)) in sub_rows.iter().copied().enumerate() {
                 let is_last_sub = sub_idx + 1 == sub_rows.len();
@@ -738,26 +1057,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         .text_system()
                         .shape_line(slice, row_font_size, &runs, None);
 
-                if let LineKind::TableRow { is_header, .. } = &parsed_line.kind {
-                    let table_row_w = (shaped.width + px(16.0)).min(content_width);
-                    if *is_header {
-                        bg_quads.push(fill(
-                            Bounds::new(
-                                point(base_x, cur_y),
-                                size(table_row_w, row_line_height),
-                            ),
-                            self.surface_bg,
-                        ));
-                    }
-                    bg_quads.push(fill(
-                        Bounds::new(
-                            point(base_x, cur_y + row_line_height - px(1.0)),
-                            size(table_row_w, px(1.0)),
-                        ),
-                        self.border_color,
-                    ));
-                }
-
                 // Selection and Find highlights
                 paint_ranges_mapped(
                     &mut quads,
@@ -872,6 +1171,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     offset_map: sub_map,
                     checkbox_hit,
                     link_hits: link_hits.clone(),
+                    cells: Vec::new(),
                 });
 
                 cur_y += row_line_height;
@@ -931,7 +1231,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             let _ = shaped.paint(origin, lh, window, cx);
         }
         for row in &prepaint.rows {
-            let _ = row.shaped.paint(row.origin, row.line_height, window, cx);
+            if row.cells.is_empty() {
+                let _ = row.shaped.paint(row.origin, row.line_height, window, cx);
+            } else {
+                for cell in &row.cells {
+                    let _ = cell
+                        .shaped
+                        .paint(cell.text_origin, row.line_height, window, cx);
+                }
+            }
         }
         for strike in prepaint.strike_quads.drain(..) {
             window.paint_quad(strike);
@@ -1023,9 +1331,11 @@ fn wysiwyg_line_metrics(
             px(0.0),
             px(0.0),
         ),
-        LineKind::TableRow { .. } => {
+        LineKind::TableRow { is_header, .. } => {
             let fs = base_font_size * 0.95;
-            (fs, base_font_size * 1.6, px(0.0), px(8.0))
+            let row_h = (base_font_size * 1.95).max(px(34.0));
+            let top_gap = if *is_header { px(6.0) } else { px(0.0) };
+            (fs, row_h, top_gap, px(0.0))
         }
         LineKind::Paragraph | LineKind::Empty => {
             (base_font_size, base_font_size * 1.65, px(0.0), px(0.0))
@@ -1077,12 +1387,7 @@ fn wysiwyg_slice_runs<V: 'static>(
             (FontWeight::NORMAL, editor.code_color, true)
         }
         LineKind::Blockquote => (FontWeight::NORMAL, editor.muted_color, false),
-        LineKind::TableRow {
-            is_header: true, ..
-        } => (FontWeight::BOLD, editor.strong_color, true),
-        LineKind::TableRow {
-            is_header: false, ..
-        } => (FontWeight::NORMAL, editor.text_color, true),
+        LineKind::TableRow { .. } => (FontWeight::NORMAL, editor.text_color, true),
         LineKind::ListItem {
             task: Some(true), ..
         } => (FontWeight::NORMAL, editor.muted_color, false),
@@ -1179,6 +1484,102 @@ fn wysiwyg_slice_runs<V: 'static>(
     if matches!(parsed_line.kind, LineKind::TableRow { .. }) {
         let slice_str = &parsed_line.display_text[display_slice];
         runs = apply_table_pipe_style(runs, slice_str, editor.border_color);
+    }
+
+    runs.retain(|r| r.len > 0);
+    runs
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wysiwyg_cell_runs<V: 'static>(
+    parsed_line: &ParsedLine,
+    disp_len: usize,
+    shaped_slice_len: usize,
+    cell_map: &RowOffsetMap,
+    marked: Option<&Range<usize>>,
+    base_font: &Font,
+    mono_font: &Font,
+    editor: &EditorElement<V>,
+) -> Vec<TextRun> {
+    let default_weight = FontWeight::NORMAL;
+    let default_color = editor.text_color;
+
+    if disp_len == 0 {
+        let mut f = base_font.clone();
+        f.weight = default_weight;
+        return vec![TextRun {
+            len: shaped_slice_len.max(1),
+            font: f,
+            color: default_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }];
+    }
+
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut covered = 0usize;
+
+    for seg in &parsed_line.styled_segments {
+        if seg.source.end <= cell_map.line_start || seg.source.start >= cell_map.line_end {
+            continue;
+        }
+        let seg_start = cell_map
+            .source_to_display(seg.source.start.max(cell_map.line_start))
+            .min(disp_len);
+        let seg_end = cell_map
+            .source_to_display(seg.source.end.min(cell_map.line_end))
+            .min(disp_len);
+        if seg_end <= seg_start {
+            continue;
+        }
+        if seg_start > covered {
+            let mut f = base_font.clone();
+            f.weight = default_weight;
+            runs.push(TextRun {
+                len: seg_start - covered,
+                font: f,
+                color: default_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+        runs.push(segment_to_run(
+            seg,
+            seg_end - seg_start,
+            &parsed_line.kind,
+            default_weight,
+            default_color,
+            false,
+            base_font,
+            mono_font,
+            editor,
+        ));
+        covered = seg_end;
+    }
+
+    if covered < disp_len {
+        let mut f = base_font.clone();
+        f.weight = default_weight;
+        runs.push(TextRun {
+            len: disp_len - covered,
+            font: f,
+            color: default_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+    }
+
+    if let Some(marked_range) = marked {
+        if marked_range.end > cell_map.line_start && marked_range.start < cell_map.line_end {
+            let m_start = cell_map.source_to_display(marked_range.start).min(disp_len);
+            let m_end = cell_map.source_to_display(marked_range.end).min(disp_len);
+            if m_end > m_start {
+                runs = apply_underline_to_runs(runs, m_start..m_end, default_color);
+            }
+        }
     }
 
     runs.retain(|r| r.len > 0);

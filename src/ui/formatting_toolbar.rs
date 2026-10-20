@@ -15,11 +15,11 @@ where
 {
     pub active_formats: ActiveFormats,
     pub show_overflow_menu: bool,
+    pub show_table_menu: bool,
     pub is_narrow: bool,
     pub menu_bar_element: AnyElement,
     pub settings_gear_element: AnyElement,
     pub on_format: FFormat,
-    #[allow(dead_code)]
     pub on_insert_table: FTable,
     pub on_insert_link: FLink,
     pub on_toggle_find: FToggleFind,
@@ -38,6 +38,7 @@ where
     FToggleOverflow: Fn(&mut App) + 'static + Clone,
 {
     let on_format = props.on_format;
+    let on_table = props.on_insert_table;
     let on_link = props.on_insert_link;
     let on_find = props.on_toggle_find;
     let on_overflow = props.on_toggle_overflow;
@@ -123,7 +124,7 @@ where
                         icon_button("tb-search", "search", "Find & Replace (Ctrl+F)", false, theme, move |_, _, cx| s(cx))
                     })
                     .child(divider(theme))
-                    // 11, 12, 13: Bullet, Numbered, Checklist
+                    // 11, 12, 13, 14: Bullet, Numbered, Checklist, Table
                     .child({
                         let f = on_format.clone();
                         icon_button("tb-ul", "list", "Bullet List", formats.ul, theme, move |_, _, cx| f("ul", cx))
@@ -136,7 +137,11 @@ where
                         let f = on_format.clone();
                         icon_button("tb-task", "square-check", "Checklist", formats.checklist, theme, move |_, _, cx| f("checklist", cx))
                     })
-                    // 14: More (⋯)
+                    .child({
+                        let t = on_table.clone();
+                        icon_button("tb-table", "table", "Table", props.show_table_menu || formats.table, theme, move |_, _, cx| t(cx))
+                    })
+                    // 15: More (⋯)
                     .child({
                         let ov = on_overflow.clone();
                         icon_button("tb-more", "ellipsis", "More Formatting", props.show_overflow_menu, theme, move |_, _, cx| ov(cx))
@@ -259,9 +264,9 @@ pub fn calculate_wide_toolbar_min_width() -> f32 {
     // Right zone: settings gear button
     let right_w = btn_w;
     // Center zone format icons:
-    // 14 buttons: Undo, Redo, H1, H2, H3, Bold, Italic, Underline, Link, Search, Bullet, Numbered, Checklist, More
+    // 15 buttons: Undo, Redo, H1, H2, H3, Bold, Italic, Underline, Link, Search, Bullet, Numbered, Checklist, Table, More
     // 3 dividers
-    let center_buttons_count = 14.0;
+    let center_buttons_count = 15.0;
     let center_dividers_count = 3.0;
     let total_center_items = center_buttons_count + center_dividers_count;
     let gaps = (total_center_items - 1.0) * TOOLBAR_ICON_GAP;
@@ -371,8 +376,8 @@ pub fn build_overflow_menu_items(
     let t1 = on_insert_table.clone();
     let c_t = on_close.clone();
     items.push(MenuItem::action("Insert Table", Some("table"), None, move |_, cx| {
-        t1(cx);
         c_t(cx);
+        t1(cx);
     }));
 
     items.push(MenuItem::divider());
@@ -465,14 +470,14 @@ mod tests {
         let narrow_min_w = calculate_narrow_toolbar_min_width();
         let btn_w = f32::from(sz::BTN);
 
-        // Wide toolbar has 15 buttons (14 format + 1 settings) + menu bar (~140px)
+        // Wide toolbar has 16 buttons (15 format + 1 settings) + menu bar (~140px)
         assert!(
             wide_min_w > narrow_min_w,
             "Wide toolbar ({wide_min_w}px) must be larger than narrow toolbar ({narrow_min_w}px)"
         );
         assert!(
-            wide_min_w >= (15.0 * btn_w) + 140.0,
-            "Wide toolbar must account for 15 buttons and menu bar"
+            wide_min_w >= (16.0 * btn_w) + 140.0,
+            "Wide toolbar must account for 16 buttons and menu bar"
         );
     }
 }

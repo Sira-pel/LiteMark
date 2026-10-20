@@ -1,7 +1,7 @@
 use crate::actions::*;
-use crate::markdown::{export_stem, parse_document, render_export};
+use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
 use crate::model::text_ops::{
-    home_offset, line_end, next_grapheme, offset_to_utf16, range_from_utf16, range_to_utf16,
+    home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
 };
 use crate::model::*;
 use crate::services::*;
@@ -25,6 +25,12 @@ pub(crate) enum Prompt {
     DeleteFolder { id: String },
     TrashDirtyFile { id: String },
     TrashDirtyFolder { id: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditorContextMenu {
+    pub position: Point<Pixels>,
+    pub is_table: bool,
 }
 
 pub struct LiteMarkApp {
@@ -75,6 +81,8 @@ pub struct LiteMarkApp {
     pub field_owns_keys: bool,
     pub field_focus: TextInput,
     pub bounds_subscription: Option<Subscription>,
+    pub table_picker_size: (usize, usize),
+    pub editor_context_menu: Option<EditorContextMenu>,
     title_drag_armed: Rc<Cell<bool>>,
 }
 
@@ -260,6 +268,8 @@ impl LiteMarkApp {
             field_owns_keys: false,
             field_focus: TextInput::Editor,
             bounds_subscription: None,
+            table_picker_size: (2, 2),
+            editor_context_menu: None,
             title_drag_armed: Rc::new(Cell::new(false)),
         }
     }
@@ -465,8 +475,42 @@ impl LiteMarkApp {
         self.refresh_find();
     }
 
-    pub fn handle_insert_table(&mut self, cx: &mut App) {
-        self.handle_format_cmd("table", cx);
+    pub fn handle_insert_table(&mut self, _cx: &mut App) {
+        if self.open_menu == Some(MenuId::Table) {
+            self.open_menu = None;
+            self.menu_selected_ix = None;
+            self.menu_open_submenu_ix = None;
+        } else {
+            self.open_menu = Some(MenuId::Table);
+            self.menu_selected_ix = None;
+            self.menu_open_submenu_ix = None;
+        }
+    }
+
+    pub fn handle_insert_table_size(&mut self, cols: usize, rows: usize, _cx: &mut App) {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.insert_table_with_size(cols, rows);
+        }
+        self.refresh_find();
+    }
+
+    pub fn handle_table_edit_action(&mut self, action: &'static str, _cx: &mut App) {
+        if let Some(tab) = self.active_tab_mut() {
+            match action {
+                "row_above" => tab.table_add_row_above(),
+                "row_below" => tab.table_add_row_below(),
+                "col_left" => tab.table_add_col_left(),
+                "col_right" => tab.table_add_col_right(),
+                "align_left" => tab.table_align_column(TableColumnAlign::Left),
+                "align_center" => tab.table_align_column(TableColumnAlign::Center),
+                "align_right" => tab.table_align_column(TableColumnAlign::Right),
+                "delete_row" => tab.table_delete_row(),
+                "delete_col" => tab.table_delete_col(),
+                "delete_table" => tab.table_delete_table(),
+                _ => {}
+            }
+        }
+        self.refresh_find();
     }
 
     pub fn handle_insert_link(&mut self, cx: &mut App) {
@@ -1481,14 +1525,9 @@ impl LiteMarkApp {
             self.show_error("PDF files are read-only.");
             return;
         }
+        let mode = self.settings.view_mode;
         if let Some(tab) = self.active_tab_mut() {
-            let range = if tab.selection_range().is_empty() {
-                let cursor = tab.cursor_offset();
-                cursor..next_grapheme(&tab.content, cursor)
-            } else {
-                tab.selection_range()
-            };
-            tab.edit(range, "");
+            tab.delete_forward_in_mode(mode);
         }
         self.refresh_find();
     }
@@ -1693,6 +1732,7 @@ impl LiteMarkApp {
         }
 
         self.sidebar_menu = None;
+        self.editor_context_menu = None;
         self.focus_handle.focus(window);
         self.applied_focus = Some(FocusSlot::Editor);
         self.field_focus = TextInput::Editor;
@@ -1727,6 +1767,49 @@ impl LiteMarkApp {
         if let Some(tab) = self.active_tab_mut() {
             tab.place(offset, true);
         }
+        cx.notify();
+    }
+
+    fn editor_right_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input_blocked() || window.default_prevented() {
+            return;
+        }
+
+        let offset = {
+            let paint = self.editor_paint.borrow();
+            index_for_position(&paint, event.position)
+        };
+        let Some(offset) = offset else {
+            self.editor_context_menu = None;
+            return;
+        };
+
+        self.sidebar_menu = None;
+        self.focus_handle.focus(window);
+        self.applied_focus = Some(FocusSlot::Editor);
+        self.field_focus = TextInput::Editor;
+        self.field_owns_keys = false;
+
+        if let Some(tab) = self.active_tab_mut() {
+            let sel = tab.selection_range();
+            if sel.is_empty() || !sel.contains(&offset) {
+                tab.place(offset, false);
+            }
+        }
+
+        let is_table = self.active_tab().is_some_and(|tab| tab.active_formats.table);
+        self.open_menu = None;
+        self.editor_context_menu = Some(EditorContextMenu {
+            position: event.position,
+            is_table,
+        });
+
+        window.refresh();
         cx.notify();
     }
 
@@ -2071,6 +2154,22 @@ impl EntityInputHandler for LiteMarkApp {
             .iter()
             .rev()
             .find(|row| row.byte_start <= range.start)?;
+        if !row.cells.is_empty() {
+            if let Some(cell) = row
+                .cells
+                .iter()
+                .find(|c| c.raw_range.start <= range.start && range.start <= c.raw_range.end)
+            {
+                let local_start = cell.offset_map.source_to_display(range.start);
+                let local_end = cell.offset_map.source_to_display(range.end);
+                let x0 = cell.shaped.x_for_index(local_start);
+                let x1 = cell.shaped.x_for_index(local_end);
+                return Some(Bounds::from_corners(
+                    point(cell.text_origin.x + x0, cell.text_origin.y),
+                    point(cell.text_origin.x + x1.max(x0), cell.text_origin.y + row.line_height),
+                ));
+            }
+        }
         let local_start = row.offset_map.source_to_display(range.start);
         let local_end = row.offset_map.source_to_display(range.end);
         let x0 = row.shaped.x_for_index(local_start);
@@ -2577,6 +2676,39 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_table_hover = {
+            let view = view.clone();
+            move |cols: usize, rows: usize, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.table_picker_size = (cols, rows);
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_table_pick = {
+            let view = view.clone();
+            move |cols: usize, rows: usize, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_insert_table_size(cols, rows, cx);
+                    this.open_menu = None;
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_table_edit_action = {
+            let view = view.clone();
+            move |action: &'static str, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_table_edit_action(action, cx);
+                    this.open_menu = None;
+                    this.menu_open_submenu_ix = None;
+                    cx.notify();
+                });
+            }
+        };
+
         let on_insert_link = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -2777,6 +2909,15 @@ impl Render for LiteMarkApp {
                 });
             }
         };
+        let on_close_context_menu = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.editor_context_menu = None;
+                    cx.notify();
+                });
+            }
+        };
         let on_rename_cancel = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -2941,8 +3082,37 @@ impl Render for LiteMarkApp {
         )
         .into_any_element();
 
-        let menu_overlay = if let Some(open_id) = self.open_menu {
-            let (point, anchor, width, items) = match open_id {
+        let menu_overlay: Option<AnyElement> = if let Some(open_id) = self.open_menu {
+            if open_id == MenuId::Table {
+                let table_menu_x = if is_narrow {
+                    (window.viewport_size().width / 2.0 + px(128.0))
+                        .min(window.viewport_size().width - px(200.0))
+                } else {
+                    (window.viewport_size().width / 2.0 + px(180.0))
+                        .min(window.viewport_size().width - px(200.0))
+                };
+                let point = Point::new(table_menu_x.max(px(8.0)), px(76.0));
+                let in_table = active_formats.table;
+                Some(
+                    render_table_picker_menu(
+                        TablePickerMenuProps {
+                            point,
+                            hovered_size: self.table_picker_size,
+                            in_table,
+                            open_submenu_ix: self.menu_open_submenu_ix,
+                            focus_handle: self.menu_focus_handle.clone(),
+                            on_hover_size: on_table_hover.clone(),
+                            on_pick_size: on_table_pick.clone(),
+                            on_edit_action: on_table_edit_action.clone(),
+                            on_close: on_close_menu.clone(),
+                            on_set_submenu: on_set_submenu.clone(),
+                        },
+                        &theme,
+                    )
+                    .into_any_element(),
+                )
+            } else {
+                let (point, anchor, width, items) = match open_id {
                 MenuId::File => (
                     Point::new(px(8.0), px(76.0)),
                     Corner::TopLeft,
@@ -3088,23 +3258,28 @@ impl Render for LiteMarkApp {
                         ),
                     )
                 }
+                MenuId::Table => unreachable!(),
             };
 
-            Some(render_dropdown_menu(
-                MenuProps {
-                    id: ("menu-dropdown", open_id as usize).into(),
-                    point,
-                    anchor_corner: anchor,
-                    width,
-                    items,
-                    focus_handle: self.menu_focus_handle.clone(),
-                    selected_index: self.menu_selected_ix,
-                    open_submenu_ix: self.menu_open_submenu_ix,
-                    on_close: on_close_menu.clone(),
-                    on_set_submenu: on_set_submenu.clone(),
-                },
-                &theme,
-            ))
+            Some(
+                render_dropdown_menu(
+                    MenuProps {
+                        id: ("menu-dropdown", open_id as usize).into(),
+                        point,
+                        anchor_corner: anchor,
+                        width,
+                        items,
+                        focus_handle: self.menu_focus_handle.clone(),
+                        selected_index: self.menu_selected_ix,
+                        open_submenu_ix: self.menu_open_submenu_ix,
+                        on_close: on_close_menu.clone(),
+                        on_set_submenu: on_set_submenu.clone(),
+                    },
+                    &theme,
+                )
+                .into_any_element(),
+            )
+            }
         } else {
             None
         };
@@ -3356,7 +3531,9 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CancelMenu, _window, cx| {
-                if this.menu_open_submenu_ix.is_some() {
+                if this.editor_context_menu.is_some() {
+                    this.editor_context_menu = None;
+                } else if this.menu_open_submenu_ix.is_some() {
                     this.menu_open_submenu_ix = None;
                 } else {
                     this.open_menu = None;
@@ -3638,6 +3815,12 @@ impl Render for LiteMarkApp {
                     this.editor_mouse_down(event, window, cx);
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.editor_right_mouse_down(event, window, cx);
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.editor_mouse_move(event, cx);
                 window.refresh();
@@ -3653,7 +3836,9 @@ impl Render for LiteMarkApp {
                 }),
             )
             .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
-                if this.prompt.is_some() {
+                if this.editor_context_menu.is_some() {
+                    this.editor_context_menu = None;
+                } else if this.prompt.is_some() {
                     this.prompt = None;
                 } else if this.error_message.is_some()
                     && this.open_menu.is_none()
@@ -3710,6 +3895,7 @@ impl Render for LiteMarkApp {
                         FormattingToolbarProps {
                             active_formats,
                             show_overflow_menu: self.open_menu == Some(MenuId::Overflow),
+                            show_table_menu: self.open_menu == Some(MenuId::Table),
                             is_narrow,
                             menu_bar_element,
                             settings_gear_element,
@@ -4021,6 +4207,35 @@ impl Render for LiteMarkApp {
                     on_sidebar_rename.clone(),
                     on_sidebar_delete.clone(),
                     on_sidebar_dismiss.clone(),
+                    &theme,
+                ))
+            })
+            .when_some(self.editor_context_menu.clone(), |parent, menu| {
+                let has_selection = !active_tab.selection_range().is_empty();
+                let items = if menu.is_table {
+                    build_table_context_menu_items(
+                        has_selection,
+                        on_cut.clone(),
+                        on_copy.clone(),
+                        on_paste.clone(),
+                        on_table_edit_action.clone(),
+                    )
+                } else {
+                    build_editor_context_menu_items(
+                        has_selection,
+                        on_cut.clone(),
+                        on_copy.clone(),
+                        on_paste.clone(),
+                        on_select_all.clone(),
+                    )
+                };
+                parent.child(render_context_menu(
+                    "editor-context-menu".into(),
+                    menu.position,
+                    px(180.0),
+                    items,
+                    self.menu_focus_handle.clone(),
+                    on_close_context_menu.clone(),
                     &theme,
                 ))
             })

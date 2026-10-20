@@ -504,6 +504,14 @@ fn floor_source(markdown: &str, mut offset: usize) -> usize {
 // Line-Indexed Syntax Projection & Offset Map for Unified True WYSIWYG Editor
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableColumnAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineKind {
     Empty,
@@ -528,6 +536,10 @@ pub enum LineKind {
         is_header: bool,
         /// Byte ranges of each cell's editable content in the document
         cells: Vec<std::ops::Range<usize>>,
+        /// Full inner byte ranges between pipes (`pipe[k]+1..pipe[k+1]`)
+        raw_cells: Vec<std::ops::Range<usize>>,
+        /// Column alignments parsed from the table's delimiter row
+        alignments: Vec<TableColumnAlign>,
         /// Full table block byte range in the document
         table_source: std::ops::Range<usize>,
     },
@@ -972,8 +984,9 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     let mut in_code_block = false;
     let mut open_fence_range: Option<std::ops::Range<usize>> = None;
 
-    // Pre-detect table block ranges
-    let mut table_ranges: Vec<(usize, usize, std::ops::Range<usize>)> = Vec::new();
+    // Pre-detect table block ranges and column alignments
+    let mut table_ranges: Vec<(usize, usize, std::ops::Range<usize>, Vec<TableColumnAlign>)> =
+        Vec::new();
     {
         let mut idx = 0;
         while idx < raw_lines.len() {
@@ -981,17 +994,38 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             if t.starts_with('|') && t.ends_with('|') && t.len() >= 2 {
                 let start_idx = idx;
                 let byte_start = raw_lines[idx].start;
-                let mut byte_end = raw_lines[idx].end;
+                let mut byte_end = raw_lines[idx].start + raw_lines[idx].text.len();
+                let mut alignments = Vec::new();
                 while idx < raw_lines.len() {
                     let cur = raw_lines[idx].text.trim();
                     if cur.starts_with('|') && cur.ends_with('|') && cur.len() >= 2 {
-                        byte_end = raw_lines[idx].end;
+                        byte_end = raw_lines[idx].start + raw_lines[idx].text.len();
+                        let is_sep = cur.contains('-')
+                            && cur
+                                .chars()
+                                .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
+                        if is_sep && alignments.is_empty() {
+                            alignments = cur
+                                .trim_matches('|')
+                                .split('|')
+                                .map(|cell| {
+                                    let c = cell.trim();
+                                    if c.starts_with(':') && c.ends_with(':') && c.len() >= 2 {
+                                        TableColumnAlign::Center
+                                    } else if c.ends_with(':') {
+                                        TableColumnAlign::Right
+                                    } else {
+                                        TableColumnAlign::Left
+                                    }
+                                })
+                                .collect();
+                        }
                         idx += 1;
                     } else {
                         break;
                     }
                 }
-                table_ranges.push((start_idx, idx - 1, byte_start..byte_end));
+                table_ranges.push((start_idx, idx - 1, byte_start..byte_end, alignments));
             } else {
                 idx += 1;
             }
@@ -1129,8 +1163,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }
 
         // Table rows
-        if let Some(&(tbl_first, _tbl_last, ref tbl_src)) =
-            table_ranges.iter().find(|&&(f, l, _)| i >= f && i <= l)
+        if let Some(&(tbl_first, _tbl_last, ref tbl_src, ref tbl_aligns)) =
+            table_ranges.iter().find(|&&(f, l, _, _)| i >= f && i <= l)
         {
             let is_separator = trimmed.contains('-')
                 && trimmed
@@ -1155,7 +1189,12 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 continue;
             } else {
                 // Parse cell ranges inside `| cell1 | cell2 |`
+                let is_header = i == tbl_first;
                 let mut cells = Vec::new();
+                let mut raw_cells = Vec::new();
+                let mut row_hidden = Vec::new();
+                let mut row_pairs = Vec::new();
+                let mut row_segments = Vec::new();
                 let mut pipe_positions = Vec::new();
                 for (b_idx, ch) in line.char_indices() {
                     if ch == '|' {
@@ -1165,39 +1204,56 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 for w in pipe_positions.windows(2) {
                     let raw_c_start = w[0] + 1;
                     let raw_c_end = w[1];
+                    raw_cells.push((line_start + raw_c_start)..(line_start + raw_c_end));
                     let cell_slice = &line[raw_c_start..raw_c_end];
-                    let lead = cell_slice.len() - cell_slice.trim_start().len();
-                    let trail = cell_slice.len() - cell_slice.trim_end().len();
-                    let (c_start, c_end) = if lead + trail <= cell_slice.len() && !cell_slice.trim().is_empty() {
-                        (line_start + raw_c_start + lead, line_start + raw_c_end - trail)
-                    } else {
-                        let mid = line_start + raw_c_start + (raw_c_end - raw_c_start) / 2;
-                        (mid, mid)
-                    };
+                    let lead = usize::from(cell_slice.starts_with(' '));
+                    let rem = &cell_slice[lead..];
+                    let trail = usize::from(rem.ends_with(' '));
+                    let c_start = line_start + raw_c_start + lead;
+                    let c_end = line_start + raw_c_end - trail;
                     cells.push(c_start..c_end);
+                    if c_end > c_start {
+                        let inner_slice = &line[(c_start - line_start)..(c_end - line_start)];
+                        let (c_hid, c_pairs, c_segs) =
+                            parse_inline_syntax(inner_slice, c_start);
+                        row_hidden.extend(c_hid);
+                        row_pairs.extend(c_pairs);
+                        row_segments.extend(c_segs);
+                    }
                 }
-                lines.push(ParsedLine {
-                    line_index: i,
-                    source: line_source.clone(),
-                    kind: LineKind::TableRow {
-                        is_header: i == tbl_first,
-                        cells,
-                        table_source: tbl_src.clone(),
-                    },
-                    prefix_range: line_start..line_start,
-                    hidden_ranges: Vec::new(),
-                    inline_pairs: Vec::new(),
-                    display_text: line.to_string(),
-                    offset_map: RowOffsetMap::identity(line_start, line_end),
-                    styled_segments: vec![StyledSegment {
-                        source: line_source,
-                        bold: i == tbl_first,
+                if row_segments.is_empty() {
+                    row_segments.push(StyledSegment {
+                        source: line_source.clone(),
+                        bold: false,
                         italic: false,
                         underline: false,
                         strike: false,
                         code: false,
                         link_url: None,
-                    }],
+                    });
+                }
+                let merged_hidden = merge_ranges(row_hidden);
+                all_hidden.extend(merged_hidden.iter().cloned());
+                all_pairs.extend(row_pairs.iter().cloned());
+                let alignments: Vec<TableColumnAlign> = (0..cells.len())
+                    .map(|col_idx| tbl_aligns.get(col_idx).copied().unwrap_or_default())
+                    .collect();
+                lines.push(ParsedLine {
+                    line_index: i,
+                    source: line_source.clone(),
+                    kind: LineKind::TableRow {
+                        is_header,
+                        cells,
+                        raw_cells,
+                        alignments,
+                        table_source: tbl_src.clone(),
+                    },
+                    prefix_range: line_start..line_start,
+                    hidden_ranges: merged_hidden,
+                    inline_pairs: row_pairs,
+                    display_text: line.to_string(),
+                    offset_map: RowOffsetMap::identity(line_start, line_end),
+                    styled_segments: row_segments,
                 });
                 continue;
             }
@@ -1432,6 +1488,11 @@ mod tests {
         assert!(matches!(doc.lines[1].kind, LineKind::TableDelimiter));
         assert!(matches!(doc.lines[2].kind, LineKind::TableRow { is_header: false, .. }));
         assert_eq!(doc.lines[0].display_text, "| **Col 1** | Col 2 |");
+        // Verify Col 1 is bold (via **), but Col 2 is not forced bold
+        let bold_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| s.bold).collect();
+        assert!(!bold_segs.is_empty());
+        let normal_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| !s.bold).collect();
+        assert!(!normal_segs.is_empty());
     }
 
     #[test]
