@@ -1,0 +1,1 @@
+row[0][1] display=40..50 text="aaaaaaaaaa"

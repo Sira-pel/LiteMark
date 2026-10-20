@@ -1,0 +1,1 @@
+segment[0][0] source=0..30 bold=false italic=false underline=false strike=false code=false link=- text="Normal bold italic strike code"
