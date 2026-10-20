@@ -148,6 +148,46 @@ impl MenuItem {
     }
 }
 
+pub const MENU_PANEL_PAD: Pixels = px(4.0);
+pub const MENU_DIVIDER_H: Pixels = px(9.0);
+pub const MENU_HEADING_H: Pixels = px(24.0);
+pub const MENU_ITEM_H: Pixels = sz::ROW_H;
+pub const SUBMENU_GAP: Pixels = px(4.0);
+
+pub fn menu_item_height(kind: &MenuItemKind) -> Pixels {
+    match kind {
+        MenuItemKind::Divider => MENU_DIVIDER_H,
+        MenuItemKind::Heading => MENU_HEADING_H,
+        _ => MENU_ITEM_H,
+    }
+}
+
+pub fn calculate_submenu_y_offset(items: &[MenuItem], sub_ix: usize) -> Pixels {
+    let mut y_offset = MENU_PANEL_PAD;
+    for prev in items.iter().take(sub_ix) {
+        y_offset += menu_item_height(&prev.kind);
+    }
+    y_offset
+}
+
+pub fn calculate_submenu_width(item: &MenuItem) -> Pixels {
+    if let MenuItemKind::Submenu(ref sub_items) = item.kind {
+        let max_label_len = sub_items.iter().map(|it| it.label.len()).max().unwrap_or(0);
+        let has_hints_or_shortcuts = sub_items.iter().any(|it| it.hint.is_some() || it.shortcut.is_some());
+        let has_icons_or_checks = sub_items.iter().any(|it| it.icon.is_some() || matches!(it.kind, MenuItemKind::Check(_) | MenuItemKind::Radio(_)));
+
+        let padding = px(24.0);
+        let icon_col = if has_icons_or_checks { px(24.0) } else { px(0.0) };
+        let text_w = px(max_label_len as f32 * 7.5);
+        let extra_col = if has_hints_or_shortcuts { px(70.0) } else { px(0.0) };
+
+        let calculated = padding + icon_col + text_w + extra_col;
+        calculated.max(px(160.0)).min(px(320.0))
+    } else {
+        px(200.0)
+    }
+}
+
 pub struct MenuProps<FClose, FSubmenu>
 where
     FClose: Fn(&mut App) + 'static + Clone,
@@ -359,27 +399,16 @@ where
     let submenu_element = if let Some(sub_ix) = open_submenu_ix {
         if let Some(item) = items.get(sub_ix) {
             if let MenuItemKind::Submenu(ref sub_items) = item.kind {
-                let mut y_offset = px(4.0);
-                for prev in items.iter().take(sub_ix) {
-                    y_offset += match prev.kind {
-                        MenuItemKind::Divider => px(9.0),
-                        MenuItemKind::Heading => px(24.0),
-                        _ => sz::ROW_H,
-                    };
-                }
-                let sub_w = match item.label {
-                    "View" => px(295.0),
-                    "Font size" => px(160.0),
-                    _ => px(220.0),
-                };
+                let y_offset = calculate_submenu_y_offset(&items, sub_ix);
+                let sub_w = calculate_submenu_width(item);
                 let is_right_anchored = matches!(
                     anchor_corner,
                     Corner::TopRight | Corner::BottomRight
                 );
                 let (sub_anchor, sub_point) = if is_right_anchored {
-                    (Corner::TopRight, Point::new(point.x - width - px(4.0), point.y + y_offset))
+                    (Corner::TopRight, Point::new(point.x - width - SUBMENU_GAP, point.y + y_offset))
                 } else {
-                    (Corner::TopLeft, Point::new(point.x + width + px(4.0), point.y + y_offset))
+                    (Corner::TopLeft, Point::new(point.x + width + SUBMENU_GAP, point.y + y_offset))
                 };
                 let sub_cls = cls.clone();
                 let theme_clone = *theme;
@@ -459,3 +488,39 @@ where
             )
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn test_calculate_submenu_y_offset() {
+        let items = vec![
+            MenuItem::action("Item 1", None, None, |_, _| {}),
+            MenuItem::divider(),
+            MenuItem::heading("Section"),
+            MenuItem::action("Item 2", None, None, |_, _| {}),
+        ];
+
+        assert_eq!(calculate_submenu_y_offset(&items, 0), MENU_PANEL_PAD);
+        assert_eq!(calculate_submenu_y_offset(&items, 1), MENU_PANEL_PAD + MENU_ITEM_H);
+        assert_eq!(calculate_submenu_y_offset(&items, 2), MENU_PANEL_PAD + MENU_ITEM_H + MENU_DIVIDER_H);
+        assert_eq!(
+            calculate_submenu_y_offset(&items, 3),
+            MENU_PANEL_PAD + MENU_ITEM_H + MENU_DIVIDER_H + MENU_HEADING_H
+        );
+    }
+
+    #[test]
+    fn test_calculate_submenu_width() {
+        let sub = MenuItem::submenu("Test", None, vec![
+            MenuItem::action("Short", None, None, |_, _| {}),
+            MenuItem::action("A somewhat longer item label", None, None, |_, _| {}),
+        ]);
+        let width = calculate_submenu_width(&sub);
+        assert!(width >= px(160.0));
+        assert!(width <= px(320.0));
+    }
+}
+

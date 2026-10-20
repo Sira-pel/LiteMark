@@ -3083,6 +3083,7 @@ impl Render for LiteMarkApp {
                             is_narrow,
                             on_format.clone(),
                             on_insert_table.clone(),
+                            on_toggle_find.clone(),
                             on_close_menu.clone(),
                         ),
                     )

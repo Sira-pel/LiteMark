@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 use crate::model::ActiveFormats;
 use crate::theme::{sz, Theme};
-use super::primitives::{divider, icon_button};
+use super::primitives::{divider, icon_button, DIVIDER_TOTAL_W};
 use super::menu::MenuItem;
 
 pub struct FormattingToolbarProps<FFormat, FTable, FLink, FToggleFind, FToggleOverflow>
@@ -22,7 +22,6 @@ where
     #[allow(dead_code)]
     pub on_insert_table: FTable,
     pub on_insert_link: FLink,
-    #[allow(dead_code)]
     pub on_toggle_find: FToggleFind,
     pub on_toggle_overflow: FToggleOverflow,
 }
@@ -40,6 +39,7 @@ where
 {
     let on_format = props.on_format;
     let on_link = props.on_insert_link;
+    let on_find = props.on_toggle_find;
     let on_overflow = props.on_toggle_overflow;
     let formats = props.active_formats;
     let is_narrow = props.is_narrow;
@@ -56,7 +56,7 @@ where
             .items_center()
             .justify_between()
             .h(sz::TOOLBAR)
-            .px(px(8.0))
+            .px(px(TOOLBAR_PX_PAD))
             .pt(px(6.0))
             .bg(theme.bg_toolbar)
             .border_b_1()
@@ -76,7 +76,7 @@ where
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(2.0))
+                    .gap(px(TOOLBAR_ICON_GAP))
                     // 1 & 2: Undo / Redo
                     .child({
                         let f = on_format.clone();
@@ -101,7 +101,7 @@ where
                         icon_button("tb-h3", "heading-3", "Heading 3 (Ctrl+3)", formats.h3, theme, move |_, _, cx| f("h3", cx))
                     })
                     .child(divider(theme))
-                    // 6, 7, 8, 9: Bold, Italic, Underline (Ctrl+U), Link
+                    // 6, 7, 8, 9, 10: Bold, Italic, Underline (Ctrl+U), Link, Search
                     .child({
                         let f = on_format.clone();
                         icon_button("tb-bold", "bold", "Bold (Ctrl+B)", formats.bold, theme, move |_, _, cx| f("bold", cx))
@@ -118,8 +118,12 @@ where
                         let l = on_link.clone();
                         icon_button("tb-link", "link", "Insert Link (Ctrl+K)", formats.link, theme, move |_, _, cx| l(cx))
                     })
+                    .child({
+                        let s = on_find.clone();
+                        icon_button("tb-search", "search", "Find & Replace (Ctrl+F)", false, theme, move |_, _, cx| s(cx))
+                    })
                     .child(divider(theme))
-                    // 10, 11, 12: Bullet, Numbered, Checklist
+                    // 11, 12, 13: Bullet, Numbered, Checklist
                     .child({
                         let f = on_format.clone();
                         icon_button("tb-ul", "list", "Bullet List", formats.ul, theme, move |_, _, cx| f("ul", cx))
@@ -132,7 +136,7 @@ where
                         let f = on_format.clone();
                         icon_button("tb-task", "square-check", "Checklist", formats.checklist, theme, move |_, _, cx| f("checklist", cx))
                     })
-                    // 13: More (⋯)
+                    // 14: More (⋯)
                     .child({
                         let ov = on_overflow.clone();
                         icon_button("tb-more", "ellipsis", "More Formatting", props.show_overflow_menu, theme, move |_, _, cx| ov(cx))
@@ -159,7 +163,7 @@ where
             .items_center()
             .justify_between()
             .h(sz::TOOLBAR)
-            .px(px(8.0))
+            .px(px(TOOLBAR_PX_PAD))
             .pt(px(6.0))
             .bg(theme.bg_toolbar)
             .border_b_1()
@@ -179,7 +183,7 @@ where
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(2.0))
+                    .gap(px(TOOLBAR_ICON_GAP))
                     .child({
                         let f = on_format.clone();
                         icon_button("tb-undo", "rotate-ccw", "Undo (Ctrl+Z)", false, theme, move |_, _, cx| f("undo", cx))
@@ -222,10 +226,57 @@ where
     }
 }
 
+pub const TOOLBAR_PX_PAD: f32 = 8.0;
+pub const TOOLBAR_ICON_GAP: f32 = 2.0;
+
+#[allow(dead_code)]
+pub fn calculate_narrow_toolbar_min_width() -> f32 {
+    let btn_w = f32::from(sz::BTN);
+    // Left zone: hamburger menu button
+    let left_w = btn_w;
+    // Right zone: settings gear button
+    let right_w = btn_w;
+    // Center zone format icons:
+    // 7 buttons: Undo, Redo, Bold, Italic, Underline, Link, More (⋯)
+    // 1 divider
+    let center_buttons_count = 7.0;
+    let center_dividers_count = 1.0;
+    let total_center_items = center_buttons_count + center_dividers_count;
+    let gaps = (total_center_items - 1.0) * TOOLBAR_ICON_GAP;
+    let center_w = (center_buttons_count * btn_w) + (center_dividers_count * DIVIDER_TOTAL_W) + gaps;
+
+    // Outer container padding (left + right)
+    let container_pad = TOOLBAR_PX_PAD * 2.0;
+
+    left_w + center_w + right_w + container_pad
+}
+
+#[allow(dead_code)]
+pub fn calculate_wide_toolbar_min_width() -> f32 {
+    let btn_w = f32::from(sz::BTN);
+    // Menu bar element (File, Edit, View text buttons ~ 140px minimum)
+    let menu_bar_w = 140.0;
+    // Right zone: settings gear button
+    let right_w = btn_w;
+    // Center zone format icons:
+    // 14 buttons: Undo, Redo, H1, H2, H3, Bold, Italic, Underline, Link, Search, Bullet, Numbered, Checklist, More
+    // 3 dividers
+    let center_buttons_count = 14.0;
+    let center_dividers_count = 3.0;
+    let total_center_items = center_buttons_count + center_dividers_count;
+    let gaps = (total_center_items - 1.0) * TOOLBAR_ICON_GAP;
+    let center_w = (center_buttons_count * btn_w) + (center_dividers_count * DIVIDER_TOTAL_W) + gaps;
+
+    let container_pad = TOOLBAR_PX_PAD * 2.0;
+
+    menu_bar_w + center_w + right_w + container_pad
+}
+
 pub fn build_overflow_menu_items(
     is_narrow: bool,
     on_format: impl Fn(&'static str, &mut App) + 'static + Clone,
     on_insert_table: impl Fn(&mut App) + 'static + Clone,
+    on_toggle_find: impl Fn(&mut App) + 'static + Clone,
     on_close: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
     let mut items = Vec::new();
@@ -318,6 +369,13 @@ pub fn build_overflow_menu_items(
         c_t(cx);
     }));
 
+    let f_find = on_toggle_find.clone();
+    let c_find = on_close.clone();
+    items.push(MenuItem::action("Find & Replace", Some("search"), Some("Ctrl+F"), move |_, cx| {
+        f_find(cx);
+        c_find(cx);
+    }));
+
     items.push(MenuItem::divider());
 
     let f_clear = on_format.clone();
@@ -332,7 +390,8 @@ pub fn build_overflow_menu_items(
 
 #[cfg(test)]
 mod tests {
-    use super::build_overflow_menu_items;
+    use super::*;
+    use crate::theme::sz;
     use core::prelude::v1::test;
 
     #[test]
@@ -343,6 +402,7 @@ mod tests {
             |_, _| {},
             |_| {},
             |_| {},
+            |_| {},
         );
         let labels_wide: Vec<&str> = wide_items.iter().map(|it| it.label).collect();
         assert!(!labels_wide.contains(&"Underline"));
@@ -350,11 +410,13 @@ mod tests {
         assert!(!labels_wide.contains(&"Bullet list"));
         assert!(labels_wide.contains(&"Strikethrough"));
         assert!(labels_wide.contains(&"Insert Table"));
+        assert!(labels_wide.contains(&"Find & Replace"));
 
         // In super small mode (is_narrow): both headings and lists are prepended
         let narrow_items = build_overflow_menu_items(
             true,
             |_, _| {},
+            |_| {},
             |_| {},
             |_| {},
         );
@@ -366,13 +428,33 @@ mod tests {
         assert!(labels_narrow.contains(&"Numbered list"));
         assert!(labels_narrow.contains(&"Task list"));
         assert!(labels_narrow.contains(&"Strikethrough"));
+        assert!(labels_narrow.contains(&"Find & Replace"));
     }
 
     #[test]
     fn test_toolbar_never_overflows_super_small_width() {
-        // In super small layout:
-        // [ ≡ ] (32) + | (13) + Undo/Redo (66) + | (13) + B/I/U/Link (134) + ⋯ (32) + | (13) + ⚙ (32) = 335px
-        let min_narrow_width = 335.0;
-        assert!(min_narrow_width < 640.0, "Super small layout fits well within 640px threshold");
+        let narrow_min_w = calculate_narrow_toolbar_min_width();
+        // Dynamically verifies the width derived from sz::BTN, paddings, gaps, and dividers
+        let expected = (9.0 * f32::from(sz::BTN)) + (1.0 * DIVIDER_TOTAL_W) + (7.0 * TOOLBAR_ICON_GAP) + (TOOLBAR_PX_PAD * 2.0);
+        assert_eq!(narrow_min_w, expected);
+        assert!(
+            narrow_min_w <= 360.0,
+            "Narrow toolbar width ({narrow_min_w}px) must fit within mobile/small window width (360px)"
+        );
+        assert!(
+            narrow_min_w < 640.0,
+            "Narrow toolbar width ({narrow_min_w}px) must be well under the 640px breakpoint"
+        );
+    }
+
+    #[test]
+    fn test_toolbar_wide_width_calculation() {
+        let wide_min_w = calculate_wide_toolbar_min_width();
+        let expected = 140.0 + (15.0 * f32::from(sz::BTN)) + (3.0 * DIVIDER_TOTAL_W) + (16.0 * TOOLBAR_ICON_GAP) + (TOOLBAR_PX_PAD * 2.0);
+        assert_eq!(wide_min_w, expected);
+        assert!(
+            wide_min_w > 640.0,
+            "Wide toolbar width ({wide_min_w}px) requires more space than the 640px narrow threshold"
+        );
     }
 }

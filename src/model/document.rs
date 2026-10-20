@@ -316,7 +316,7 @@ impl DocumentTab {
         // 0. Table rows: continuation or exit
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow { ref cells, is_header, .. } = pline.kind {
+            if let LineKind::TableRow { ref cells, is_header, ref table_source } = pline.kind {
                 let col_count = cells.len().max(2);
                 let is_empty_row = cells.iter().all(|c| {
                     if c.end <= self.content.len() && c.start <= c.end {
@@ -326,19 +326,69 @@ impl DocumentTab {
                     }
                 });
 
-                if is_empty_row && !is_header {
-                    // Empty row: exit table by removing this empty row
-                    let (remove_start, remove_end) = if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' {
-                        (line_start - 1, line_end_pos)
-                    } else if line_end_pos < self.content.len() && self.content.as_bytes()[line_end_pos] == b'\n' {
-                        (line_start, line_end_pos + 1)
+                if is_header {
+                    // Header row: find delimiter line and jump to / create first data row
+                    if let Some(delim_line) = parsed.lines.get(pline.line_index + 1) {
+                        let after_delim = delim_line.source.end;
+                        // Check if there is already a body row after delimiter
+                        if let Some(first_body) = parsed.lines.get(pline.line_index + 2) {
+                            if let LineKind::TableRow { ref cells, is_header: false, .. } = first_body.kind {
+                                if let Some(first_cell) = cells.first() {
+                                    self.caret.move_to(first_cell.start);
+                                    self.refresh_cursor();
+                                    return;
+                                }
+                            }
+                        }
+                        // Otherwise insert first body row after delimiter
+                        let new_row = format!("\n|{}", "  |".repeat(col_count));
+                        self.edit(after_delim..after_delim, &new_row);
+                        let target = (after_delim + 3).min(self.content.len());
+                        self.caret.move_to(floor_boundary(&self.content, target));
+                        self.refresh_cursor();
+                        return;
+                    }
+                }
+
+                // Count body rows in this table
+                let body_rows_count = parsed.lines.iter().filter(|l| {
+                    if let LineKind::TableRow { is_header, table_source: ref ts, .. } = l.kind {
+                        !is_header && ts.start == table_source.start && ts.end == table_source.end
                     } else {
-                        (line_start, line_end_pos)
-                    };
-                    self.edit(remove_start..remove_end, "");
-                    self.caret.move_to(remove_start);
-                    self.refresh_cursor();
-                    return;
+                        false
+                    }
+                }).count();
+
+                if is_empty_row {
+                    // Empty row: exit table!
+                    if body_rows_count <= 1 {
+                        // This is the only body row: remove the whole empty table cleanly!
+                        let t_start = table_source.start;
+                        let t_end = table_source.end;
+                        self.edit(t_start..t_end, "");
+                        self.caret.move_to(t_start);
+                        self.refresh_cursor();
+                        return;
+                    } else {
+                        // Multiple body rows: remove this empty row and exit table to a new line below
+                        let remove_start = if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' {
+                            line_start - 1
+                        } else {
+                            line_start
+                        };
+                        let remove_end = line_end_pos;
+                        self.edit(remove_start..remove_end, "");
+
+                        // After removing empty row, ensure there is a blank line below the table
+                        let after_table = remove_start;
+                        let has_newline_after = after_table < self.content.len() && self.content.as_bytes()[after_table] == b'\n';
+                        if !has_newline_after {
+                            self.edit(after_table..after_table, "\n");
+                        }
+                        self.caret.move_to(after_table + 1);
+                        self.refresh_cursor();
+                        return;
+                    }
                 } else {
                     // Non-empty row: insert a new row below current line
                     let new_row = format!("\n|{}", "  |".repeat(col_count));
@@ -364,8 +414,9 @@ impl DocumentTab {
             let is_empty_task = trimmed_start.len() == prefix.len()
                 || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
             if is_empty_task {
-                if indent.len() >= 2 {
-                    self.edit(line_start..line_start + 2, "");
+                if !indent.is_empty() {
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
+                    self.edit(line_start..line_start + outdent_len, "");
                 } else {
                     self.edit(line_start..line_end_pos, "");
                 }
@@ -382,8 +433,9 @@ impl DocumentTab {
             let is_empty_bullet = trimmed_start.len() == prefix.len()
                 || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
             if is_empty_bullet {
-                if indent.len() >= 2 {
-                    self.edit(line_start..line_start + 2, "");
+                if !indent.is_empty() {
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
+                    self.edit(line_start..line_start + outdent_len, "");
                 } else {
                     self.edit(line_start..line_end_pos, "");
                 }
@@ -402,8 +454,9 @@ impl DocumentTab {
                     let is_empty_num = trimmed_start.len() == marker_len
                         || (trimmed_start.len() > marker_len && trimmed_start[marker_len..].trim().is_empty());
                     if is_empty_num {
-                        if indent.len() >= 2 {
-                            self.edit(line_start..line_start + 2, "");
+                        if !indent.is_empty() {
+                            let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
+                            self.edit(line_start..line_start + outdent_len, "");
                         } else {
                             self.edit(line_start..line_end_pos, "");
                         }
@@ -422,7 +475,12 @@ impl DocumentTab {
                 || trimmed_start == "> "
                 || trimmed_start[1..].trim().is_empty();
             if is_empty_quote {
-                self.edit(line_start..line_end_pos, "");
+                if !indent.is_empty() {
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
+                    self.edit(line_start..line_start + outdent_len, "");
+                } else {
+                    self.edit(line_start..line_end_pos, "");
+                }
             } else {
                 let ins = format!("\n{}> ", indent);
                 self.edit(range, &ins);
@@ -500,11 +558,15 @@ impl DocumentTab {
             }
         }
 
+        let trimmed = line_before.trim_start();
+        let indent_len = line_before.len() - trimmed.len();
+        let indent = &line_before[..indent_len];
+
         // 3. Task list prefix at cursor boundary
         for prefix in [
             "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
         ] {
-            if line_before.ends_with(prefix) {
+            if trimmed == prefix {
                 let start = cursor - 4;
                 self.edit(start..cursor, "");
                 return true;
@@ -513,11 +575,10 @@ impl DocumentTab {
 
         // 4. Bullet list prefix at cursor boundary
         for prefix in ["- ", "* ", "+ "] {
-            if line_before.ends_with(prefix) {
-                let trimmed = line_before.trim_start();
-                let indent_len = line_before.len() - trimmed.len();
-                if indent_len >= 2 {
-                    self.edit(line_start..line_start + 2, "");
+            if trimmed == prefix {
+                if !indent.is_empty() {
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
+                    self.edit(line_start..line_start + outdent_len, "");
                 } else {
                     self.edit(line_start..cursor, "");
                 }
@@ -526,21 +587,18 @@ impl DocumentTab {
         }
 
         // 5. Numbered list prefix at cursor boundary
-        if line_before.ends_with(". ") {
-            let trimmed = line_before.trim_start();
-            let indent_len = line_before.len() - trimmed.len();
-            if let Some(dot_pos) = trimmed.find(". ") {
-                if dot_pos > 0
-                    && trimmed[..dot_pos].chars().all(|c| c.is_ascii_digit())
-                    && dot_pos + 2 == trimmed.len()
-                {
-                    if indent_len >= 2 {
-                        self.edit(line_start..line_start + 2, "");
-                    } else {
-                        self.edit(line_start..cursor, "");
-                    }
-                    return true;
+        if let Some(dot_pos) = trimmed.find(". ") {
+            if dot_pos > 0
+                && trimmed[..dot_pos].chars().all(|c| c.is_ascii_digit())
+                && dot_pos + 2 == trimmed.len()
+            {
+                if !indent.is_empty() {
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
+                    self.edit(line_start..line_start + outdent_len, "");
+                } else {
+                    self.edit(line_start..cursor, "");
                 }
+                return true;
             }
         }
 
@@ -1824,12 +1882,13 @@ fn is_delimited(text: &str, prefix: &str, suffix: &str) -> bool {
 }
 
 fn outer_is_delimited(content: &str, start: usize, end: usize, prefix: &str, suffix: &str) -> bool {
-    if start < prefix.len() || content.len() < end + suffix.len() {
+    if start > content.len() || end > content.len() || start > end {
         return false;
     }
-    let before = &content[start - prefix.len()..start];
-    let after = &content[end..end + suffix.len()];
-    if before != prefix || after != suffix {
+    if !content.is_char_boundary(start) || !content.is_char_boundary(end) {
+        return false;
+    }
+    if !content[..start].ends_with(prefix) || !content[end..].starts_with(suffix) {
         return false;
     }
     if prefix == "*" {
@@ -2663,9 +2722,74 @@ mod tests {
         doc.smart_newline(false);
         assert!(doc.content.ends_with("\n|  |  |"));
 
-        // Press Enter on the new empty row -> removes it and exits table
+        // Press Enter on the new empty row -> removes it and exits table to a newline after table
         doc.smart_newline(false);
-        assert_eq!(doc.content, table);
+        assert_eq!(doc.content, format!("{}\n", table));
+        assert_eq!(doc.cursor_offset(), table.len() + 1);
+
+        // Pressing Enter again outside table does not add a row to the table
+        doc.smart_newline(false);
+        assert_eq!(doc.content, format!("{}\n\n", table));
+    }
+
+    #[test]
+    fn test_table_single_empty_row_exit_removes_table_cleanly() {
+        // Table with only a single empty body row
+        let table = "| Col 1 | Col 2 |\n| :--- | :--- |\n|  |  |";
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), table.into(), None, None);
+        doc.place(table.len(), false); // inside empty row
+
+        doc.smart_newline(false);
+        // Exiting the only empty row removes the table cleanly rather than leaving an orphaned header
+        assert_eq!(doc.content, "");
+    }
+
+    #[test]
+    fn test_emoji_formatting_no_crash() {
+        let content = "🦀hello world";
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), content.into(), None, None);
+        // Place caret right after emoji (at byte 4)
+        doc.place(4, false);
+
+        // Press Ctrl+U (underline) in Wysiwyg mode next to emoji -> must not crash!
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+
+        // Press Ctrl+I (italic) in Wysiwyg mode next to emoji -> must not crash!
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+
+        let content2 = "hello🦀";
+        let mut doc2 = DocumentTab::new("t".into(), "test.md".into(), content2.into(), None, None);
+        doc2.place(content2.len(), false);
+        doc2.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        doc2.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+    }
+
+    #[test]
+    fn test_backspace_on_text_ending_with_dash_space() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), "foo - ".into(), None, None);
+        doc.place("foo - ".len(), false);
+
+        // Backspacing on "foo - " must delete the space, NOT wipe out "foo - " to empty!
+        doc.smart_backspace();
+        assert_eq!(doc.content, "foo -");
+
+        doc.smart_backspace();
+        assert_eq!(doc.content, "foo ");
+    }
+
+    #[test]
+    fn test_enter_on_indented_bullet_tab() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), "\t- ".into(), None, None);
+        doc.place("\t- ".len(), false);
+
+        // Enter on "\t- " must outdent to "- ", NOT wipe to empty string!
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "- ");
+
+        // Enter on root "- " exits the list, removing the marker
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "");
     }
 }
+
 

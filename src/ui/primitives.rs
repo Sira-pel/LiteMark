@@ -84,12 +84,16 @@ where
     }
 }
 
+pub const DIVIDER_W: f32 = 1.0;
+pub const DIVIDER_MX: f32 = 6.0;
+pub const DIVIDER_TOTAL_W: f32 = DIVIDER_W + (DIVIDER_MX * 2.0);
+
 pub fn divider(theme: &Theme) -> impl IntoElement {
     div()
-        .w(px(1.0))
+        .w(px(DIVIDER_W))
         .h(px(16.0))
         .bg(theme.border_subtle)
-        .mx(px(6.0))
+        .mx(px(DIVIDER_MX))
         .flex_shrink_0()
 }
 
