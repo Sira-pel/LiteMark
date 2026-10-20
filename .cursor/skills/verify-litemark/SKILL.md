@@ -48,14 +48,30 @@ cargo clippy --all-targets -- -D warnings
 .cursor/skills/verify-litemark/scripts/fmt-gate.sh
 ```
 
-`scripts/ci.sh` runs that contract. The blob's fmt step prints `Tree is not fmt-clean; skipping cargo fmt --check.` and exits 0 when the tree is dirty. `ci.sh` does not copy that skip. `fmt-gate.sh` runs `cargo fmt --check` and allows dirt only for files in `fixtures/fmt-baseline.files` and hunk headers in `fixtures/fmt-baseline.hunks` (`path:line` from `Diff in`). Any other file prints `fmt_new_file=<path>` and fails. Any other hunk prints `fmt_new_hunk=<path:line>` and fails. A clean gate prints `fmt_gate=pass`.
+`scripts/ci.sh` runs that contract. The blob's fmt step prints `Tree is not fmt-clean; skipping cargo fmt --check.` and exits 0 when the tree is dirty. `ci.sh` does not copy that skip.
+
+`fmt-gate.sh` runs `cargo fmt --check`. Each hunk is `path:line:sha256` in `fixtures/fmt-baseline.hunks`. The sha256 is the hunk body with ANSI stripped and `@@` line numbers folded, so the hash is the changed text. The `path:line` stays in the token, so a header that moves is still a new hunk.
+
+- A file absent from `fixtures/fmt-baseline.files` prints `fmt_new_file=<path>` and fails.
+- A header absent from the baseline prints `fmt_new_hunk=<path:line>` and fails.
+- A header that is on the baseline with a different body prints `fmt_hunk_body=<path:line>` and fails.
+- A clean gate prints `fmt_gate=pass`.
+
+The baseline is the tip after the `src/markdown/mod.rs` reorder: `fmt_baseline_files=19` and `fmt_baseline_hunks=201`. `cargo fmt --check` on `main` (`fc681a8`) is 20 files and 202 hunks. The only header on main that the tip does not have is `src/markdown/mod.rs:1`. The tip adds no dirty hunk of its own.
+
+`ci.sh` does not install packages. The blob's apt list includes `libxcb1-dev` and `libfreetype6-dev`. This kit does not install those. `ci.sh` still runs build, test, clippy, and the fmt gate when an earlier step fails, then prints `ci_fail=`. GitHub Actions stops the job at the first failing step.
 
 ```bash
 source .cursor/skills/verify-litemark/scripts/env.sh
 .cursor/skills/verify-litemark/scripts/ci.sh
 ```
 
-`scripts/prove-fmt-red.sh` appends `fn zz_fmt_red(){let _x=1;}` to `src/markdown/render_dump.rs` (that path is absent from `fmt-baseline.files`), runs `ci.sh`, requires a non-zero exit and the exact line `fmt_new_file=src/markdown/render_dump.rs`, then restores the file.
+Fmt red fixtures, each of which restores the file:
+
+- `scripts/prove-fmt-red.sh` appends `fn zz_fmt_red(){let _x=1;}` to `src/markdown/render_dump.rs` (absent from `fmt-baseline.files`), runs `ci.sh`, and requires `fmt_new_file=src/markdown/render_dump.rs` plus a non-zero exit.
+- `scripts/prove-fmt-absorb.sh` inserts `let _new_break=1;` inside the `src/theme.rs:22` hunk and requires `fmt_hunk_body=src/theme.rs:22`.
+- `scripts/prove-fmt-collide.sh` rustfmts `src/model/settings.rs`, prepends `fn zz_coincide(){let _x=1;}`, and requires `fmt_hunk_body=src/model/settings.rs:1`.
+- `scripts/prove-fmt-shift.sh` puts 20 `// pad` lines at the top of `src/theme.rs` and requires `fmt_new_hunk=src/theme.rs:42`.
 
 ### Environment prerequisites (Linux)
 
@@ -83,8 +99,8 @@ Doctor requires all of:
 - `src/markdown/render_dump.rs` contains the exact line `fn dump_render_tree() {`
 - every small green fixture has `fixtures/<name>/input.md` and `fixtures/<name>/expect.txt`
 - `fixtures/large-doc/` has `seed.txt`, `input.sha256` (exact line `sha256=7eac2c0a0471e1b121b9a3b8c6a11020b4e2e98cffb26387f1db057596bd092c`), and `required-lines.txt` (exact line `lines=2001`)
-- `fixtures/fmt-baseline.files` and `fixtures/fmt-baseline.hunks` exist
-- every red fixture has `input.md`, `expect.path`, and `missing-line.txt`
+- `fixtures/fmt-baseline.hunks` lines match `path:line:sha256`
+- every red fixture has `input.md`, `expect.path`, `missing-line.txt`, and `broken-line.txt`
 
 Doctor prints `doctor ok` or exits 1. It does not start the GUI.
 
@@ -103,17 +119,29 @@ Harness name: **control-litemark**.
 .cursor/skills/verify-litemark/scripts/prove-markdown.sh green
 
 # Red fixtures. Prints red_caught=<n>/<total> and exits non-zero
-# unless every red input is caught.
+# unless every red input shows its broken-line.txt and lacks missing-line.txt.
 .cursor/skills/verify-litemark/scripts/prove-markdown.sh red
+
+# One red fixture.
+.cursor/skills/verify-litemark/scripts/prove-markdown.sh red headings-missing-marker
+
+# Seed sections=399. Exits non-zero with green_fail=1 before any render.
+.cursor/skills/verify-litemark/scripts/prove-large-doc-seed.sh
 
 # Seed one wrong headings expect line, require green exit != 0, restore.
 .cursor/skills/verify-litemark/scripts/prove-green-can-fail.sh
 
+# Renderer mutant per red fixture. Each must make that red check exit non-zero.
+.cursor/skills/verify-litemark/scripts/prove-red-mutants.sh
+
 # CI contract, including the bounded fmt gate.
 .cursor/skills/verify-litemark/scripts/ci.sh
 
-# Seed a fmt break off the baseline. ci.sh must exit non-zero.
+# Fmt reds: new file, absorption, collision, shift.
 .cursor/skills/verify-litemark/scripts/prove-fmt-red.sh
+.cursor/skills/verify-litemark/scripts/prove-fmt-absorb.sh
+.cursor/skills/verify-litemark/scripts/prove-fmt-collide.sh
+.cursor/skills/verify-litemark/scripts/prove-fmt-shift.sh
 
 # Window features. Exit 2. Do not launch the app yourself.
 .cursor/skills/verify-litemark/scripts/refuse-gui.sh
@@ -121,7 +149,7 @@ Harness name: **control-litemark**.
 
 The dump test calls `parse_document` and then `visual_rows(&display_text, wrap_cols)` with `LITEMARK_WRAP_COLS` (default 40). The editor computes `wrap_cols` from pixel width in `src/ui/text_editor.rs`; this harness passes 40 so the row text is reproducible without a font shaper. Small fixtures use `cmp` of the whole dump, which is full-line equality, not a substring search. `large-doc` is not committed: `scripts/generate-large-doc.py` expands `fixtures/large-doc/seed.txt` (400 sections) and the harness requires the exact line `sha256=7eac2c0a0471e1b121b9a3b8c6a11020b4e2e98cffb26387f1db057596bd092c` plus every full line in `required-lines.txt`, including `bytes=70444`, `lines=2001`, and `wrap_cols=40`.
 
-`prove-markdown.sh red` prints `red_caught=<n>/<total>`. Exit 0 requires `red_caught` equal to the total (every missing exact line absent from its dump). A smaller count exits 1. `prove-green-can-fail.sh` replaces the exact line `line[0] kind=Heading level=1 source=0..7 display="Title"` with `line[0] kind=Heading level=9 source=0..7 display="Title"`, requires `prove-markdown.sh green` to exit non-zero and print `FAIL fixture=headings`, then restores the expect file.
+`prove-markdown.sh red` prints `red_caught=<n>/<total>`. Exit 0 requires `red_caught` equal to the total. Caught means `broken-line.txt` is one full line of the dump and `missing-line.txt` is not. A smaller count exits 1. `prove-large-doc-seed.sh` rewrites `sections=400` to `sections=399`. `generate-large-doc.py` hashes the bytes it wrote (`sha256_self=ok`) and exits 1 when that hash is not `sha256=7eac2c0a0471e1b121b9a3b8c6a11020b4e2e98cffb26387f1db057596bd092c`. The harness then prints `green_fail=1` and does not render. `prove-green-can-fail.sh` replaces the exact line `line[0] kind=Heading level=1 source=0..7 display="Title"` with `line[0] kind=Heading level=9 source=0..7 display="Title"`, requires `prove-markdown.sh green` to exit non-zero and print `FAIL fixture=headings`, then restores the expect file. `prove-red-mutants.sh` applies one renderer edit per red fixture and requires `broken_line_absent=` for that fixture's broken line.
 
 Stable handles:
 
@@ -159,9 +187,15 @@ Proof standards:
 - The dump is the production functions, not a reimplementation of Markdown.
 - Green proof for a small fixture is `cmp -s expect.txt observed.dump`.
 - Green proof for `large-doc` is the exact line `sha256=7eac2c0a0471e1b121b9a3b8c6a11020b4e2e98cffb26387f1db057596bd092c` and every line of `required-lines.txt` present as a full dump line.
-- Red proof names `missing_exact_line=` and the expect path. The observed dump must not contain that full line. The summary token is `red_caught=<n>/<total>`.
+- Red proof prints `broken_exact_line=` (the line the broken input produces) and `missing_exact_line=` (a full line that must be absent). The summary token is `red_caught=<n>/<total>`.
 - `prove-green-can-fail.sh` must print `GREEN_CAN_FAIL exit=` with an exit other than 0, then `restored=`.
+- `prove-large-doc-seed.sh` must print `green_fail=1` and `sha256_self=ok`, and must not print `unbound variable` or `PASS fixture=`.
+- `prove-red-mutants.sh` must print `prove_red_mutants=pass`. Each row is `MUTANT fixture=` with `rc=` other than 0 and `broken_line_absent=`.
 - `prove-fmt-red.sh` must print `fmt_new_file=src/markdown/render_dump.rs` and `ci_fail=1`.
+- `prove-fmt-absorb.sh` must print `fmt_hunk_body=src/theme.rs:22`.
+- `prove-fmt-collide.sh` must print `fmt_hunk_body=src/model/settings.rs:1`.
+- `prove-fmt-shift.sh` must print `fmt_new_hunk=src/theme.rs:42`.
+- Command output from the latest run is in `EVIDENCE.md`.
 - Do not report a refused window journey as verified.
 
 ## Cleanup
@@ -185,13 +219,20 @@ Rules:
 | `scripts/env.sh` | `RUN_ID`, run dir, stable toolchain, wrap columns |
 | `scripts/launch.sh` | `cargo build`; do not start the GUI |
 | `scripts/doctor.sh` | Read-only harness health |
-| `scripts/ci.sh` | CI contract: `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `fmt-gate.sh` |
-| `scripts/fmt-gate.sh` | Bounded `cargo fmt --check` against `fmt-baseline.files` and `fmt-baseline.hunks` |
-| `scripts/generate-large-doc.py` | Expand `large-doc/seed.txt`; print `sha256=` and `bytes=` |
+| `scripts/ci.sh` | CI contract: `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `fmt-gate.sh`. Does not apt-install `libxcb1-dev` or `libfreetype6-dev`. Runs every step; Actions stops at the first failure. |
+| `scripts/fmt-gate.sh` | `cargo fmt --check` against `path:line:sha256` hunk bodies |
+| `scripts/fmt-hunks.py` | Parse hunks and decide `fmt_new_file`, `fmt_new_hunk`, `fmt_hunk_body` |
+| `scripts/generate-large-doc.py` | Expand `large-doc/seed.txt`, assert `sha256_self=ok` and `input.sha256` |
 | `scripts/render_dump.sh` | One markdown file through the ignored dump test |
-| `scripts/prove-markdown.sh` | Green corpus and red-fixture proofs (`red_caught=<n>/<total>`) |
+| `scripts/prove-markdown.sh` | Green corpus and red proofs (`broken_exact_line=`, `red_caught=<n>/<total>`) |
+| `scripts/prove-large-doc-seed.sh` | `sections=399` must print `green_fail=1` before any render |
 | `scripts/prove-green-can-fail.sh` | Seed one wrong headings expect line, require green exit non-zero, restore |
-| `scripts/prove-fmt-red.sh` | Seed `fn zz_fmt_red(){let _x=1;}` in `src/markdown/render_dump.rs`, require `ci.sh` to print `fmt_new_file=src/markdown/render_dump.rs` and exit non-zero, restore |
+| `scripts/prove-red-mutants.sh` | One renderer mutant per red fixture; each red check must exit non-zero |
+| `scripts/red-mutants.py` | The source replacements `prove-red-mutants.sh` applies |
+| `scripts/prove-fmt-red.sh` | Seed `fn zz_fmt_red(){let _x=1;}` in `src/markdown/render_dump.rs`, require `fmt_new_file=src/markdown/render_dump.rs` |
+| `scripts/prove-fmt-absorb.sh` | `let _new_break=1;` inside `src/theme.rs:22`, require `fmt_hunk_body=src/theme.rs:22` |
+| `scripts/prove-fmt-collide.sh` | `fn zz_coincide(){let _x=1;}` at `src/model/settings.rs:1`, require `fmt_hunk_body=src/model/settings.rs:1` |
+| `scripts/prove-fmt-shift.sh` | 20 `// pad` lines, require `fmt_new_hunk=src/theme.rs:42` |
 | `scripts/refuse-gui.sh` | Exit 2. Prints `reason=notes_dir_unisolated` and `reason=vulkan_icd_missing` |
 | `scripts/cleanup.sh` | Keep evidence and artifacts |
 

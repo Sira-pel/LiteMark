@@ -1,0 +1,1 @@
+row[0][0] display=0..50 text="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
