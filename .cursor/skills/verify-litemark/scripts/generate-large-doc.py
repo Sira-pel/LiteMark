@@ -43,13 +43,28 @@ def main() -> None:
         raise SystemExit(f"usage: {sys.argv[0]} <seed.txt> <output.md>")
     seed_path = Path(sys.argv[1])
     output_path = Path(sys.argv[2])
+    expected_path = seed_path.parent / "input.sha256"
+    if not expected_path.is_file():
+        raise SystemExit(f"missing {expected_path}")
     sections, templates = load_seed(seed_path)
     text = render(sections, templates)
+    encoded = text.encode("utf-8")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(text.encode("utf-8"))
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    print(f"sha256={digest}")
-    print(f"bytes={len(text.encode('utf-8'))}")
+    output_path.write_bytes(encoded)
+    reread = output_path.read_bytes()
+    digest = hashlib.sha256(encoded).hexdigest()
+    file_digest = hashlib.sha256(reread).hexdigest()
+    if file_digest != digest:
+        print(f"sha256_self=fail memory={digest} file={file_digest}")
+        raise SystemExit(1)
+    print("sha256_self=ok")
+    expected = expected_path.read_text(encoding="utf-8").strip()
+    observed = f"sha256={digest}"
+    if observed != expected:
+        print(f"FAIL fixture=large-doc sha256_observed={observed} sha256_expected={expected}")
+        raise SystemExit(1)
+    print(observed)
+    print(f"bytes={len(encoded)}")
 
 
 if __name__ == "__main__":

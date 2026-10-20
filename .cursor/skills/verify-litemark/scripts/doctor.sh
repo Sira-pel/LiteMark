@@ -83,19 +83,24 @@ red_fixtures=(
   tables-not-a-table
   fenced-code-no-fence
   links-plain
-  images-plain
-  long-lines-short
-  large-doc-tiny
+  images-markup
+  long-lines-hard-wrap
+  trailing-empty
 )
 for name in "${red_fixtures[@]}"; do
   dir="${KIT_DIR}/fixtures/red/${name}"
-  for file in input.md expect.path missing-line.txt; do
+  for file in input.md expect.path missing-line.txt broken-line.txt; do
     if [[ ! -f "${dir}/${file}" ]]; then
       say "doctor fail missing ${dir}/${file}"
       fail=1
     fi
   done
 done
+hunks="${KIT_DIR}/fixtures/fmt-baseline.hunks"
+if [[ -f "${hunks}" ]] && grep -Ev '^.+:[0-9]+:[0-9a-f]{64}$' "${hunks}" | grep -q .; then
+  say "doctor fail fmt baseline hunk is not path:line:sha256"
+  fail=1
+fi
 
 say "wrap_cols=${LITEMARK_WRAP_COLS}"
 say "gui=refused notes_dir=dirs::document_dir()/Notes"

@@ -11,7 +11,13 @@
 #   cargo clippy --all-targets -- -D warnings
 #   scripts/fmt-gate.sh
 # The blob's fmt step skips when `cargo fmt --check` is dirty. This script
-# does not. A new dirty file or a new hunk fails the script.
+# does not. A new dirty file, a shifted hunk, or a changed hunk body fails.
+#
+# This script does not apt-get install. The blob's apt list includes
+# libxcb1-dev and libfreetype6-dev. Those packages are not installed here.
+# This script runs build, test, clippy, and the fmt gate even when an
+# earlier step fails, then exits with ci_fail. GitHub Actions stops the
+# job at the first failing step.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

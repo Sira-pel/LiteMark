@@ -18,7 +18,7 @@ The primary proof is headless. The desktop window is not isolated and is not the
 - Treat every command as literal. Keep paths and flags unchanged.
 - Run render proofs through `scripts/render_dump.sh` and `scripts/prove-markdown.sh`.
 - Run build, test, clippy, and fmt through `scripts/ci.sh`.
-- `prove-markdown.sh red` prints `red_caught=<n>/<total>` and exits 0 only when every red input is caught. That is not a product pass.
+- `prove-markdown.sh red` prints `red_caught=<n>/<total>` and exits 0 only when every red input's `broken-line.txt` is present and its `missing-line.txt` is absent. That is not a product pass.
 - Do not remove proof artifacts during cleanup.
 
 ## Proof and skip reporting

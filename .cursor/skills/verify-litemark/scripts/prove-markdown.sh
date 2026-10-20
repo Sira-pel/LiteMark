@@ -8,9 +8,11 @@
 #
 # Green exit 0: every small dump is byte-identical to expect.txt, and the
 # generated large doc matches input.sha256 plus required-lines.txt.
+# A wrong large-doc seed exits before any fixture render with green_fail=1.
 # Red prints red_caught=<n>/<total> and exits 0 only when every red input
-# is caught (the missing exact line is absent). Otherwise it exits non-zero.
-# red_caught is not a product pass.
+# is caught: broken-line.txt is an exact dump line, and missing-line.txt
+# is not. Otherwise it exits non-zero. red_caught is not a product pass.
+#   prove-markdown.sh red <fixture>   # one red fixture
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,9 +36,22 @@ copy_proof() {
 generate_large_doc() {
   local dir="${KIT_DIR}/fixtures/large-doc"
   local generated="${VERIFY_RUN_DIR}/large-doc/input.md"
-  local expected sha_line
+  local gen_out gen_status sha_line expected
+  mkdir -p "${VERIFY_RUN_DIR}/large-doc"
+  set +e
+  gen_out="$(python3 "${SCRIPT_DIR}/generate-large-doc.py" "${dir}/seed.txt" "${generated}" 2>&1)"
+  gen_status=$?
+  set -e
+  printf '%s\n' "${gen_out}"
+  if [[ "${gen_status}" -ne 0 ]]; then
+    return 1
+  fi
+  if ! printf '%s\n' "${gen_out}" | grep -Fxq -- "sha256_self=ok"; then
+    echo "FAIL fixture=large-doc sha256_self=missing"
+    return 1
+  fi
   expected="$(tr -d '\n' <"${dir}/input.sha256")"
-  sha_line="$(python3 "${SCRIPT_DIR}/generate-large-doc.py" "${dir}/seed.txt" "${generated}" | grep -E '^sha256=[0-9a-f]{64}$')"
+  sha_line="$(printf '%s\n' "${gen_out}" | grep -E '^sha256=[0-9a-f]{64}$')"
   if [[ "${sha_line}" != "${expected}" ]]; then
     echo "FAIL fixture=large-doc sha256_observed=${sha_line} sha256_expected=${expected}"
     return 1
@@ -102,6 +117,7 @@ run_red() {
   rel="$(tr -d '\n' <"${dir}/expect.path")"
   local expect="${KIT_DIR}/${rel}"
   local token_file="${dir}/missing-line.txt"
+  local broken_file="${dir}/broken-line.txt"
   local dump="${VERIFY_EVIDENCE_DIR}/red-${name}.dump.txt"
   local timing="${VERIFY_EVIDENCE_DIR}/red-${name}.timing.txt"
   if [[ ! -f "${expect}" ]]; then
@@ -112,8 +128,17 @@ run_red() {
     echo "RED FIXTURE INVALID fixture=${name} missing-line.txt must be one line"
     return 1
   fi
-  local token
+  if [[ ! -f "${broken_file}" ]]; then
+    echo "RED FIXTURE INVALID fixture=${name} missing ${broken_file}"
+    return 1
+  fi
+  if [[ "$(grep -c '' "${broken_file}")" -ne 1 ]]; then
+    echo "RED FIXTURE INVALID fixture=${name} broken-line.txt must be one line"
+    return 1
+  fi
+  local token broken
   IFS= read -r token <"${token_file}"
+  IFS= read -r broken <"${broken_file}"
   if ! grep -Fxq -- "${token}" "${expect}"; then
     echo "RED FIXTURE INVALID fixture=${name} missing-line.txt is not an exact line of ${expect}"
     echo "token=${token}"
@@ -128,6 +153,12 @@ run_red() {
     return 1
   fi
   copy_proof "red-${name}" "${dump}" "${timing}"
+  if ! grep -Fxq -- "${broken}" "${dump}"; then
+    echo "RED PROOF FAILED fixture=${name} broken line absent"
+    echo "broken_line_absent=${broken}"
+    echo "observed=${dump}"
+    return 1
+  fi
   if grep -Fxq -- "${token}" "${dump}"; then
     echo "RED PROOF FAILED fixture=${name} observed dump still contains the exact line"
     echo "missing_exact_line=${token}"
@@ -140,6 +171,7 @@ run_red() {
   fi
   echo "RED fixture=${name} result=FAIL_AS_REQUIRED expect=${expect} observed=${dump} artifact=${ART_DIR}/red-${name}.dump.txt"
   echo "missing_exact_line=${token}"
+  echo "broken_exact_line=${broken}"
   echo "--- observed head ${name} ---"
   head -n 20 "${dump}"
   echo "--- end observed head ${name} ---"
@@ -164,17 +196,51 @@ red_names=(
   tables-not-a-table
   fenced-code-no-fence
   links-plain
-  images-plain
-  long-lines-short
-  large-doc-tiny
+  images-markup
+  long-lines-hard-wrap
+  trailing-empty
 )
+
+only="${2:-}"
+if [[ -n "${only}" && "${mode}" != "red" ]]; then
+  echo "usage: prove-markdown.sh red <fixture>" >&2
+  exit 2
+fi
+if [[ -n "${only}" ]]; then
+  known=0
+  for name in "${red_names[@]}"; do
+    if [[ "${name}" == "${only}" ]]; then
+      known=1
+    fi
+  done
+  if [[ "${known}" -ne 1 ]]; then
+    echo "unknown red fixture ${only}" >&2
+    exit 2
+  fi
+  red_names=("${only}")
+fi
+
+finish_green_fail() {
+  {
+    printf 'run_id=%s\n' "${RUN_ID}"
+    printf 'mode=%s\n' "${mode}"
+    printf 'wrap_cols=%s\n' "${LITEMARK_WRAP_COLS}"
+    printf 'bin=%s\n' "${LITEMARK_BIN}"
+    printf 'green_fail=%s\n' "${fail}"
+  } >"${ART_DIR}/meta-${mode}.txt"
+  echo "prove_markdown mode=${mode} green_fail=${fail} artifacts=${ART_DIR}"
+  exit "${fail}"
+}
 
 fail=0
 caught=0
 total="${#red_names[@]}"
 case "${mode}" in
   green)
-    generate_large_doc || fail=1
+    if ! generate_large_doc; then
+      fail=1
+      finish_green_fail
+    fi
     for name in "${green_names[@]}"; do
       run_green "${name}" || fail=1
     done
@@ -189,7 +255,10 @@ case "${mode}" in
     done
     ;;
   all)
-    generate_large_doc || fail=1
+    if ! generate_large_doc; then
+      fail=1
+      finish_green_fail
+    fi
     for name in "${green_names[@]}"; do
       run_green "${name}" || fail=1
     done
