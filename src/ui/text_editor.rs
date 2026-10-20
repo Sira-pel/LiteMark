@@ -217,6 +217,7 @@ pub struct EditorElement<V: 'static> {
     pub text_color: Hsla,
     pub strong_color: Hsla,
     pub muted_color: Hsla,
+    #[allow(dead_code)]
     pub faint_color: Hsla,
     pub h1_color: Hsla,
     pub h2_color: Hsla,
@@ -250,6 +251,7 @@ pub struct Prepaint {
     decor_lines: Vec<(Point<Pixels>, Pixels, ShapedLine)>,
     bg_quads: Vec<PaintQuad>,
     quads: Vec<PaintQuad>,
+    strike_quads: Vec<PaintQuad>,
     cursor: Option<PaintQuad>,
     line_height: Pixels,
     total_height: Pixels,
@@ -487,6 +489,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 decor_lines: Vec::new(),
                 bg_quads: Vec::new(),
                 quads,
+                strike_quads: Vec::new(),
                 cursor,
                 line_height: base_line_height,
                 total_height,
@@ -500,6 +503,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut decor_lines = Vec::new();
         let mut bg_quads = Vec::new();
         let mut quads = Vec::new();
+        let mut strike_quads = Vec::new();
         let mut cursor = None;
         let base_x = bounds.left() + gutter + x_offset;
         let mut cur_y = bounds.top() + px(16.0);
@@ -624,15 +628,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 self.surface_bg,
                             ));
                         }
-                        bg_quads.push(fill(
-                            Bounds::new(
-                                point(base_x, cur_y + row_line_height - px(1.0)),
-                                size(content_width, px(1.0)),
-                            ),
-                            self.border_color,
-                        ));
-                    }
-                    LineKind::Heading { level: 1 | 2 } if is_last_sub => {
                         bg_quads.push(fill(
                             Bounds::new(
                                 point(base_x, cur_y + row_line_height - px(1.0)),
@@ -786,6 +781,52 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     );
                 }
 
+                // Strikethrough lines (bright, solid, and slightly extended past the words)
+                for seg in &parsed_line.styled_segments {
+                    if !seg.strike {
+                        continue;
+                    }
+                    let seg_disp_start = parsed_line.offset_map.source_to_display(seg.source.start);
+                    let seg_disp_end = parsed_line.offset_map.source_to_display(seg.source.end);
+                    if seg_disp_end <= d_start || seg_disp_start >= d_end {
+                        continue;
+                    }
+                    let seg_start = seg_disp_start.max(d_start);
+                    let seg_end = seg_disp_end.min(d_end);
+                    if seg_end > seg_start {
+                        let sub_disp_start = seg_start - d_start;
+                        let sub_disp_end = seg_end - d_start;
+                        let x1 = shaped.x_for_index(sub_disp_start);
+                        let x2 = shaped.x_for_index(sub_disp_end);
+                        let extend_left = if seg_start == seg_disp_start { px(3.0) } else { px(0.0) };
+                        let extend_right = if seg_end == seg_disp_end { px(3.0) } else { px(0.0) };
+                        let strike_x = (row_origin.x + x1 - extend_left).max(base_x);
+                        let strike_w = (x2 - x1) + extend_left + extend_right;
+                        let pad = (row_line_height - shaped.ascent - shaped.descent).max(px(0.0)) / 2.0;
+                        let strike_y = row_origin.y + (pad + shaped.ascent * 1.5) * 0.5;
+                        let color = if seg.bold { self.strong_color } else { self.text_color };
+                        let thickness = if seg.bold { px(2.0) } else { px(1.75) };
+                        strike_quads.push(fill(
+                            Bounds::new(point(strike_x, strike_y), size(strike_w, thickness)),
+                            color,
+                        ));
+                    }
+                }
+                if matches!(parsed_line.kind, LineKind::ListItem { task: Some(true), .. }) && display_len > 0 {
+                    let x1 = shaped.x_for_index(0);
+                    let x2 = shaped.x_for_index(display_len);
+                    let extend_left = if sub_idx == 0 { px(3.0) } else { px(0.0) };
+                    let extend_right = if is_last_sub { px(3.0) } else { px(0.0) };
+                    let strike_x = (row_origin.x + x1 - extend_left).max(base_x);
+                    let strike_w = (x2 - x1) + extend_left + extend_right;
+                    let pad = (row_line_height - shaped.ascent - shaped.descent).max(px(0.0)) / 2.0;
+                    let strike_y = row_origin.y + (pad + shaped.ascent * 1.5) * 0.5;
+                    strike_quads.push(fill(
+                        Bounds::new(point(strike_x, strike_y), size(strike_w, px(1.75))),
+                        self.muted_color,
+                    ));
+                }
+
                 // Caret painting
                 let caret_matches = if is_last_sub {
                     self.selection.start >= sub_map.line_start
@@ -836,6 +877,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             decor_lines,
             bg_quads,
             quads,
+            strike_quads,
             cursor,
             line_height: base_line_height,
             total_height,
@@ -882,6 +924,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
         for row in &prepaint.rows {
             let _ = row.shaped.paint(row.origin, row.line_height, window, cx);
+        }
+        for strike in prepaint.strike_quads.drain(..) {
+            window.paint_quad(strike);
         }
         if let Some(cursor) = prepaint.cursor.take() {
             window.paint_quad(cursor);
@@ -1173,15 +1218,7 @@ fn segment_to_run<V: 'static>(
         None
     };
 
-    let task_checked = matches!(line_kind, LineKind::ListItem { task: Some(true), .. });
-    let strikethrough = if seg.strike || task_checked {
-        Some(StrikethroughStyle {
-            thickness: px(1.0),
-            color: Some(editor.faint_color),
-        })
-    } else {
-        None
-    };
+    let strikethrough = None;
 
     TextRun {
         len,
