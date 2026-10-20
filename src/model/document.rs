@@ -1103,7 +1103,10 @@ impl DocumentTab {
             let inner_start = open_fence.end.min(close_fence.start);
             let inner_end = close_fence.start;
             let mut inner = self.content[inner_start..inner_end].to_string();
-            if inner.ends_with('\n') && !close_fence.is_empty() {
+            // Drop the newline that separated the body from the closer. An
+            // unclosed fence has an empty close range, and the document's own
+            // trailing newline is added back below, so the same pop applies.
+            if inner.ends_with('\n') {
                 inner.pop();
             }
             let full_end = close_fence.end;
@@ -1256,6 +1259,10 @@ impl DocumentTab {
         if pos == 0 {
             return;
         }
+        if on_setext(&parsed, pos) {
+            self.place(retreat_off_setext(&parsed, pos), extend);
+            return;
+        }
         if let Some(pline) = parsed.line_at_offset(pos) {
             if let LineKind::TableRow {
                 ref cells,
@@ -1306,7 +1313,7 @@ impl DocumentTab {
             if pos <= pline.prefix_range.end && pos >= pline.source.start {
                 if pline.source.start > 0 {
                     let prev_end = pline.source.start - 1;
-                    let snapped = skip_hidden_left(&parsed, prev_end);
+                    let snapped = retreat_off_setext(&parsed, prev_end);
                     self.place(snapped, extend);
                 } else {
                     self.place(0, extend);
@@ -1339,6 +1346,13 @@ impl DocumentTab {
         let parsed = self.parsed();
         let mut pos = self.cursor_offset();
         if pos >= self.content.len() {
+            return;
+        }
+        if on_setext(&parsed, pos) {
+            self.place(
+                advance_past_setext(&parsed, self.content.len(), pos),
+                extend,
+            );
             return;
         }
         if let Some(pline) = parsed.line_at_offset(pos) {
@@ -1398,6 +1412,13 @@ impl DocumentTab {
         }
         if self.content.as_bytes().get(pos) == Some(&b'\n') {
             let next_line_start = pos + 1;
+            if on_setext(&parsed, next_line_start) {
+                self.place(
+                    advance_past_setext(&parsed, self.content.len(), next_line_start),
+                    extend,
+                );
+                return;
+            }
             if let Some(nline) = parsed.line_at_offset(next_line_start) {
                 let target = skip_hidden_right(&parsed, nline.prefix_range.end);
                 self.place(target, extend);
@@ -2407,6 +2428,39 @@ fn compute_active_formats(
         }
     }
     fmt
+}
+
+fn on_setext(parsed: &ParsedDocument, pos: usize) -> bool {
+    parsed
+        .line_at_offset(pos)
+        .is_some_and(|line| matches!(line.kind, LineKind::SetextUnderline))
+}
+
+fn advance_past_setext(parsed: &ParsedDocument, content_len: usize, mut pos: usize) -> usize {
+    while on_setext(parsed, pos) {
+        let Some(line) = parsed.line_at_offset(pos) else {
+            break;
+        };
+        let next = line.source.end + 1;
+        if next > content_len {
+            return content_len;
+        }
+        pos = next;
+    }
+    skip_hidden_right(parsed, pos)
+}
+
+fn retreat_off_setext(parsed: &ParsedDocument, mut pos: usize) -> usize {
+    while on_setext(parsed, pos) {
+        let Some(line) = parsed.line_at_offset(pos) else {
+            break;
+        };
+        if line.source.start == 0 {
+            return 0;
+        }
+        pos = line.source.start - 1;
+    }
+    skip_hidden_left(parsed, pos)
 }
 
 fn skip_hidden_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
@@ -3576,6 +3630,61 @@ mod tests {
         assert!(doc.undo());
         assert_eq!(doc.content, "hello world");
         assert!(!doc.undo());
+    }
+
+    #[test]
+    fn setext_underline_is_skipped_by_arrows_and_editable() {
+        let md = "Foo\n---\nbar";
+        let parsed = parse_document(md);
+        assert!(matches!(parsed.lines[1].kind, LineKind::SetextUnderline));
+        let bar = &parsed.lines[2];
+        assert_eq!(bar.offset_map.display_to_source(0), 8);
+
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), md.into(), None, None);
+        doc.place(0, false);
+        let mut stops = Vec::new();
+        for _ in 0..8 {
+            doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+            stops.push(doc.cursor_offset());
+        }
+        assert_eq!(stops, vec![1, 2, 3, 8, 9, 10, 11, 11]);
+        doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+        doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+        doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), 8);
+        doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), 3);
+
+        doc.insert_text_in_mode(3..3, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "FooX\n---\nbar");
+        let again = doc.parsed();
+        assert!(matches!(again.lines[0].kind, LineKind::Heading { level: 2 }));
+        assert!(matches!(again.lines[1].kind, LineKind::SetextUnderline));
+        assert!(matches!(again.lines[2].kind, LineKind::Paragraph));
+    }
+
+    #[test]
+    fn unclosed_fence_toggle_unwraps_to_eof() {
+        let mut doc = DocumentTab::new(
+            "c".into(),
+            "code.md".into(),
+            "```\naaa\n".into(),
+            None,
+            None,
+        );
+        doc.place(5, false);
+        doc.apply_format_in_mode("codeblock", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "aaa\n");
+    }
+
+    #[test]
+    fn setext_underline_has_table_delimiter_metrics() {
+        let font = gpui::px(16.0);
+        let setext = crate::ui::text_editor::wysiwyg_line_metrics(&LineKind::SetextUnderline, font);
+        let delimiter =
+            crate::ui::text_editor::wysiwyg_line_metrics(&LineKind::TableDelimiter, font);
+        assert_eq!(setext, delimiter);
+        assert_eq!(setext.1, gpui::px(0.0));
     }
 }
 

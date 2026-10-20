@@ -166,6 +166,10 @@ fn source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
     for piece in markdown.split_inclusive('\n') {
         let end = start + piece.len();
         let text = piece.strip_suffix('\n').unwrap_or(piece);
+        // Classify the line without a trailing CR. The `\r` stays in `end`,
+        // outside this line's source, the same way `\n` does. A lone CR with
+        // no LF is not a line break.
+        let text = text.strip_suffix('\r').unwrap_or(text);
         lines.push(SourceLine { start, end, text });
         start = end;
     }
@@ -576,6 +580,8 @@ pub enum LineKind {
     },
     CodeLine,
     HorizontalRule,
+    /// Setext underline. Collapsed in WYSIWYG the same way as [`LineKind::TableDelimiter`].
+    SetextUnderline,
     TableDelimiter,
     TableRow {
         is_header: bool,
@@ -1023,16 +1029,6 @@ fn leading_spaces(line: &str) -> usize {
     line.bytes().take_while(|byte| *byte == b' ').count()
 }
 
-fn odd_backslashes(bytes: &[u8], index: usize) -> bool {
-    let mut slashes = 0usize;
-    let mut look = index;
-    while look > 0 && bytes[look - 1] == b'\\' {
-        slashes += 1;
-        look -= 1;
-    }
-    slashes % 2 == 1
-}
-
 /// Setext underline: 0–3 spaces, one or more `=` or `-`, then only spaces or tabs.
 fn setext_level(line: &str) -> Option<u8> {
     let bytes = line.as_bytes();
@@ -1190,6 +1186,190 @@ fn indented_code_prefix(line: &str) -> Option<usize> {
     }
 }
 
+/// `(bytes, column)` of the first non-space, non-tab. Tabs advance to the next multiple of 4.
+fn split_indent(line: &str) -> (usize, usize) {
+    let bytes = line.as_bytes();
+    let mut column = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' => {
+                column += 1;
+                index += 1;
+            }
+            b'\t' => {
+                column += 4 - (column % 4);
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    (index, column)
+}
+
+struct ListMarker {
+    column: usize,
+    prefix_len: usize,
+    ordered: bool,
+    number: usize,
+    task: Option<bool>,
+    checkbox_rel: Option<usize>,
+}
+
+fn list_marker(line: &str) -> Option<ListMarker> {
+    let (indent_bytes, column) = split_indent(line);
+    let rest = &line[indent_bytes..];
+    if rest
+        .strip_prefix("- [ ] ")
+        .or_else(|| rest.strip_prefix("* [ ] "))
+        .or_else(|| rest.strip_prefix("+ [ ] "))
+        .is_some()
+    {
+        return Some(ListMarker {
+            column,
+            prefix_len: indent_bytes + 6,
+            ordered: false,
+            number: 0,
+            task: Some(false),
+            checkbox_rel: Some(indent_bytes + 2),
+        });
+    }
+    if rest
+        .strip_prefix("- [x] ")
+        .or_else(|| rest.strip_prefix("- [X] "))
+        .or_else(|| rest.strip_prefix("* [x] "))
+        .or_else(|| rest.strip_prefix("* [X] "))
+        .or_else(|| rest.strip_prefix("+ [x] "))
+        .or_else(|| rest.strip_prefix("+ [X] "))
+        .is_some()
+    {
+        return Some(ListMarker {
+            column,
+            prefix_len: indent_bytes + 6,
+            ordered: false,
+            number: 0,
+            task: Some(true),
+            checkbox_rel: Some(indent_bytes + 2),
+        });
+    }
+    if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
+        return Some(ListMarker {
+            column,
+            prefix_len: indent_bytes + 2,
+            ordered: false,
+            number: 0,
+            task: None,
+            checkbox_rel: None,
+        });
+    }
+    if let Some(dot_pos) = rest.find(". ") {
+        if dot_pos > 0 && rest[..dot_pos].bytes().all(|byte| byte.is_ascii_digit()) {
+            if let Ok(number) = rest[..dot_pos].parse::<usize>() {
+                return Some(ListMarker {
+                    column,
+                    prefix_len: indent_bytes + dot_pos + 2,
+                    ordered: true,
+                    number,
+                    task: None,
+                    checkbox_rel: None,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn continues_list(lines: &[ParsedLine], column: usize) -> bool {
+    for prev in lines.iter().rev() {
+        match &prev.kind {
+            LineKind::Empty => continue,
+            LineKind::ListItem { indent_cols, .. } => return *indent_cols < column,
+            LineKind::Paragraph
+            | LineKind::Heading { .. }
+            | LineKind::Blockquote
+            | LineKind::CodeFence { .. }
+            | LineKind::CodeLine
+            | LineKind::HorizontalRule
+            | LineKind::SetextUnderline
+            | LineKind::TableDelimiter
+            | LineKind::TableRow { .. } => return false,
+        }
+    }
+    false
+}
+
+fn indented_code_resumes(lines: &[SourceLine<'_>], from: usize) -> bool {
+    for later in lines.iter().skip(from + 1) {
+        if later.text.trim().is_empty() {
+            continue;
+        }
+        let (index, column) = split_indent(later.text);
+        return index < later.text.len() && column >= 4;
+    }
+    false
+}
+
+fn whitespace_code_strip(line: &str) -> usize {
+    indented_code_prefix(line).unwrap_or(line.len())
+}
+
+fn paragraph_run_start(lines: &[ParsedLine]) -> Option<usize> {
+    let last = lines.last()?;
+    if !matches!(last.kind, LineKind::Paragraph) {
+        return None;
+    }
+    let mut start = lines.len() - 1;
+    while start > 0 && matches!(lines[start - 1].kind, LineKind::Paragraph) {
+        start -= 1;
+    }
+    Some(start)
+}
+
+fn is_bare_list_marker_line(line: &str) -> bool {
+    let (index, column) = split_indent(line);
+    if column > 3 {
+        return false;
+    }
+    let rest = line[index..].trim_end_matches([' ', '\t']);
+    if matches!(rest, "-" | "+" | "*") {
+        return true;
+    }
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 2 && (bytes[bytes.len() - 1] == b'.' || bytes[bytes.len() - 1] == b')') {
+        let digits = &bytes[..bytes.len() - 1];
+        return !digits.is_empty()
+            && digits.len() <= 9
+            && digits.iter().all(|byte| byte.is_ascii_digit());
+    }
+    false
+}
+
+/// A setext underline does not promote a lazy continuation of a quote or list,
+/// or an indented line that continues a bare marker we do not parse as an item.
+fn setext_is_lazy(lines: &[ParsedLine], markdown: &str, run_start: usize) -> bool {
+    if run_start > 0
+        && matches!(
+            lines[run_start - 1].kind,
+            LineKind::Blockquote | LineKind::ListItem { .. }
+        )
+    {
+        return true;
+    }
+    let mut saw_bare = false;
+    for line in &lines[run_start..] {
+        let text = &markdown[line.source.clone()];
+        if is_bare_list_marker_line(text) {
+            saw_bare = true;
+            continue;
+        }
+        let (index, _) = split_indent(text);
+        if saw_bare && index > 0 {
+            return true;
+        }
+    }
+    false
+}
+
 fn atx_heading(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
     let bytes = line.as_bytes();
     let mut index = 0;
@@ -1207,7 +1387,9 @@ fn atx_heading(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
         }
         index += 1;
     }
-    if level == 0 || (index < bytes.len() && bytes[index] != b' ') {
+    // A tab is whitespace after the opening hashes (CommonMark example 10).
+    let separator = index < bytes.len() && (bytes[index] == b' ' || bytes[index] == b'\t');
+    if level == 0 || (index < bytes.len() && !separator) {
         return None;
     }
     let mut content_start = index;
@@ -1224,8 +1406,10 @@ fn atx_heading(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
     }
     // A closing run may consume the whole content (`### ###`). The space that
     // precedes it can be the opening separator, so `end` is allowed to land on
-    // `content_start` but not before it. An odd run of backslashes escapes that space.
-    let preceded_by_space = end > 0 && bytes[end - 1] == b' ' && !odd_backslashes(bytes, end - 1);
+    // `content_start` but not before it. A backslash does not escape a space,
+    // so `# foo\ #` still strips the closer. A backslash immediately before
+    // the hash (`### foo \###`) is not a separating space, and the hash stays.
+    let preceded_by_space = end > 0 && bytes[end - 1] == b' ';
     if end < hash_end && preceded_by_space {
         if end > content_start {
             end -= 1;
@@ -1436,6 +1620,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     let mut code_blocks = Vec::new();
 
     let mut open_fence: Option<OpenFence> = None;
+    let mut in_indented_code = false;
 
     // Pre-detect table block ranges and column alignments
     let mut table_ranges: Vec<(usize, usize, std::ops::Range<usize>, Vec<TableColumnAlign>)> =
@@ -1516,6 +1701,33 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
+        if in_indented_code {
+            if trimmed.is_empty() {
+                if indented_code_resumes(&raw_lines, i) {
+                    let parsed = code_content_line(
+                        i,
+                        line_source.clone(),
+                        line,
+                        whitespace_code_strip(line),
+                    );
+                    all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                    lines.push(parsed);
+                    continue;
+                }
+                in_indented_code = false;
+            } else {
+                let (index, column) = split_indent(line);
+                if index < line.len() && column >= 4 {
+                    let strip = indented_code_prefix(line).unwrap_or(index);
+                    let parsed = code_content_line(i, line_source.clone(), line, strip);
+                    all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                    lines.push(parsed);
+                    continue;
+                }
+                in_indented_code = false;
+            }
+        }
+
         if let Some((marker, len, indent, language)) = match_opening_fence(line) {
             open_fence = Some(OpenFence {
                 marker,
@@ -1553,17 +1765,18 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }
 
         if let Some(level) = setext_level(line) {
-            let can_promote = matches!(
-                lines.last().map(|prev| &prev.kind),
-                Some(LineKind::Paragraph)
-            );
-            if can_promote {
-                let extra = promote_setext(lines.last_mut().unwrap(), markdown, level);
-                all_hidden.extend(extra);
-                let parsed = structural_line(i, line_source, line, LineKind::Empty);
-                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-                lines.push(parsed);
-                continue;
+            if let Some(run_start) = paragraph_run_start(&lines) {
+                if !setext_is_lazy(&lines, markdown, run_start) {
+                    for prev in &mut lines[run_start..] {
+                        let extra = promote_setext(prev, markdown, level);
+                        all_hidden.extend(extra);
+                    }
+                    let parsed =
+                        structural_line(i, line_source.clone(), line, LineKind::SetextUnderline);
+                    all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                    lines.push(parsed);
+                    continue;
+                }
             }
         }
 
@@ -1678,72 +1891,47 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         let mut kind = LineKind::Paragraph;
         let mut prefix_len = 0usize;
 
-        if prefix_len == 0 {
-            if let Some(_rest) = trimmed_start
-                .strip_prefix("- [ ] ")
-                .or_else(|| trimmed_start.strip_prefix("* [ ] "))
-                .or_else(|| trimmed_start.strip_prefix("+ [ ] "))
-            {
-                let cb_start = line_start + indent_len + 2;
+        if let Some(marker) = list_marker(line) {
+            // A marker at column 4 or more is indented code, unless it continues
+            // a list item whose marker sits in a smaller column.
+            let nested = marker.column >= 4 && continues_list(&lines, marker.column);
+            if marker.column < 4 || nested {
+                let checkbox_source = marker.checkbox_rel.map(|rel| {
+                    let start = line_start + rel;
+                    start..(start + 3)
+                });
                 kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: Some(false),
-                    indent_cols: indent_len,
-                    checkbox_source: Some(cb_start..(cb_start + 3)),
+                    ordered: marker.ordered,
+                    number: marker.number,
+                    task: marker.task,
+                    indent_cols: marker.column,
+                    checkbox_source,
                 };
-                prefix_len = indent_len + 6;
-            } else if let Some(_rest) = trimmed_start
-                .strip_prefix("- [x] ")
-                .or_else(|| trimmed_start.strip_prefix("- [X] "))
-                .or_else(|| trimmed_start.strip_prefix("* [x] "))
-                .or_else(|| trimmed_start.strip_prefix("* [X] "))
-                .or_else(|| trimmed_start.strip_prefix("+ [x] "))
-                .or_else(|| trimmed_start.strip_prefix("+ [X] "))
-            {
-                let cb_start = line_start + indent_len + 2;
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: Some(true),
-                    indent_cols: indent_len,
-                    checkbox_source: Some(cb_start..(cb_start + 3)),
-                };
-                prefix_len = indent_len + 6;
-            } else if trimmed_start.starts_with("- ")
-                || trimmed_start.starts_with("* ")
-                || trimmed_start.starts_with("+ ")
-            {
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: None,
-                    indent_cols: indent_len,
-                    checkbox_source: None,
-                };
-                prefix_len = indent_len + 2;
-            } else if let Some(dot_pos) = trimmed_start.find(". ") {
-                if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
-                    if let Ok(num) = trimmed_start[..dot_pos].parse::<usize>() {
-                        kind = LineKind::ListItem {
-                            ordered: true,
-                            number: num,
-                            task: None,
-                            indent_cols: indent_len,
-                            checkbox_source: None,
-                        };
-                        prefix_len = indent_len + dot_pos + 2;
-                    }
-                }
+                prefix_len = marker.prefix_len;
             }
         }
 
         if prefix_len == 0 {
             if let Some(strip) = indented_code_prefix(line) {
-                let parsed = code_content_line(i, line_source, line, strip);
-                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-                lines.push(parsed);
-                continue;
+                let previous_is_paragraph = lines.last().is_some_and(|prev| {
+                    if !matches!(prev.kind, LineKind::Paragraph) {
+                        return false;
+                    }
+                    // A bare marker is not a paragraph in CommonMark. An indented
+                    // line after it can still open a code block (example 278).
+                    !is_bare_list_marker_line(&markdown[prev.source.clone()])
+                });
+                if previous_is_paragraph {
+                    // Indented code does not interrupt a paragraph. Hide the
+                    // whole leading run of spaces and tabs.
+                    prefix_len = split_indent(line).0;
+                } else {
+                    let parsed = code_content_line(i, line_source.clone(), line, strip);
+                    all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                    lines.push(parsed);
+                    in_indented_code = true;
+                    continue;
+                }
             }
         }
 
@@ -1779,6 +1967,11 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             offset_map,
             styled_segments,
         });
+        in_indented_code = false;
+    }
+
+    if let Some(fence) = open_fence {
+        code_blocks.push((fence.open_range, markdown.len()..markdown.len()));
     }
 
     ParsedDocument {
@@ -2057,6 +2250,7 @@ mod tests {
             LineKind::CodeFence { opening: false, .. } => "fence-close".to_string(),
             LineKind::CodeLine => "code".to_string(),
             LineKind::HorizontalRule => "hr".to_string(),
+            LineKind::SetextUnderline => "setext".to_string(),
             LineKind::TableDelimiter => "tdelim".to_string(),
             LineKind::TableRow { .. } => "row".to_string(),
         }
@@ -2133,11 +2327,12 @@ mod tests {
 
     /// CommonMark 0.31.2 leaf blocks from the audit samples and the spec
     /// examples they cite. Each case compares the whole kind, display, source,
-    /// mark, and link record. A setext underline is an empty display line
-    /// whose source is the marker, not a horizontal rule.
+    /// mark, and link record. A setext underline is a collapsed `setext` line
+    /// whose source is the marker, not a horizontal rule and not a blank row.
     #[test]
     fn leaf_blocks_match_commonmark_examples() {
-        let cases: Vec<(&str, &str, Vec<LeafExpect>)> = leaf_block_cases();
+        let mut cases: Vec<(&str, &str, Vec<LeafExpect>)> = leaf_block_cases();
+        cases.extend(leaf_block_cases_round2());
         let mut failures = Vec::new();
         for (name, md, expected) in &cases {
             let want = expect_dump(expected);
@@ -2254,7 +2449,7 @@ mod tests {
                 "Foo\n---\nbar",
                 vec![
                     leaf("h2", "Foo", "Foo"),
-                    leaf("empty", "", "---"),
+                    leaf("setext", "", "---"),
                     leaf("p", "bar", "bar"),
                 ],
             ),
@@ -2408,10 +2603,10 @@ mod tests {
                 "Foo *bar*\n=========\n\nFoo *bar*\n---------",
                 vec![
                     leaf_marks("h1", "Foo bar", "Foo *bar*", "I:bar"),
-                    leaf("empty", "", "========="),
+                    leaf("setext", "", "========="),
                     leaf("empty", "", ""),
                     leaf_marks("h2", "Foo bar", "Foo *bar*", "I:bar"),
-                    leaf("empty", "", "---------"),
+                    leaf("setext", "", "---------"),
                 ],
             ),
             (
@@ -2419,10 +2614,10 @@ mod tests {
                 "Foo\n-------------------------\n\nFoo\n=",
                 vec![
                     leaf("h2", "Foo", "Foo"),
-                    leaf("empty", "", "-------------------------"),
+                    leaf("setext", "", "-------------------------"),
                     leaf("empty", "", ""),
                     leaf("h1", "Foo", "Foo"),
-                    leaf("empty", "", "="),
+                    leaf("setext", "", "="),
                 ],
             ),
             (
@@ -2430,10 +2625,10 @@ mod tests {
                 "Foo\n---\n\nBar\n===",
                 vec![
                     leaf("h2", "Foo", "Foo"),
-                    leaf("empty", "", "---"),
+                    leaf("setext", "", "---"),
                     leaf("empty", "", ""),
                     leaf("h1", "Bar", "Bar"),
-                    leaf("empty", "", "==="),
+                    leaf("setext", "", "==="),
                 ],
             ),
             (
@@ -2441,19 +2636,19 @@ mod tests {
                 "   Foo\n---\n\n  Foo\n-----\n\n  Foo\n  ===",
                 vec![
                     leaf("h2", "Foo", "   Foo"),
-                    leaf("empty", "", "---"),
+                    leaf("setext", "", "---"),
                     leaf("empty", "", ""),
                     leaf("h2", "Foo", "  Foo"),
-                    leaf("empty", "", "-----"),
+                    leaf("setext", "", "-----"),
                     leaf("empty", "", ""),
                     leaf("h1", "Foo", "  Foo"),
-                    leaf("empty", "", "  ==="),
+                    leaf("setext", "", "  ==="),
                 ],
             ),
             (
                 "ex86-setext-underline-indent",
                 "Foo\n   ----      ",
-                vec![leaf("h2", "Foo", "Foo"), leaf("empty", "", "   ----      ")],
+                vec![leaf("h2", "Foo", "Foo"), leaf("setext", "", "   ----      ")],
             ),
             (
                 "ex88-not-setext",
@@ -2469,23 +2664,23 @@ mod tests {
             (
                 "ex89-setext-trailing-spaces",
                 "Foo  \n-----",
-                vec![leaf("h2", "Foo", "Foo  "), leaf("empty", "", "-----")],
+                vec![leaf("h2", "Foo", "Foo  "), leaf("setext", "", "-----")],
             ),
             (
                 "ex90-setext-backslash",
                 "Foo\\\n----",
-                vec![leaf("h2", "Foo\\", "Foo\\"), leaf("empty", "", "----")],
+                vec![leaf("h2", "Foo\\", "Foo\\"), leaf("setext", "", "----")],
             ),
             (
                 "ex91-setext-in-text",
                 "`Foo\n----\n`\n\n<a title=\"a lot\n---\nof dashes\"/>",
                 vec![
                     leaf("h2", "`Foo", "`Foo"),
-                    leaf("empty", "", "----"),
+                    leaf("setext", "", "----"),
                     leaf("p", "`", "`"),
                     leaf("empty", "", ""),
                     leaf("h2", "<a title=\"a lot", "<a title=\"a lot"),
-                    leaf("empty", "", "---"),
+                    leaf("setext", "", "---"),
                     leaf("p", "of dashes\"/>", "of dashes\"/>"),
                 ],
             ),
@@ -2505,9 +2700,9 @@ mod tests {
                 vec![
                     leaf("hr", "", "---"),
                     leaf("h2", "Foo", "Foo"),
-                    leaf("empty", "", "---"),
+                    leaf("setext", "", "---"),
                     leaf("h2", "Bar", "Bar"),
-                    leaf("empty", "", "---"),
+                    leaf("setext", "", "---"),
                     leaf("p", "Baz", "Baz"),
                 ],
             ),
@@ -2536,7 +2731,7 @@ mod tests {
                     leaf("p", "Foo", "Foo"),
                     leaf("empty", "", ""),
                     leaf("h2", "bar", "bar"),
-                    leaf("empty", "", "---"),
+                    leaf("setext", "", "---"),
                     leaf("p", "baz", "baz"),
                 ],
             ),
@@ -2752,7 +2947,7 @@ mod tests {
                 "foo\n---\n~~~\nbar\n~~~\n# baz",
                 vec![
                     leaf("h2", "foo", "foo"),
-                    leaf("empty", "", "---"),
+                    leaf("setext", "", "---"),
                     leaf("fence-open", "", "~~~"),
                     leaf_marks("code", "bar", "bar", "C:bar"),
                     leaf("fence-close", "", "~~~"),
@@ -2850,7 +3045,9 @@ mod tests {
             (
                 "tab-list-not-code",
                 "\t- foo",
-                vec![leaf("ul:1", "foo", "\t- foo")],
+                // CommonMark tabs: a marker at column 4 is indented code.
+                // pulldown-cmark 0.12.2 text is `- foo`.
+                vec![leaf_marks("code", "- foo", "\t- foo", "C:- foo")],
             ),
             (
                 "double-tilde-not-fence",
@@ -2886,5 +3083,352 @@ mod tests {
                 ],
             ),
         ]
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn leaf_block_cases_round2() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
+        vec![
+            // Example 49. Indented code does not interrupt a paragraph.
+            (
+                "ex49-indent-not-interrupt",
+                "Foo\n    ***",
+                vec![leaf("p", "Foo", "Foo"), leaf("p", "***", "    ***")],
+            ),
+            (
+                "ex70-indent-not-interrupt",
+                "foo\n    # bar",
+                vec![leaf("p", "foo", "foo"), leaf("p", "# bar", "    # bar")],
+            ),
+            (
+                "ex87-indent-not-interrupt",
+                "Foo\n    ---",
+                vec![leaf("p", "Foo", "Foo"), leaf("p", "---", "    ---")],
+            ),
+            (
+                "ex113-indent-not-interrupt",
+                "Foo\n    bar\n",
+                vec![
+                    leaf("p", "Foo", "Foo"),
+                    leaf("p", "bar", "    bar"),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            (
+                "ex223-deep-indent-not-interrupt",
+                "aaa\n             bbb\n                                       ccc",
+                vec![
+                    leaf("p", "aaa", "aaa"),
+                    leaf("p", "bbb", "             bbb"),
+                    leaf("p", "ccc", "                                       ccc"),
+                ],
+            ),
+            (
+                "ex636-hard-break-indent",
+                "foo  \n     bar",
+                vec![leaf("p", "foo  ", "foo  "), leaf("p", "bar", "     bar")],
+            ),
+            (
+                "ex637-backslash-break-indent",
+                "foo\\\n     bar",
+                vec![leaf("p", "foo\\", "foo\\"), leaf("p", "bar", "     bar")],
+            ),
+            // Example 10. A tab after the opening hashes is the separator.
+            (
+                "ex10-atx-tab",
+                "#\tFoo",
+                vec![leaf("h1", "Foo", "#\tFoo")],
+            ),
+            // Example 81, 82, 95. The whole paragraph run is the heading.
+            (
+                "ex81-setext-run",
+                "Foo *bar\nbaz*\n====",
+                vec![
+                    leaf("h1", "Foo *bar", "Foo *bar"),
+                    leaf("h1", "baz*", "baz*"),
+                    leaf("setext", "", "===="),
+                ],
+            ),
+            (
+                "ex82-setext-run-tab",
+                "  Foo *bar\nbaz*\t\n====",
+                vec![
+                    leaf("h1", "Foo *bar", "  Foo *bar"),
+                    leaf("h1", "baz*", "baz*\t"),
+                    leaf("setext", "", "===="),
+                ],
+            ),
+            (
+                "ex95-setext-two-lines",
+                "Foo\nBar\n---",
+                vec![
+                    leaf("h2", "Foo", "Foo"),
+                    leaf("h2", "Bar", "Bar"),
+                    leaf("setext", "", "---"),
+                ],
+            ),
+            // Example 93. Lazy continuation is not promoted. `===` stays text.
+            (
+                "ex93-lazy-not-heading",
+                "> foo\nbar\n===",
+                vec![
+                    leaf("quote", "foo", "> foo"),
+                    leaf("p", "bar", "bar"),
+                    leaf("p", "===", "==="),
+                ],
+            ),
+            // pulldown: quote covers `> foo` and `bar`; `---` is a rule.
+            (
+                "quote-lazy-then-hr",
+                "> foo\nbar\n---",
+                vec![
+                    leaf("quote", "foo", "> foo"),
+                    leaf("p", "bar", "bar"),
+                    leaf("hr", "", "---"),
+                ],
+            ),
+            // Example 278. `  foo` must not become a heading. Empty markers
+            // stay paragraphs (list items are LM-09).
+            (
+                "ex278-bare-marker-not-heading",
+                "-\n  foo\n-\n  ```\n  bar\n  ```\n-\n      baz",
+                vec![
+                    leaf("p", "-", "-"),
+                    leaf("p", "  foo", "  foo"),
+                    leaf("p", "-", "-"),
+                    leaf("fence-open", "", "  ```"),
+                    leaf_marks("code", "bar", "  bar", "C:bar"),
+                    leaf("fence-close", "", "  ```"),
+                    leaf("p", "-", "-"),
+                    leaf_marks("code", "  baz", "      baz", "C:  baz"),
+                ],
+            ),
+            (
+                "four-space-bullet-is-code",
+                "    - one\n",
+                vec![
+                    leaf_marks("code", "- one", "    - one", "C:- one"),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            (
+                "four-space-ordered-is-code",
+                "    1. foo",
+                vec![leaf_marks("code", "1. foo", "    1. foo", "C:1. foo")],
+            ),
+            (
+                "four-space-task-is-code",
+                "    - [ ] todo",
+                vec![leaf_marks(
+                    "code",
+                    "- [ ] todo",
+                    "    - [ ] todo",
+                    "C:- [ ] todo",
+                )],
+            ),
+            (
+                "blank-then-nested-list",
+                "- foo\n\n    - bar",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("empty", "", ""),
+                    leaf("ul:4", "bar", "    - bar"),
+                ],
+            ),
+            (
+                "tab-under-list",
+                "- foo\n\t- bar",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("ul:4", "bar", "\t- bar"),
+                ],
+            ),
+            (
+                "deep-nested-list",
+                "- foo\n    - bar\n        - baz",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("ul:4", "bar", "    - bar"),
+                    leaf("ul:8", "baz", "        - baz"),
+                ],
+            ),
+            (
+                "three-space-list",
+                "   - foo",
+                vec![leaf("ul:3", "foo", "   - foo")],
+            ),
+            (
+                "para-then-indented-marker",
+                "Foo\n    - one",
+                vec![leaf("p", "Foo", "Foo"), leaf("p", "- one", "    - one")],
+            ),
+            // Example 110. The marker and the interior blank are code.
+            (
+                "ex110-indented-code-marker",
+                "    <a/>\n    *hi*\n\n    - one",
+                vec![
+                    leaf_marks("code", "<a/>", "    <a/>", "C:<a/>"),
+                    leaf_marks("code", "*hi*", "    *hi*", "C:*hi*"),
+                    leaf("code", "", ""),
+                    leaf_marks("code", "- one", "    - one", "C:- one"),
+                ],
+            ),
+            // Example 111. Blank and short whitespace lines stay inside the code.
+            (
+                "ex111-blank-inside-indent",
+                "    chunk1\n\n    chunk2\n  \n \n \n    chunk3",
+                vec![
+                    leaf_marks("code", "chunk1", "    chunk1", "C:chunk1"),
+                    leaf("code", "", ""),
+                    leaf_marks("code", "chunk2", "    chunk2", "C:chunk2"),
+                    leaf("code", "", "  "),
+                    leaf("code", "", " "),
+                    leaf("code", "", " "),
+                    leaf_marks("code", "chunk3", "    chunk3", "C:chunk3"),
+                ],
+            ),
+            // Example 112. Six spaces strip back to column 4.
+            (
+                "ex112-spaces-inside-indent",
+                "    chunk1\n      \n      chunk2",
+                vec![
+                    leaf_marks("code", "chunk1", "    chunk1", "C:chunk1"),
+                    leaf_marks("code", "  ", "      ", "C:  "),
+                    leaf_marks("code", "  chunk2", "      chunk2", "C:  chunk2"),
+                ],
+            ),
+            // Example 85. The blank between the chunks is a code line.
+            (
+                "ex85-indent-then-hr",
+                "    Foo\n    ---\n\n    Foo\n---",
+                vec![
+                    leaf_marks("code", "Foo", "    Foo", "C:Foo"),
+                    leaf_marks("code", "---", "    ---", "C:---"),
+                    leaf("code", "", ""),
+                    leaf_marks("code", "Foo", "    Foo", "C:Foo"),
+                    leaf("hr", "", "---"),
+                ],
+            ),
+            // Example 117. Leading and trailing blanks stay empty.
+            (
+                "ex117-indent-outer-blanks",
+                "\n    \n    foo\n    \n",
+                vec![
+                    leaf("empty", "", ""),
+                    leaf("empty", "    ", "    "),
+                    leaf_marks("code", "foo", "    foo", "C:foo"),
+                    leaf("empty", "    ", "    "),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            // Example 264. Interior blanks of the open code block are code lines.
+            // Column-4 strip leaves the list's extra indent (container indent is LM-09).
+            (
+                "ex264-code-inside-list",
+                "- Foo\n\n      bar\n\n\n      baz",
+                vec![
+                    leaf("ul:0", "Foo", "- Foo"),
+                    leaf("empty", "", ""),
+                    leaf_marks("code", "  bar", "      bar", "C:  bar"),
+                    leaf("code", "", ""),
+                    leaf("code", "", ""),
+                    leaf_marks("code", "  baz", "      baz", "C:  baz"),
+                ],
+            ),
+            // Example 289. The ordered marker is indented code, blanks included.
+            (
+                "ex289-indented-ordered",
+                "    1.  A paragraph\n        with two lines.\n\n            indented code\n\n        > A block quote.",
+                vec![
+                    leaf_marks(
+                        "code",
+                        "1.  A paragraph",
+                        "    1.  A paragraph",
+                        "C:1.  A paragraph",
+                    ),
+                    leaf_marks(
+                        "code",
+                        "    with two lines.",
+                        "        with two lines.",
+                        "C:    with two lines.",
+                    ),
+                    leaf("code", "", ""),
+                    leaf_marks(
+                        "code",
+                        "        indented code",
+                        "            indented code",
+                        "C:        indented code",
+                    ),
+                    leaf("code", "", ""),
+                    leaf_marks(
+                        "code",
+                        "    > A block quote.",
+                        "        > A block quote.",
+                        "C:    > A block quote.",
+                    ),
+                ],
+            ),
+            // CRLF. Each line is classified with the trailing CR removed.
+            (
+                "crlf-hr",
+                "---\r\n",
+                vec![leaf("hr", "", "---"), leaf("empty", "", "")],
+            ),
+            (
+                "crlf-setext",
+                "Foo\r\n---\r\nbar\r\n",
+                vec![
+                    leaf("h2", "Foo", "Foo"),
+                    leaf("setext", "", "---"),
+                    leaf("p", "bar", "bar"),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            (
+                "crlf-backtick-fence",
+                "```\r\ncode\r\n```\r\n",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "code", "code", "C:code"),
+                    leaf("fence-close", "", "```"),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            (
+                "crlf-tilde-fence",
+                "~~~\r\ncode\r\n~~~\r\n",
+                vec![
+                    leaf("fence-open", "", "~~~"),
+                    leaf_marks("code", "code", "code", "C:code"),
+                    leaf("fence-close", "", "~~~"),
+                    leaf("empty", "", ""),
+                ],
+            ),
+            (
+                "crlf-atx",
+                "# foo #\r\n",
+                vec![leaf("h1", "foo", "# foo #"), leaf("empty", "", "")],
+            ),
+            // pulldown strips the closer. The backslash stays (it does not escape the space).
+            (
+                "atx-backslash-space-closer",
+                "# foo\\ #\n",
+                vec![
+                    leaf("h1", "foo\\", "# foo\\ #"),
+                    leaf("empty", "", ""),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn unclosed_fence_spans_to_eof() {
+        let md = "```\naaa\n";
+        let doc = parse_document(md);
+        assert_eq!(doc.code_blocks.len(), 1);
+        let (open, close) = &doc.code_blocks[0];
+        assert_eq!(open.start, 0);
+        assert!(open.end > open.start);
+        assert_eq!(close.start, md.len());
+        assert_eq!(close.end, md.len());
     }
 }

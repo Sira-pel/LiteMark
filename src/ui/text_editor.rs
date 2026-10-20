@@ -364,7 +364,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let estimated_height = if self.view_mode == ViewMode::Wysiwyg {
             let mut h = px(32.0);
             for line in &self.parsed.lines {
-                if matches!(line.kind, LineKind::TableDelimiter) {
+                if matches!(
+                    line.kind,
+                    LineKind::TableDelimiter | LineKind::SetextUnderline
+                ) {
                     continue;
                 }
                 let (font_sz, line_h, top_gap, _) =
@@ -590,7 +593,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut cur_y = bounds.top() + px(16.0);
 
         for (line_idx, parsed_line) in self.parsed.lines.iter().enumerate() {
-            if matches!(parsed_line.kind, LineKind::TableDelimiter) {
+            if matches!(
+                parsed_line.kind,
+                LineKind::TableDelimiter | LineKind::SetextUnderline
+            ) {
                 continue;
             }
             let (row_font_size, row_line_height, top_gap, indent_x) =
@@ -1278,7 +1284,7 @@ impl<V: EntityInputHandler> IntoElement for EditorElement<V> {
     }
 }
 
-fn wysiwyg_line_metrics(
+pub(crate) fn wysiwyg_line_metrics(
     kind: &LineKind,
     base_font_size: Pixels,
 ) -> (Pixels, Pixels, Pixels, Pixels) {
@@ -1325,7 +1331,7 @@ fn wysiwyg_line_metrics(
             px(2.0),
             px(0.0),
         ),
-        LineKind::TableDelimiter => (
+        LineKind::TableDelimiter | LineKind::SetextUnderline => (
             px(0.0),
             px(0.0),
             px(0.0),

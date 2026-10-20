@@ -54,6 +54,12 @@ pub fn render_tree(markdown: &str, wrap_cols: usize) -> String {
             ));
         }
 
+        // A setext underline is collapsed, the same way TableDelimiter is skipped
+        // in request_layout. The line is recorded; it has no visual row.
+        if matches!(line.kind, LineKind::SetextUnderline) {
+            continue;
+        }
+
         let rows = visual_rows(&line.display_text, wrap_cols);
         for (row_index, (start, end)) in rows.iter().enumerate() {
             let text = slice_text(&line.display_text, &(*start..*end));
@@ -98,6 +104,7 @@ fn kind_token(kind: &LineKind) -> String {
         }
         LineKind::CodeLine => "kind=CodeLine".to_string(),
         LineKind::HorizontalRule => "kind=HorizontalRule".to_string(),
+        LineKind::SetextUnderline => "kind=SetextUnderline".to_string(),
         LineKind::TableDelimiter => "kind=TableDelimiter".to_string(),
         LineKind::TableRow {
             is_header, cells, ..
@@ -193,4 +200,21 @@ fn dump_render_tree() {
     fs::write(&output_path, &dump).unwrap_or_else(|err| panic!("write {output_path}: {err}"));
     eprintln!("LITEMARK_ELAPSED_US={elapsed_us}");
     eprintln!("LITEMARK_RENDER_OUT={output_path}");
+}
+
+#[test]
+fn setext_underline_has_no_visual_row() {
+    let dump = render_tree("Foo\n---\nbar\n", 40);
+    assert!(
+        dump.contains("line[1] kind=SetextUnderline source=4..7 display=\"\""),
+        "{dump}"
+    );
+    assert!(
+        !dump.lines().any(|line| line.starts_with("row[1]")),
+        "{dump}"
+    );
+    assert!(
+        dump.contains("row[2][0] display=0..3 text=\"bar\""),
+        "{dump}"
+    );
 }

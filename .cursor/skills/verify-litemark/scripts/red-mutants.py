@@ -43,25 +43,21 @@ MUTANTS: dict[str, dict[str, str]] = {
     "nested-lists-flat": {
         "file": "src/markdown/parser.rs",
         "label": "unordered list indent_cols + 7",
-        "old": """            } else if trimmed_start.starts_with("- ")
-                || trimmed_start.starts_with("* ")
-                || trimmed_start.starts_with("+ ")
-            {
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: None,
-                    indent_cols: indent_len,
+        "old": """                kind = LineKind::ListItem {
+                    ordered: marker.ordered,
+                    number: marker.number,
+                    task: marker.task,
+                    indent_cols: marker.column,
+                    checkbox_source,
+                };
 """,
-        "new": """            } else if trimmed_start.starts_with("- ")
-                || trimmed_start.starts_with("* ")
-                || trimmed_start.starts_with("+ ")
-            {
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: None,
-                    indent_cols: indent_len + 7,
+        "new": """                kind = LineKind::ListItem {
+                    ordered: marker.ordered,
+                    number: marker.number,
+                    task: marker.task,
+                    indent_cols: marker.column + if marker.ordered { 0 } else { 7 },
+                    checkbox_source,
+                };
 """,
     },
     "tables-not-a-table": {
@@ -80,11 +76,14 @@ MUTANTS: dict[str, dict[str, str]] = {
     "fenced-code-no-fence": {
         "file": "src/markdown/parser.rs",
         "label": "fence detector also matches line rust",
-        "old": """        // Check code block fences
-        if trimmed.starts_with("```") {
+        "old": """fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)> {
+    let indent = leading_spaces(line);
 """,
-        "new": """        // Check code block fences
-        if trimmed.starts_with("```") || trimmed == "rust" {
+        "new": """fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)> {
+    if line.trim() == "rust" {
+        return Some((b'`', 3, 0, Some("rust".to_string())));
+    }
+    let indent = leading_spaces(line);
 """,
     },
     "links-plain": {
