@@ -151,6 +151,7 @@ green_names=(
   emphasis
   nested-lists
   tables
+  gfm-tables
   fenced-code
   links
   images

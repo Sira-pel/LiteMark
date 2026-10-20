@@ -38,6 +38,7 @@ green_fixtures=(
   emphasis
   nested-lists
   tables
+  gfm-tables
   fenced-code
   links
   images

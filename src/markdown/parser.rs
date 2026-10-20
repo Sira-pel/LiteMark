@@ -280,28 +280,25 @@ pub fn parse_markdown(markdown: &str) -> Vec<Block> {
             continue;
         }
 
-        // Markdown Table | col1 | col2 |
-        if trimmed.starts_with('|') && trimmed.ends_with('|') {
+        // Markdown table. Column count is the delimiter row, which must match the header.
+        if let Some(table) = table_block(&lines, i) {
             let table_start = lines[i].start;
+            let table_end = lines[table.last].end;
+            let cols = table.alignments.len();
             let mut table_rows = Vec::new();
-            let mut table_end = lines[i].end;
-            while i < lines.len() {
-                let cur = lines[i].text.trim();
-                if cur.starts_with('|') && cur.ends_with('|') {
-                    table_end = lines[i].end;
-                    // Check if it is delimiter row |---|---|
-                    let is_separator = cur
-                        .chars()
-                        .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
-                    if !is_separator {
-                        table_rows.push(split_table_cells(cur));
-                    }
-                    i += 1;
-                } else {
-                    break;
+            for (row, line) in lines.iter().enumerate().take(table.last + 1).skip(i) {
+                if row == table.delimiter {
+                    continue;
                 }
+                let mut cells = split_table_cells(line.text);
+                if cells.len() > cols {
+                    cells.truncate(cols);
+                }
+                while cells.len() < cols {
+                    cells.push(String::new());
+                }
+                table_rows.push(cells);
             }
-
             if !table_rows.is_empty() {
                 let headers = table_rows.remove(0);
                 blocks.push(Block::Table {
@@ -310,6 +307,7 @@ pub fn parse_markdown(markdown: &str) -> Vec<Block> {
                     source: table_start..table_end,
                 });
             }
+            i = table.last + 1;
             continue;
         }
 
@@ -509,38 +507,250 @@ pub enum TableColumnAlign {
     Right,
 }
 
-/// Byte offsets of `|` that are not escaped with a backslash.
+/// Inline code spans, including the backtick delimiters. An unclosed opener is not a span.
+fn code_span_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = line.as_bytes();
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            index += 1;
+            continue;
+        }
+        let open = index;
+        while index < bytes.len() && bytes[index] == b'`' {
+            index += 1;
+        }
+        let width = index - open;
+        let mut cursor = index;
+        let mut closed_at = None;
+        while cursor < bytes.len() {
+            if bytes[cursor] != b'`' {
+                cursor += 1;
+                continue;
+            }
+            let close = cursor;
+            while cursor < bytes.len() && bytes[cursor] == b'`' {
+                cursor += 1;
+            }
+            if cursor - close == width {
+                closed_at = Some(cursor);
+                break;
+            }
+        }
+        if let Some(end) = closed_at {
+            ranges.push(open..end);
+            index = end;
+        }
+    }
+    ranges
+}
+
+fn index_in_ranges(ranges: &[std::ops::Range<usize>], index: usize) -> bool {
+    ranges
+        .iter()
+        .any(|range| index >= range.start && index < range.end)
+}
+
+fn separator_pipe(bytes: &[u8], code: &[std::ops::Range<usize>], index: usize) -> bool {
+    if index >= bytes.len() || bytes[index] != b'|' || index_in_ranges(code, index) {
+        return false;
+    }
+    let mut slashes = 0usize;
+    let mut look = index;
+    while look > 0 && bytes[look - 1] == b'\\' && !index_in_ranges(code, look - 1) {
+        slashes += 1;
+        look -= 1;
+    }
+    slashes.is_multiple_of(2)
+}
+
+/// Byte offsets of `|` that split a table cell.
+/// A backslash-escaped pipe stays in the cell, and so does a pipe inside a code span.
 pub fn unescaped_pipe_offsets(line: &str) -> Vec<usize> {
     let bytes = line.as_bytes();
+    let code = code_span_ranges(line);
     let mut offsets = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'|' {
-            let mut slashes = 0usize;
-            let mut look = index;
-            while look > 0 && bytes[look - 1] == b'\\' {
-                slashes += 1;
-                look -= 1;
-            }
-            if slashes.is_multiple_of(2) {
-                offsets.push(index);
-            }
+        if separator_pipe(bytes, &code, index) {
+            offsets.push(index);
         }
         index += 1;
     }
     offsets
 }
 
-/// Cell text between unescaped pipes. `\|` stays inside the cell.
-pub fn split_table_cells(line: &str) -> Vec<String> {
-    let pipes = unescaped_pipe_offsets(line);
-    if pipes.len() < 2 {
+/// Raw cell slices for one row. Leading and trailing border pipes are optional.
+/// The returned ranges include the spaces next to the pipes; callers trim those.
+fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = line.as_bytes();
+    let code = code_span_ranges(line);
+    let mut start = 0;
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let mut end = bytes.len();
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if start >= end {
         return Vec::new();
     }
-    pipes
-        .windows(2)
-        .map(|pair| line[pair[0] + 1..pair[1]].trim().to_string())
+    if separator_pipe(bytes, &code, start) {
+        start += 1;
+    }
+
+    let mut ranges = Vec::new();
+    while start < end {
+        let cell_start = start;
+        while start < end && !separator_pipe(bytes, &code, start) {
+            if let Some(span) = code.iter().find(|span| span.start == start) {
+                start = span.end;
+            } else {
+                start += 1;
+            }
+        }
+        let cell_end = start.min(end);
+        ranges.push(cell_start..cell_end);
+        if start < end && separator_pipe(bytes, &code, start) {
+            start += 1;
+            if start >= end {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    ranges
+}
+
+/// Cell text between separator pipes. `\|` and a pipe inside `` ` ` `` stay in the cell.
+pub fn split_table_cells(line: &str) -> Vec<String> {
+    table_cell_ranges(line)
+        .into_iter()
+        .map(|range| line[range].trim().to_string())
         .collect()
+}
+
+fn is_delimiter_cell(cell: &str) -> bool {
+    let cell = cell.trim();
+    let bytes = cell.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut index = usize::from(bytes[0] == b':');
+    let hyphens_at = index;
+    while index < bytes.len() && bytes[index] == b'-' {
+        index += 1;
+    }
+    if index == hyphens_at {
+        return false;
+    }
+    if index < bytes.len() && bytes[index] == b':' {
+        index += 1;
+    }
+    index == bytes.len()
+}
+
+/// Alignment for a delimiter row, or `None` when the line is not one.
+/// A delimiter must contain a pipe, so a thematic break stays a break.
+fn delimiter_alignments(line: &str) -> Option<Vec<TableColumnAlign>> {
+    if unescaped_pipe_offsets(line).is_empty() {
+        return None;
+    }
+    let cells = split_table_cells(line);
+    if cells.is_empty() || !cells.iter().all(|cell| is_delimiter_cell(cell)) {
+        return None;
+    }
+    Some(cells.iter().map(|cell| table_column_align(cell)).collect())
+}
+
+/// A line that starts another block ends a table. Blank lines do too.
+fn line_breaks_table(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with("```") {
+        return true;
+    }
+    if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+        return true;
+    }
+    let trimmed_start = line.trim_start();
+    let indent_len = line.len() - trimmed_start.len();
+    if indent_len <= 3 {
+        for prefix in ["###### ", "##### ", "#### ", "### ", "## ", "# "] {
+            if trimmed_start.starts_with(prefix) {
+                return true;
+            }
+        }
+    }
+    if trimmed_start.starts_with("> ") {
+        return true;
+    }
+    let task = trimmed_start.starts_with("- [ ] ")
+        || trimmed_start.starts_with("* [ ] ")
+        || trimmed_start.starts_with("+ [ ] ")
+        || trimmed_start.starts_with("- [x] ")
+        || trimmed_start.starts_with("- [X] ")
+        || trimmed_start.starts_with("* [x] ")
+        || trimmed_start.starts_with("* [X] ")
+        || trimmed_start.starts_with("+ [x] ")
+        || trimmed_start.starts_with("+ [X] ");
+    if task
+        || trimmed_start.starts_with("- ")
+        || trimmed_start.starts_with("* ")
+        || trimmed_start.starts_with("+ ")
+    {
+        return true;
+    }
+    if let Some(dot_pos) = trimmed_start.find(". ") {
+        if dot_pos > 0
+            && trimmed_start[..dot_pos]
+                .chars()
+                .all(|ch| ch.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+struct TableBlock {
+    last: usize,
+    delimiter: usize,
+    alignments: Vec<TableColumnAlign>,
+}
+
+struct DetectedTable {
+    first: usize,
+    last: usize,
+    delimiter: usize,
+    source: std::ops::Range<usize>,
+    alignments: Vec<TableColumnAlign>,
+}
+
+/// A table is a header row plus the next line as a delimiter of the same width.
+/// Later lines stay in the table until a blank line or another block starts.
+fn table_block(lines: &[SourceLine<'_>], start: usize) -> Option<TableBlock> {
+    if start + 1 >= lines.len() || line_breaks_table(lines[start].text) {
+        return None;
+    }
+    let header_cells = table_cell_ranges(lines[start].text);
+    let alignments = delimiter_alignments(lines[start + 1].text)?;
+    if header_cells.is_empty() || alignments.len() != header_cells.len() {
+        return None;
+    }
+    let mut last = start + 1;
+    let mut index = start + 2;
+    while index < lines.len() && !line_breaks_table(lines[index].text) {
+        last = index;
+        index += 1;
+    }
+    Some(TableBlock {
+        last,
+        delimiter: start + 1,
+        alignments,
+    })
 }
 
 /// `---` is unset, `:---` is left, `:---:` is center, and `---:` is right.
@@ -1029,38 +1239,34 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     let mut in_code_block = false;
     let mut open_fence_range: Option<std::ops::Range<usize>> = None;
 
-    // Pre-detect table block ranges and column alignments
-    let mut table_ranges: Vec<(usize, usize, std::ops::Range<usize>, Vec<TableColumnAlign>)> =
-        Vec::new();
+    // Header plus a same-width delimiter. Body rows stop at the next block.
+    let mut table_ranges: Vec<DetectedTable> = Vec::new();
     {
         let mut idx = 0;
+        let mut in_fence = false;
         while idx < raw_lines.len() {
-            let t = raw_lines[idx].text.trim();
-            if t.starts_with('|') && t.ends_with('|') && t.len() >= 2 {
-                let start_idx = idx;
+            let text = raw_lines[idx].text;
+            if text.trim().starts_with("```") {
+                in_fence = !in_fence;
+                idx += 1;
+                continue;
+            }
+            if in_fence {
+                idx += 1;
+                continue;
+            }
+            if let Some(table) = table_block(&raw_lines, idx) {
                 let byte_start = raw_lines[idx].start;
-                let mut byte_end = raw_lines[idx].start + raw_lines[idx].text.len();
-                let mut alignments = Vec::new();
-                while idx < raw_lines.len() {
-                    let cur = raw_lines[idx].text.trim();
-                    if cur.starts_with('|') && cur.ends_with('|') && cur.len() >= 2 {
-                        byte_end = raw_lines[idx].start + raw_lines[idx].text.len();
-                        let is_sep = cur.contains('-')
-                            && cur
-                                .chars()
-                                .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
-                        if is_sep && alignments.is_empty() {
-                            alignments = split_table_cells(cur)
-                                .iter()
-                                .map(|cell| table_column_align(cell))
-                                .collect();
-                        }
-                        idx += 1;
-                    } else {
-                        break;
-                    }
-                }
-                table_ranges.push((start_idx, idx - 1, byte_start..byte_end, alignments));
+                let last_line = &raw_lines[table.last];
+                let byte_end = last_line.start + last_line.text.len();
+                table_ranges.push(DetectedTable {
+                    first: idx,
+                    last: table.last,
+                    delimiter: table.delimiter,
+                    source: byte_start..byte_end,
+                    alignments: table.alignments,
+                });
+                idx = table.last + 1;
             } else {
                 idx += 1;
             }
@@ -1197,15 +1403,12 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
-        // Table rows
-        if let Some(&(tbl_first, _tbl_last, ref tbl_src, ref tbl_aligns)) =
-            table_ranges.iter().find(|&&(f, l, _, _)| i >= f && i <= l)
+        // Table rows. Only the delimiter line is hidden; cells follow its width.
+        if let Some(table) = table_ranges
+            .iter()
+            .find(|table| i >= table.first && i <= table.last)
         {
-            let is_separator = trimmed.contains('-')
-                && trimmed
-                    .chars()
-                    .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
-            if is_separator {
+            if i == table.delimiter {
                 let hidden = vec![line_start..line_end];
                 all_hidden.extend(hidden.iter().cloned());
                 let (display_text, offset_map) =
@@ -1223,33 +1426,34 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 });
                 continue;
             } else {
-                // Parse cell ranges inside `| cell1 | cell2 |`
-                let is_header = i == tbl_first;
+                let is_header = i == table.first;
+                let cols = table.alignments.len();
                 let mut cells = Vec::new();
                 let mut raw_cells = Vec::new();
                 let mut row_hidden = Vec::new();
                 let mut row_pairs = Vec::new();
                 let mut row_segments = Vec::new();
-                let pipe_positions = unescaped_pipe_offsets(line);
-                for w in pipe_positions.windows(2) {
-                    let raw_c_start = w[0] + 1;
-                    let raw_c_end = w[1];
-                    raw_cells.push((line_start + raw_c_start)..(line_start + raw_c_end));
-                    let cell_slice = &line[raw_c_start..raw_c_end];
+                for raw in table_cell_ranges(line).into_iter().take(cols) {
+                    let raw_abs = (line_start + raw.start)..(line_start + raw.end);
+                    let cell_slice = &line[raw.clone()];
                     let lead = usize::from(cell_slice.starts_with(' '));
                     let rem = &cell_slice[lead..];
                     let trail = usize::from(rem.ends_with(' '));
-                    let c_start = line_start + raw_c_start + lead;
-                    let c_end = line_start + raw_c_end - trail;
+                    let c_start = raw_abs.start + lead;
+                    let c_end = raw_abs.end - trail;
+                    raw_cells.push(raw_abs);
                     cells.push(c_start..c_end);
                     if c_end > c_start {
                         let inner_slice = &line[(c_start - line_start)..(c_end - line_start)];
-                        let (c_hid, c_pairs, c_segs) =
-                            parse_inline_syntax(inner_slice, c_start);
+                        let (c_hid, c_pairs, c_segs) = parse_inline_syntax(inner_slice, c_start);
                         row_hidden.extend(c_hid);
                         row_pairs.extend(c_pairs);
                         row_segments.extend(c_segs);
                     }
+                }
+                while cells.len() < cols {
+                    cells.push(line_end..line_end);
+                    raw_cells.push(line_end..line_end);
                 }
                 if row_segments.is_empty() {
                     row_segments.push(StyledSegment {
@@ -1265,9 +1469,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 let merged_hidden = merge_ranges(row_hidden);
                 all_hidden.extend(merged_hidden.iter().cloned());
                 all_pairs.extend(row_pairs.iter().cloned());
-                let alignments: Vec<TableColumnAlign> = (0..cells.len())
-                    .map(|col_idx| tbl_aligns.get(col_idx).copied().unwrap_or_default())
-                    .collect();
+                let alignments = table.alignments.clone();
                 lines.push(ParsedLine {
                     line_index: i,
                     source: line_source.clone(),
@@ -1276,7 +1478,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                         cells,
                         raw_cells,
                         alignments,
-                        table_source: tbl_src.clone(),
+                        table_source: table.source.clone(),
                     },
                     prefix_range: line_start..line_start,
                     hidden_ranges: merged_hidden,
