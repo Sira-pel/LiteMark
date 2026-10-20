@@ -37,7 +37,7 @@ A super lightweight, high-performance **Markdown & Plain Text Editor** designed 
 - **Formatting Included:** **Bold**, *italic*, <u>underline</u>, and ~~strikethrough~~.
 - **Header Levels:** Clean H1, H2, and H3 headers.
 - **Lists & Checklists:**
-  - [x] Lightweight & low memory usage (~18–28MB RAM)
+  - [x] Lightweight & low memory usage
   - [x] Open & save both .txt and .md files
   - [x] 1-Click install as desktop app or native .deb package
 - **Quotes & Code Blocks:**
@@ -53,7 +53,7 @@ fn main() {
 ---
 
 ## 🚀 Native Performance (Rust with GPUI)
-Running with **GPUI** hardware-accelerated Vulkan pipeline tailored for Ubuntu with **~20MB RAM** footprint!
+Running with **GPUI** hardware-accelerated Vulkan pipeline tailored for Ubuntu with minimal memory footprint!
 "#;
 
 pub fn get_or_create_notes_dir() -> PathBuf {

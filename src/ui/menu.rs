@@ -214,10 +214,6 @@ where
                         _ => false,
                     };
                     let is_submenu = matches!(item.kind, MenuItemKind::Submenu(_));
-                    let submenu_items = match item.kind {
-                        MenuItemKind::Submenu(subs) => Some(subs),
-                        _ => None,
-                    };
                     let is_sub_open = open_submenu_ix == Some(ix);
 
                     let mut row = div()
@@ -226,6 +222,7 @@ where
                         .flex()
                         .items_center()
                         .justify_between()
+                        .gap(px(12.0))
                         .h(sz::ROW_H)
                         .px(px(12.0))
                         .rounded(px(5.0))
@@ -236,8 +233,8 @@ where
                         .when(!is_disabled, |s| {
                             let sub = on_set_submenu.clone();
                             s.cursor_pointer()
-                                .text_color(if is_selected { theme.text_strong } else { theme.text_primary })
-                                .when(is_selected, |sel| sel.bg(theme.border_subtle))
+                                .text_color(if is_selected || is_sub_open { theme.text_strong } else { theme.text_primary })
+                                .when(is_selected || is_sub_open, |sel| sel.bg(theme.border_subtle))
                                 .hover(|h| h.bg(theme.border_subtle).text_color(theme.text_strong))
                                 .when(!is_submenu, |act_s| {
                                     let cls = cls.clone();
@@ -288,6 +285,7 @@ where
                     let right_side = div()
                         .flex()
                         .items_center()
+                        .flex_shrink_0()
                         .gap(px(8.0))
                         .when_some(item.hint, |s, hint| {
                             s.child(
@@ -311,35 +309,10 @@ where
                             )
                         })
                         .when(is_submenu, |s| {
-                            s.child(render_icon("chevron-right", 12.0, theme.text_muted))
+                            s.child(render_icon("chevron-right", 12.0, if is_sub_open { theme.text_strong } else { theme.text_muted }))
                         });
 
                     row = row.child(right_side);
-
-                    // Submenu popup if open
-                    if is_sub_open {
-                        if let Some(sub_items) = submenu_items {
-                            let sub_w = px(180.0);
-                            let sub_cls = cls.clone();
-                            let theme_clone = *theme;
-                            row = row.child(
-                                anchored()
-                                    .position(Point::new(width - px(4.0), px(ix as f32 * 32.0)))
-                                    .anchor(Corner::TopLeft)
-                                    .snap_to_window()
-                                    .child(render_menu_panel(
-                                        ("sub-menu", ix).into(),
-                                        sub_w,
-                                        sub_items,
-                                        None,
-                                        None,
-                                        sub_cls,
-                                        on_set_submenu.clone(),
-                                        &theme_clone,
-                                    ))
-                            );
-                        }
-                    }
 
                     row.into_any_element()
                 }
@@ -352,6 +325,8 @@ where
         .flex()
         .flex_col()
         .w(width)
+        .max_h(px(480.0))
+        .overflow_y_scroll()
         .p(px(4.0))
         .rounded(sz::R_LG)
         .bg(theme.menu_bg)
@@ -381,29 +356,106 @@ where
     let id = props.id;
     let on_set_submenu = props.on_set_submenu;
 
-    deferred(
-        anchored()
-            .position(point)
-            .anchor(anchor_corner)
-            .snap_to_window()
-            .child(
-                div()
-                    .track_focus(&focus_handle)
-                    .key_context("Menu")
-                    .on_mouse_down_out(move |_, _, cx| {
-                        cls(cx);
-                    })
-                    .child(render_menu_panel(
-                        id,
-                        width,
-                        items,
-                        selected_index,
-                        open_submenu_ix,
-                        props.on_close,
-                        on_set_submenu,
-                        theme,
-                    ))
+    let submenu_element = if let Some(sub_ix) = open_submenu_ix {
+        if let Some(item) = items.get(sub_ix) {
+            if let MenuItemKind::Submenu(ref sub_items) = item.kind {
+                let mut y_offset = px(4.0);
+                for prev in items.iter().take(sub_ix) {
+                    y_offset += match prev.kind {
+                        MenuItemKind::Divider => px(9.0),
+                        MenuItemKind::Heading => px(24.0),
+                        _ => sz::ROW_H,
+                    };
+                }
+                let sub_w = match item.label {
+                    "View" => px(295.0),
+                    "Font size" => px(160.0),
+                    _ => px(220.0),
+                };
+                let is_right_anchored = matches!(
+                    anchor_corner,
+                    Corner::TopRight | Corner::BottomRight
+                );
+                let (sub_anchor, sub_point) = if is_right_anchored {
+                    (Corner::TopRight, Point::new(point.x - width - px(4.0), point.y + y_offset))
+                } else {
+                    (Corner::TopLeft, Point::new(point.x + width + px(4.0), point.y + y_offset))
+                };
+                let sub_cls = cls.clone();
+                let theme_clone = *theme;
+                Some(
+                    anchored()
+                        .position(sub_point)
+                        .anchor(sub_anchor)
+                        .snap_to_window()
+                        .child(
+                            div()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(render_menu_panel(
+                                    ("sub-menu", sub_ix).into(),
+                                    sub_w,
+                                    sub_items.clone(),
+                                    None,
+                                    None,
+                                    sub_cls,
+                                    |_, _: &mut App| {},
+                                    &theme_clone,
+                                ))
+                        )
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    div()
+        .id("dropdown-menu-overlay-root")
+        .absolute()
+        .inset_0()
+        .child(
+            // Invisible dismissal backdrop
+            div()
+                .id("menu-dismiss-backdrop")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(MouseButton::Left, {
+                    let cls = cls.clone();
+                    move |_, _, cx| cls(cx)
+                })
+        )
+        .child(
+            deferred(
+                anchored()
+                    .position(point)
+                    .anchor(anchor_corner)
+                    .snap_to_window()
+                    .child(
+                        div()
+                            .track_focus(&focus_handle)
+                            .key_context("Menu")
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(render_menu_panel(
+                                id,
+                                width,
+                                items,
+                                selected_index,
+                                open_submenu_ix,
+                                props.on_close,
+                                on_set_submenu,
+                                theme,
+                            ))
+                    )
             )
-    )
-    .with_priority(1)
+            .with_priority(1)
+        )
+        .when_some(submenu_element, |s, sub| {
+            s.child(
+                deferred(sub).with_priority(2)
+            )
+        })
 }

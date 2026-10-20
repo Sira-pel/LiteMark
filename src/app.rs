@@ -2920,7 +2920,8 @@ impl Render for LiteMarkApp {
             }
         };
 
-        let is_narrow = window.viewport_size().width < px(640.0);
+        let window_width = window.viewport_size().width;
+        let is_narrow = window_width < px(640.0);
 
         let menu_bar_element = render_menu_bar(
             MenuBarProps {
@@ -3063,20 +3064,29 @@ impl Render for LiteMarkApp {
                         items,
                     )
                 }
-                MenuId::Overflow => (
-                    Point::new(
-                        (window.viewport_size().width / 2.0 + px(220.0))
-                            .min(window.viewport_size().width - px(8.0)),
-                        px(76.0),
-                    ),
-                    Corner::TopRight,
-                    px(210.0),
-                    build_overflow_menu_items(
-                        on_format.clone(),
-                        on_insert_table.clone(),
-                        on_close_menu.clone(),
-                    ),
-                ),
+                MenuId::Overflow => {
+                    let overflow_x = if is_narrow {
+                        (window.viewport_size().width / 2.0 + px(128.0))
+                            .min(window.viewport_size().width - px(8.0))
+                    } else {
+                        (window.viewport_size().width / 2.0 + px(270.0))
+                            .min(window.viewport_size().width - px(8.0))
+                    };
+                    (
+                        Point::new(
+                            overflow_x.min(window.viewport_size().width - px(8.0)),
+                            px(76.0),
+                        ),
+                        Corner::TopRight,
+                        px(210.0),
+                        build_overflow_menu_items(
+                            is_narrow,
+                            on_format.clone(),
+                            on_insert_table.clone(),
+                            on_close_menu.clone(),
+                        ),
+                    )
+                }
             };
 
             Some(render_dropdown_menu(

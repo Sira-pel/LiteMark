@@ -74,7 +74,7 @@ Depends: libc6, libxcb1, libxkbcommon0, libxkbcommon-x11-0
 Description: Ultra-fast native GPUI markdown and text editor for Ubuntu
  LiteMark is a pure native Linux desktop application built with
  Rust and GPUI (Vulkan hardware acceleration). It starts in under
- 30ms, idles at ~20MB RAM, features exact Yaru dark and light themes,
+ 30ms, features minimal resource footprint, exact Yaru dark and light themes,
  automatic ~/Documents/Notes folder management, instant WYSIWYG
  rendering, pure-Rust PDF extraction, and atomic file saving.
 EOF

@@ -1,6 +1,6 @@
 # LiteMark
 
-**LiteMark** is an ultra-fast, native Linux Markdown and plain text editor with an authentic Ubuntu Yaru visual aesthetic. Built from the ground up using **Rust** and **GPUI** with **Vulkan hardware acceleration**, LiteMark delivers instantaneous sub-30ms startup times, minimal resource footprint (~20MB RAM idle), and fluid 60+ FPS text editing.
+**LiteMark** is an ultra-fast, native Linux Markdown and plain text editor with an authentic Ubuntu Yaru visual aesthetic. Built from the ground up using **Rust** and **GPUI** with **Vulkan hardware acceleration**, LiteMark delivers instantaneous sub-30ms startup times, minimal resource footprint, and fluid 60+ FPS text editing.
 
 ---
 

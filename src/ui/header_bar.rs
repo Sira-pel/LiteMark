@@ -90,6 +90,7 @@ where
         .px(px(8.0))
         .bg(theme.bg_header)
         .flex_shrink_0()
+        .overflow_hidden()
         // Double-click zooms. A plain click only arms a drag. X11 has to
         // receive `_NET_WM_MOVERESIZE` while the button is still down, so the
         // first move with the left button pressed starts the move immediately.
@@ -143,40 +144,49 @@ where
         // Left: Sidebar Toggle + Tabs + "+"
         .child(
             div()
+                .id("title-bar-left")
                 .flex()
                 .items_end()
                 .h_full()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .child(
                     // Sidebar Toggle: 32x28 at y 6-34, 8px gap to tabs
-                    div().flex().items_center().h_full().mr(px(8.0)).child({
-                        let t_sb = on_toggle_sidebar.clone();
-                        div()
-                            .id("hb-toggle-sidebar")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(sz::BTN)
-                            .h(sz::TB_TILE_H)
-                            .rounded(sz::R_MD)
-                            .cursor_pointer()
-                            .bg(if props.is_sidebar_open {
-                                theme.row_active
-                            } else {
-                                rgba(0x00000000)
-                            })
-                            .hover(|h| h.bg(theme.bg_hover))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, _, cx| t_sb(cx))
-                            .child(render_icon(
-                                "sidebar-toggle",
-                                16.0,
-                                if props.is_sidebar_open {
-                                    theme.text_strong
+                    div()
+                        .flex()
+                        .items_center()
+                        .h_full()
+                        .mr(px(8.0))
+                        .flex_shrink_0()
+                        .child({
+                            let t_sb = on_toggle_sidebar.clone();
+                            div()
+                                .id("hb-toggle-sidebar")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(sz::BTN)
+                                .h(sz::TB_TILE_H)
+                                .rounded(sz::R_MD)
+                                .cursor_pointer()
+                                .bg(if props.is_sidebar_open {
+                                    theme.row_active
                                 } else {
-                                    theme.text_muted
-                                },
-                            ))
-                    }),
+                                    rgba(0x00000000)
+                                })
+                                .hover(|h| h.bg(theme.bg_hover))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| t_sb(cx))
+                                .child(render_icon(
+                                    "sidebar-toggle",
+                                    16.0,
+                                    if props.is_sidebar_open {
+                                        theme.text_strong
+                                    } else {
+                                        theme.text_muted
+                                    },
+                                ))
+                        }),
                 )
                 // Tabs strip: 32px tall, flush to bottom, active covers bottom line
                 .child(
@@ -186,6 +196,8 @@ where
                         .items_end()
                         .gap(px(4.0))
                         .h_full()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
                         .children(props.tabs.into_iter().map(|tab| {
                             let is_active = tab.id == active_id;
                             let tab_id = tab.id.clone();
@@ -200,10 +212,12 @@ where
                                 .flex()
                                 .items_center()
                                 .gap(px(8.0))
-                                .px(px(12.0))
+                                .px(px(10.0))
                                 .h(sz::TAB_H)
                                 .rounded_t(sz::R_MD)
                                 .cursor_pointer()
+                                .min_w(px(36.0))
+                                .overflow_hidden()
                                 .bg(if is_active {
                                     theme.bg_toolbar
                                 } else {
@@ -221,25 +235,30 @@ where
                                 })
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(move |_, _, cx| sel(tab_id.clone(), cx))
-                                .child(render_icon(
-                                    "file-text",
-                                    14.0,
-                                    if is_active {
-                                        theme.text_hi
-                                    } else {
-                                        theme.text_muted
-                                    },
-                                ))
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .child(render_icon(
+                                            "file-text",
+                                            14.0,
+                                            if is_active {
+                                                theme.text_hi
+                                            } else {
+                                                theme.text_muted
+                                            },
+                                        ))
+                                )
                                 .child(
                                     div()
                                         .max_w(px(200.0))
-                                        .min_w(px(60.0))
+                                        .min_w(px(0.0))
                                         .truncate()
                                         .child(tab.title),
                                 )
                                 // Close slot (16px) with close button or modified dot
                                 .child(
                                     div()
+                                        .flex_shrink_0()
                                         .w(px(16.0))
                                         .h(px(16.0))
                                         .flex()
@@ -290,34 +309,47 @@ where
                         // "+" button: 28x28 at y 6-34, 4px after last tab
                         .child({
                             let nt = on_new_tab.clone();
-                            div().flex().items_center().h_full().child(
-                                div()
-                                    .id("hb-new-tab")
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .w(sz::PLUS)
-                                    .h(sz::PLUS)
-                                    .rounded(sz::R_MD)
-                                    .cursor_pointer()
-                                    .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(move |_, _, cx| nt(cx))
-                                    .child(render_icon("plus", 14.0, theme.text_muted)),
-                            )
+                            div()
+                                .flex()
+                                .items_center()
+                                .h_full()
+                                .flex_shrink_0()
+                                .child(
+                                    div()
+                                        .id("hb-new-tab")
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .w(sz::PLUS)
+                                        .h(sz::PLUS)
+                                        .rounded(sz::R_MD)
+                                        .cursor_pointer()
+                                        .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(move |_, _, cx| nt(cx))
+                                        .child(render_icon("plus", 14.0, theme.text_muted)),
+                                )
                         }),
-                ),
+                )
         )
         // Center spacer (flex_1): clicking here drags the window
-        .child(div().flex_1().h_full())
+        .child(
+            div()
+                .id("title-bar-spacer")
+                .flex_1()
+                .min_w(px(0.0))
+                .h_full()
+        )
         // Right: Window Controls (36x28, radius 6, 4px gaps, 8px from right edge)
         .child(
             div()
+                .id("window-controls")
                 .flex()
                 .items_center()
                 .gap(px(4.0))
+                .flex_shrink_0()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 // Minimize
                 .child({
@@ -331,6 +363,7 @@ where
                         .h(sz::WC_H)
                         .rounded(sz::R_MD)
                         .cursor_pointer()
+                        .flex_shrink_0()
                         .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
                         .on_click(move |_, window, cx| m(window, cx))
                         .child(render_icon("wc-min", 10.0, theme.wc_glyph))
@@ -352,6 +385,7 @@ where
                         .h(sz::WC_H)
                         .rounded(sz::R_MD)
                         .cursor_pointer()
+                        .flex_shrink_0()
                         .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
                         .on_click(move |_, window, cx| m(window, cx))
                         .child(render_icon(icon, 10.0, theme.wc_glyph))
@@ -368,6 +402,7 @@ where
                         .h(sz::WC_H)
                         .rounded(sz::R_MD)
                         .cursor_pointer()
+                        .flex_shrink_0()
                         .hover(|h| h.bg(theme.close_hover).text_color(rgb(0xffffff)))
                         .on_click(move |_, window, cx| c(window, cx))
                         .child(render_icon("wc-close", 10.0, theme.wc_glyph))
@@ -802,5 +837,25 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn test_window_controls_dimensions_and_responsiveness() {
+        use gpui::px;
+        // 3 buttons of WC_W (36.0) with two 4.0 gaps
+        let wc_width = crate::theme::sz::WC_W * 3.0 + px(4.0) * 2.0;
+        assert_eq!(wc_width, px(116.0));
+        // Padding on right is 8.0, total window controls span is 124.0
+        let wc_span = wc_width + px(8.0);
+        assert_eq!(wc_span, px(124.0));
+
+        // Sidebar button (32.0) + mr (8.0) + padding left (8.0) = 48.0
+        let left_fixed = crate::theme::sz::BTN + px(8.0) + px(8.0);
+        assert_eq!(left_fixed, px(48.0));
+
+        // At narrow viewport of 360.0, available space for tabs = 360 - 124 - 48 = 188.0
+        let min_narrow_viewport = px(360.0);
+        let available_for_tabs = min_narrow_viewport - wc_span - left_fixed;
+        assert!(available_for_tabs > px(100.0), "Tabs strip has space to shrink while window controls remain fully intact");
     }
 }

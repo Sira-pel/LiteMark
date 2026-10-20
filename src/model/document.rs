@@ -2547,6 +2547,47 @@ mod tests {
     }
 
     #[test]
+    fn test_underline_toggle_selection_and_pending_formats() {
+        let mut doc = DocumentTab::new(
+            "u1".into(),
+            "test.md".into(),
+            "selected text to underline".into(),
+            None,
+            None,
+        );
+        // Select "text" (indices 9..13)
+        doc.place(9, false);
+        doc.place(13, true);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "selected <u>text</u> to underline");
+        assert!(doc.active_formats.underline);
+
+        // Toggle again on selection should unwrap
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "selected text to underline");
+        assert!(!doc.active_formats.underline);
+
+        // Empty cursor in WYSIWYG mode toggles pending_formats
+        let mut doc2 = DocumentTab::new("u2".into(), "test.md".into(), "".into(), None, None);
+        doc2.place(0, false);
+        doc2.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        assert!(doc2.pending_formats.underline);
+        assert!(doc2.active_formats.underline);
+
+        // Disarm pending underline
+        doc2.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        assert!(!doc2.pending_formats.underline);
+        assert!(!doc2.active_formats.underline);
+
+        // Re-arm and type text -> wraps in <u>...</u>
+        doc2.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        let range = doc2.selection_range();
+        doc2.insert_text_in_mode(range, "hello", ViewMode::Wysiwyg);
+        assert_eq!(doc2.content, "<u>hello</u>");
+        assert!(!doc2.pending_formats.underline);
+    }
+
+    #[test]
     fn test_wysiwyg_delimiter_skipping_navigation_and_atomic_backspace() {
         let mut doc =
             DocumentTab::new("n".into(), "test.md".into(), "a **b** c".into(), None, None);
