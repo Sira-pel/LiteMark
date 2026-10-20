@@ -1599,5 +1599,913 @@ mod tests {
             assert_eq!(line.offset_map.source_to_display(src_idx), disp_idx);
         }
     }
-}
 
+    struct LeafExpect {
+        kind: &'static str,
+        display: &'static str,
+        source: &'static str,
+        marks: &'static str,
+        links: &'static str,
+    }
+
+    fn leaf(kind: &'static str, display: &'static str, source: &'static str) -> LeafExpect {
+        LeafExpect {
+            kind,
+            display,
+            source,
+            marks: "-",
+            links: "-",
+        }
+    }
+
+    fn leaf_marks(
+        kind: &'static str,
+        display: &'static str,
+        source: &'static str,
+        marks: &'static str,
+    ) -> LeafExpect {
+        LeafExpect {
+            kind,
+            display,
+            source,
+            marks,
+            links: "-",
+        }
+    }
+
+    fn leaf_link(
+        kind: &'static str,
+        display: &'static str,
+        source: &'static str,
+        links: &'static str,
+    ) -> LeafExpect {
+        LeafExpect {
+            kind,
+            display,
+            source,
+            marks: "-",
+            links,
+        }
+    }
+
+    fn leaf_kind_token(kind: &LineKind) -> String {
+        match kind {
+            LineKind::Empty => "empty".to_string(),
+            LineKind::Paragraph => "p".to_string(),
+            LineKind::Heading { level } => format!("h{level}"),
+            LineKind::Blockquote => "quote".to_string(),
+            LineKind::ListItem {
+                ordered,
+                number,
+                task,
+                indent_cols,
+                ..
+            } => match (ordered, task) {
+                (false, None) => format!("ul:{indent_cols}"),
+                (true, None) => format!("ol:{number}:{indent_cols}"),
+                (false, Some(false)) => format!("task:{indent_cols}"),
+                (false, Some(true)) => format!("task-x:{indent_cols}"),
+                (true, Some(_)) => format!("ol-task:{number}:{indent_cols}"),
+            },
+            LineKind::CodeFence {
+                language: Some(language),
+                opening: true,
+            } => format!("fence-open:{language}"),
+            LineKind::CodeFence {
+                language: None,
+                opening: true,
+            } => "fence-open".to_string(),
+            LineKind::CodeFence { opening: false, .. } => "fence-close".to_string(),
+            LineKind::CodeLine => "code".to_string(),
+            LineKind::HorizontalRule => "hr".to_string(),
+            LineKind::TableDelimiter => "tdelim".to_string(),
+            LineKind::TableRow { .. } => "row".to_string(),
+        }
+    }
+
+    fn leaf_dump(md: &str) -> Result<String, String> {
+        let doc = parse_document(md);
+        let mut out = String::new();
+        for line in &doc.lines {
+            for (idx, ch) in line.display_text.char_indices() {
+                let src = line.offset_map.display_to_source(idx);
+                if !md.is_char_boundary(src) || !md[src..].starts_with(ch) {
+                    return Err(format!(
+                        "map display {ch:?} at {idx} -> source {src} in {:?}",
+                        line.display_text
+                    ));
+                }
+            }
+            let mut marks = Vec::new();
+            let mut links = Vec::new();
+            for segment in &line.styled_segments {
+                let mut flags = String::new();
+                if segment.bold {
+                    flags.push('B');
+                }
+                if segment.italic {
+                    flags.push('I');
+                }
+                if segment.code {
+                    flags.push('C');
+                }
+                if segment.strike {
+                    flags.push('S');
+                }
+                let text = md.get(segment.source.clone()).unwrap_or("");
+                if !flags.is_empty() && !text.is_empty() {
+                    marks.push(format!("{flags}:{text}"));
+                }
+                if let Some(url) = &segment.link_url {
+                    links.push(url.clone());
+                }
+            }
+            let marks = if marks.is_empty() {
+                "-".to_string()
+            } else {
+                marks.join(",")
+            };
+            let links = if links.is_empty() {
+                "-".to_string()
+            } else {
+                links.join(",")
+            };
+            let source = &md[line.source.clone()];
+            out.push_str(&format!(
+                "{}\tdisplay={:?}\tsource={:?}\tmarks={marks}\tlinks={links}\n",
+                leaf_kind_token(&line.kind),
+                line.display_text,
+                source,
+            ));
+        }
+        Ok(out)
+    }
+
+    fn expect_dump(lines: &[LeafExpect]) -> String {
+        let mut out = String::new();
+        for line in lines {
+            out.push_str(&format!(
+                "{}\tdisplay={:?}\tsource={:?}\tmarks={}\tlinks={}\n",
+                line.kind, line.display, line.source, line.marks, line.links,
+            ));
+        }
+        out
+    }
+
+    /// CommonMark 0.31.2 leaf blocks from the audit samples and the spec
+    /// examples they cite. Each case compares the whole kind, display, source,
+    /// mark, and link record. A setext underline is an empty display line
+    /// whose source is the marker, not a horizontal rule.
+    #[test]
+    fn leaf_blocks_match_commonmark_examples() {
+        let cases: Vec<(&str, &str, Vec<LeafExpect>)> = leaf_block_cases();
+        let mut failures = Vec::new();
+        for (name, md, expected) in &cases {
+            let want = expect_dump(expected);
+            match leaf_dump(md) {
+                Ok(actual) if actual == want => {}
+                Ok(actual) => {
+                    failures.push(format!("CASE {name}\nexpected:\n{want}actual:\n{actual}"))
+                }
+                Err(err) => failures.push(format!("CASE {name} {err}")),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} leaf-block case(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
+        vec![
+            (
+                "ex43-hr",
+                "***\n---\n___",
+                vec![
+                    leaf("hr", "", "***"),
+                    leaf("hr", "", "---"),
+                    leaf("hr", "", "___"),
+                ],
+            ),
+            ("ex44-not-hr", "+++", vec![leaf("p", "+++", "+++")]),
+            ("ex45-equals-not-hr", "===", vec![leaf("p", "===", "===")]),
+            (
+                "ex46-too-short",
+                "--\n**\n__",
+                vec![
+                    leaf("p", "--", "--"),
+                    leaf("p", "**", "**"),
+                    leaf("p", "__", "__"),
+                ],
+            ),
+            (
+                "ex47-hr-indent",
+                " ***\n  ***\n   ***",
+                vec![
+                    leaf("hr", "", " ***"),
+                    leaf("hr", "", "  ***"),
+                    leaf("hr", "", "   ***"),
+                ],
+            ),
+            (
+                "ex48-hr-indented-code",
+                "    ***",
+                vec![leaf_marks("code", "***", "    ***", "C:***")],
+            ),
+            (
+                "ex50-hr-long",
+                "_____________________________________",
+                vec![leaf("hr", "", "_____________________________________")],
+            ),
+            ("ex51-hr-spaced", " - - -", vec![leaf("hr", "", " - - -")]),
+            (
+                "ex52-hr-stars",
+                " **  * ** * ** * **",
+                vec![leaf("hr", "", " **  * ** * ** * **")],
+            ),
+            (
+                "ex53-hr-spaced-dashes",
+                "-     -      -      -",
+                vec![leaf("hr", "", "-     -      -      -")],
+            ),
+            (
+                "ex54-hr-trailing-space",
+                "- - - -    ",
+                vec![leaf("hr", "", "- - - -    ")],
+            ),
+            (
+                "ex55-not-hr",
+                "_ _ _ _ a\n\na------\n\n---a---",
+                vec![
+                    leaf("p", "_ _ _ _ a", "_ _ _ _ a"),
+                    leaf("empty", "", ""),
+                    leaf("p", "a------", "a------"),
+                    leaf("empty", "", ""),
+                    leaf("p", "---a---", "---a---"),
+                ],
+            ),
+            (
+                "ex56-mixed-not-hr",
+                " *-*",
+                vec![leaf_marks("p", " -", " *-*", "I:-")],
+            ),
+            (
+                "ex57-hr-between-lists",
+                "- foo\n***\n- bar",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("hr", "", "***"),
+                    leaf("ul:0", "bar", "- bar"),
+                ],
+            ),
+            (
+                "ex58-hr-not-setext",
+                "Foo\n***\nbar",
+                vec![
+                    leaf("p", "Foo", "Foo"),
+                    leaf("hr", "", "***"),
+                    leaf("p", "bar", "bar"),
+                ],
+            ),
+            (
+                "ex59-setext-h2",
+                "Foo\n---\nbar",
+                vec![
+                    leaf("h2", "Foo", "Foo"),
+                    leaf("empty", "", "---"),
+                    leaf("p", "bar", "bar"),
+                ],
+            ),
+            (
+                "ex60-hr-vs-list",
+                "* Foo\n* * *\n* Bar",
+                vec![
+                    leaf("ul:0", "Foo", "* Foo"),
+                    leaf("hr", "", "* * *"),
+                    leaf("ul:0", "Bar", "* Bar"),
+                ],
+            ),
+            (
+                "ex62-atx-levels",
+                "# foo\n## foo\n### foo\n#### foo\n##### foo\n###### foo",
+                vec![
+                    leaf("h1", "foo", "# foo"),
+                    leaf("h2", "foo", "## foo"),
+                    leaf("h3", "foo", "### foo"),
+                    leaf("h4", "foo", "#### foo"),
+                    leaf("h5", "foo", "##### foo"),
+                    leaf("h6", "foo", "###### foo"),
+                ],
+            ),
+            (
+                "ex63-seven-hashes",
+                "####### foo",
+                vec![leaf("p", "####### foo", "####### foo")],
+            ),
+            (
+                "audit-seven-hashes",
+                "####### no",
+                vec![leaf("p", "####### no", "####### no")],
+            ),
+            (
+                "ex64-atx-needs-space",
+                "#5 bolt\n\n#hashtag",
+                vec![
+                    leaf("p", "#5 bolt", "#5 bolt"),
+                    leaf("empty", "", ""),
+                    leaf("p", "#hashtag", "#hashtag"),
+                ],
+            ),
+            (
+                "ex65-escaped-atx",
+                "\\## foo",
+                vec![leaf("p", "\\## foo", "\\## foo")],
+            ),
+            (
+                "ex66-atx-inline",
+                "# foo *bar* \\*baz\\*",
+                vec![leaf_marks(
+                    "h1",
+                    "foo bar \\*baz\\*",
+                    "# foo *bar* \\*baz\\*",
+                    "I:bar",
+                )],
+            ),
+            (
+                "ex67-atx-trim",
+                "#                  foo                     ",
+                vec![leaf(
+                    "h1",
+                    "foo",
+                    "#                  foo                     ",
+                )],
+            ),
+            (
+                "ex68-atx-indent",
+                " ### foo\n  ## foo\n   # foo",
+                vec![
+                    leaf("h3", "foo", " ### foo"),
+                    leaf("h2", "foo", "  ## foo"),
+                    leaf("h1", "foo", "   # foo"),
+                ],
+            ),
+            (
+                "ex69-atx-indented-code",
+                "    # foo",
+                vec![leaf_marks("code", "# foo", "    # foo", "C:# foo")],
+            ),
+            (
+                "ex71-closing-hash",
+                "## foo ##\n  ###   bar    ###",
+                vec![
+                    leaf("h2", "foo", "## foo ##"),
+                    leaf("h3", "bar", "  ###   bar    ###"),
+                ],
+            ),
+            (
+                "ex72-closing-hash-run",
+                "# foo ##################################\n##### foo ##",
+                vec![
+                    leaf("h1", "foo", "# foo ##################################"),
+                    leaf("h5", "foo", "##### foo ##"),
+                ],
+            ),
+            (
+                "ex73-closing-hash-spaces",
+                "### foo ###     ",
+                vec![leaf("h3", "foo", "### foo ###     ")],
+            ),
+            (
+                "ex74-hash-not-closer",
+                "### foo ### b",
+                vec![leaf("h3", "foo ### b", "### foo ### b")],
+            ),
+            (
+                "ex75-hash-needs-space",
+                "# foo#",
+                vec![leaf("h1", "foo#", "# foo#")],
+            ),
+            (
+                "ex76-escaped-closer",
+                "### foo \\###\n## foo #\\##\n# foo \\#",
+                vec![
+                    leaf("h3", "foo \\###", "### foo \\###"),
+                    leaf("h2", "foo #\\##", "## foo #\\##"),
+                    leaf("h1", "foo \\#", "# foo \\#"),
+                ],
+            ),
+            (
+                "ex77-four-stars",
+                "****\n## foo\n****",
+                vec![
+                    leaf("hr", "", "****"),
+                    leaf("h2", "foo", "## foo"),
+                    leaf("hr", "", "****"),
+                ],
+            ),
+            (
+                "ex78-atx-interrupts",
+                "Foo bar\n# baz\nBar foo",
+                vec![
+                    leaf("p", "Foo bar", "Foo bar"),
+                    leaf("h1", "baz", "# baz"),
+                    leaf("p", "Bar foo", "Bar foo"),
+                ],
+            ),
+            (
+                "ex79-empty-atx",
+                "## \n#\n### ###",
+                vec![
+                    leaf("h2", "", "## "),
+                    leaf("h1", "", "#"),
+                    leaf("h3", "", "### ###"),
+                ],
+            ),
+            (
+                "ex80-setext-inline",
+                "Foo *bar*\n=========\n\nFoo *bar*\n---------",
+                vec![
+                    leaf_marks("h1", "Foo bar", "Foo *bar*", "I:bar"),
+                    leaf("empty", "", "========="),
+                    leaf("empty", "", ""),
+                    leaf_marks("h2", "Foo bar", "Foo *bar*", "I:bar"),
+                    leaf("empty", "", "---------"),
+                ],
+            ),
+            (
+                "ex83-setext",
+                "Foo\n-------------------------\n\nFoo\n=",
+                vec![
+                    leaf("h2", "Foo", "Foo"),
+                    leaf("empty", "", "-------------------------"),
+                    leaf("empty", "", ""),
+                    leaf("h1", "Foo", "Foo"),
+                    leaf("empty", "", "="),
+                ],
+            ),
+            (
+                "audit-setext-both",
+                "Foo\n---\n\nBar\n===",
+                vec![
+                    leaf("h2", "Foo", "Foo"),
+                    leaf("empty", "", "---"),
+                    leaf("empty", "", ""),
+                    leaf("h1", "Bar", "Bar"),
+                    leaf("empty", "", "==="),
+                ],
+            ),
+            (
+                "ex84-setext-indent",
+                "   Foo\n---\n\n  Foo\n-----\n\n  Foo\n  ===",
+                vec![
+                    leaf("h2", "Foo", "   Foo"),
+                    leaf("empty", "", "---"),
+                    leaf("empty", "", ""),
+                    leaf("h2", "Foo", "  Foo"),
+                    leaf("empty", "", "-----"),
+                    leaf("empty", "", ""),
+                    leaf("h1", "Foo", "  Foo"),
+                    leaf("empty", "", "  ==="),
+                ],
+            ),
+            (
+                "ex86-setext-underline-indent",
+                "Foo\n   ----      ",
+                vec![leaf("h2", "Foo", "Foo"), leaf("empty", "", "   ----      ")],
+            ),
+            (
+                "ex88-not-setext",
+                "Foo\n= =\n\nFoo\n--- -",
+                vec![
+                    leaf("p", "Foo", "Foo"),
+                    leaf("p", "= =", "= ="),
+                    leaf("empty", "", ""),
+                    leaf("p", "Foo", "Foo"),
+                    leaf("hr", "", "--- -"),
+                ],
+            ),
+            (
+                "ex89-setext-trailing-spaces",
+                "Foo  \n-----",
+                vec![leaf("h2", "Foo", "Foo  "), leaf("empty", "", "-----")],
+            ),
+            (
+                "ex90-setext-backslash",
+                "Foo\\\n----",
+                vec![leaf("h2", "Foo\\", "Foo\\"), leaf("empty", "", "----")],
+            ),
+            (
+                "ex91-setext-in-text",
+                "`Foo\n----\n`\n\n<a title=\"a lot\n---\nof dashes\"/>",
+                vec![
+                    leaf("h2", "`Foo", "`Foo"),
+                    leaf("empty", "", "----"),
+                    leaf("p", "`", "`"),
+                    leaf("empty", "", ""),
+                    leaf("h2", "<a title=\"a lot", "<a title=\"a lot"),
+                    leaf("empty", "", "---"),
+                    leaf("p", "of dashes\"/>", "of dashes\"/>"),
+                ],
+            ),
+            (
+                "ex92-quote-then-hr",
+                "> Foo\n---",
+                vec![leaf("quote", "Foo", "> Foo"), leaf("hr", "", "---")],
+            ),
+            (
+                "ex94-list-then-hr",
+                "- Foo\n---",
+                vec![leaf("ul:0", "Foo", "- Foo"), leaf("hr", "", "---")],
+            ),
+            (
+                "ex96-hr-and-setext",
+                "---\nFoo\n---\nBar\n---\nBaz",
+                vec![
+                    leaf("hr", "", "---"),
+                    leaf("h2", "Foo", "Foo"),
+                    leaf("empty", "", "---"),
+                    leaf("h2", "Bar", "Bar"),
+                    leaf("empty", "", "---"),
+                    leaf("p", "Baz", "Baz"),
+                ],
+            ),
+            (
+                "ex97-equals-after-blank",
+                "\n====",
+                vec![leaf("empty", "", ""), leaf("p", "====", "====")],
+            ),
+            (
+                "ex98-two-hrs",
+                "---\n---",
+                vec![leaf("hr", "", "---"), leaf("hr", "", "---")],
+            ),
+            (
+                "ex100-code-then-hr",
+                "    foo\n---",
+                vec![
+                    leaf_marks("code", "foo", "    foo", "C:foo"),
+                    leaf("hr", "", "---"),
+                ],
+            ),
+            (
+                "ex103-setext-after-blank",
+                "Foo\n\nbar\n---\nbaz",
+                vec![
+                    leaf("p", "Foo", "Foo"),
+                    leaf("empty", "", ""),
+                    leaf("h2", "bar", "bar"),
+                    leaf("empty", "", "---"),
+                    leaf("p", "baz", "baz"),
+                ],
+            ),
+            (
+                "ex107-indented-code",
+                "    a simple\n      indented code block",
+                vec![
+                    leaf_marks("code", "a simple", "    a simple", "C:a simple"),
+                    leaf_marks(
+                        "code",
+                        "  indented code block",
+                        "      indented code block",
+                        "C:  indented code block",
+                    ),
+                ],
+            ),
+            (
+                "cm40-tab",
+                "\tfoo",
+                vec![leaf_marks("code", "foo", "\tfoo", "C:foo")],
+            ),
+            (
+                "ex119-backtick-fence",
+                "```\n<\n >\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "<", "<", "C:<"),
+                    leaf_marks("code", " >", " >", "C: >"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex120-tilde-fence",
+                "~~~\n<\n >\n~~~",
+                vec![
+                    leaf("fence-open", "", "~~~"),
+                    leaf_marks("code", "<", "<", "C:<"),
+                    leaf_marks("code", " >", " >", "C: >"),
+                    leaf("fence-close", "", "~~~"),
+                ],
+            ),
+            (
+                "ex122-tilde-inside-backticks",
+                "```\naaa\n~~~\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "~~~", "~~~", "C:~~~"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex123-backticks-inside-tilde",
+                "~~~\naaa\n```\n~~~",
+                vec![
+                    leaf("fence-open", "", "~~~"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "```", "```", "C:```"),
+                    leaf("fence-close", "", "~~~"),
+                ],
+            ),
+            (
+                "ex124-fence-len",
+                "````\naaa\n```\n``````",
+                vec![
+                    leaf("fence-open", "", "````"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "```", "```", "C:```"),
+                    leaf("fence-close", "", "``````"),
+                ],
+            ),
+            (
+                "ex125-tilde-len",
+                "~~~~\naaa\n~~~\n~~~~",
+                vec![
+                    leaf("fence-open", "", "~~~~"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "~~~", "~~~", "C:~~~"),
+                    leaf("fence-close", "", "~~~~"),
+                ],
+            ),
+            (
+                "ex126-open-fence",
+                "```",
+                vec![leaf("fence-open", "", "```")],
+            ),
+            (
+                "ex127-unclosed-fence",
+                "`````\n\n```\naaa",
+                vec![
+                    leaf("fence-open", "", "`````"),
+                    leaf("code", "", ""),
+                    leaf_marks("code", "```", "```", "C:```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                ],
+            ),
+            (
+                "ex129-fence-blanks",
+                "```\n\n  \n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf("code", "", ""),
+                    leaf_marks("code", "  ", "  ", "C:  "),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex130-empty-fence",
+                "```\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex131-fence-indent-1",
+                " ```\n aaa\naaa\n```",
+                vec![
+                    leaf("fence-open", "", " ```"),
+                    leaf_marks("code", "aaa", " aaa", "C:aaa"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex132-fence-indent-2",
+                "  ```\naaa\n  aaa\naaa\n  ```",
+                vec![
+                    leaf("fence-open", "", "  ```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "aaa", "  aaa", "C:aaa"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf("fence-close", "", "  ```"),
+                ],
+            ),
+            (
+                "ex133-fence-indent-3",
+                "   ```\n   aaa\n    aaa\n  aaa\n   ```",
+                vec![
+                    leaf("fence-open", "", "   ```"),
+                    leaf_marks("code", "aaa", "   aaa", "C:aaa"),
+                    leaf_marks("code", " aaa", "    aaa", "C: aaa"),
+                    leaf_marks("code", "aaa", "  aaa", "C:aaa"),
+                    leaf("fence-close", "", "   ```"),
+                ],
+            ),
+            (
+                "ex134-fence-indent-4",
+                "    ```\n    aaa\n    ```",
+                vec![
+                    leaf_marks("code", "```", "    ```", "C:```"),
+                    leaf_marks("code", "aaa", "    aaa", "C:aaa"),
+                    leaf_marks("code", "```", "    ```", "C:```"),
+                ],
+            ),
+            (
+                "ex135-closer-indent",
+                "```\naaa\n  ```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf("fence-close", "", "  ```"),
+                ],
+            ),
+            (
+                "ex136-opener-indent-3",
+                "   ```\naaa\n  ```",
+                vec![
+                    leaf("fence-open", "", "   ```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf("fence-close", "", "  ```"),
+                ],
+            ),
+            (
+                "ex137-closer-indent-4",
+                "```\naaa\n    ```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "    ```", "    ```", "C:    ```"),
+                ],
+            ),
+            (
+                "ex138-backtick-in-info",
+                "``` ```\naaa",
+                vec![
+                    leaf_marks("p", " ", "``` ```", "C: "),
+                    leaf("p", "aaa", "aaa"),
+                ],
+            ),
+            (
+                "ex139-tilde-closer-info",
+                "~~~~~~\naaa\n~~~ ~~",
+                vec![
+                    leaf("fence-open", "", "~~~~~~"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "~~~ ~~", "~~~ ~~", "C:~~~ ~~"),
+                ],
+            ),
+            (
+                "ex140-fence-interrupts",
+                "foo\n```\nbar\n```\nbaz",
+                vec![
+                    leaf("p", "foo", "foo"),
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "bar", "bar", "C:bar"),
+                    leaf("fence-close", "", "```"),
+                    leaf("p", "baz", "baz"),
+                ],
+            ),
+            (
+                "ex141-setext-fence-atx",
+                "foo\n---\n~~~\nbar\n~~~\n# baz",
+                vec![
+                    leaf("h2", "foo", "foo"),
+                    leaf("empty", "", "---"),
+                    leaf("fence-open", "", "~~~"),
+                    leaf_marks("code", "bar", "bar", "C:bar"),
+                    leaf("fence-close", "", "~~~"),
+                    leaf("h1", "baz", "# baz"),
+                ],
+            ),
+            (
+                "ex142-fence-info",
+                "```ruby\ndef foo(x)\n  return 3\nend\n```",
+                vec![
+                    leaf("fence-open:ruby", "", "```ruby"),
+                    leaf_marks("code", "def foo(x)", "def foo(x)", "C:def foo(x)"),
+                    leaf_marks("code", "  return 3", "  return 3", "C:  return 3"),
+                    leaf_marks("code", "end", "end", "C:end"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex143-tilde-info",
+                "~~~~    ruby startline=3 $%@#$\ndef foo(x)\n  return 3\nend\n~~~~~~~",
+                vec![
+                    leaf(
+                        "fence-open:ruby startline=3 $%@#$",
+                        "",
+                        "~~~~    ruby startline=3 $%@#$",
+                    ),
+                    leaf_marks("code", "def foo(x)", "def foo(x)", "C:def foo(x)"),
+                    leaf_marks("code", "  return 3", "  return 3", "C:  return 3"),
+                    leaf_marks("code", "end", "end", "C:end"),
+                    leaf("fence-close", "", "~~~~~~~"),
+                ],
+            ),
+            (
+                "ex144-info-semicolon",
+                "````;\n````",
+                vec![
+                    leaf("fence-open:;", "", "````;"),
+                    leaf("fence-close", "", "````"),
+                ],
+            ),
+            (
+                "ex145-backtick-info-not-fence",
+                "``` aa ```\nfoo",
+                vec![
+                    leaf_marks("p", "aa", "``` aa ```", "C:aa"),
+                    leaf("p", "foo", "foo"),
+                ],
+            ),
+            (
+                "ex146-tilde-info-backticks",
+                "~~~ aa ``` ~~~\nfoo\n~~~",
+                vec![
+                    leaf("fence-open:aa ``` ~~~", "", "~~~ aa ``` ~~~"),
+                    leaf_marks("code", "foo", "foo", "C:foo"),
+                    leaf("fence-close", "", "~~~"),
+                ],
+            ),
+            (
+                "ex147-closer-info",
+                "```\n``` aaa\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "``` aaa", "``` aaa", "C:``` aaa"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "bold-closing-hash",
+                "## **foo** ##",
+                vec![leaf_marks("h2", "foo", "## **foo** ##", "B:foo")],
+            ),
+            (
+                "heading-link",
+                "# [Foo](/url)",
+                vec![leaf_link("h1", "Foo", "# [Foo](/url)", "/url")],
+            ),
+            (
+                "nested-list-not-code",
+                "- foo\n    - bar",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("ul:4", "bar", "    - bar"),
+                ],
+            ),
+            (
+                "quote-indent-3",
+                "   > foo",
+                vec![leaf("quote", "foo", "   > foo")],
+            ),
+            (
+                "quote-indent-4-is-code",
+                "    > foo",
+                vec![leaf_marks("code", "> foo", "    > foo", "C:> foo")],
+            ),
+            (
+                "tab-list-not-code",
+                "\t- foo",
+                vec![leaf("ul:1", "foo", "\t- foo")],
+            ),
+            (
+                "double-tilde-not-fence",
+                "~~Hi~~",
+                vec![leaf_marks("p", "Hi", "~~Hi~~", "S:Hi")],
+            ),
+            (
+                "blank-spaces-not-code",
+                "    ",
+                vec![leaf("empty", "    ", "    ")],
+            ),
+            (
+                "spaced-dashes-after-paragraph",
+                "Foo\n- - -",
+                vec![leaf("p", "Foo", "Foo"), leaf("hr", "", "- - -")],
+            ),
+            (
+                "table-unchanged",
+                "| a | b |\n| --- | --- |\n| c | d |",
+                vec![
+                    leaf("row", "| a | b |", "| a | b |"),
+                    leaf("tdelim", "", "| --- | --- |"),
+                    leaf("row", "| c | d |", "| c | d |"),
+                ],
+            ),
+            (
+                "fence-tabs",
+                "```\n\tkeep\tme\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "\tkeep\tme", "\tkeep\tme", "C:\tkeep\tme"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+        ]
+    }
+}
