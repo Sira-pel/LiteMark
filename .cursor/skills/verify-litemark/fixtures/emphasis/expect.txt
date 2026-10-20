@@ -1,0 +1,15 @@
+bytes=43
+lines=2
+wrap_cols=40
+line[0] kind=Paragraph source=0..42 display="Normal bold italic strike code"
+segment[0][0] source=0..7 bold=false italic=false underline=false strike=false code=false link=- text="Normal "
+segment[0][1] source=9..13 bold=true italic=false underline=false strike=false code=false link=- text="bold"
+segment[0][2] source=15..16 bold=false italic=false underline=false strike=false code=false link=- text=" "
+segment[0][3] source=17..23 bold=false italic=true underline=false strike=false code=false link=- text="italic"
+segment[0][4] source=24..25 bold=false italic=false underline=false strike=false code=false link=- text=" "
+segment[0][5] source=27..33 bold=false italic=false underline=false strike=true code=false link=- text="strike"
+segment[0][6] source=35..36 bold=false italic=false underline=false strike=false code=false link=- text=" "
+segment[0][7] source=37..41 bold=false italic=false underline=false strike=false code=true link=- text="code"
+row[0][0] display=0..30 text="Normal bold italic strike code"
+line[1] kind=Empty source=43..43 display=""
+row[1][0] display=0..0 text=""

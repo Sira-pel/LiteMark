@@ -1,0 +1,1 @@
+line[0] kind=CodeFence opening=true language="rust" source=0..7 display=""

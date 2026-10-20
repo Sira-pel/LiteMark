@@ -1,0 +1,1 @@
+segment[0][1] source=9..13 bold=true italic=false underline=false strike=false code=false link=- text="bold"

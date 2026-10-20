@@ -1,0 +1,46 @@
+# LiteMark verification map
+
+This directory is the maintained source for verifying user-facing behavior of LiteMark. Read this index before driving, then use the matching feature file as the recipe.
+
+The primary proof is headless. The desktop window is not isolated and is not the default drive target.
+
+## Baseline preconditions
+
+- Source `.cursor/skills/verify-litemark/scripts/env.sh` so `RUSTUP_TOOLCHAIN=stable` is set.
+- Build with `.cursor/skills/verify-litemark/scripts/launch.sh`. It runs `cargo build` and does not start the GUI.
+- Run `.cursor/skills/verify-litemark/scripts/doctor.sh` and require `doctor ok`, `bin=target/debug/litemark`, and `hook=src/markdown/render_dump.rs`.
+- Markdown proofs use `LITEMARK_WRAP_COLS=40` (the default). That is the column count passed to `visual_rows`, not a measured pixel width.
+- Never launch `target/debug/litemark` from this kit. `scripts/refuse-gui.sh` is the command for window journeys.
+
+## Driving conventions
+
+- Start markdown recipes from the committed fixture file named in the feature.
+- Treat every command as literal. Keep paths and flags unchanged.
+- Run render proofs through `scripts/render_dump.sh` and `scripts/prove-markdown.sh`.
+- Run build, test, clippy, and fmt through `scripts/ci.sh`.
+- A red-fixture exit 0 means the check failed on purpose. It is not a product pass.
+- Do not remove proof artifacts during cleanup.
+
+## Proof and skip reporting
+
+- Markdown proof is the dump file compared byte-for-byte with `expect.txt`.
+- Each assertion line is a full dump line. Do not accept a substring match.
+- UI journeys call `scripts/refuse-gui.sh`, exit 2, and name the unmet precondition. Do not report them as verified through the render dump.
+- Record `RUN_ID` in `artifacts/markdown-render/<RUN_ID>/meta-*.txt`.
+
+## Feature entry contract
+
+Each feature file starts with an H1 title and one paragraph describing the user-visible behavior. It then uses exactly four H2 sections in this order.
+
+1. `Sub-features`
+2. `How to get to it (user POV)`
+3. `Driving it with control-litemark`
+4. `Gotchas`
+
+## Features
+
+- [Markdown render](./markdown-render.md) — headings, emphasis, nested lists, tables, fenced code, links, images, wrapping, and a large document timed through `parse_document` and `visual_rows`.
+- [Open a file](./open-file.md) — File → Open…, Ctrl+O, or a path argument.
+- [Find and replace](./find-replace.md) — Edit → Find, Ctrl+F, and the Replace / All bar.
+- [Notes sidebar](./notes-sidebar.md) — View → Sidebar and Ctrl+\\.
+- [Theme](./theme.md) — settings gear, then Dark, Light, or System.

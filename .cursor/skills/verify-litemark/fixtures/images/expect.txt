@@ -1,0 +1,9 @@
+bytes=42
+lines=2
+wrap_cols=40
+line[0] kind=Paragraph source=0..41 display="![Alt text](https://example.com/note.png)"
+segment[0][0] source=2..10 bold=false italic=false underline=false strike=false code=false link=- text="Alt text"
+row[0][0] display=0..6 text="![Alt "
+row[0][1] display=6..41 text="text](https://example.com/note.png)"
+line[1] kind=Empty source=42..42 display=""
+row[1][0] display=0..0 text=""

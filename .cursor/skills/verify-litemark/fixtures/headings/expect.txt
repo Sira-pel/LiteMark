@@ -1,0 +1,14 @@
+bytes=32
+lines=4
+wrap_cols=40
+line[0] kind=Heading level=1 source=0..7 display="Title"
+segment[0][0] source=2..7 bold=false italic=false underline=false strike=false code=false link=- text="Title"
+row[0][0] display=0..5 text="Title"
+line[1] kind=Heading level=2 source=8..19 display="Subtitle"
+segment[1][0] source=11..19 bold=false italic=false underline=false strike=false code=false link=- text="Subtitle"
+row[1][0] display=0..8 text="Subtitle"
+line[2] kind=Heading level=3 source=20..31 display="Section"
+segment[2][0] source=24..31 bold=false italic=false underline=false strike=false code=false link=- text="Section"
+row[2][0] display=0..7 text="Section"
+line[3] kind=Empty source=32..32 display=""
+row[3][0] display=0..0 text=""

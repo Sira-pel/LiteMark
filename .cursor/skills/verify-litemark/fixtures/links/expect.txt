@@ -1,0 +1,10 @@
+bytes=50
+lines=2
+wrap_cols=40
+line[0] kind=Paragraph source=0..49 display="See LiteMark now."
+segment[0][0] source=0..4 bold=false italic=false underline=false strike=false code=false link=- text="See "
+segment[0][1] source=5..13 bold=false italic=false underline=false strike=false code=false link="https://example.com/litemark" text="LiteMark"
+segment[0][2] source=44..49 bold=false italic=false underline=false strike=false code=false link=- text=" now."
+row[0][0] display=0..17 text="See LiteMark now."
+line[1] kind=Empty source=50..50 display=""
+row[1][0] display=0..0 text=""

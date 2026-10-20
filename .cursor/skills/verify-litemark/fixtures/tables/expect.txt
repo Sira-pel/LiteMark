@@ -1,0 +1,19 @@
+bytes=45
+lines=4
+wrap_cols=40
+line[0] kind=TableRow header=true cells=2 source=0..14 display="| Name | Qty |"
+cell[0][0] source=2..6 align=left text="Name"
+cell[0][1] source=9..12 align=right text="Qty"
+segment[0][0] source=2..6 bold=false italic=false underline=false strike=false code=false link=- text="Name"
+segment[0][1] source=9..12 bold=false italic=false underline=false strike=false code=false link=- text="Qty"
+row[0][0] display=0..14 text="| Name | Qty |"
+line[1] kind=TableDelimiter source=15..30 display=""
+row[1][0] display=0..0 text=""
+line[2] kind=TableRow header=false cells=2 source=31..44 display="| Apple | 2 |"
+cell[2][0] source=33..38 align=left text="Apple"
+cell[2][1] source=41..42 align=right text="2"
+segment[2][0] source=33..38 bold=false italic=false underline=false strike=false code=false link=- text="Apple"
+segment[2][1] source=41..42 bold=false italic=false underline=false strike=false code=false link=- text="2"
+row[2][0] display=0..13 text="| Apple | 2 |"
+line[3] kind=Empty source=45..45 display=""
+row[3][0] display=0..0 text=""

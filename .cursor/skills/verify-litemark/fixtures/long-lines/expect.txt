@@ -1,0 +1,15 @@
+bytes=112
+lines=4
+wrap_cols=40
+line[0] kind=Paragraph source=0..59 display="The quick brown fox jumps over the lazy dog near the river."
+segment[0][0] source=0..59 bold=false italic=false underline=false strike=false code=false link=- text="The quick brown fox jumps over the lazy dog near the river."
+row[0][0] display=0..40 text="The quick brown fox jumps over the lazy "
+row[0][1] display=40..59 text="dog near the river."
+line[1] kind=Empty source=60..60 display=""
+row[1][0] display=0..0 text=""
+line[2] kind=Paragraph source=61..111 display="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+segment[2][0] source=61..111 bold=false italic=false underline=false strike=false code=false link=- text="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+row[2][0] display=0..40 text="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+row[2][1] display=40..50 text="aaaaaaaaaa"
+line[3] kind=Empty source=112..112 display=""
+row[3][0] display=0..0 text=""

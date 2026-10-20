@@ -1,0 +1,12 @@
+bytes=25
+lines=4
+wrap_cols=40
+line[0] kind=CodeFence opening=true language="rust" source=0..7 display=""
+row[0][0] display=0..0 text=""
+line[1] kind=CodeLine source=8..20 display="fn main() {}"
+segment[1][0] source=8..20 bold=false italic=false underline=false strike=false code=true link=- text="fn main() {}"
+row[1][0] display=0..12 text="fn main() {}"
+line[2] kind=CodeFence opening=false language=- source=21..24 display=""
+row[2][0] display=0..0 text=""
+line[3] kind=Empty source=25..25 display=""
+row[3][0] display=0..0 text=""
