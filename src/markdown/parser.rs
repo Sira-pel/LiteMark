@@ -1000,6 +1000,62 @@ fn parse_inline_syntax(
     (raw_hidden, inline_pairs, styled_segments)
 }
 
+/// CommonMark ordered marker: 1–9 ASCII digits, then `.` or `)`.
+/// A following space or tab is the separator and is included in the length.
+/// End of line after the punctuation is an empty item.
+fn ordered_marker(text: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut digits = 0usize;
+    while digits < bytes.len() && bytes[digits].is_ascii_digit() {
+        digits += 1;
+        if digits > 9 {
+            return None;
+        }
+    }
+    if digits == 0 || digits >= bytes.len() {
+        return None;
+    }
+    let punct = bytes[digits];
+    if punct != b'.' && punct != b')' {
+        return None;
+    }
+    let after = digits + 1;
+    let marker_len = if after == bytes.len() {
+        after
+    } else if bytes[after] == b' ' || bytes[after] == b'\t' {
+        after + 1
+    } else {
+        return None;
+    };
+    let number = text[..digits].parse::<usize>().ok()?;
+    Some((number, marker_len))
+}
+
+/// GFM task marker: `[ ]`, `[x]`, or `[X]`, then spaces or tabs, or end of line.
+/// The length includes that separator. The checkbox itself is 3 bytes.
+fn task_marker(text: &str) -> Option<(bool, usize)> {
+    let checked = if text.starts_with("[ ]") {
+        false
+    } else if text.starts_with("[x]") || text.starts_with("[X]") {
+        true
+    } else {
+        return None;
+    };
+    let bytes = text.as_bytes();
+    let after = 3;
+    if after == bytes.len() {
+        return Some((checked, after));
+    }
+    if bytes[after] != b' ' && bytes[after] != b'\t' {
+        return None;
+    }
+    let mut end = after + 1;
+    while end < bytes.len() && (bytes[end] == b' ' || bytes[end] == b'\t') {
+        end += 1;
+    }
+    Some((checked, end))
+}
+
 #[allow(clippy::single_range_in_vec_init)]
 pub fn parse_document(markdown: &str) -> ParsedDocument {
     let raw_lines = if markdown.is_empty() {
@@ -1357,18 +1413,27 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             } else if trimmed_start.starts_with("> ") {
                 kind = LineKind::Blockquote;
                 prefix_len = indent_len + 2;
-            } else if let Some(dot_pos) = trimmed_start.find(". ") {
-                if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
-                    if let Ok(num) = trimmed_start[..dot_pos].parse::<usize>() {
-                        kind = LineKind::ListItem {
-                            ordered: true,
-                            number: num,
-                            task: None,
-                            indent_cols: indent_len,
-                            checkbox_source: None,
-                        };
-                        prefix_len = indent_len + dot_pos + 2;
-                    }
+            } else if let Some((number, marker_len)) = ordered_marker(trimmed_start) {
+                let rest = &trimmed_start[marker_len..];
+                if let Some((checked, task_len)) = task_marker(rest) {
+                    let cb_start = line_start + indent_len + marker_len;
+                    kind = LineKind::ListItem {
+                        ordered: true,
+                        number,
+                        task: Some(checked),
+                        indent_cols: indent_len,
+                        checkbox_source: Some(cb_start..(cb_start + 3)),
+                    };
+                    prefix_len = indent_len + marker_len + task_len;
+                } else {
+                    kind = LineKind::ListItem {
+                        ordered: true,
+                        number,
+                        task: None,
+                        indent_cols: indent_len,
+                        checkbox_source: None,
+                    };
+                    prefix_len = indent_len + marker_len;
                 }
             }
         }
