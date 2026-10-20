@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env.sh
 source "${SCRIPT_DIR}/env.sh"
+# shellcheck source=sha-fail-line.sh
+source "${SCRIPT_DIR}/sha-fail-line.sh"
 
 seed="${KIT_DIR}/fixtures/large-doc/seed.txt"
 backup="${VERIFY_RUN_DIR}/large-doc-seed.bak"
@@ -62,8 +64,11 @@ if ! grep -Eq '^prove_markdown mode=green green_fail=1 ' "${log}"; then
   echo "RED PROOF FAILED log missing green_fail=1" >&2
   exit 1
 fi
-if ! grep -q '^FAIL fixture=large-doc sha256_observed=sha256=' "${log}"; then
-  echo "RED PROOF FAILED log missing sha256 mismatch line" >&2
+expected_sha="$(tr -d '[:space:]' <"${KIT_DIR}/fixtures/large-doc/input.sha256")"
+sha_line="$(grep -E '^FAIL fixture=large-doc ' "${log}" | head -n 1 || true)"
+if ! large_doc_sha_fail_ok "${sha_line}" "${expected_sha}"; then
+  echo "RED PROOF FAILED log missing 64-hex sha256 mismatch line" >&2
+  printf 'sha_line=%s\n' "${sha_line}" >&2
   exit 1
 fi
 

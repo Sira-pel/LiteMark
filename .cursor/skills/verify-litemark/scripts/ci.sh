@@ -44,15 +44,27 @@ run_one() {
 fail=0
 run_one build cargo build || fail=1
 run_one test cargo test || fail=1
+# Exit 0 from `cargo test` is not a pass. Require a result line whose
+# passed count is greater than zero. A runner that skips the harness
+# (for example runner = "true") exits 0 with no such line.
+if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' "${LOG_DIR}/test.log"; then
+  echo "test_result_ok=missing"
+  fail=1
+fi
 run_one clippy cargo clippy --all-targets -- -D warnings || fail=1
 
 echo "===== fmt: scripts/fmt-gate.sh ====="
+fmt_log="${LOG_DIR}/fmt-gate.log"
 set +e
-"${SCRIPT_DIR}/fmt-gate.sh"
+"${SCRIPT_DIR}/fmt-gate.sh" >"${fmt_log}" 2>&1
 fmt_status=$?
 set -e
+cat "${fmt_log}"
 echo "===== fmt exit=${fmt_status} ====="
 if [[ "${fmt_status}" -ne 0 ]]; then
+  fail=1
+elif ! grep -Fxq 'fmt_gate=pass' "${fmt_log}"; then
+  echo "fmt_gate_pass=missing"
   fail=1
 fi
 

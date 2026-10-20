@@ -10,6 +10,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env.sh
 source "${SCRIPT_DIR}/env.sh"
 
+# Always the debug binary cargo just built. CARGO_TARGET_DIR changes
+# `cargo metadata` target_directory, so a stale $ROOT/target binary is unused.
+LITEMARK_BIN="$(litemark_debug_bin)"
+
 LOG="${VERIFY_RUN_DIR}/logs/cargo-build.log"
 echo "cargo build (package litemark, no extra flags; .github/workflows is absent)"
 set +e
