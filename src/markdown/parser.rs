@@ -633,24 +633,42 @@ pub fn split_table_cells(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// A delimiter cell is optional spaces, an optional colon, one or more hyphens,
+/// and an optional colon. Spaces may sit between the colons and the hyphens.
+/// A tab is not a space here: it disqualifies the cell.
 fn is_delimiter_cell(cell: &str) -> bool {
-    let cell = cell.trim();
     let bytes = cell.as_bytes();
-    if bytes.is_empty() {
+    let mut index = 0;
+    let mut end = bytes.len();
+    while index < end && bytes[index] == b' ' {
+        index += 1;
+    }
+    while end > index && bytes[end - 1] == b' ' {
+        end -= 1;
+    }
+    if index >= end {
         return false;
     }
-    let mut index = usize::from(bytes[0] == b':');
+    if bytes[index] == b':' {
+        index += 1;
+    }
+    while index < end && bytes[index] == b' ' {
+        index += 1;
+    }
     let hyphens_at = index;
-    while index < bytes.len() && bytes[index] == b'-' {
+    while index < end && bytes[index] == b'-' {
         index += 1;
     }
     if index == hyphens_at {
         return false;
     }
-    if index < bytes.len() && bytes[index] == b':' {
+    while index < end && bytes[index] == b' ' {
         index += 1;
     }
-    index == bytes.len()
+    if index < end && bytes[index] == b':' {
+        index += 1;
+    }
+    index == end
 }
 
 /// Alignment for a delimiter row, or `None` when the line is not one.
@@ -659,60 +677,315 @@ fn delimiter_alignments(line: &str) -> Option<Vec<TableColumnAlign>> {
     if unescaped_pipe_offsets(line).is_empty() {
         return None;
     }
-    let cells = split_table_cells(line);
-    if cells.is_empty() || !cells.iter().all(|cell| is_delimiter_cell(cell)) {
+    let ranges = table_cell_ranges(line);
+    if ranges.is_empty() {
         return None;
     }
-    Some(cells.iter().map(|cell| table_column_align(cell)).collect())
+    let mut alignments = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        let cell = &line[range];
+        if !is_delimiter_cell(cell) {
+            return None;
+        }
+        alignments.push(table_column_align(cell));
+    }
+    Some(alignments)
+}
+
+/// Columns of leading spaces and tabs. A tab advances to the next multiple of 4.
+fn leading_columns(line: &str) -> usize {
+    let mut columns = 0;
+    for byte in line.bytes() {
+        match byte {
+            b' ' => columns += 1,
+            b'\t' => columns += 4 - (columns % 4),
+            _ => break,
+        }
+    }
+    columns
+}
+
+/// Text after a CommonMark indent of 0–3 columns.
+/// `None` when the line is indented four or more, which is indented code.
+fn after_block_indent(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut column = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' => {
+                if column >= 3 {
+                    return None;
+                }
+                column += 1;
+                index += 1;
+            }
+            b'\t' => {
+                if column >= 3 {
+                    return None;
+                }
+                let next = column + 4 - (column % 4);
+                if next > 3 {
+                    return None;
+                }
+                column = next;
+                index += 1;
+            }
+            _ => return Some(&line[index..]),
+        }
+    }
+    Some(&line[index..])
+}
+
+fn is_blank_line(line: &str) -> bool {
+    line.bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
+}
+
+/// CommonMark §4.1. Three or more of one marker, spaces and tabs allowed between them.
+fn is_thematic_break(line: &str) -> bool {
+    let Some(body) = after_block_indent(line) else {
+        return false;
+    };
+    let bytes = body.as_bytes();
+    let Some(&marker) = bytes.first() else {
+        return false;
+    };
+    if !matches!(marker, b'-' | b'_' | b'*') {
+        return false;
+    }
+    let mut count = 0;
+    for &byte in bytes {
+        if byte == marker {
+            count += 1;
+        } else if !matches!(byte, b' ' | b'\t' | b'\r') {
+            return false;
+        }
+    }
+    count >= 3
+}
+
+/// CommonMark §4.2. One to six `#`, then whitespace or the end of the line.
+fn is_atx_heading_line(line: &str) -> bool {
+    let Some(body) = after_block_indent(line) else {
+        return false;
+    };
+    let bytes = body.as_bytes();
+    let mut level = 0;
+    while level < bytes.len() && bytes[level] == b'#' {
+        level += 1;
+    }
+    if !(1..=6).contains(&level) {
+        return false;
+    }
+    level == bytes.len() || matches!(bytes[level], b' ' | b'\t' | b'\r')
+}
+
+/// CommonMark §4.5. An opening fence is three or more backticks or tildes.
+/// A backtick info string cannot itself contain a backtick.
+fn opening_fence(line: &str) -> Option<(u8, usize)> {
+    let body = after_block_indent(line)?;
+    let bytes = body.as_bytes();
+    let marker = *bytes.first()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let mut length = 0;
+    while length < bytes.len() && bytes[length] == marker {
+        length += 1;
+    }
+    if length < 3 {
+        return None;
+    }
+    if marker == b'`' && bytes[length..].contains(&b'`') {
+        return None;
+    }
+    Some((marker, length))
+}
+
+/// CommonMark §4.5 closing fence: the same marker, at least as long, then only whitespace.
+fn closes_fence(line: &str, marker: u8, length: usize) -> bool {
+    let Some(body) = after_block_indent(line) else {
+        return false;
+    };
+    let bytes = body.as_bytes();
+    let mut count = 0;
+    while count < bytes.len() && bytes[count] == marker {
+        count += 1;
+    }
+    count >= length
+        && bytes[count..]
+            .iter()
+            .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
+}
+
+/// CommonMark §5.1. A `>` marker, with or without a following space.
+fn is_blockquote_marker(line: &str) -> bool {
+    after_block_indent(line).is_some_and(|body| body.as_bytes().first() == Some(&b'>'))
+}
+
+/// CommonMark §5.2 and §5.3. Bullet or 1–9 digit `.` / `)` marker, then whitespace or end.
+fn is_list_marker_line(line: &str) -> bool {
+    let Some(body) = after_block_indent(line) else {
+        return false;
+    };
+    let bytes = body.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let rest = if matches!(bytes[0], b'-' | b'+' | b'*') {
+        &bytes[1..]
+    } else if bytes[0].is_ascii_digit() {
+        let mut index = 0;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == 0 || index > 9 || index >= bytes.len() {
+            return false;
+        }
+        if !matches!(bytes[index], b'.' | b')') {
+            return false;
+        }
+        &bytes[index + 1..]
+    } else {
+        return false;
+    };
+    rest.is_empty() || matches!(rest[0], b' ' | b'\t' | b'\r')
+}
+
+/// CommonMark §4.6 block-tag names for HTML block type 6.
+fn is_html_block_tag(name: &[u8]) -> bool {
+    const TAGS: [&str; 62] = [
+        "address",
+        "article",
+        "aside",
+        "base",
+        "basefont",
+        "blockquote",
+        "body",
+        "caption",
+        "center",
+        "col",
+        "colgroup",
+        "dd",
+        "details",
+        "dialog",
+        "dir",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "frame",
+        "frameset",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "head",
+        "header",
+        "hr",
+        "html",
+        "iframe",
+        "legend",
+        "li",
+        "link",
+        "main",
+        "menu",
+        "menuitem",
+        "nav",
+        "noframes",
+        "ol",
+        "optgroup",
+        "option",
+        "p",
+        "param",
+        "search",
+        "section",
+        "summary",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "title",
+        "tr",
+        "track",
+        "ul",
+    ];
+    let mut lower = [0u8; 16];
+    if name.is_empty() || name.len() > lower.len() {
+        return false;
+    }
+    for (slot, byte) in lower.iter_mut().zip(name.iter()) {
+        *slot = byte.to_ascii_lowercase();
+    }
+    let Ok(key) = std::str::from_utf8(&lower[..name.len()]) else {
+        return false;
+    };
+    TAGS.binary_search(&key).is_ok()
+}
+
+/// CommonMark §4.6 types 1–6. Assumes `rest` is the line after the leading `<`.
+fn html_block_type_1_to_6(rest: &[u8]) -> bool {
+    const TYPE_1: [&[u8]; 4] = [b"script", b"pre", b"style", b"textarea"];
+    for tag in TYPE_1 {
+        if rest.len() < tag.len() || !rest[..tag.len()].eq_ignore_ascii_case(tag) {
+            continue;
+        }
+        if rest.len() == tag.len() {
+            return true;
+        }
+        let next = rest[tag.len()];
+        if next.is_ascii_whitespace() || next == b'>' {
+            return true;
+        }
+    }
+    if rest.starts_with(b"!--") || rest.starts_with(b"?") || rest.starts_with(b"![CDATA[") {
+        return true;
+    }
+    if rest.len() >= 2 && rest[0] == b'!' && rest[1].is_ascii_alphabetic() {
+        return true;
+    }
+    let slash = usize::from(rest.first() == Some(&b'/'));
+    let tail = &rest[slash..];
+    let mut name_len = 0;
+    while name_len < tail.len() && tail[name_len].is_ascii_alphanumeric() {
+        name_len += 1;
+    }
+    if !is_html_block_tag(&tail[..name_len]) {
+        return false;
+    }
+    let after = &tail[name_len..];
+    after.is_empty()
+        || matches!(after[0], b' ' | b'\t' | b'\r' | b'\n' | b'>')
+        || after.starts_with(b"/>")
+}
+
+/// CommonMark §4.6. An HTML block of type 1–6, indented 0–3 columns.
+fn is_html_block_start(line: &str) -> bool {
+    let Some(body) = after_block_indent(line) else {
+        return false;
+    };
+    let bytes = body.as_bytes();
+    bytes.first() == Some(&b'<') && html_block_type_1_to_6(&bytes[1..])
 }
 
 /// A line that starts another block ends a table. Blank lines do too.
 fn line_breaks_table(line: &str) -> bool {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with("```") {
-        return true;
-    }
-    if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-        return true;
-    }
-    let trimmed_start = line.trim_start();
-    let indent_len = line.len() - trimmed_start.len();
-    if indent_len <= 3 {
-        for prefix in ["###### ", "##### ", "#### ", "### ", "## ", "# "] {
-            if trimmed_start.starts_with(prefix) {
-                return true;
-            }
-        }
-    }
-    if trimmed_start.starts_with("> ") {
-        return true;
-    }
-    let task = trimmed_start.starts_with("- [ ] ")
-        || trimmed_start.starts_with("* [ ] ")
-        || trimmed_start.starts_with("+ [ ] ")
-        || trimmed_start.starts_with("- [x] ")
-        || trimmed_start.starts_with("- [X] ")
-        || trimmed_start.starts_with("* [x] ")
-        || trimmed_start.starts_with("* [X] ")
-        || trimmed_start.starts_with("+ [x] ")
-        || trimmed_start.starts_with("+ [X] ");
-    if task
-        || trimmed_start.starts_with("- ")
-        || trimmed_start.starts_with("* ")
-        || trimmed_start.starts_with("+ ")
-    {
-        return true;
-    }
-    if let Some(dot_pos) = trimmed_start.find(". ") {
-        if dot_pos > 0
-            && trimmed_start[..dot_pos]
-                .chars()
-                .all(|ch| ch.is_ascii_digit())
-        {
-            return true;
-        }
-    }
-    false
+    is_blank_line(line)
+        || is_thematic_break(line)
+        || is_atx_heading_line(line)
+        || opening_fence(line).is_some()
+        || is_blockquote_marker(line)
+        || is_list_marker_line(line)
+        || is_html_block_start(line)
 }
 
 struct TableBlock {
@@ -730,19 +1003,27 @@ struct DetectedTable {
 }
 
 /// A table is a header row plus the next line as a delimiter of the same width.
-/// Later lines stay in the table until a blank line or another block starts.
+/// The header needs an unescaped pipe outside code spans, and an indent under 4.
+/// Later lines stay in the table until a blank line, another block, or a row with no cells.
 fn table_block(lines: &[SourceLine<'_>], start: usize) -> Option<TableBlock> {
     if start + 1 >= lines.len() || line_breaks_table(lines[start].text) {
         return None;
     }
-    let header_cells = table_cell_ranges(lines[start].text);
+    let header = lines[start].text;
+    if leading_columns(header) >= 4 || unescaped_pipe_offsets(header).is_empty() {
+        return None;
+    }
+    let header_cells = table_cell_ranges(header);
     let alignments = delimiter_alignments(lines[start + 1].text)?;
     if header_cells.is_empty() || alignments.len() != header_cells.len() {
         return None;
     }
     let mut last = start + 1;
     let mut index = start + 2;
-    while index < lines.len() && !line_breaks_table(lines[index].text) {
+    while index < lines.len()
+        && !line_breaks_table(lines[index].text)
+        && !table_cell_ranges(lines[index].text).is_empty()
+    {
         last = index;
         index += 1;
     }
@@ -771,7 +1052,9 @@ pub fn table_column_align(cell: &str) -> TableColumnAlign {
 pub enum LineKind {
     Empty,
     Paragraph,
-    Heading { level: u8 }, // 1..=6
+    Heading {
+        level: u8,
+    }, // 1..=6
     Blockquote,
     ListItem {
         ordered: bool,
@@ -941,7 +1224,9 @@ impl RowOffsetMap {
             }
             let overlap_start = d.start.max(disp_range.start);
             let overlap_end = d.end.min(disp_range.end);
-            if overlap_end > overlap_start || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end) {
+            if overlap_end > overlap_start
+                || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end)
+            {
                 let src_start = s.start + (overlap_start - d.start);
                 let src_end = s.start + (overlap_end - d.start);
                 let new_d_start = overlap_start - disp_range.start;
@@ -1243,15 +1528,18 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     let mut table_ranges: Vec<DetectedTable> = Vec::new();
     {
         let mut idx = 0;
-        let mut in_fence = false;
+        let mut fence: Option<(u8, usize)> = None;
         while idx < raw_lines.len() {
             let text = raw_lines[idx].text;
-            if text.trim().starts_with("```") {
-                in_fence = !in_fence;
+            if let Some((marker, length)) = fence {
+                if closes_fence(text, marker, length) {
+                    fence = None;
+                }
                 idx += 1;
                 continue;
             }
-            if in_fence {
+            if let Some(opened) = opening_fence(text) {
+                fence = Some(opened);
                 idx += 1;
                 continue;
             }
@@ -1745,14 +2033,34 @@ mod tests {
         let md = "| **Col 1** | Col 2 |\n| :--- | :--- |\n| Val A | ~~Val B~~ |";
         let doc = parse_document(md);
         assert_eq!(doc.lines.len(), 3);
-        assert!(matches!(doc.lines[0].kind, LineKind::TableRow { is_header: true, .. }));
+        assert!(matches!(
+            doc.lines[0].kind,
+            LineKind::TableRow {
+                is_header: true,
+                ..
+            }
+        ));
         assert!(matches!(doc.lines[1].kind, LineKind::TableDelimiter));
-        assert!(matches!(doc.lines[2].kind, LineKind::TableRow { is_header: false, .. }));
+        assert!(matches!(
+            doc.lines[2].kind,
+            LineKind::TableRow {
+                is_header: false,
+                ..
+            }
+        ));
         assert_eq!(doc.lines[0].display_text, "| **Col 1** | Col 2 |");
         // Verify Col 1 is bold (via **), but Col 2 is not forced bold
-        let bold_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| s.bold).collect();
+        let bold_segs: Vec<_> = doc.lines[0]
+            .styled_segments
+            .iter()
+            .filter(|s| s.bold)
+            .collect();
         assert!(!bold_segs.is_empty());
-        let normal_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| !s.bold).collect();
+        let normal_segs: Vec<_> = doc.lines[0]
+            .styled_segments
+            .iter()
+            .filter(|s| !s.bold)
+            .collect();
         assert!(!normal_segs.is_empty());
     }
 
@@ -1940,6 +2248,1004 @@ mod tests {
                 r#"line[0] Paragraph display="| a | b |" code=[]"#,
                 r#"line[1] Paragraph display="| c | d |" code=[]"#,
             ],
+        );
+        drop(check);
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    fn align_label(align: &TableColumnAlign) -> &'static str {
+        match align {
+            TableColumnAlign::None => "none",
+            TableColumnAlign::Left => "left",
+            TableColumnAlign::Center => "center",
+            TableColumnAlign::Right => "right",
+        }
+    }
+
+    fn pulldown_align(align: &pulldown_cmark::Alignment) -> &'static str {
+        match align {
+            pulldown_cmark::Alignment::None => "none",
+            pulldown_cmark::Alignment::Left => "left",
+            pulldown_cmark::Alignment::Center => "center",
+            pulldown_cmark::Alignment::Right => "right",
+        }
+    }
+
+    fn exporter_table_options() -> pulldown_cmark::Options {
+        let mut options = pulldown_cmark::Options::empty();
+        options.insert(pulldown_cmark::Options::ENABLE_TABLES);
+        options.insert(pulldown_cmark::Options::ENABLE_FOOTNOTES);
+        options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
+        options.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
+        options
+    }
+
+    /// Column count, body-plus-header rows, alignments, and the in-table line mask.
+    fn editor_table_membership(markdown: &str) -> (String, Vec<bool>) {
+        let doc = parse_document(markdown);
+        let mut tables = Vec::new();
+        let mut mask = Vec::new();
+        let mut cols = 0usize;
+        let mut rows = 0usize;
+        let mut align = String::new();
+        let mut in_table = false;
+        for line in &doc.lines {
+            let table_line = matches!(
+                line.kind,
+                LineKind::TableRow { .. } | LineKind::TableDelimiter
+            );
+            mask.push(table_line);
+            if table_line && !in_table {
+                in_table = true;
+                rows = 0;
+            }
+            if let LineKind::TableRow { alignments, .. } = &line.kind {
+                cols = alignments.len();
+                rows += 1;
+                align = alignments
+                    .iter()
+                    .map(align_label)
+                    .collect::<Vec<_>>()
+                    .join(",");
+            }
+            if in_table && !table_line {
+                tables.push(format!("cols={cols} rows={rows} align={align}"));
+                in_table = false;
+            }
+        }
+        if in_table {
+            tables.push(format!("cols={cols} rows={rows} align={align}"));
+        }
+        let sig = if tables.is_empty() {
+            "none".to_string()
+        } else {
+            tables.join(" | ")
+        };
+        (sig, mask)
+    }
+
+    fn pulldown_table_membership(markdown: &str) -> (String, Vec<bool>) {
+        let doc = parse_document(markdown);
+        let mut mask = vec![false; doc.lines.len()];
+        let mut tables = Vec::new();
+        let mut current: Option<(usize, String, usize)> = None;
+        let events =
+            pulldown_cmark::Parser::new_ext(markdown, exporter_table_options()).into_offset_iter();
+        for (event, range) in events {
+            match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(aligns)) => {
+                    let align = aligns
+                        .iter()
+                        .map(pulldown_align)
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    current = Some((aligns.len(), align, 0));
+                    for (index, line) in doc.lines.iter().enumerate() {
+                        if line.source.start < range.end && line.source.end > range.start {
+                            mask[index] = true;
+                        }
+                    }
+                }
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::TableHead)
+                | pulldown_cmark::Event::Start(pulldown_cmark::Tag::TableRow) => {
+                    if let Some(table) = current.as_mut() {
+                        table.2 += 1;
+                    }
+                }
+                pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Table) => {
+                    if let Some((cols, align, rows)) = current.take() {
+                        tables.push(format!("cols={cols} rows={rows} align={align}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let sig = if tables.is_empty() {
+            "none".to_string()
+        } else {
+            tables.join(" | ")
+        };
+        (sig, mask)
+    }
+
+    /// Exact kinds and cells for the checker cases plus GFM examples 198–205.
+    /// pulldown-cmark 0.12.2 with the exporter options is the oracle for which
+    /// lines belong to a table, and for the column count and alignment.
+    /// `double-backslash-pipe` stays a table because an even run of backslashes
+    /// leaves a real separator. `indent4-delim` stays a table because the header
+    /// itself is not indented.
+    #[test]
+    fn table_membership_kinds_and_cells() {
+        let mut mismatches = Vec::new();
+        let mut check = |name: &str, markdown: &str, lines: &[&str], preserved: bool| {
+            if let Some(mismatch) = shape_mismatch(name, markdown, lines) {
+                mismatches.push(mismatch);
+            }
+            let editor = editor_table_membership(markdown);
+            let pulldown = pulldown_table_membership(markdown);
+            let same = editor == pulldown;
+            if preserved && same {
+                mismatches.push(format!(
+                    "case {name} preserved divergence now matches pulldown\neditor {:?} {:?}\npulldown {:?} {:?}",
+                    editor.0, editor.1, pulldown.0, pulldown.1
+                ));
+            } else if !preserved && !same {
+                mismatches.push(format!(
+                    "case {name} membership diverges from pulldown\neditor {:?} {:?}\npulldown {:?} {:?}",
+                    editor.0, editor.1, pulldown.0, pulldown.1
+                ));
+            }
+        };
+        check(
+            "gfm198",
+            "| foo | bar |\n| --- | --- |\n| baz | bim |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["foo", "bar"] display="| foo | bar |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["baz", "bim"] display="| baz | bim |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "gfm199",
+            "| abc | defghi |\n:-: | -----------:\nbar | baz",
+            &[
+                r#"line[0] TableRow header=true align=[center,right] cells=["abc", "defghi"] display="| abc | defghi |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[center,right] cells=["bar", "baz"] display="bar | baz" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "gfm200",
+            "| f\\|oo  |\n| ------ |\n| b `\\|` az |\n| b **\\|** im |",
+            &[
+                r#"line[0] TableRow header=true align=[none] cells=["f\\|oo "] display="| f\\|oo  |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none] cells=["b `\\|` az"] display="| b `\\|` az |" code=["\\|"]"#,
+                r#"line[3] TableRow header=false align=[none] cells=["b **\\|** im"] display="| b **\\|** im |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "gfm201",
+            "| abc | def |\n| --- | --- |\n| bar | baz |\n> bar",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["abc", "def"] display="| abc | def |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["bar", "baz"] display="| bar | baz |" code=[]"#,
+                r#"line[3] Blockquote display="bar" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "gfm202",
+            "| abc | def |\n| --- | --- |\n| bar | baz |\nbar\n\nbar",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["abc", "def"] display="| abc | def |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["bar", "baz"] display="| bar | baz |" code=[]"#,
+                r#"line[3] TableRow header=false align=[none,none] cells=["bar", ""] display="bar" code=[]"#,
+                r#"line[4] Empty display="" code=[]"#,
+                r#"line[5] Paragraph display="bar" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "gfm203",
+            "| abc | def |\n| --- |\n| bar |",
+            &[
+                r#"line[0] Paragraph display="| abc | def |" code=[]"#,
+                r#"line[1] Paragraph display="| --- |" code=[]"#,
+                r#"line[2] Paragraph display="| bar |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "gfm204",
+            "| abc | def |\n| --- | --- |\n| bar |\n| bar | baz | boo |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["abc", "def"] display="| abc | def |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["bar", ""] display="| bar |" code=[]"#,
+                r#"line[3] TableRow header=false align=[none,none] cells=["bar", "baz"] display="| bar | baz | boo |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "gfm205",
+            "| abc | def |\n| --- | --- |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["abc", "def"] display="| abc | def |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "code-pipe",
+            "| a | b |\n| --- | --- |\n| `c|d` | e |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["`c|d`", "e"] display="| `c|d` | e |" code=["c|d"]"#,
+            ],
+            false,
+        );
+        check(
+            "no-delim",
+            "| a | b |\n| c | d |",
+            &[
+                r#"line[0] Paragraph display="| a | b |" code=[]"#,
+                r#"line[1] Paragraph display="| c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "delim-wider",
+            "| a | b |\n| --- | --- | --- |\n| x | y | z |",
+            &[
+                r#"line[0] Paragraph display="| a | b |" code=[]"#,
+                r#"line[1] Paragraph display="| --- | --- | --- |" code=[]"#,
+                r#"line[2] Paragraph display="| x | y | z |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "header-wider",
+            "| a | b | c |\n| --- | --- |\n| x | y |",
+            &[
+                r#"line[0] Paragraph display="| a | b | c |" code=[]"#,
+                r#"line[1] Paragraph display="| --- | --- |" code=[]"#,
+                r#"line[2] Paragraph display="| x | y |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "one-col",
+            "| a |\n| --- |\n| b |",
+            &[
+                r#"line[0] TableRow header=true align=[none] cells=["a"] display="| a |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none] cells=["b"] display="| b |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "delim-no-pipe-dash",
+            "foo\n---\nbar",
+            &[
+                r#"line[0] Paragraph display="foo" code=[]"#,
+                r#"line[1] HorizontalRule display="" code=[]"#,
+                r#"line[2] Paragraph display="bar" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "delim-no-pipe-colon",
+            "foo\n:-:\nbar",
+            &[
+                r#"line[0] Paragraph display="foo" code=[]"#,
+                r#"line[1] Paragraph display=":-:" code=[]"#,
+                r#"line[2] Paragraph display="bar" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "piped-header-bare-colon",
+            "| foo |\n:-:\nbar",
+            &[
+                r#"line[0] Paragraph display="| foo |" code=[]"#,
+                r#"line[1] Paragraph display=":-:" code=[]"#,
+                r#"line[2] Paragraph display="bar" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "pipe-only-header",
+            "|\n| --- | --- |\n| a | b |",
+            &[
+                r#"line[0] Paragraph display="|" code=[]"#,
+                r#"line[1] Paragraph display="| --- | --- |" code=[]"#,
+                r#"line[2] Paragraph display="| a | b |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "pipe-only-body",
+            "| a | b |\n| --- | --- |\n| c | d |\n|\n| e | f |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="|" code=[]"#,
+                r#"line[4] Paragraph display="| e | f |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "pipe-only-tail",
+            "| a | b |\n| --- | --- |\n|",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] Paragraph display="|" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "double-pipe-body",
+            "| a | b |\n| --- | --- |\n||",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["", ""] display="||" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "empty-cells",
+            "| a | | b |\n| --- | --- | --- |\n| | x | |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none,none] cells=["a", "", "b"] display="| a | | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none,none] cells=["", "x", ""] display="| | x | |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "space-only-cells",
+            "| a |     |\n| --- | --- |\n| b | c |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "   "] display="| a |     |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["b", "c"] display="| b | c |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "tab-only-cells",
+            "| \tb | \t |\n| --- | --- |\n| c | d |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["\tb", "\t"] display="| \tb | \t |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "escaped-pipe",
+            "| a \\| b | c |\n| --- | --- |\n| d | e |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a \\| b", "c"] display="| a \\| b | c |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["d", "e"] display="| d | e |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "double-backslash-pipe",
+            "| a \\\\| b |\n| --- | --- |\n| c | d |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a \\\\", "b"] display="| a \\\\| b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+            ],
+            true,
+        );
+        check(
+            "unequal-backticks-body",
+            "| a | b |\n| --- | --- |\n| `c|d`` | e |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["`c", "d``"] display="| `c|d`` | e |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "unequal-backticks-header",
+            "| `a|b`` | c |\n| --- | --- |\n| d | e |",
+            &[
+                r#"line[0] Paragraph display="| `a|b`` | c |" code=[]"#,
+                r#"line[1] Paragraph display="| --- | --- |" code=[]"#,
+                r#"line[2] Paragraph display="| d | e |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "unclosed-code",
+            "| `a|b | c |\n| --- | --- |\n| d | e |",
+            &[
+                r#"line[0] Paragraph display="| `a|b | c |" code=[]"#,
+                r#"line[1] Paragraph display="| --- | --- |" code=[]"#,
+                r#"line[2] Paragraph display="| d | e |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "double-backtick-pipe",
+            "| a | b |\n| --- | --- |\n| ``c|d`` | e |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["``c|d``", "e"] display="| ``c|d`` | e |" code=["c|d"]"#,
+            ],
+            false,
+        );
+        check(
+            "blank-ends",
+            "| a | b |\n| --- | --- |\n| c | d |\n\npara",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Empty display="" code=[]"#,
+                r#"line[4] Paragraph display="para" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "plain-row",
+            "| a | b |\n| --- | --- |\nhello",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["hello", ""] display="hello" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "list-ends",
+            "| a | b |\n| --- | --- |\n| c | d |\n- item",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] ListItem display="item" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "quote-ends",
+            "| a | b |\n| --- | --- |\n| c | d |\n> bar",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Blockquote display="bar" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "quote-no-space",
+            "| a | b |\n| --- | --- |\n| c | d |\n>bar",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display=">bar" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "fence-ends",
+            "| a | b |\n| --- | --- |\n| c | d |\n```\ncode\n```",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] CodeFence display="" code=[]"#,
+                r#"line[4] CodeLine display="code" code=["code"]"#,
+                r#"line[5] CodeFence display="" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "tilde-fence",
+            "| a | b |\n| --- | --- |\n| c | d |\n~~~\ncode\n~~~",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="~~~" code=[]"#,
+                r#"line[4] Paragraph display="code" code=[]"#,
+                r#"line[5] Paragraph display="~~~" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "heading-ends",
+            "| a | b |\n| --- | --- |\n| c | d |\n# heading",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Heading level=1 display="heading" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "hr-exact",
+            "| a | b |\n| --- | --- |\n| c | d |\n---",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] HorizontalRule display="" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "hr-four-dash",
+            "| a | b |\n| --- | --- |\n| c | d |\n----",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="----" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "hr-four-star",
+            "| a | b |\n| --- | --- |\n| c | d |\n****",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="****" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "hr-four-under",
+            "| a | b |\n| --- | --- |\n| c | d |\n____",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="____" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "hr-spaced-dash",
+            "| a | b |\n| --- | --- |\n| c | d |\n- - -",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] ListItem display="- -" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "hr-spaced-star",
+            "| a | b |\n| --- | --- |\n| c | d |\n* * *",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] ListItem display="* *" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "hr-star-pairs",
+            "| a | b |\n| --- | --- |\n| c | d |\n** ** **",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="** ** **" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "hr-indented-four-dash",
+            "| a | b |\n| --- | --- |\n| c | d |\n   ----",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="   ----" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "paren-list",
+            "| a | b |\n| --- | --- |\n| c | d |\n1) item",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="1) item" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "html-div",
+            "| a | b |\n| --- | --- |\n| c | d |\n<div>",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="<div>" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "html-pre",
+            "| a | b |\n| --- | --- |\n| c | d |\n<pre>",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="<pre>" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "html-comment",
+            "| a | b |\n| --- | --- |\n| c | d |\n<!--",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="<!--" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "html-pi",
+            "| a | b |\n| --- | --- |\n| c | d |\n<?",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="<?" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "html-decl",
+            "| a | b |\n| --- | --- |\n| c | d |\n<!DOCTYPE html>",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="<!DOCTYPE html>" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "html-cdata",
+            "| a | b |\n| --- | --- |\n| c | d |\n<![CDATA[",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Paragraph display="<![CDATA[" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "indent4-table",
+            "    | a | b |\n    | --- | --- |\n    | c | d |",
+            &[
+                r#"line[0] Paragraph display="    | a | b |" code=[]"#,
+                r#"line[1] Paragraph display="    | --- | --- |" code=[]"#,
+                r#"line[2] Paragraph display="    | c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "indent4-delim",
+            "| a | b |\n    | --- | --- |\n| c | d |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+            ],
+            true,
+        );
+        check(
+            "indent3-table",
+            "   | a | b |\n   | --- | --- |\n   | c | d |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="   | a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="   | c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "crlf",
+            "| a | b |\r\n| --- | --- |\r\n| c | d |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |\r" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "multibyte",
+            "| 你好 | 世界 |\n| --- | --- |\n| 😀 | ខ |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["你好", "世界"] display="| 你好 | 世界 |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["😀", "ខ"] display="| 😀 | ខ |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "delim-inner-space",
+            "| a | b |\n| : --- | --- : |\n| c | d |",
+            &[
+                r#"line[0] TableRow header=true align=[left,right] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[left,right] cells=["c", "d"] display="| c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "delim-tab",
+            "| a | b |\n|\t---\t|\t---\t|\n| c | d |",
+            &[
+                r#"line[0] Paragraph display="| a | b |" code=[]"#,
+                r#"line[1] Paragraph display="|\t---\t|\t---\t|" code=[]"#,
+                r#"line[2] Paragraph display="| c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "inside-fence",
+            "```\n| a | b |\n| --- | --- |\n```",
+            &[
+                r#"line[0] CodeFence display="" code=[]"#,
+                r#"line[1] CodeLine display="| a | b |" code=["| a | b |"]"#,
+                r#"line[2] CodeLine display="| --- | --- |" code=["| --- | --- |"]"#,
+                r#"line[3] CodeFence display="" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "after-fence",
+            "```\ncode\n```\n| a | b |\n| --- | --- |\n| c | d |",
+            &[
+                r#"line[0] CodeFence display="" code=[]"#,
+                r#"line[1] CodeLine display="code" code=["code"]"#,
+                r#"line[2] CodeFence display="" code=[]"#,
+                r#"line[3] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[4] TableDelimiter display="" code=[]"#,
+                r#"line[5] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "unclosed-fence",
+            "```\n| a | b |\n| --- | --- |\n| c | d |",
+            &[
+                r#"line[0] CodeFence display="" code=[]"#,
+                r#"line[1] CodeLine display="| a | b |" code=["| a | b |"]"#,
+                r#"line[2] CodeLine display="| --- | --- |" code=["| --- | --- |"]"#,
+                r#"line[3] CodeLine display="| c | d |" code=["| c | d |"]"#,
+            ],
+            false,
+        );
+        check(
+            "header-no-pipe",
+            "hello\n| --- |\nworld",
+            &[
+                r#"line[0] Paragraph display="hello" code=[]"#,
+                r#"line[1] Paragraph display="| --- |" code=[]"#,
+                r#"line[2] Paragraph display="world" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "header-code-only-pipe",
+            "`a|b`\n| --- |\nc",
+            &[
+                r#"line[0] Paragraph display="a|b" code=["a|b"]"#,
+                r#"line[1] Paragraph display="| --- |" code=[]"#,
+                r#"line[2] Paragraph display="c" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "align-four",
+            "| a | b | c | d |\n| :--- | :---: | ---: | --- |\n| e | f | g | h |",
+            &[
+                r#"line[0] TableRow header=true align=[left,center,right,none] cells=["a", "b", "c", "d"] display="| a | b | c | d |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[left,center,right,none] cells=["e", "f", "g", "h"] display="| e | f | g | h |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "single-hyphen",
+            "| a | b |\n| - | - |\n| c | d |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "delim-empty-cell",
+            "| a | b |\n| --- || --- |\n| c | d |",
+            &[
+                r#"line[0] Paragraph display="| a | b |" code=[]"#,
+                r#"line[1] Paragraph display="| --- || --- |" code=[]"#,
+                r#"line[2] Paragraph display="| c | d |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "body-looks-like-delim",
+            "| a | b |\n| --- | --- |\n| c | d |\n| --- | --- |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] TableRow header=false align=[none,none] cells=["---", "---"] display="| --- | --- |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "two-tables",
+            "| a | b |\n| --- | --- |\n| c | d |\n\n| e | f |\n| --- | --- |\n| g | h |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Empty display="" code=[]"#,
+                r#"line[4] TableRow header=true align=[none,none] cells=["e", "f"] display="| e | f |" code=[]"#,
+                r#"line[5] TableDelimiter display="" code=[]"#,
+                r#"line[6] TableRow header=false align=[none,none] cells=["g", "h"] display="| g | h |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "code-escaped-pipe-cell",
+            "| a | b |\n| --- | --- |\n| c `\\|` d | e |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c `\\|` d", "e"] display="| c `\\|` d | e |" code=["\\|"]"#,
+            ],
+            false,
+        );
+        check(
+            "ws-line-ends",
+            "| a | b |\n| --- | --- |\n| c | d |\n   \n| e | f |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Empty display="   " code=[]"#,
+                r#"line[4] Paragraph display="| e | f |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "tab-line",
+            "| a | b |\n| --- | --- |\n| c | d |\n\t\n| e | f |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] Empty display="\t" code=[]"#,
+                r#"line[4] Paragraph display="| e | f |" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "ordered-list",
+            "| a | b |\n| --- | --- |\n| c | d |\n1. item",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] ListItem display="item" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "ordered-two",
+            "| a | b |\n| --- | --- |\n| c | d |\n2. item",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] ListItem display="item" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "ordered-ten",
+            "| a | b |\n| --- | --- |\n| c | d |\n1234567890. item",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] TableRow header=false align=[none,none] cells=["1234567890. item", ""] display="1234567890. item" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "task-list",
+            "| a | b |\n| --- | --- |\n| c | d |\n- [ ] item",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] ListItem display="item" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "indent4-body",
+            "| a | b |\n| --- | --- |\n| c | d |\n    more",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
+                r#"line[3] TableRow header=false align=[none,none] cells=["more", ""] display="    more" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "indent4-bare",
+            "    a | b\n    --- | ---\n    c | d",
+            &[
+                r#"line[0] Paragraph display="    a | b" code=[]"#,
+                r#"line[1] Paragraph display="    --- | ---" code=[]"#,
+                r#"line[2] Paragraph display="    c | d" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "no-outer-pipes",
+            "a | b\n--- | ---\nc | d",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="a | b" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="c | d" code=[]"#,
+            ],
+            false,
+        );
+        check(
+            "short-header-match",
+            "a | b | c\n--- | ---",
+            &[
+                r#"line[0] Paragraph display="a | b | c" code=[]"#,
+                r#"line[1] Paragraph display="--- | ---" code=[]"#,
+            ],
+            false,
         );
         drop(check);
         assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
