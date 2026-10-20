@@ -172,7 +172,7 @@ pub fn calculate_submenu_y_offset(items: &[MenuItem], sub_ix: usize) -> Pixels {
 
 pub fn calculate_submenu_width(item: &MenuItem) -> Pixels {
     if let MenuItemKind::Submenu(ref sub_items) = item.kind {
-        let max_label_len = sub_items.iter().map(|it| it.label.len()).max().unwrap_or(0);
+        let max_label_len = sub_items.iter().map(|it| it.label.chars().count()).max().unwrap_or(0);
         let has_hints_or_shortcuts = sub_items.iter().any(|it| it.hint.is_some() || it.shortcut.is_some());
         let has_icons_or_checks = sub_items.iter().any(|it| it.icon.is_some() || matches!(it.kind, MenuItemKind::Check(_) | MenuItemKind::Radio(_)));
 

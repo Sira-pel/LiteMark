@@ -849,7 +849,7 @@ mod tests {
         caret.move_to(content.len());
         assert_eq!(line_col(&content, caret.cursor()), (1, 3));
 
-        content.insert_str(caret.cursor(), "\n");
+        content.insert(caret.cursor(), '\n');
         caret.move_to(content.len());
         content.insert_str(caret.cursor(), "there");
         caret.move_to(content.len());

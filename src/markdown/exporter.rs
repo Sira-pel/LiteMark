@@ -114,6 +114,26 @@ pub fn export_to_plaintext(markdown: &str) -> String {
     text_output.trim().to_string()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn format_markdown_table(headers: &[String], rows: &[Vec<String>]) -> String {
+    let mut out = String::new();
+    out.push_str("| ");
+    out.push_str(&headers.join(" | "));
+    out.push_str(" |\n| ");
+    let separators = vec![":---"; headers.len()];
+    out.push_str(&separators.join(" | "));
+    out.push_str(" |\n");
+    for row in rows {
+        out.push_str("| ");
+        let cells: Vec<String> = (0..headers.len())
+            .map(|i| row.get(i).cloned().unwrap_or_default())
+            .collect();
+        out.push_str(&cells.join(" | "));
+        out.push_str(" |\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,24 +188,4 @@ mod tests {
         let out = format_markdown_table(&headers, &rows);
         assert_eq!(out, "| A | B |\n| :--- | :--- |\n| 1 | 2 |\n");
     }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn format_markdown_table(headers: &[String], rows: &[Vec<String>]) -> String {
-    let mut out = String::new();
-    out.push_str("| ");
-    out.push_str(&headers.join(" | "));
-    out.push_str(" |\n| ");
-    let separators = vec![":---"; headers.len()];
-    out.push_str(&separators.join(" | "));
-    out.push_str(" |\n");
-    for row in rows {
-        out.push_str("| ");
-        let cells: Vec<String> = (0..headers.len())
-            .map(|i| row.get(i).cloned().unwrap_or_default())
-            .collect();
-        out.push_str(&cells.join(" | "));
-        out.push_str(" |\n");
-    }
-    out
 }

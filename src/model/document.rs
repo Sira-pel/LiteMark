@@ -2867,6 +2867,23 @@ mod tests {
         doc.smart_newline(false);
         assert_eq!(doc.content, "");
     }
+
+    #[test]
+    fn test_enter_with_selection_is_single_undo_step() {
+        let mut doc = DocumentTab::new(
+            "t".into(),
+            "test.md".into(),
+            "hello world".into(),
+            None,
+            None,
+        );
+        doc.caret.range = 6..11;
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "hello \n");
+        assert!(doc.undo());
+        assert_eq!(doc.content, "hello world");
+        assert!(!doc.undo());
+    }
 }
 
 
