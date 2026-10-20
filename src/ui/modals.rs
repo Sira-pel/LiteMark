@@ -47,6 +47,7 @@ where
     let cls = on_close.clone();
 
     div()
+        .id("shortcuts-modal-backdrop")
         .absolute()
         .inset_0()
         .bg(rgba(0x00000099))
@@ -54,8 +55,11 @@ where
         .items_center()
         .justify_center()
         .p(px(16.0))
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .child(
             div()
+                .id("shortcuts-modal-card")
                 .flex()
                 .flex_col()
                 .w(px(520.0))
@@ -66,6 +70,8 @@ where
                 .border_color(theme.border_surface)
                 .shadow_2xl()
                 .overflow_hidden()
+                .occlude()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 // Header
                 .child(
                     div()
@@ -182,6 +188,7 @@ where
     let ext = on_open_external.clone();
 
     div()
+        .id("pdf-modal-backdrop")
         .absolute()
         .inset_0()
         .bg(rgba(0x00000099))
@@ -189,8 +196,11 @@ where
         .items_center()
         .justify_center()
         .p(px(16.0))
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .child(
             div()
+                .id("pdf-modal-card")
                 .flex()
                 .flex_col()
                 .w(px(560.0))
@@ -200,6 +210,8 @@ where
                 .border_color(theme.border_surface)
                 .shadow_2xl()
                 .overflow_hidden()
+                .occlude()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .flex()
@@ -311,6 +323,7 @@ where
     let version = env!("CARGO_PKG_VERSION");
 
     div()
+        .id("about-modal-backdrop")
         .absolute()
         .inset_0()
         .bg(rgba(0x00000099))
@@ -318,8 +331,11 @@ where
         .items_center()
         .justify_center()
         .p(px(16.0))
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .child(
             div()
+                .id("about-modal-card")
                 .flex()
                 .flex_col()
                 .w(px(420.0))
@@ -329,6 +345,8 @@ where
                 .border_color(theme.border_surface)
                 .shadow_2xl()
                 .overflow_hidden()
+                .occlude()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 // Header
                 .child(
                     div()
@@ -451,6 +469,7 @@ where
     let title = title.into();
     let message = message.into();
     div()
+        .id("prompt-modal-backdrop")
         .absolute()
         .inset_0()
         .bg(rgba(0x00000099))
@@ -458,8 +477,11 @@ where
         .items_center()
         .justify_center()
         .p(px(16.0))
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .child(
             div()
+                .id("prompt-modal-card")
                 .flex()
                 .flex_col()
                 .w(px(420.0))
@@ -469,6 +491,8 @@ where
                 .border_color(theme.border_surface)
                 .shadow_2xl()
                 .overflow_hidden()
+                .occlude()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .px(px(20.0))

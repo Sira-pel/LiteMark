@@ -1131,9 +1131,10 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         if let Some(&(tbl_first, _tbl_last, ref tbl_src)) =
             table_ranges.iter().find(|&&(f, l, _)| i >= f && i <= l)
         {
-            let is_separator = trimmed
-                .chars()
-                .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
+            let is_separator = trimmed.contains('-')
+                && trimmed
+                    .chars()
+                    .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
             if is_separator {
                 let hidden = vec![line_start..line_end];
                 all_hidden.extend(hidden.iter().cloned());
@@ -1419,6 +1420,17 @@ mod tests {
             }
             _ => panic!("Expected table block"),
         }
+    }
+
+    #[test]
+    fn test_parse_document_table() {
+        let md = "| **Col 1** | Col 2 |\n| :--- | :--- |\n| Val A | ~~Val B~~ |";
+        let doc = parse_document(md);
+        assert_eq!(doc.lines.len(), 3);
+        assert!(matches!(doc.lines[0].kind, LineKind::TableRow { is_header: true, .. }));
+        assert!(matches!(doc.lines[1].kind, LineKind::TableDelimiter));
+        assert!(matches!(doc.lines[2].kind, LineKind::TableRow { is_header: false, .. }));
+        assert_eq!(doc.lines[0].display_text, "| **Col 1** | Col 2 |");
     }
 
     #[test]

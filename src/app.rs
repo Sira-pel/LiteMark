@@ -515,6 +515,11 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_mode(&mut self) {
         self.settings.view_mode = self.settings.view_mode.toggle();
+        if self.settings.view_mode == ViewMode::Wysiwyg {
+            if let Some(tab) = self.active_tab_mut() {
+                tab.snap_wysiwyg_table_delimiter();
+            }
+        }
         self.settings.save();
     }
 
@@ -565,8 +570,7 @@ impl LiteMarkApp {
                     let title = tab.title.clone();
                     self.show_toast(format!("Saved {title}"), cx);
                 }
-                self.workspace = scan_workspace_dir(&self.workspace.folder_path);
-                self.refresh_workspace_ids();
+                self.rescan_workspace();
             }
             Err(err) => self.show_error(format!("Couldn't save {}: {err}", path.display())),
         }
@@ -593,6 +597,11 @@ impl LiteMarkApp {
 
     pub fn handle_set_view_mode(&mut self, mode: ViewMode) {
         self.settings.view_mode = mode;
+        if mode == ViewMode::Wysiwyg {
+            if let Some(tab) = self.active_tab_mut() {
+                tab.snap_wysiwyg_table_delimiter();
+            }
+        }
         self.settings.save();
     }
 
@@ -877,7 +886,7 @@ impl LiteMarkApp {
             tab.file_type = FileType::from_filename(&tab.title);
             tab.is_modified = false;
         }
-        self.workspace = scan_workspace_dir(&self.workspace.folder_path);
+        self.rescan_workspace();
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
             let path = tab.file_path.clone();
             tab.workspace_file_id = path.and_then(|path| {
@@ -989,13 +998,41 @@ impl LiteMarkApp {
             .collect()
     }
 
+    pub fn toggle_folder(&mut self, folder_id: &str) {
+        if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.id == folder_id) {
+            folder.is_open = !folder.is_open;
+        }
+    }
+
+    pub fn rescan_workspace(&mut self) {
+        let open_map: std::collections::HashMap<PathBuf, bool> = self
+            .workspace
+            .folders
+            .iter()
+            .map(|f| (f.path.clone(), f.is_open))
+            .collect();
+        let mut new_workspace = scan_workspace_dir(&self.workspace.folder_path);
+        for folder in &mut new_workspace.folders {
+            if let Some(&open) = open_map.get(&folder.path) {
+                folder.is_open = open;
+            }
+        }
+        self.workspace = new_workspace;
+        self.refresh_workspace_ids();
+    }
+
     fn create_note(&mut self, folder_id: Option<String>, desired: String) {
         let folders = self.folder_pairs();
         let dir = child_directory(&self.workspace.folder_path, &folders, folder_id.as_deref());
         let name = next_available_filename(&dir, &desired);
         match safe_create_file(&dir, &name, "") {
             Ok(path) => {
-                self.workspace = scan_workspace_dir(&self.workspace.folder_path);
+                if let Some(fid) = &folder_id {
+                    if let Some(folder) = self.workspace.folders.iter_mut().find(|f| &f.id == fid) {
+                        folder.is_open = true;
+                    }
+                }
+                self.rescan_workspace();
                 let file_id = self
                     .workspace
                     .files
@@ -1020,7 +1057,14 @@ impl LiteMarkApp {
             dir.join(candidate).exists()
         });
         match safe_create_folder(&dir, &name) {
-            Ok(_) => self.workspace = scan_workspace_dir(&self.workspace.folder_path),
+            Ok(_) => {
+                if let Some(pid) = &parent_id {
+                    if let Some(folder) = self.workspace.folders.iter_mut().find(|f| &f.id == pid) {
+                        folder.is_open = true;
+                    }
+                }
+                self.rescan_workspace();
+            }
             Err(err) => self.show_error(format!("Couldn't create folder: {err}")),
         }
     }
@@ -1190,8 +1234,7 @@ impl LiteMarkApp {
         match safe_rename(&old, &name) {
             Ok(new_path) => {
                 self.retarget_open_tabs(&old, &new_path);
-                self.workspace = scan_workspace_dir(&self.workspace.folder_path);
-                self.refresh_workspace_ids();
+                self.rescan_workspace();
             }
             Err(err) => {
                 self.show_error(format!("Couldn't rename: {err}"));
@@ -1219,7 +1262,7 @@ impl LiteMarkApp {
                     .filter(|tab| tab.file_path.as_ref() == Some(&file.path))
                     .map(|tab| tab.id.clone())
                     .collect();
-                self.workspace = scan_workspace_dir(&self.workspace.folder_path);
+                self.rescan_workspace();
                 for tab_id in closing {
                     self.discard_tab(&tab_id);
                 }
@@ -1252,7 +1295,7 @@ impl LiteMarkApp {
                     })
                     .map(|tab| tab.id.clone())
                     .collect();
-                self.workspace = scan_workspace_dir(&self.workspace.folder_path);
+                self.rescan_workspace();
                 for tab_id in closing {
                     self.discard_tab(&tab_id);
                 }
@@ -2681,6 +2724,16 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_folder = {
+            let view = view.clone();
+            move |folder_id: String, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.toggle_folder(&folder_id);
+                    cx.notify();
+                });
+            }
+        };
+
         let on_sidebar_context = {
             let view = view.clone();
             move |target: SidebarTarget, position: Point<Pixels>, cx: &mut App| {
@@ -3700,6 +3753,7 @@ impl Render for LiteMarkApp {
                                         on_create_folder: on_create_folder.clone(),
                                         on_delete_file: on_delete_file.clone(),
                                         on_delete_folder: on_delete_folder.clone(),
+                                        on_toggle_folder: on_toggle_folder.clone(),
                                         on_choose_dir: on_choose_dir.clone(),
                                         on_close: on_toggle_sidebar.clone(),
                                         on_context_menu: on_sidebar_context.clone(),

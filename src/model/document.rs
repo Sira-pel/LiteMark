@@ -312,6 +312,45 @@ impl DocumentTab {
         let cursor = range.start;
         let line_start = home_offset(&self.content, cursor);
         let line_end_pos = line_end(&self.content, cursor);
+
+        // 0. Table rows: continuation or exit
+        let parsed = self.parsed();
+        if let Some(pline) = parsed.line_at_offset(cursor) {
+            if let LineKind::TableRow { ref cells, is_header, .. } = pline.kind {
+                let col_count = cells.len().max(2);
+                let is_empty_row = cells.iter().all(|c| {
+                    if c.end <= self.content.len() && c.start <= c.end {
+                        self.content[c.clone()].trim().is_empty()
+                    } else {
+                        true
+                    }
+                });
+
+                if is_empty_row && !is_header {
+                    // Empty row: exit table by removing this empty row
+                    let (remove_start, remove_end) = if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' {
+                        (line_start - 1, line_end_pos)
+                    } else if line_end_pos < self.content.len() && self.content.as_bytes()[line_end_pos] == b'\n' {
+                        (line_start, line_end_pos + 1)
+                    } else {
+                        (line_start, line_end_pos)
+                    };
+                    self.edit(remove_start..remove_end, "");
+                    self.caret.move_to(remove_start);
+                    self.refresh_cursor();
+                    return;
+                } else {
+                    // Non-empty row: insert a new row below current line
+                    let new_row = format!("\n|{}", "  |".repeat(col_count));
+                    self.edit(line_end_pos..line_end_pos, &new_row);
+                    let target = (line_end_pos + 3).min(self.content.len());
+                    self.caret.move_to(floor_boundary(&self.content, target));
+                    self.refresh_cursor();
+                    return;
+                }
+            }
+        }
+
         let line = &self.content[line_start..line_end_pos];
         let trimmed_start = line.trim_start();
         let indent_len = line.len() - trimmed_start.len();
@@ -804,6 +843,66 @@ impl DocumentTab {
             }
         }
 
+        if cmd == "table" {
+            let range = self.selection_range();
+            let parsed = self.parsed();
+
+            // Check if cursor is currently inside an existing table
+            let in_table = parsed.lines.iter().find(|l| {
+                if let LineKind::TableRow { ref table_source, .. } = l.kind {
+                    range.start >= table_source.start && range.start <= table_source.end
+                } else {
+                    false
+                }
+            });
+
+            if let Some(table_line) = in_table {
+                if let LineKind::TableRow { ref cells, ref table_source, .. } = table_line.kind {
+                    let col_count = cells.len().max(2);
+                    let row_str = format!("\n|{}", "  |".repeat(col_count));
+                    let insert_pos = table_source.end;
+                    self.edit(insert_pos..insert_pos, &row_str);
+                    let target_pos = (insert_pos + 3).min(self.content.len());
+                    self.caret.move_to(floor_boundary(&self.content, target_pos));
+                    self.refresh_cursor();
+                    return;
+                }
+            }
+
+            // Outside table: insert clean standard 2-column table template
+            let mut prefix = String::new();
+            if range.start > 0 {
+                let prev_char = self.content[..range.start].chars().next_back();
+                if let Some(c) = prev_char {
+                    if c != '\n' {
+                        prefix.push_str("\n\n");
+                    } else if !self.content[..range.start].ends_with("\n\n") {
+                        prefix.push('\n');
+                    }
+                }
+            }
+            let mut suffix = String::new();
+            if range.end < self.content.len() {
+                let next_char = self.content[range.end..].chars().next();
+                if let Some(c) = next_char {
+                    if c != '\n' {
+                        suffix.push_str("\n\n");
+                    } else if !self.content[range.end..].starts_with("\n\n") {
+                        suffix.push('\n');
+                    }
+                }
+            }
+            let table_template = "| Column 1 | Column 2 |\n| :--- | :--- |\n| Item 1 | Item 2 |";
+            let full_insert = format!("{}{}{}", prefix, table_template, suffix);
+            self.edit(range.clone(), &full_insert);
+            let col1_start = range.start + prefix.len() + 2;
+            let col1_end = col1_start + "Column 1".len();
+            self.caret.range = col1_start..col1_end;
+            self.caret.reversed = false;
+            self.refresh_cursor();
+            return;
+        }
+
         // 4. Fallback for clear, hr, table
         let range = self.selection_range();
         let selected = self.content[range.clone()].to_string();
@@ -1175,10 +1274,14 @@ impl DocumentTab {
         let parsed = self.parsed();
         let mut all_cells: Vec<Range<usize>> = Vec::new();
         let mut in_table = false;
+        let mut table_end = 0usize;
+        let mut num_cols = 2usize;
         for line in &parsed.lines {
             if let LineKind::TableRow { ref cells, ref table_source, .. } = line.kind {
                 if cursor >= table_source.start && cursor <= table_source.end {
                     in_table = true;
+                    table_end = table_source.end;
+                    num_cols = cells.len().max(num_cols);
                     all_cells.extend(cells.iter().cloned());
                 }
             }
@@ -1202,13 +1305,36 @@ impl DocumentTab {
                 cur_idx - 1
             }
         } else {
-            (cur_idx + 1) % all_cells.len()
+            if cur_idx + 1 == all_cells.len() {
+                let new_row = format!("\n|{}", "  |".repeat(num_cols));
+                self.edit(table_end..table_end, &new_row);
+                let first_cell_start = (table_end + 3).min(self.content.len());
+                let target = floor_boundary(&self.content, first_cell_start);
+                self.caret.range = target..target;
+                self.caret.reversed = false;
+                self.refresh_cursor();
+                return true;
+            }
+            cur_idx + 1
         };
         let target = all_cells[next_idx].clone();
         self.caret.range = target;
         self.caret.reversed = false;
         self.refresh_cursor();
         true
+    }
+
+    pub fn snap_wysiwyg_table_delimiter(&mut self) {
+        let cursor = self.cursor_offset();
+        let parsed = self.parsed();
+        if let Some(pline) = parsed.line_at_offset(cursor) {
+            if matches!(pline.kind, LineKind::TableDelimiter) {
+                let next_pos = (pline.source.end + 1).min(self.content.len());
+                let target = floor_boundary(&self.content, next_pos);
+                self.caret.move_to(target);
+                self.refresh_cursor();
+            }
+        }
     }
 
     pub fn move_up(&mut self, extend: bool) {
@@ -2463,5 +2589,42 @@ mod tests {
         // Shift+Tab goes backwards
         assert!(doc.tab_table_cell(true));
         assert_eq!(doc.selected_text(), "Alice");
+
+        // Forward Tab to Admin, then forward Tab on last cell appends a new row
+        assert!(doc.tab_table_cell(false));
+        assert_eq!(doc.selected_text(), "Admin");
+        assert!(doc.tab_table_cell(false));
+        assert!(doc.content.ends_with("\n|  |  |"));
+    }
+
+    #[test]
+    fn test_table_insertion_and_row_addition() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("table", ViewMode::Wysiwyg);
+        assert_eq!(
+            doc.content,
+            "| Column 1 | Column 2 |\n| :--- | :--- |\n| Item 1 | Item 2 |"
+        );
+        assert_eq!(doc.selected_text(), "Column 1");
+
+        // Calling "table" format while inside a table appends a new row
+        doc.apply_format_in_mode("table", ViewMode::Wysiwyg);
+        assert!(doc.content.ends_with("\n|  |  |"));
+    }
+
+    #[test]
+    fn test_table_smart_newline_continuation_and_exit() {
+        let table = "| Col 1 | Col 2 |\n| :--- | :--- |\n| Item 1 | Item 2 |";
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), table.into(), None, None);
+        doc.place(table.len(), false); // at end of "Item 2 |"
+
+        // Press Enter on non-empty row -> adds a new row
+        doc.smart_newline(false);
+        assert!(doc.content.ends_with("\n|  |  |"));
+
+        // Press Enter on the new empty row -> removes it and exits table
+        doc.smart_newline(false);
+        assert_eq!(doc.content, table);
     }
 }
+

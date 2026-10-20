@@ -323,23 +323,20 @@ where
                             let sub_cls = cls.clone();
                             let theme_clone = *theme;
                             row = row.child(
-                                deferred(
-                                    anchored()
-                                        .position(Point::new(width - px(4.0), px(ix as f32 * 32.0)))
-                                        .anchor(Corner::TopLeft)
-                                        .snap_to_window()
-                                        .child(render_menu_panel(
-                                            ("sub-menu", ix).into(),
-                                            sub_w,
-                                            sub_items,
-                                            None,
-                                            None,
-                                            sub_cls,
-                                            on_set_submenu.clone(),
-                                            &theme_clone,
-                                        ))
-                                )
-                                .with_priority(2)
+                                anchored()
+                                    .position(Point::new(width - px(4.0), px(ix as f32 * 32.0)))
+                                    .anchor(Corner::TopLeft)
+                                    .snap_to_window()
+                                    .child(render_menu_panel(
+                                        ("sub-menu", ix).into(),
+                                        sub_w,
+                                        sub_items,
+                                        None,
+                                        None,
+                                        sub_cls,
+                                        on_set_submenu.clone(),
+                                        &theme_clone,
+                                    ))
                             );
                         }
                     }

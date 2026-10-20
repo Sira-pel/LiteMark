@@ -287,6 +287,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let estimated_height = if self.view_mode == ViewMode::Wysiwyg {
             let mut h = px(32.0);
             for line in &self.parsed.lines {
+                if matches!(line.kind, LineKind::TableDelimiter) {
+                    continue;
+                }
                 let (font_sz, line_h, top_gap, _) =
                     wysiwyg_line_metrics(&line.kind, self.font_size);
                 let _ = font_sz;
@@ -509,6 +512,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut cur_y = bounds.top() + px(16.0);
 
         for (line_idx, parsed_line) in self.parsed.lines.iter().enumerate() {
+            if matches!(parsed_line.kind, LineKind::TableDelimiter) {
+                continue;
+            }
             let (row_font_size, row_line_height, top_gap, indent_x) =
                 wysiwyg_line_metrics(&parsed_line.kind, self.font_size);
             cur_y += top_gap;
@@ -611,28 +617,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             self.link_color,
                         ));
                     }
-                    LineKind::HorizontalRule | LineKind::TableDelimiter => {
+                    LineKind::HorizontalRule => {
                         let mid_y = cur_y + row_line_height * 0.5;
                         bg_quads.push(fill(
                             Bounds::new(point(base_x, mid_y), size(content_width, px(1.5))),
-                            self.border_color,
-                        ));
-                    }
-                    LineKind::TableRow { is_header, .. } => {
-                        if *is_header {
-                            bg_quads.push(fill(
-                                Bounds::new(
-                                    point(base_x, cur_y),
-                                    size(content_width, row_line_height),
-                                ),
-                                self.surface_bg,
-                            ));
-                        }
-                        bg_quads.push(fill(
-                            Bounds::new(
-                                point(base_x, cur_y + row_line_height - px(1.0)),
-                                size(content_width, px(1.0)),
-                            ),
                             self.border_color,
                         ));
                     }
@@ -749,6 +737,26 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     window
                         .text_system()
                         .shape_line(slice, row_font_size, &runs, None);
+
+                if let LineKind::TableRow { is_header, .. } = &parsed_line.kind {
+                    let table_row_w = (shaped.width + px(16.0)).min(content_width);
+                    if *is_header {
+                        bg_quads.push(fill(
+                            Bounds::new(
+                                point(base_x, cur_y),
+                                size(table_row_w, row_line_height),
+                            ),
+                            self.surface_bg,
+                        ));
+                    }
+                    bg_quads.push(fill(
+                        Bounds::new(
+                            point(base_x, cur_y + row_line_height - px(1.0)),
+                            size(table_row_w, px(1.0)),
+                        ),
+                        self.border_color,
+                    ));
+                }
 
                 // Selection and Find highlights
                 paint_ranges_mapped(
@@ -1003,10 +1011,16 @@ fn wysiwyg_line_metrics(
             let fs = base_font_size * 0.92;
             (fs, base_font_size * 1.5, px(0.0), px(14.0))
         }
-        LineKind::HorizontalRule | LineKind::TableDelimiter => (
+        LineKind::HorizontalRule => (
             base_font_size * 0.75,
             base_font_size * 1.1,
             px(2.0),
+            px(0.0),
+        ),
+        LineKind::TableDelimiter => (
+            px(0.0),
+            px(0.0),
+            px(0.0),
             px(0.0),
         ),
         LineKind::TableRow { .. } => {
@@ -1162,6 +1176,11 @@ fn wysiwyg_slice_runs<V: 'static>(
         }
     }
 
+    if matches!(parsed_line.kind, LineKind::TableRow { .. }) {
+        let slice_str = &parsed_line.display_text[display_slice];
+        runs = apply_table_pipe_style(runs, slice_str, editor.border_color);
+    }
+
     runs.retain(|r| r.len > 0);
     runs
 }
@@ -1268,6 +1287,54 @@ fn apply_underline_to_runs(
                 len: end - u_end,
                 ..run
             });
+        }
+    }
+    out
+}
+
+fn apply_table_pipe_style(
+    runs: Vec<TextRun>,
+    slice_text: &str,
+    border_color: Hsla,
+) -> Vec<TextRun> {
+    let mut out = runs;
+    for (idx, ch) in slice_text.char_indices() {
+        if ch == '|' {
+            let target = idx..(idx + 1);
+            let mut next_out = Vec::new();
+            let mut offset = 0usize;
+            for run in out {
+                let start = offset;
+                let end = offset + run.len;
+                offset = end;
+                if end <= target.start || start >= target.end {
+                    next_out.push(run);
+                    continue;
+                }
+                let p_start = target.start.max(start);
+                let p_end = target.end.min(end);
+                if p_start > start {
+                    next_out.push(TextRun {
+                        len: p_start - start,
+                        ..run.clone()
+                    });
+                }
+                let mut pipe_font = run.font.clone();
+                pipe_font.weight = FontWeight::NORMAL;
+                next_out.push(TextRun {
+                    len: p_end - p_start,
+                    font: pipe_font,
+                    color: border_color,
+                    ..run.clone()
+                });
+                if p_end < end {
+                    next_out.push(TextRun {
+                        len: end - p_end,
+                        ..run
+                    });
+                }
+            }
+            out = next_out;
         }
     }
     out
