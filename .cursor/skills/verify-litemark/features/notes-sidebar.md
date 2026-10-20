@@ -22,7 +22,7 @@ Preconditions:
 - That directory is not isolated. Do not start the window.
 
 - **Refuse the window.** Run `.cursor/skills/verify-litemark/scripts/refuse-gui.sh`. Exit code is 2. Stdout contains `command=not-run target/debug/litemark`.
-- **Unmet precondition.** Stdout contains `unmet_precondition=notes directory is dirs::document_dir()/Notes with no override (src/services/fs_service.rs get_or_create_notes_dir); launch writes that directory's Welcome.md`.
+- **Exact reasons.** Stdout contains `reason=notes_dir_unisolated path=dirs::document_dir()/Notes symbol=get_or_create_notes_dir file=src/services/fs_service.rs` and `reason=vulkan_icd_missing path=/usr/share/vulkan/icd.d`.
 - **Proof.** Stop. Do not create `Welcome.md` to force the sidebar to look populated.
 
 ## Gotchas

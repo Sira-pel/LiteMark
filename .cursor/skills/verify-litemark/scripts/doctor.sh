@@ -42,7 +42,6 @@ green_fixtures=(
   links
   images
   long-lines
-  large-doc
 )
 for name in "${green_fixtures[@]}"; do
   input="${KIT_DIR}/fixtures/${name}/input.md"
@@ -56,6 +55,26 @@ for name in "${green_fixtures[@]}"; do
     fail=1
   fi
 done
+
+large_dir="${KIT_DIR}/fixtures/large-doc"
+for file in seed.txt input.sha256 required-lines.txt; do
+  if [[ ! -f "${large_dir}/${file}" ]]; then
+    say "doctor fail missing ${large_dir}/${file}"
+    fail=1
+  fi
+done
+if ! grep -Fxq -- 'sha256=7eac2c0a0471e1b121b9a3b8c6a11020b4e2e98cffb26387f1db057596bd092c' "${large_dir}/input.sha256"; then
+  say "doctor fail ${large_dir}/input.sha256 is not the committed sha256 line"
+  fail=1
+fi
+if ! grep -Fxq -- 'lines=2001' "${large_dir}/required-lines.txt"; then
+  say "doctor fail missing exact line lines=2001"
+  fail=1
+fi
+if [[ ! -f "${KIT_DIR}/fixtures/fmt-baseline.files" || ! -f "${KIT_DIR}/fixtures/fmt-baseline.hunks" ]]; then
+  say "doctor fail missing fmt baseline"
+  fail=1
+fi
 
 red_fixtures=(
   headings-missing-marker

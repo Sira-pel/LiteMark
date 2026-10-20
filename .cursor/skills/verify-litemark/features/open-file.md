@@ -22,7 +22,7 @@ Preconditions:
 - The notes directory is `dirs::document_dir()/Notes` with no override.
 
 - **Refuse the window.** Do not launch the binary. Run `.cursor/skills/verify-litemark/scripts/refuse-gui.sh`. Exit code is 2. Stdout contains the exact line `REFUSED bin=` followed by the debug binary path, and the exact line `command=not-run target/debug/litemark`.
-- **Unmet notes directory.** The same command prints `unmet_precondition=notes directory is dirs::document_dir()/Notes with no override (src/services/fs_service.rs get_or_create_notes_dir); launch writes that directory's Welcome.md`.
+- **Exact reasons.** The same command prints `reason=notes_dir_unisolated path=dirs::document_dir()/Notes symbol=get_or_create_notes_dir file=src/services/fs_service.rs` and `reason=vulkan_icd_missing path=/usr/share/vulkan/icd.d`.
 - **Proof.** Leave the process unstarted. Do not treat a render-dump of the file as this journey.
 
 ## Gotchas
@@ -30,4 +30,4 @@ Preconditions:
 - README.md lists Ctrl+O. The binding is `ctrl-o` → `OpenFile` in `src/main.rs`. The menu label is `Open…`.
 - A path argument is ignored when the path does not exist (`filter(|p| p.exists())`).
 - Launching the binary creates `Welcome.md` under the notes directory when that file is absent. This kit does not isolate that directory.
-- `import`, `scrot`, and `grim` are not installed. A screenshot is not available.
+- `/usr/share/vulkan/icd.d` is absent. The refuse line for that is `reason=vulkan_icd_missing path=/usr/share/vulkan/icd.d`.

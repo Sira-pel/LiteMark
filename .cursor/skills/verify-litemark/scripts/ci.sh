@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Commands CI runs.
+# CI contract until main has .github/workflows.
 #
-# main has no .github directory (`git ls-tree -r HEAD --name-only`).
-# The only workflow in this remote is
-# origin/cursor/linux-packaging-readme-4544:.github/workflows/ci.yml.
-# Its steps, copied here, are:
+# Provenance: branch cursor/linux-packaging-readme-4544,
+# blob a24e5dd3af5ff2f6b0a7bfdad3530f4e580920db (.github/workflows/ci.yml).
+# main does not contain that file.
+#
+# Contract copied from that blob, with the fmt step replaced:
 #   cargo build
 #   cargo test
 #   cargo clippy --all-targets -- -D warnings
-#   cargo fmt --check, and if that fails the CI step prints a skip line
-#   and still exits 0.
+#   scripts/fmt-gate.sh
+# The blob's fmt step skips when `cargo fmt --check` is dirty. This script
+# does not. A new dirty file or a new hunk fails the script.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,19 +40,14 @@ run_one build cargo build || fail=1
 run_one test cargo test || fail=1
 run_one clippy cargo clippy --all-targets -- -D warnings || fail=1
 
-echo "===== fmt: cargo fmt --check ====="
-fmt_log="${LOG_DIR}/fmt.log"
+echo "===== fmt: scripts/fmt-gate.sh ====="
 set +e
-cargo fmt --check >"${fmt_log}" 2>&1
+"${SCRIPT_DIR}/fmt-gate.sh"
 fmt_status=$?
 set -e
-cat "${fmt_log}"
-if [[ "${fmt_status}" -eq 0 ]]; then
-  echo "Tree is fmt-clean."
-  echo "===== fmt exit=0 log=${fmt_log} ====="
-else
-  echo "Tree is not fmt-clean; skipping cargo fmt --check."
-  echo "===== fmt raw_exit=${fmt_status} ci_step_exit=0 log=${fmt_log} ====="
+echo "===== fmt exit=${fmt_status} ====="
+if [[ "${fmt_status}" -ne 0 ]]; then
+  fail=1
 fi
 
 echo "ci_fail=${fail}"

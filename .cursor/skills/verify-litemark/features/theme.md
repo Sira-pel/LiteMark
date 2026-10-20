@@ -21,7 +21,7 @@ Preconditions:
 - Theme is stored with the window session. This kit does not start that window.
 
 - **Refuse the window.** Run `.cursor/skills/verify-litemark/scripts/refuse-gui.sh`. Exit code is 2. Stdout contains `command=not-run target/debug/litemark`.
-- **Unmet precondition.** Stdout contains `unmet_precondition=screenshot tools import, scrot, and grim are not installed; imagemagick is not an allowed install`.
+- **Exact reasons.** Stdout contains `reason=notes_dir_unisolated path=dirs::document_dir()/Notes symbol=get_or_create_notes_dir file=src/services/fs_service.rs` and `reason=vulkan_icd_missing path=/usr/share/vulkan/icd.d`.
 - **Proof.** Stop. Do not claim a theme change from a render dump. The dump has no color tokens.
 
 ## Gotchas

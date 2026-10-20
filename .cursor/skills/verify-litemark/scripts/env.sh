@@ -25,10 +25,12 @@ mkdir -p \
   "${VERIFY_EVIDENCE_DIR}" \
   "${VERIFY_ARTIFACTS_DIR}"
 
-# main has no rust-toolchain.toml. The only CI workflow in this remote is
-# origin/cursor/linux-packaging-readme-4544:.github/workflows/ci.yml, which
-# installs dtolnay/rust-toolchain@stable. Cargo.lock pins ar_archive_writer
-# 0.5.3 (rust-version 1.88.0), which rustc 1.83 cannot parse.
+# main has no rust-toolchain.toml and no .github/workflows.
+# Stable is pinned by branch cursor/linux-packaging-readme-4544,
+# blob a24e5dd3af5ff2f6b0a7bfdad3530f4e580920db
+# (.github/workflows/ci.yml), step dtolnay/rust-toolchain@stable.
+# Cargo.lock pins ar_archive_writer 0.5.3 (rust-version 1.88.0),
+# which rustc 1.83 cannot parse.
 if command -v rustup >/dev/null 2>&1; then
   export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
 fi

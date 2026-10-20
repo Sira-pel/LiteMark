@@ -18,14 +18,14 @@ The primary proof is headless. The desktop window is not isolated and is not the
 - Treat every command as literal. Keep paths and flags unchanged.
 - Run render proofs through `scripts/render_dump.sh` and `scripts/prove-markdown.sh`.
 - Run build, test, clippy, and fmt through `scripts/ci.sh`.
-- A red-fixture exit 0 means the check failed on purpose. It is not a product pass.
+- `prove-markdown.sh red` prints `red_caught=<n>/<total>` and exits 0 only when every red input is caught. That is not a product pass.
 - Do not remove proof artifacts during cleanup.
 
 ## Proof and skip reporting
 
-- Markdown proof is the dump file compared byte-for-byte with `expect.txt`.
+- Small markdown proofs compare the dump byte-for-byte with `expect.txt`. `large-doc` is generated from `seed.txt` and checked with `sha256=` plus `required-lines.txt`.
 - Each assertion line is a full dump line. Do not accept a substring match.
-- UI journeys call `scripts/refuse-gui.sh`, exit 2, and name the unmet precondition. Do not report them as verified through the render dump.
+- UI journeys call `scripts/refuse-gui.sh`, exit 2, and print `reason=notes_dir_unisolated` and `reason=vulkan_icd_missing`. Do not report them as verified through the render dump.
 - Record `RUN_ID` in `artifacts/markdown-render/<RUN_ID>/meta-*.txt`.
 
 ## Feature entry contract

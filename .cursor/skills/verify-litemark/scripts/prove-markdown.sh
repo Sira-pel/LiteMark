@@ -6,10 +6,11 @@
 #   prove-markdown.sh red        # red fixtures must fail their exact line
 #   prove-markdown.sh all
 #
-# Green exit 0: every dump file is byte-identical to its expect.txt.
-# Red exit 0: every red fixture's dump does NOT contain missing-line.txt
-# as a full line, and that line IS a full line of the named expect file.
-# A red exit 0 is the proof the check can fail. It is not a product pass.
+# Green exit 0: every small dump is byte-identical to expect.txt, and the
+# generated large doc matches input.sha256 plus required-lines.txt.
+# Red prints red_caught=<n>/<total> and exits 0 only when every red input
+# is caught (the missing exact line is absent). Otherwise it exits non-zero.
+# red_caught is not a product pass.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +31,20 @@ copy_proof() {
   fi
 }
 
+generate_large_doc() {
+  local dir="${KIT_DIR}/fixtures/large-doc"
+  local generated="${VERIFY_RUN_DIR}/large-doc/input.md"
+  local expected sha_line
+  expected="$(tr -d '\n' <"${dir}/input.sha256")"
+  sha_line="$(python3 "${SCRIPT_DIR}/generate-large-doc.py" "${dir}/seed.txt" "${generated}" | grep -E '^sha256=[0-9a-f]{64}$')"
+  if [[ "${sha_line}" != "${expected}" ]]; then
+    echo "FAIL fixture=large-doc sha256_observed=${sha_line} sha256_expected=${expected}"
+    return 1
+  fi
+  echo "sha256_ok=${sha_line} input=${generated}"
+  LARGE_INPUT="${generated}"
+}
+
 run_green() {
   local name="$1"
   local dir="${KIT_DIR}/fixtures/${name}"
@@ -37,6 +52,10 @@ run_green() {
   local expect="${dir}/expect.txt"
   local dump="${VERIFY_EVIDENCE_DIR}/${name}.dump.txt"
   local timing="${VERIFY_EVIDENCE_DIR}/${name}.timing.txt"
+  if [[ "${name}" == "large-doc" ]]; then
+    input="${LARGE_INPUT}"
+    expect="${dir}/required-lines.txt"
+  fi
   local elapsed dump_status
   set +e
   elapsed="$("${SCRIPT_DIR}/render_dump.sh" "${input}" "${dump}" "${timing}")"
@@ -47,15 +66,27 @@ run_green() {
     return 1
   fi
   copy_proof "${name}" "${dump}" "${timing}"
+  if [[ "${name}" == "large-doc" ]]; then
+    local missing=0 line
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ -n "${line}" ]] || continue
+      if ! grep -Fxq -- "${line}" "${dump}"; then
+        echo "FAIL fixture=large-doc missing_exact_line=${line} observed=${dump}"
+        missing=1
+      fi
+    done <"${expect}"
+    if [[ "${missing}" -ne 0 ]]; then
+      return 1
+    fi
+    echo "PASS fixture=large-doc required=${expect} observed=${dump} artifact=${ART_DIR}/${name}.dump.txt ${elapsed}"
+    grep -E '^(bytes|lines|wrap_cols)=' "${dump}"
+    return 0
+  fi
   if cmp -s "${expect}" "${dump}"; then
     echo "PASS fixture=${name} expect=${expect} observed=${dump} artifact=${ART_DIR}/${name}.dump.txt ${elapsed}"
-    if [[ "${name}" == "large-doc" ]]; then
-      grep -E '^(bytes|lines|wrap_cols)=' "${dump}"
-    else
-      echo "--- observed ${name} ---"
-      cat "${dump}"
-      echo "--- end observed ${name} ---"
-    fi
+    echo "--- observed ${name} ---"
+    cat "${dump}"
+    echo "--- end observed ${name} ---"
     return 0
   fi
   echo "FAIL fixture=${name} expect=${expect} observed=${dump}"
@@ -139,23 +170,35 @@ red_names=(
 )
 
 fail=0
+caught=0
+total="${#red_names[@]}"
 case "${mode}" in
   green)
+    generate_large_doc || fail=1
     for name in "${green_names[@]}"; do
       run_green "${name}" || fail=1
     done
     ;;
   red)
     for name in "${red_names[@]}"; do
-      run_red "${name}" || fail=1
+      if run_red "${name}"; then
+        caught=$((caught + 1))
+      else
+        fail=1
+      fi
     done
     ;;
   all)
+    generate_large_doc || fail=1
     for name in "${green_names[@]}"; do
       run_green "${name}" || fail=1
     done
     for name in "${red_names[@]}"; do
-      run_red "${name}" || fail=1
+      if run_red "${name}"; then
+        caught=$((caught + 1))
+      else
+        fail=1
+      fi
     done
     ;;
   *)
@@ -168,9 +211,25 @@ esac
   printf 'run_id=%s\n' "${RUN_ID}"
   printf 'mode=%s\n' "${mode}"
   printf 'wrap_cols=%s\n' "${LITEMARK_WRAP_COLS}"
-  printf 'fail=%s\n' "${fail}"
   printf 'bin=%s\n' "${LITEMARK_BIN}"
+  if [[ "${mode}" == "green" ]]; then
+    printf 'green_fail=%s\n' "${fail}"
+  fi
+  if [[ "${mode}" == "red" || "${mode}" == "all" ]]; then
+    printf 'red_caught=%s/%s\n' "${caught}" "${total}"
+  fi
 } >"${ART_DIR}/meta-${mode}.txt"
 
-echo "prove_markdown mode=${mode} fail=${fail} artifacts=${ART_DIR}"
-exit "${fail}"
+if [[ "${mode}" == "red" || "${mode}" == "all" ]]; then
+  echo "red_caught=${caught}/${total}"
+  if [[ "${caught}" -ne "${total}" ]]; then
+    echo "prove_markdown mode=${mode} red_caught=${caught}/${total} artifacts=${ART_DIR}"
+    exit 1
+  fi
+fi
+if [[ "${mode}" == "green" || "${mode}" == "all" ]]; then
+  echo "prove_markdown mode=${mode} green_fail=${fail} artifacts=${ART_DIR}"
+  exit "${fail}"
+fi
+echo "prove_markdown mode=${mode} red_caught=${caught}/${total} artifacts=${ART_DIR}"
+exit 0

@@ -12,7 +12,7 @@ Markdown render is the editor's view of a note: each source line becomes a kind,
 - `render-links` keeps the URL `https://example.com/litemark` on the link text.
 - `render-images` keeps the image markup in the display string and the alt text on one segment.
 - `render-wrap` splits a long line at column 40.
-- `render-large` parses the 2001-line fixture and records `LITEMARK_ELAPSED_US`.
+- `render-large` generates the 2001-line document from `fixtures/large-doc/seed.txt` and records `LITEMARK_ELAPSED_US`.
 
 ## How to get to it (user POV)
 
@@ -35,8 +35,9 @@ Preconditions:
 - **Links.** The `links` expect contains the exact line `segment[0][1] source=5..13 bold=false italic=false underline=false strike=false code=false link="https://example.com/litemark" text="LiteMark"`.
 - **Images.** The `images` expect contains the exact line `line[0] kind=Paragraph source=0..41 display="![Alt text](https://example.com/note.png)"` and `segment[0][0] source=2..10 bold=false italic=false underline=false strike=false code=false link=- text="Alt text"`. The display string keeps the `![` markup. There is no image kind.
 - **Wrapping.** The `long-lines` expect contains the exact line `row[0][0] display=0..40 text="The quick brown fox jumps over the lazy "` and `row[2][0] display=0..40 text="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`.
-- **Large document.** The `large-doc` expect contains the exact line `lines=2001`. The script prints `LITEMARK_ELAPSED_US=` from the parse. That number is not compared.
-- **Red proofs.** Run `.cursor/skills/verify-litemark/scripts/prove-markdown.sh red`. Exit 0 means each red fixture's dump lacks `missing-line.txt` as a full line. A pass here is a failed compare, not a product pass.
+- **Large document.** `scripts/generate-large-doc.py` writes the input from `fixtures/large-doc/seed.txt`. The harness requires the exact line `sha256=7eac2c0a0471e1b121b9a3b8c6a11020b4e2e98cffb26387f1db057596bd092c` and every full line in `fixtures/large-doc/required-lines.txt`, including `bytes=70444`, `lines=2001`, and `wrap_cols=40`. The script prints `LITEMARK_ELAPSED_US=` from the parse. That number is not compared.
+- **Red proofs.** Run `.cursor/skills/verify-litemark/scripts/prove-markdown.sh red`. It prints `red_caught=<n>/<total>` and exits 0 only when every red input is caught (each `missing-line.txt` is absent as a full line). A smaller count exits 1. That exit 0 is a failed compare, not a product pass.
+- **Green can fail.** Run `.cursor/skills/verify-litemark/scripts/prove-green-can-fail.sh`. It replaces `line[0] kind=Heading level=1 source=0..7 display="Title"` with `line[0] kind=Heading level=9 source=0..7 display="Title"`, requires `prove-markdown.sh green` to exit non-zero, then restores the expect file.
 
 ## Gotchas
 
@@ -44,5 +45,5 @@ Preconditions:
 - `wrap_cols=40` is the harness column count. The editor derives columns from glyph width in `src/ui/text_editor.rs`. Do not treat 40 as that pixel width.
 - Image syntax is not a `LineKind`. The alt text is a segment and the display string still contains `![Alt text](https://example.com/note.png)`.
 - Table display text keeps the pipe row. Delimiter rows are `kind=TableDelimiter` with an empty display string.
-- `prove-markdown.sh red` exiting 0 is required. If a red dump still contains its missing line, the check cannot fail and the script exits 1.
+- `prove-markdown.sh red` must print `red_caught=` equal to the total. If a red dump still contains its missing line, that input is not caught and the script exits 1.
 - Do not bless a new dump by copying it over `expect.txt` unless the exact tokens above are still the ones you mean to require.
