@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    parse_document, split_table_cells, unescaped_pipe_offsets, InlineTagKind, LineKind,
-    ParsedDocument, TableColumnAlign,
+    parse_document, scan_list_marker, split_table_cells, unescaped_pipe_offsets, InlineTagKind,
+    LineKind, ParsedDocument, TableColumnAlign,
 };
 
 use super::text_ops::{
@@ -433,86 +433,35 @@ impl DocumentTab {
 
         let line = &self.content[line_start..line_end_pos];
         let trimmed_start = line.trim_start();
-        let indent_len = line.len() - trimmed_start.len();
-        let indent = &line[..indent_len];
+        let indent = &line[..line.len() - trimmed_start.len()];
 
-        // 1. Task lists: "- [ ] ", "- [x] ", etc.
-        let task_prefixes = [
-            "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-        ];
-        if let Some(&prefix) = task_prefixes.iter().find(|&&p| trimmed_start.starts_with(p)) {
-            let is_empty_task = trimmed_start.len() == prefix.len()
-                || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
-            if is_empty_task {
+        if let Some(item) = scan_list_marker(line) {
+            let body = &line[item.prefix_end()..];
+            let is_empty = body.trim().is_empty();
+            if is_empty {
                 if !range.is_empty() {
                     self.edit(range, "\n");
                     return;
                 }
-                if !indent.is_empty() {
-                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
-                    self.edit(line_start..line_start + outdent_len, "");
-                } else {
-                    self.edit(line_start..line_end_pos, "");
-                }
-            } else {
-                let bullet_char = prefix.chars().next().unwrap_or('-');
-                let ins = format!("\n{}{} [ ] ", indent, bullet_char);
-                self.edit(range, &ins);
-            }
-            return;
-        }
-
-        // 2. Bullet lists: "- ", "* ", "+ "
-        let bullet_prefixes = ["- ", "* ", "+ "];
-        if let Some(&prefix) = bullet_prefixes.iter().find(|&&p| trimmed_start.starts_with(p)) {
-            let is_empty_bullet = trimmed_start.len() == prefix.len()
-                || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
-            if is_empty_bullet {
-                if !range.is_empty() {
-                    self.edit(range, "\n");
-                    return;
-                }
-                if !indent.is_empty() {
-                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
-                    self.edit(line_start..line_start + outdent_len, "");
-                } else {
-                    self.edit(line_start..line_end_pos, "");
-                }
-            } else {
-                let ins = format!("\n{}{}", indent, prefix);
-                self.edit(range, &ins);
-            }
-            return;
-        }
-
-        // 3. Numbered lists: digits + ". "
-        if let Some(dot_pos) = trimmed_start.find(". ") {
-            if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
-                if let Ok(num) = trimmed_start[..dot_pos].parse::<usize>() {
-                    let marker_len = dot_pos + 2;
-                    let is_empty_num = trimmed_start.len() == marker_len
-                        || (trimmed_start.len() > marker_len && trimmed_start[marker_len..].trim().is_empty());
-                    if is_empty_num {
-                        if !range.is_empty() {
-                            self.edit(range, "\n");
-                            return;
-                        }
-                        if !indent.is_empty() {
-                            let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
-                            self.edit(line_start..line_start + outdent_len, "");
-                        } else {
-                            self.edit(line_start..line_end_pos, "");
-                        }
+                if item.indent_bytes > 0 {
+                    let indent = &line[..item.indent_bytes];
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 {
+                        1
                     } else {
-                        let ins = format!("\n{}{}. ", indent, num + 1);
-                        self.edit(range, &ins);
-                    }
-                    return;
+                        2
+                    };
+                    self.edit(line_start..line_start + outdent_len, "");
+                } else {
+                    self.edit(line_start..line_end_pos, "");
                 }
+            } else {
+                let kept = &line[..item.indent_bytes];
+                self.edit(range, &item.continuation(kept));
             }
+            return;
         }
 
-        // 4. Blockquotes: "> "
+        // Blockquotes: "> "
         if trimmed_start.starts_with("> ") || trimmed_start == ">" {
             let is_empty_quote = trimmed_start == ">"
                 || trimmed_start == "> "
@@ -600,26 +549,20 @@ impl DocumentTab {
             }
         }
 
-        let trimmed = line_before.trim_start();
-        let indent_len = line_before.len() - trimmed.len();
-        let indent = &line_before[..indent_len];
-
-        // 3. Task list prefix at cursor boundary
-        for prefix in [
-            "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-        ] {
-            if trimmed == prefix {
-                let start = cursor - 4;
-                self.edit(start..cursor, "");
-                return true;
-            }
-        }
-
-        // 4. Bullet list prefix at cursor boundary
-        for prefix in ["- ", "* ", "+ "] {
-            if trimmed == prefix {
-                if !indent.is_empty() {
-                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
+        if let Some(item) = scan_list_marker(line_before) {
+            if item.prefix_end() == line_before.len() {
+                if item.task.is_some() {
+                    let start = line_start + item.marker_end;
+                    self.edit(start..cursor, "");
+                    return true;
+                }
+                if item.indent_bytes > 0 {
+                    let indent = &line_before[..item.indent_bytes];
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 {
+                        1
+                    } else {
+                        2
+                    };
                     self.edit(line_start..line_start + outdent_len, "");
                 } else {
                     self.edit(line_start..cursor, "");
@@ -628,23 +571,7 @@ impl DocumentTab {
             }
         }
 
-        // 5. Numbered list prefix at cursor boundary
-        if let Some(dot_pos) = trimmed.find(". ") {
-            if dot_pos > 0
-                && trimmed[..dot_pos].chars().all(|c| c.is_ascii_digit())
-                && dot_pos + 2 == trimmed.len()
-            {
-                if !indent.is_empty() {
-                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
-                    self.edit(line_start..line_start + outdent_len, "");
-                } else {
-                    self.edit(line_start..cursor, "");
-                }
-                return true;
-            }
-        }
-
-        // 6. Blockquote prefix at cursor boundary
+        // Blockquote prefix at cursor boundary
         if line_before == "> " {
             self.edit(line_start..cursor, "");
             return true;
@@ -2330,30 +2257,15 @@ fn parse_line_block_prefix(line: &str) -> (usize, Option<BlockFormatTarget>, usi
             }
         }
     }
-    for pfx in [
-        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-    ] {
-        if trimmed.starts_with(pfx) {
-            return (indent, Some(BlockFormatTarget::TaskList), indent + pfx.len());
-        }
-    }
-    for pfx in ["- ", "* ", "+ "] {
-        if trimmed.starts_with(pfx) {
-            return (
-                indent,
-                Some(BlockFormatTarget::BulletList),
-                indent + pfx.len(),
-            );
-        }
-    }
-    if let Some(dot) = trimmed.find(". ") {
-        if dot > 0 && trimmed[..dot].chars().all(|c| c.is_ascii_digit()) {
-            return (
-                indent,
-                Some(BlockFormatTarget::OrderedList),
-                indent + dot + 2,
-            );
-        }
+    if let Some(item) = scan_list_marker(line) {
+        let target = if item.task.is_some() && !item.ordered {
+            BlockFormatTarget::TaskList
+        } else if item.ordered {
+            BlockFormatTarget::OrderedList
+        } else {
+            BlockFormatTarget::BulletList
+        };
+        return (item.indent_bytes, Some(target), item.prefix_end());
     }
     if trimmed.starts_with("> ") {
         return (indent, Some(BlockFormatTarget::Blockquote), indent + 2);
@@ -2502,28 +2414,12 @@ pub fn block_prefix_len(line: &str) -> usize {
         }
     }
 
-    for prefix in [
-        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-    ] {
-        if trimmed_start.starts_with(prefix) {
-            return indent_len + prefix.len();
-        }
-    }
-
-    for prefix in ["- ", "* ", "+ "] {
-        if trimmed_start.starts_with(prefix) {
-            return indent_len + prefix.len();
-        }
+    if let Some(item) = scan_list_marker(line) {
+        return item.prefix_end();
     }
 
     if trimmed_start.starts_with("> ") {
         return indent_len + 2;
-    }
-
-    if let Some(dot_pos) = trimmed_start.find(". ") {
-        if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
-            return indent_len + dot_pos + 2;
-        }
     }
 
     0
@@ -3559,6 +3455,112 @@ mod tests {
         // Enter on root "- " exits the list, removing the marker
         doc.smart_newline(false);
         assert_eq!(doc.content, "");
+    }
+
+    fn edit_probe(source: &str) -> (usize, usize, String, String, String, usize, String) {
+        let prefix_len = block_prefix_len(source);
+        let marker_len = crate::model::text_ops::list_marker_len(source);
+        let mut newline_doc =
+            DocumentTab::new("n".into(), "t.md".into(), source.into(), None, None);
+        newline_doc.place(source.len(), false);
+        newline_doc.smart_newline(false);
+        let mut backspace_doc =
+            DocumentTab::new("b".into(), "t.md".into(), source.into(), None, None);
+        backspace_doc.place(source.len(), false);
+        backspace_doc.smart_backspace();
+        let mut toggle_doc = DocumentTab::new("o".into(), "t.md".into(), source.into(), None, None);
+        toggle_doc.place(source.len(), false);
+        toggle_doc.apply_format_in_mode("ol", ViewMode::Wysiwyg);
+        let mut home_doc = DocumentTab::new("h".into(), "t.md".into(), source.into(), None, None);
+        home_doc.place(0, false);
+        home_doc.move_home_in_mode(false, ViewMode::Wysiwyg);
+        let mut typed = source.to_string();
+        let at = if prefix_len > 0 { prefix_len } else { 0 };
+        typed.insert(at, 'Z');
+        (
+            prefix_len,
+            marker_len,
+            newline_doc.content,
+            backspace_doc.content,
+            toggle_doc.content,
+            home_doc.cursor_offset(),
+            typed,
+        )
+    }
+
+    #[test]
+    fn editing_helpers_accept_dot_and_paren() {
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("1. foo");
+        assert_eq!(prefix, 3, "ed-dot prefix_len");
+        assert_eq!(marker, 3, "ed-dot list_marker_len");
+        assert_eq!(newline, "1. foo\n2. ", "ed-dot newline");
+        assert_eq!(toggle, "foo", "ed-dot ol_toggle");
+        assert_eq!(home, 3, "ed-dot home_from_0");
+        assert_eq!(typed, "1. Zfoo", "ed-dot type_at_0");
+
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("1) foo");
+        assert_eq!(prefix, 3, "ed-paren prefix_len");
+        assert_eq!(marker, 3, "ed-paren list_marker_len");
+        assert_eq!(newline, "1) foo\n2) ", "ed-paren newline");
+        assert_eq!(toggle, "foo", "ed-paren ol_toggle");
+        assert_eq!(home, 3, "ed-paren home_from_0");
+        assert_eq!(typed, "1) Zfoo", "ed-paren type_at_0");
+
+        let (_prefix, _marker, newline, backspace, _toggle, _home, _typed) = edit_probe("1. ");
+        assert_eq!(newline, "", "ed-marker-dot newline");
+        assert_eq!(backspace, "", "ed-marker-dot backspace");
+
+        let (_prefix, _marker, newline, backspace, toggle, _home, typed) = edit_probe("1) ");
+        assert_eq!(newline, "", "ed-marker-paren newline");
+        assert_eq!(backspace, "", "ed-marker-paren backspace");
+        assert_eq!(toggle, "", "ed-marker-paren ol_toggle");
+        assert_eq!(typed, "1) Z", "ed-marker-paren type_at_0");
+
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("1. [ ] foo");
+        assert_eq!(prefix, 7, "ed-task prefix_len");
+        assert_eq!(marker, 7, "ed-task list_marker_len");
+        assert_eq!(newline, "1. [ ] foo\n2. [ ] ", "ed-task newline");
+        assert_eq!(toggle, "foo", "ed-task ol_toggle");
+        assert_eq!(home, 7, "ed-task home_from_0");
+        assert_eq!(typed, "1. [ ] Zfoo", "ed-task type_at_0");
+
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("1) [ ] foo");
+        assert_eq!(prefix, 7, "ed-task-paren prefix_len");
+        assert_eq!(marker, 7, "ed-task-paren list_marker_len");
+        assert_eq!(newline, "1) [ ] foo\n2) [ ] ", "ed-task-paren newline");
+        assert_eq!(toggle, "foo", "ed-task-paren ol_toggle");
+        assert_eq!(home, 7, "ed-task-paren home_from_0");
+        assert_eq!(typed, "1) [ ] Zfoo", "ed-task-paren type_at_0");
+
+        let (prefix, marker, newline, _backspace, _toggle, home, typed) = edit_probe("- [ ] foo");
+        assert_eq!(prefix, 6, "ed-bullet-task prefix_len");
+        assert_eq!(marker, 6, "ed-bullet-task list_marker_len");
+        assert_eq!(newline, "- [ ] foo\n- [ ] ", "ed-bullet-task newline");
+        assert_eq!(home, 6, "ed-bullet-task home_from_0");
+        assert_eq!(typed, "- [ ] Zfoo", "ed-bullet-task type_at_0");
+
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("10) foo");
+        assert_eq!(prefix, 4, "ed-ten prefix_len");
+        assert_eq!(marker, 4, "ed-ten list_marker_len");
+        assert_eq!(newline, "10) foo\n11) ", "ed-ten newline");
+        assert_eq!(toggle, "foo", "ed-ten ol_toggle");
+        assert_eq!(home, 4, "ed-ten home_from_0");
+        assert_eq!(typed, "10) Zfoo", "ed-ten type_at_0");
+
+        let (prefix, _marker, newline, backspace, toggle, home, typed) = edit_probe("1)");
+        assert_eq!(prefix, 2, "ed-empty-paren prefix_len");
+        assert_eq!(newline, "", "ed-empty-paren newline");
+        assert_eq!(backspace, "", "ed-empty-paren backspace");
+        assert_eq!(toggle, "", "ed-empty-paren ol_toggle");
+        assert_eq!(home, 2, "ed-empty-paren home_from_0");
+        assert_eq!(typed, "1)Z", "ed-empty-paren type_at_0");
+
+        let (prefix, _marker, newline, backspace, _toggle, home, typed) = edit_probe("1.");
+        assert_eq!(prefix, 2, "ed-empty-dot prefix_len");
+        assert_eq!(newline, "", "ed-empty-dot newline");
+        assert_eq!(backspace, "", "ed-empty-dot backspace");
+        assert_eq!(home, 2, "ed-empty-dot home_from_0");
+        assert_eq!(typed, "1.Z", "ed-empty-dot type_at_0");
     }
 
     #[test]

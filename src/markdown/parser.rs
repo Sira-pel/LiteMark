@@ -165,7 +165,8 @@ fn source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
     }
     for piece in markdown.split_inclusive('\n') {
         let end = start + piece.len();
-        let text = piece.strip_suffix('\n').unwrap_or(piece);
+        let mut text = piece.strip_suffix('\n').unwrap_or(piece);
+        text = text.strip_suffix('\r').unwrap_or(text);
         lines.push(SourceLine { start, end, text });
         start = end;
     }
@@ -1000,60 +1001,243 @@ fn parse_inline_syntax(
     (raw_hidden, inline_pairs, styled_segments)
 }
 
-/// CommonMark ordered marker: 1–9 ASCII digits, then `.` or `)`.
-/// A following space or tab is the separator and is included in the length.
-/// End of line after the punctuation is an empty item.
-fn ordered_marker(text: &str) -> Option<(usize, usize)> {
-    let bytes = text.as_bytes();
-    let mut digits = 0usize;
-    while digits < bytes.len() && bytes[digits].is_ascii_digit() {
-        digits += 1;
-        if digits > 9 {
+/// Tab, VT, FF, or space. Pulldown `is_ascii_whitespace_no_nl`.
+fn is_ascii_whitespace_no_nl(byte: u8) -> bool {
+    byte == b'\t' || byte == 0x0b || byte == 0x0c || byte == b' '
+}
+
+/// Column scanner for list padding. Tabs expand to the next stop of 4,
+/// counted from the byte after the previous tab (pulldown `scan_space_inner`).
+#[derive(Clone, Copy)]
+struct ColScan<'a> {
+    bytes: &'a [u8],
+    ix: usize,
+    tab_start: usize,
+    spaces_remaining: usize,
+}
+
+impl<'a> ColScan<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            ix: 0,
+            tab_start: 0,
+            spaces_remaining: 0,
+        }
+    }
+
+    fn scan_space(&mut self, n_space: usize) -> bool {
+        self.scan_space_inner(n_space) == 0
+    }
+
+    fn scan_space_upto(&mut self, n_space: usize) -> usize {
+        n_space - self.scan_space_inner(n_space)
+    }
+
+    fn scan_space_inner(&mut self, mut n_space: usize) -> usize {
+        let n_from_remaining = self.spaces_remaining.min(n_space);
+        self.spaces_remaining -= n_from_remaining;
+        n_space -= n_from_remaining;
+        while n_space > 0 && self.ix < self.bytes.len() {
+            match self.bytes[self.ix] {
+                b' ' => {
+                    self.ix += 1;
+                    n_space -= 1;
+                }
+                b'\t' => {
+                    let spaces = 4 - (self.ix - self.tab_start) % 4;
+                    self.ix += 1;
+                    self.tab_start = self.ix;
+                    let n = spaces.min(n_space);
+                    n_space -= n;
+                    self.spaces_remaining = spaces - n;
+                }
+                _ => break,
+            }
+        }
+        n_space
+    }
+
+    fn is_at_eol(&self) -> bool {
+        self.bytes
+            .get(self.ix)
+            .map(|&byte| byte == b'\r' || byte == b'\n')
+            .unwrap_or(true)
+    }
+
+    fn skip_indent(&mut self, indent: usize) {
+        while self.ix < indent {
+            if self.bytes.get(self.ix) == Some(&b'\t') {
+                self.ix += 1;
+                self.tab_start = self.ix;
+                self.spaces_remaining = 0;
+            } else {
+                self.ix += 1;
+            }
+        }
+    }
+}
+
+fn rest_is_blank(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() && is_ascii_whitespace_no_nl(bytes[index]) {
+        index += 1;
+    }
+    index == bytes.len() || bytes[index] == b'\n' || bytes[index] == b'\r'
+}
+
+/// One list marker, shared by the parser and the editing helpers.
+///
+/// Ordered markers are 1–9 digits and then `.` or `)`. Padding after `.`, `)`,
+/// or a bullet is 1–4 columns (tabs use a stop of 4). Five or more columns
+/// keep one column in the marker and leave the rest as content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListMarker {
+    pub indent_bytes: usize,
+    pub ordered: bool,
+    pub number: usize,
+    pub punct: u8,
+    /// Byte offset where the marker and its padding end.
+    pub marker_end: usize,
+    pub task: Option<TaskMarker>,
+}
+
+/// GFM task marker. `checkbox_at` is the `[`. `end` is after the required
+/// whitespace and any further run of tab, VT, FF, or space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskMarker {
+    pub checked: bool,
+    pub checkbox_at: usize,
+    pub end: usize,
+}
+
+impl ListMarker {
+    pub fn prefix_end(&self) -> usize {
+        self.task
+            .as_ref()
+            .map(|task| task.end)
+            .unwrap_or(self.marker_end)
+    }
+
+    /// The next Enter continuation, including its leading newline.
+    pub fn continuation(&self, indent: &str) -> String {
+        let punct = self.punct as char;
+        if self.task.is_some() {
+            if self.ordered {
+                format!("\n{indent}{}{punct} [ ] ", self.number + 1)
+            } else {
+                format!("\n{indent}{punct} [ ] ")
+            }
+        } else if self.ordered {
+            format!("\n{indent}{}{punct} ", self.number + 1)
+        } else {
+            format!("\n{indent}{punct} ")
+        }
+    }
+}
+
+pub fn scan_list_marker(line: &str) -> Option<ListMarker> {
+    let raw = line.strip_suffix('\r').unwrap_or(line);
+    let bytes = raw.as_bytes();
+    let indent_bytes = raw.len() - raw.trim_start().len();
+    let mut col = ColScan::new(bytes);
+    col.skip_indent(indent_bytes);
+    if col.ix >= bytes.len() {
+        return None;
+    }
+    let (ordered, number, punct) = if matches!(bytes[col.ix], b'-' | b'+' | b'*') {
+        let punct = bytes[col.ix];
+        col.ix += 1;
+        if col.scan_space(1) || col.is_at_eol() {
+            (false, 0, punct)
+        } else {
+            return None;
+        }
+    } else if bytes[col.ix].is_ascii_digit() {
+        parse_ordered_marker(&mut col)?
+    } else {
+        return None;
+    };
+    let marker_end = finish_list_padding(&mut col);
+    let task = task_marker_at(bytes, marker_end);
+    Some(ListMarker {
+        indent_bytes,
+        ordered,
+        number,
+        punct,
+        marker_end,
+        task,
+    })
+}
+
+fn parse_ordered_marker(col: &mut ColScan<'_>) -> Option<(bool, usize, u8)> {
+    let bytes = col.bytes;
+    let start = col.ix;
+    let mut ix = start + 1;
+    let mut value = u64::from(bytes[start] - b'0');
+    while ix < bytes.len() && ix - start < 10 {
+        let byte = bytes[ix];
+        ix += 1;
+        if byte.is_ascii_digit() {
+            value = value * 10 + u64::from(byte - b'0');
+        } else if byte == b'.' || byte == b')' {
+            col.ix = ix;
+            if col.scan_space(1) || col.is_at_eol() {
+                return Some((true, value as usize, byte));
+            }
+            return None;
+        } else {
             return None;
         }
     }
-    if digits == 0 || digits >= bytes.len() {
-        return None;
-    }
-    let punct = bytes[digits];
-    if punct != b'.' && punct != b')' {
-        return None;
-    }
-    let after = digits + 1;
-    let marker_len = if after == bytes.len() {
-        after
-    } else if bytes[after] == b' ' || bytes[after] == b'\t' {
-        after + 1
-    } else {
-        return None;
-    };
-    let number = text[..digits].parse::<usize>().ok()?;
-    Some((number, marker_len))
+    None
 }
 
-/// GFM task marker: `[ ]`, `[x]`, or `[X]`, then spaces or tabs, or end of line.
-/// The length includes that separator. The checkbox itself is 3 bytes.
-fn task_marker(text: &str) -> Option<(bool, usize)> {
-    let checked = if text.starts_with("[ ]") {
-        false
-    } else if text.starts_with("[x]") || text.starts_with("[X]") {
-        true
-    } else {
-        return None;
-    };
-    let bytes = text.as_bytes();
-    let after = 3;
-    if after == bytes.len() {
-        return Some((checked, after));
+/// Consume 0–3 extra padding columns after the required separator.
+/// Four extra columns (five total) stay with the content.
+fn finish_list_padding(col: &mut ColScan<'_>) -> usize {
+    let saved = *col;
+    if rest_is_blank(&col.bytes[col.ix..]) {
+        return col.ix;
     }
-    if bytes[after] != b' ' && bytes[after] != b'\t' {
+    let post_indent = col.scan_space_upto(4);
+    if post_indent < 4 {
+        col.ix
+    } else {
+        *col = saved;
+        col.ix
+    }
+}
+
+fn task_marker_at(bytes: &[u8], at: usize) -> Option<TaskMarker> {
+    if bytes.get(at) != Some(&b'[') {
+        return None;
+    }
+    let checked = match bytes.get(at + 1) {
+        Some(&byte) if is_ascii_whitespace_no_nl(byte) => false,
+        Some(b'x') | Some(b'X') => true,
+        _ => return None,
+    };
+    if bytes.get(at + 2) != Some(&b']') {
+        return None;
+    }
+    let after = at + 3;
+    let follows = bytes
+        .get(after)
+        .copied()
+        .is_some_and(is_ascii_whitespace_no_nl);
+    if !follows {
         return None;
     }
     let mut end = after + 1;
-    while end < bytes.len() && (bytes[end] == b' ' || bytes[end] == b'\t') {
+    while end < bytes.len() && is_ascii_whitespace_no_nl(bytes[end]) {
         end += 1;
     }
-    Some((checked, end))
+    Some(TaskMarker {
+        checked,
+        checkbox_at: at,
+        end,
+    })
 }
 
 #[allow(clippy::single_range_in_vec_init)]
@@ -1367,74 +1551,22 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }
 
         if prefix_len == 0 {
-            if let Some(_rest) = trimmed_start
-                .strip_prefix("- [ ] ")
-                .or_else(|| trimmed_start.strip_prefix("* [ ] "))
-                .or_else(|| trimmed_start.strip_prefix("+ [ ] "))
-            {
-                let cb_start = line_start + indent_len + 2;
+            if let Some(item) = scan_list_marker(line) {
+                let checkbox_source = item.task.as_ref().map(|task| {
+                    let start = line_start + task.checkbox_at;
+                    start..start + 3
+                });
                 kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: Some(false),
+                    ordered: item.ordered,
+                    number: item.number,
+                    task: item.task.as_ref().map(|task| task.checked),
                     indent_cols: indent_len,
-                    checkbox_source: Some(cb_start..(cb_start + 3)),
+                    checkbox_source,
                 };
-                prefix_len = indent_len + 6;
-            } else if let Some(_rest) = trimmed_start
-                .strip_prefix("- [x] ")
-                .or_else(|| trimmed_start.strip_prefix("- [X] "))
-                .or_else(|| trimmed_start.strip_prefix("* [x] "))
-                .or_else(|| trimmed_start.strip_prefix("* [X] "))
-                .or_else(|| trimmed_start.strip_prefix("+ [x] "))
-                .or_else(|| trimmed_start.strip_prefix("+ [X] "))
-            {
-                let cb_start = line_start + indent_len + 2;
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: Some(true),
-                    indent_cols: indent_len,
-                    checkbox_source: Some(cb_start..(cb_start + 3)),
-                };
-                prefix_len = indent_len + 6;
-            } else if trimmed_start.starts_with("- ")
-                || trimmed_start.starts_with("* ")
-                || trimmed_start.starts_with("+ ")
-            {
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: None,
-                    indent_cols: indent_len,
-                    checkbox_source: None,
-                };
-                prefix_len = indent_len + 2;
+                prefix_len = item.prefix_end();
             } else if trimmed_start.starts_with("> ") {
                 kind = LineKind::Blockquote;
                 prefix_len = indent_len + 2;
-            } else if let Some((number, marker_len)) = ordered_marker(trimmed_start) {
-                let rest = &trimmed_start[marker_len..];
-                if let Some((checked, task_len)) = task_marker(rest) {
-                    let cb_start = line_start + indent_len + marker_len;
-                    kind = LineKind::ListItem {
-                        ordered: true,
-                        number,
-                        task: Some(checked),
-                        indent_cols: indent_len,
-                        checkbox_source: Some(cb_start..(cb_start + 3)),
-                    };
-                    prefix_len = indent_len + marker_len + task_len;
-                } else {
-                    kind = LineKind::ListItem {
-                        ordered: true,
-                        number,
-                        task: None,
-                        indent_cols: indent_len,
-                        checkbox_source: None,
-                    };
-                    prefix_len = indent_len + marker_len;
-                }
             }
         }
 
@@ -1815,15 +1947,139 @@ eol_paren[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- displa
 tab_dot[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
 tab_paren[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
 task_tab[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
-task_eol[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\" strike=- link=- map=ok
-task_x_eol[0] ListItem ordered=true number=1 task=checked indent=0 checkbox=\"[x]\" display=\"\" strike=- link=- map=ok
+task_eol[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]\" strike=- link=- map=ok
+task_x_eol[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[x]\" strike=- link=- map=ok
 task_sp_eol[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\" strike=- link=- map=ok
 task_tight[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]foo\" strike=- link=- map=ok
-task_gap[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\" [ ] foo\" strike=- link=- map=ok
-bullet_gap[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\" [ ] foo\" strike=- link=- map=ok
+task_gap[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
+bullet_gap[0] ListItem ordered=false number=0 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
 task_spaces[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
 task_tabs[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"bar\" strike=- link=- map=ok";
         assert_eq!(observed, expected);
     }
-}
 
+    #[test]
+    fn task_eol_is_not_a_task() {
+        for (source, display) in [
+            ("1. [ ]", "[ ]"),
+            ("1. [x]", "[x]"),
+            ("1. [X]", "[X]"),
+            ("1) [ ]", "[ ]"),
+            ("- [ ]", "[ ]"),
+        ] {
+            let line = observe_line(source, 0);
+            assert!(
+                line.contains("task=none") && line.contains(&format!("display={display:?}")),
+                "{source:?} -> {line}"
+            );
+            assert!(!line.contains("checkbox=\"["), "{source:?} -> {line}");
+        }
+        let spaced = observe_line("1. [ ] ", 0);
+        assert!(
+            spaced.contains("task=unchecked") && spaced.contains("display=\"\""),
+            "{spaced}"
+        );
+        let tabbed = observe_line("1. [ ]\t", 0);
+        assert!(
+            tabbed.contains("task=unchecked") && tabbed.contains("display=\"\""),
+            "{tabbed}"
+        );
+    }
+
+    #[test]
+    fn list_padding_is_one_to_four_columns() {
+        for source in [
+            "1.  foo",
+            "1.   foo",
+            "1.    foo",
+            "1)  foo",
+            "1. \tfoo",
+            "1.  [ ] foo",
+            "1.   [ ] foo",
+            "1.    [ ] foo",
+            "-  [ ] foo",
+        ] {
+            let line = observe_line(source, 0);
+            assert!(line.contains("display=\"foo\""), "{source:?} -> {line}");
+        }
+        let task = observe_line("1.  [ ] foo", 0);
+        assert!(task.contains("task=unchecked"), "{task}");
+        let five = observe_line("1.     foo", 0);
+        assert!(five.contains("display=\"    foo\""), "{five}");
+        let five_task = observe_line("1.     [ ] foo", 0);
+        assert!(
+            five_task.contains("task=none") && five_task.contains("display=\"    [ ] foo\""),
+            "{five_task}"
+        );
+    }
+
+    #[test]
+    fn trailing_cr_is_not_part_of_the_line() {
+        let empty_dot = observe_line("1.\r\n", 0);
+        assert!(
+            empty_dot.contains("ordered=true")
+                && empty_dot.contains("display=\"\"")
+                && empty_dot.contains("map=ok"),
+            "{empty_dot}"
+        );
+        let empty_paren = observe_line("1)\r\n", 0);
+        assert!(
+            empty_paren.contains("ordered=true") && empty_paren.contains("display=\"\""),
+            "{empty_paren}"
+        );
+        let foo = observe_line("1. foo\r\n", 0);
+        assert!(
+            foo.contains("display=\"foo\"") && foo.contains("map=ok"),
+            "{foo}"
+        );
+        let bare = observe_line("1. [ ]\r\n", 0);
+        assert!(
+            bare.contains("task=none") && bare.contains("display=\"[ ]\""),
+            "{bare}"
+        );
+        let task = observe_line("1. [ ] \r\n", 0);
+        assert!(
+            task.contains("task=unchecked")
+                && task.contains("display=\"\"")
+                && task.contains("map=ok"),
+            "{task}"
+        );
+    }
+
+    #[test]
+    fn unordered_task_uses_task_marker() {
+        let tab = observe_line("- [ ]\tfoo", 0);
+        assert!(
+            tab.contains("task=unchecked") && tab.contains("display=\"foo\""),
+            "{tab}"
+        );
+        let spaces = observe_line("- [ ]  foo", 0);
+        assert!(
+            spaces.contains("task=unchecked") && spaces.contains("display=\"foo\""),
+            "{spaces}"
+        );
+        let star = observe_line("* [x] bar", 0);
+        assert!(
+            star.contains("task=checked") && star.contains("display=\"bar\""),
+            "{star}"
+        );
+        let plus = observe_line("+ [ ] baz", 0);
+        assert!(
+            plus.contains("task=unchecked") && plus.contains("display=\"baz\""),
+            "{plus}"
+        );
+    }
+
+    #[test]
+    fn task_bracket_accepts_tab_vt_ff() {
+        for source in ["1. [\t] foo", "1. [\u{b}] foo", "1. [\u{c}] foo"] {
+            let line = observe_line(source, 0);
+            assert!(
+                line.contains("task=unchecked") && line.contains("display=\"foo\""),
+                "{source:?} -> {line}"
+            );
+        }
+        let nbsp = observe_line("1. [ ]\u{a0}foo", 0);
+        assert!(nbsp.contains("task=none"), "{nbsp}");
+    }
+}
