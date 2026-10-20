@@ -1599,5 +1599,147 @@ mod tests {
             assert_eq!(line.offset_map.source_to_display(src_idx), disp_idx);
         }
     }
-}
 
+    fn shape_of(markdown: &str) -> String {
+        let doc = parse_document(markdown);
+        let mut out = String::new();
+        for (index, line) in doc.lines.iter().enumerate() {
+            let code = line
+                .styled_segments
+                .iter()
+                .filter(|segment| segment.code)
+                .map(|segment| markdown[segment.source.clone()].to_string())
+                .collect::<Vec<_>>();
+            let body = match &line.kind {
+                LineKind::Empty => "Empty".to_string(),
+                LineKind::Paragraph => "Paragraph".to_string(),
+                LineKind::Heading { level } => format!("Heading level={level}"),
+                LineKind::Blockquote => "Blockquote".to_string(),
+                LineKind::ListItem { .. } => "ListItem".to_string(),
+                LineKind::CodeFence { .. } => "CodeFence".to_string(),
+                LineKind::CodeLine => "CodeLine".to_string(),
+                LineKind::HorizontalRule => "HorizontalRule".to_string(),
+                LineKind::TableDelimiter => "TableDelimiter".to_string(),
+                LineKind::TableRow {
+                    is_header,
+                    cells,
+                    alignments,
+                    ..
+                } => {
+                    let texts = cells
+                        .iter()
+                        .map(|range| markdown[range.clone()].to_string())
+                        .collect::<Vec<_>>();
+                    let align = alignments
+                        .iter()
+                        .map(|align| match align {
+                            TableColumnAlign::None => "none",
+                            TableColumnAlign::Left => "left",
+                            TableColumnAlign::Center => "center",
+                            TableColumnAlign::Right => "right",
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("TableRow header={is_header} align=[{align}] cells={texts:?}")
+                }
+            };
+            out.push_str(&format!(
+                "line[{index}] {body} display={:?} code={code:?}\n",
+                line.display_text
+            ));
+        }
+        out
+    }
+
+    fn shape_mismatch(name: &str, markdown: &str, lines: &[&str]) -> Option<String> {
+        let mut expected = String::new();
+        for line in lines {
+            expected.push_str(line);
+            expected.push('\n');
+        }
+        let got = shape_of(markdown);
+        if got == expected {
+            None
+        } else {
+            Some(format!(
+                "case {name}\n--- expected ---\n{expected}--- got ---\n{got}"
+            ))
+        }
+    }
+
+    #[test]
+    fn gfm_table_columns_follow_the_delimiter() {
+        let mut mismatches = Vec::new();
+        let mut check = |name: &str, markdown: &str, lines: &[&str]| {
+            if let Some(mismatch) = shape_mismatch(name, markdown, lines) {
+                mismatches.push(mismatch);
+            }
+        };
+        check(
+            "gfm198",
+            "| foo | bar |\n| --- | --- |\n| baz | bim |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["foo", "bar"] display="| foo | bar |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["baz", "bim"] display="| baz | bim |" code=[]"#,
+            ],
+        );
+        check(
+            "gfm199",
+            "| abc | defghi |\n:-: | -----------:\nbar | baz",
+            &[
+                r#"line[0] TableRow header=true align=[center,right] cells=["abc", "defghi"] display="| abc | defghi |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[center,right] cells=["bar", "baz"] display="bar | baz" code=[]"#,
+            ],
+        );
+        check(
+            "gfm200",
+            "| f\\|oo  |\n| ------ |\n| b `\\|` az |\n| b **\\|** im |",
+            &[
+                r#"line[0] TableRow header=true align=[none] cells=["f\\|oo "] display="| f\\|oo  |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none] cells=["b `\\|` az"] display="| b `\\|` az |" code=["\\|"]"#,
+                r#"line[3] TableRow header=false align=[none] cells=["b **\\|** im"] display="| b **\\|** im |" code=[]"#,
+            ],
+        );
+        check(
+            "gfm203",
+            "| abc | def |\n| --- |\n| bar |",
+            &[
+                r#"line[0] Paragraph display="| abc | def |" code=[]"#,
+                r#"line[1] Paragraph display="| --- |" code=[]"#,
+                r#"line[2] Paragraph display="| bar |" code=[]"#,
+            ],
+        );
+        check(
+            "gfm204",
+            "| abc | def |\n| --- | --- |\n| bar |\n| bar | baz | boo |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["abc", "def"] display="| abc | def |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["bar", ""] display="| bar |" code=[]"#,
+                r#"line[3] TableRow header=false align=[none,none] cells=["bar", "baz"] display="| bar | baz | boo |" code=[]"#,
+            ],
+        );
+        check(
+            "code-pipe",
+            "| a | b |\n| --- | --- |\n| `c|d` | e |",
+            &[
+                r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
+                r#"line[1] TableDelimiter display="" code=[]"#,
+                r#"line[2] TableRow header=false align=[none,none] cells=["`c|d`", "e"] display="| `c|d` | e |" code=["c|d"]"#,
+            ],
+        );
+        check(
+            "pipe-row-no-delim",
+            "| a | b |\n| c | d |",
+            &[
+                r#"line[0] Paragraph display="| a | b |" code=[]"#,
+                r#"line[1] Paragraph display="| c | d |" code=[]"#,
+            ],
+        );
+        drop(check);
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+}
