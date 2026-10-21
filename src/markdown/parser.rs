@@ -3650,4 +3650,73 @@ mod tests {
             "tail-vtab"
         );
     }
+
+    fn painted(markdown: &str) -> Vec<String> {
+        parse_document(markdown)
+            .lines
+            .iter()
+            .map(|line| match &line.kind {
+                LineKind::Empty => "Empty".to_string(),
+                LineKind::Paragraph => "Paragraph".to_string(),
+                LineKind::Heading { level } => format!("Heading {level}"),
+                LineKind::Blockquote => "Quote".to_string(),
+                LineKind::ListItem { .. } => "List".to_string(),
+                LineKind::CodeFence { language, opening } => {
+                    format!("Fence open={opening} lang={language:?}")
+                }
+                LineKind::CodeLine => format!("Code {:?}", line.display_text),
+                LineKind::HorizontalRule => "Rule".to_string(),
+                LineKind::TableDelimiter => "Delim".to_string(),
+                LineKind::TableRow {
+                    is_header, cells, ..
+                } => {
+                    let texts: Vec<&str> =
+                        cells.iter().map(|range| &markdown[range.clone()]).collect();
+                    format!("Row h={is_header} {texts:?}")
+                }
+            })
+            .collect()
+    }
+
+    fn expect_paint(name: &str, markdown: &str, expected: &str) {
+        assert_eq!(painted(markdown).join(" | "), expected, "{name}");
+    }
+
+    /// Paint kinds come from the fence the table scanner already opened.
+    /// A shorter fence, or a fence line with an info string, is content.
+    /// The closing fence has at least as many of the same marker.
+    /// A four-backtick opener's language is the text after all four marks.
+    #[test]
+    fn fence_paint_follows_scanner() {
+        expect_paint(
+            "short-inner",
+            "````\ncode\n```\nstill\n````\n| a | b |\n| --- | --- |\n| c | d |",
+            "Fence open=true lang=None | Code \"code\" | Code \"```\" | Code \"still\" | Fence open=false lang=None | Row h=true [\"a\", \"b\"] | Delim | Row h=false [\"c\", \"d\"]",
+        );
+        expect_paint(
+            "info-not-closer",
+            "```\ncode\n``` rust\n| a | b |\n| --- | --- |\n| c | d |\n```\n| e | f |\n| --- | --- |\n| g | h |",
+            "Fence open=true lang=None | Code \"code\" | Code \"``` rust\" | Code \"| a | b |\" | Code \"| --- | --- |\" | Code \"| c | d |\" | Fence open=false lang=None | Row h=true [\"e\", \"f\"] | Delim | Row h=false [\"g\", \"h\"]",
+        );
+        expect_paint(
+            "tilde-inner-backtick",
+            "~~~\n```\n| a | b |\n| --- | --- |\n| c | d |\n~~~\n| e | f |\n| --- | --- |\n| g | h |",
+            "Fence open=true lang=None | Code \"```\" | Code \"| a | b |\" | Code \"| --- | --- |\" | Code \"| c | d |\" | Fence open=false lang=None | Row h=true [\"e\", \"f\"] | Delim | Row h=false [\"g\", \"h\"]",
+        );
+        expect_paint(
+            "four-backtick-lang",
+            "```` rust\ncode\n````",
+            "Fence open=true lang=Some(\"rust\") | Code \"code\" | Fence open=false lang=None",
+        );
+        expect_paint(
+            "longer-closer",
+            "```\ncode\n``````\n| a | b |\n| --- | --- |\n| c | d |",
+            "Fence open=true lang=None | Code \"code\" | Fence open=false lang=None | Row h=true [\"a\", \"b\"] | Delim | Row h=false [\"c\", \"d\"]",
+        );
+        expect_paint(
+            "two-backtick-not-fence",
+            "``\n| a | b |\n| --- | --- |\n| c | d |\n``",
+            "Paragraph | Row h=true [\"a\", \"b\"] | Delim | Row h=false [\"c\", \"d\"] | Row h=false [\"``\", \"\"]",
+        );
+    }
 }
