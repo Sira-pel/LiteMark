@@ -1061,11 +1061,15 @@ impl<'a> ColScan<'a> {
         n_space
     }
 
+    /// End of an editor line. A CR ends the marker only when it is the line
+    /// ending (`2.\r` in a CRLF line). `1.\rfoo` keeps the CR in the text.
     fn is_at_eol(&self) -> bool {
-        self.bytes
-            .get(self.ix)
-            .map(|&byte| byte == b'\n')
-            .unwrap_or(true)
+        match self.bytes.get(self.ix) {
+            None => true,
+            Some(&b'\n') => true,
+            Some(&b'\r') => self.ix + 1 >= self.bytes.len() || self.bytes[self.ix + 1] == b'\n',
+            Some(_) => false,
+        }
     }
 
     fn skip_indent(&mut self, indent: usize) {
@@ -1276,13 +1280,88 @@ fn line_is_blank(line: &str) -> bool {
 
 /// Open list items, so a marker can be refused when it would interrupt a
 /// paragraph or when it starts at column 4 or later outside a parent item.
-#[derive(Default)]
 struct ListWalk {
     open: Vec<usize>,
-    paragraph: bool,
+    /// Paragraph-open flag per container. Index 0 is the document. Index
+    /// `i + 1` is the content of `open[i]`.
+    para: Vec<bool>,
+}
+
+impl Default for ListWalk {
+    fn default() -> Self {
+        Self {
+            open: Vec::new(),
+            para: vec![false],
+        }
+    }
+}
+
+fn marker_is_empty(line: &str, item: &ListMarker) -> bool {
+    item.task.is_none() && rest_is_blank(&line.as_bytes()[item.marker_end..])
+}
+
+/// A line the block parser records as a heading, rule, fence, quote, or table
+/// rather than as paragraph text. Those lines close a list item.
+fn is_structural_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        return true;
+    }
+    if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+        return true;
+    }
+    let trimmed_start = line.trim_start();
+    let indent = line.len() - trimmed_start.len();
+    if indent <= 3 {
+        const HEADINGS: [&str; 6] = ["###### ", "##### ", "#### ", "### ", "## ", "# "];
+        if HEADINGS
+            .iter()
+            .any(|prefix| trimmed_start.starts_with(prefix))
+        {
+            return true;
+        }
+    }
+    if trimmed_start.starts_with("> ") || trimmed_start == ">" {
+        return true;
+    }
+    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2
 }
 
 impl ListWalk {
+    fn in_paragraph(&self) -> bool {
+        self.para.last().copied().unwrap_or(false)
+    }
+
+    fn set_paragraph(&mut self, open: bool) {
+        if let Some(flag) = self.para.last_mut() {
+            *flag = open;
+        }
+    }
+
+    /// A dedented line stays in the item when it is paragraph continuation
+    /// text (a lazy continuation). A marker that would start a list in the
+    /// parent container closes the item instead.
+    fn continues_lazily(&self, line: &str) -> bool {
+        if !self.in_paragraph() {
+            return false;
+        }
+        if is_structural_line(line) {
+            return false;
+        }
+        let Some(item) = scan_list_marker(line) else {
+            return true;
+        };
+        let marker_col = leading_column(line);
+        let parent_depth = self.open.len().saturating_sub(1);
+        let nested = parent_depth > 0;
+        if marker_col > 3 && !nested {
+            return true;
+        }
+        let parent_para = self.para.get(parent_depth).copied().unwrap_or(false);
+        let empty = marker_is_empty(line, &item);
+        parent_para && (empty || (item.ordered && item.number != 1))
+    }
+
     fn prepare(&mut self, line: &str) {
         if line_is_blank(line) {
             return;
@@ -1294,7 +1373,11 @@ impl ListWalk {
             .copied()
             .is_some_and(|content| column < content)
         {
+            if self.continues_lazily(line) {
+                return;
+            }
             self.open.pop();
+            self.para.pop();
         }
     }
 
@@ -1302,9 +1385,13 @@ impl ListWalk {
     ///
     /// CommonMark list items, rule 1 exception: an empty marker cannot
     /// interrupt a paragraph, and an ordered marker interrupts only when its
-    /// start number is 1 (examples 285, 304, 367). Rule 4: a marker at column
-    /// 4 or later is indented code unless it sits in a parent item (examples
-    /// 1, 2, 107, and the nested marker in 296).
+    /// start number is 1. That includes a paragraph inside a parent item
+    /// (examples 285, 304, 367). A blank line ends that paragraph, so the
+    /// same marker can then open a nested list. A lazy continuation stays in
+    /// the item, and a marker after it can start a new list (example 283,
+    /// including a CRLF empty item). Rule 4: a marker at column 4 or later is
+    /// indented code unless it sits in a parent item (examples 1, 2, 107, and
+    /// the nested marker in 296).
     fn take_list(&mut self, line: &str) -> Option<ListMarker> {
         self.prepare(line);
         let item = scan_list_marker(line)?;
@@ -1313,26 +1400,29 @@ impl ListWalk {
         if marker_col > 3 && !nested {
             return None;
         }
-        let empty = item.task.is_none() && rest_is_blank(&line.as_bytes()[item.marker_end..]);
-        if self.paragraph && !nested && (empty || (item.ordered && item.number != 1)) {
+        let empty = marker_is_empty(line, &item);
+        if self.in_paragraph() && (empty || (item.ordered && item.number != 1)) {
             return None;
         }
+        let has_text = !rest_is_blank(&line.as_bytes()[item.prefix_end()..]);
         self.open.push(column_at(line, item.marker_end));
-        self.paragraph = false;
+        self.para.push(has_text);
+        let parent = self.para.len() - 2;
+        self.para[parent] = false;
         Some(item)
     }
 
     fn note_block(&mut self, line: &str) {
         self.prepare(line);
-        self.paragraph = false;
+        self.set_paragraph(false);
     }
 
     fn note_blank(&mut self) {
-        self.paragraph = false;
+        self.set_paragraph(false);
     }
 
     fn note_paragraph(&mut self) {
-        self.paragraph = self.open.is_empty();
+        self.set_paragraph(true);
     }
 }
 
@@ -2184,17 +2274,18 @@ task_tabs[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[
     }
 
     /// F3 was Low. Stripping the CR hid it from the caret, so the editor
-    /// keeps it in the line, the same as kit `4e72b711`. Pulldown still
-    /// treats CR as a line ending in HTML.
+    /// keeps it in the line, the same as kit `4e72b711`. A trailing CR is a
+    /// line ending for the marker scan, so `1.\r` is an empty item whose
+    /// display is the CR. `1.\rfoo` stays a paragraph (the CR is not the end).
     #[test]
     fn trailing_cr_stays_in_the_editor_line() {
         assert_eq!(
             observe_line("1.\r\n", 0),
-            "Paragraph display=\"1.\\r\" strike=- link=- map=ok"
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\\r\" strike=- link=- map=ok"
         );
         assert_eq!(
             observe_line("1)\r\n", 0),
-            "Paragraph display=\"1)\\r\" strike=- link=- map=ok"
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\\r\" strike=- link=- map=ok"
         );
         assert_eq!(
             observe_line("1. foo\r\n", 0),
@@ -2387,5 +2478,111 @@ nest[2] Empty display=\"\" strike=- link=- map=ok"
         assert_eq!(click(&click("1. [\t] a")), "1. [ ] a");
         assert_eq!(click(&click("1. [\u{b}] a")), "1. [ ] a");
         assert_eq!(click(&click("1. [\u{c}] a")), "1. [ ] a");
+    }
+
+    /// CommonMark list items, exception 1 (spec lines 4123–4129): an empty
+    /// marker, or an ordered marker whose start is not 1, does not interrupt
+    /// paragraph continuation text. That includes the paragraph inside a
+    /// parent item. A blank line ends the paragraph, and a start of 1 with
+    /// text still opens a nested list.
+    #[test]
+    fn nested_marker_does_not_interrupt_item_paragraph() {
+        assert_eq!(
+            observe_doc("star", "- foo\n  *\n"),
+            "\
+star[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+star[1] Paragraph display=\"  *\" strike=- link=- map=ok
+star[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("one", "- foo\n  1.\n"),
+            "\
+one[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+one[1] Paragraph display=\"  1.\" strike=- link=- map=ok
+one[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("two", "- foo\n  bar\n  2) baz\n"),
+            "\
+two[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+two[1] Paragraph display=\"  bar\" strike=- link=- map=ok
+two[2] Paragraph display=\"  2) baz\" strike=- link=- map=ok
+two[3] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("fourteen", "- parent\n  14) a\n"),
+            "\
+fourteen[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"parent\" strike=- link=- map=ok
+fourteen[1] Paragraph display=\"  14) a\" strike=- link=- map=ok
+fourteen[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("checked", "- parent\n  14) [x] a\n"),
+            "\
+checked[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"parent\" strike=- link=- map=ok
+checked[1] Paragraph display=\"  14) [x] a\" strike=- link=- map=ok
+checked[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("blank", "- parent\n\n  *\n"),
+            "\
+blank[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"parent\" strike=- link=- map=ok
+blank[1] Empty display=\"\" strike=- link=- map=ok
+blank[2] ListItem ordered=false number=0 task=none indent=2 checkbox=- display=\"\" strike=- link=- map=ok
+blank[3] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("start", "- foo\n  1. x\n"),
+            "\
+start[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+start[1] ListItem ordered=true number=1 task=none indent=2 checkbox=- display=\"x\" strike=- link=- map=ok
+start[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("after", "- parent\n\n  14) a\n"),
+            "\
+after[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"parent\" strike=- link=- map=ok
+after[1] Empty display=\"\" strike=- link=- map=ok
+after[2] ListItem ordered=true number=14 task=none indent=2 checkbox=- display=\"a\" strike=- link=- map=ok
+after[3] Empty display=\"\" strike=- link=- map=ok"
+        );
+    }
+
+    /// Laziness (spec lines 4814–4821): `bar` continues the item, and `2. baz`
+    /// then starts a new list. `foo` then `2. baz` stays one paragraph
+    /// (example 304).
+    #[test]
+    fn ordered_marker_after_dedent_stays_list() {
+        assert_eq!(
+            observe_doc("lazy", "- foo\nbar\n2. baz\n"),
+            "\
+lazy[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+lazy[1] Paragraph display=\"bar\" strike=- link=- map=ok
+lazy[2] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"baz\" strike=- link=- map=ok
+lazy[3] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("para", "foo\n2. baz\n"),
+            "\
+para[0] Paragraph display=\"foo\" strike=- link=- map=ok
+para[1] Paragraph display=\"2. baz\" strike=- link=- map=ok
+para[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+    }
+
+    /// Example 283 with CR LF: `2.\r` is an empty item, so `3. bar` stays item 3.
+    #[test]
+    fn crlf_empty_item_does_not_drop_next_item() {
+        assert_eq!(
+            observe_doc("crlf", "1. foo\r\n2.\r\n3. bar"),
+            "\
+crlf[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\\r\" strike=- link=- map=ok
+crlf[1] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"\\r\" strike=- link=- map=ok
+crlf[2] ListItem ordered=true number=3 task=none indent=0 checkbox=- display=\"bar\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("1.\rfoo", 0),
+            "Paragraph display=\"1.\\rfoo\" strike=- link=- map=ok"
+        );
     }
 }

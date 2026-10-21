@@ -2335,12 +2335,21 @@ fn ordered_checklist_line(
     target: BlockFormatTarget,
     turn_off: bool,
 ) -> Option<String> {
-    if target != BlockFormatTarget::TaskList {
-        return None;
-    }
     let line_end_pos = line_end(content, line_start);
     let line = &content[line_start..line_end_pos];
     let item = accepted_list_marker(content, line_start)?;
+    // An ordered task shows the checklist button on and the ordered-list
+    // button off. The ordered-list click leaves the line unchanged so it
+    // matches that off button.
+    if target == BlockFormatTarget::OrderedList {
+        if item.ordered && item.task.is_some() {
+            return Some(line.to_string());
+        }
+        return None;
+    }
+    if target != BlockFormatTarget::TaskList {
+        return None;
+    }
     if !item.ordered || item.task.is_none() {
         return None;
     }
@@ -3700,7 +3709,8 @@ mod tests {
         assert_eq!(prefix, 7, "ed-task prefix_len");
         assert_eq!(marker, 7, "ed-task list_marker_len");
         assert_eq!(newline, "1. [ ] foo\n2. [ ] ", "ed-task newline");
-        assert_eq!(toggle, "foo", "ed-task ol_toggle");
+        // The ordered-list button is off on an ordered task, so the click keeps the line.
+        assert_eq!(toggle, "1. [ ] foo", "ed-task ol_toggle");
         assert_eq!(home, 7, "ed-task home_from_0");
         assert_eq!(typed, "1. [ ] Zfoo", "ed-task type_at_0");
 
@@ -3708,7 +3718,7 @@ mod tests {
         assert_eq!(prefix, 7, "ed-task-paren prefix_len");
         assert_eq!(marker, 7, "ed-task-paren list_marker_len");
         assert_eq!(newline, "1) [ ] foo\n2) [ ] ", "ed-task-paren newline");
-        assert_eq!(toggle, "foo", "ed-task-paren ol_toggle");
+        assert_eq!(toggle, "1) [ ] foo", "ed-task-paren ol_toggle");
         assert_eq!(home, 7, "ed-task-paren home_from_0");
         assert_eq!(typed, "1) [ ] Zfoo", "ed-task-paren type_at_0");
 
@@ -3968,5 +3978,110 @@ mod tests {
         bullet.place(crate::model::text_ops::line_end(&bullet.content, 0), false);
         bullet.smart_newline(false);
         assert_eq!(bullet.content, "\n");
+    }
+
+    /// Ordered-list button is off on an ordered task, and the click leaves
+    /// the number and the box in place.
+    #[test]
+    fn ordered_button_off_does_not_strip_task() {
+        for source in ["1. [x] a", "1) [x] a", "12. [X] a"] {
+            let mut doc =
+                DocumentTab::new("o".into(), "t.md".into(), source.to_string(), None, None);
+            assert_eq!(
+                format!(
+                    "ol={} checklist={} content={:?}",
+                    doc.active_formats.ol, doc.active_formats.checklist, doc.content
+                ),
+                format!("ol=false checklist=true content={source:?}"),
+                "{source} before"
+            );
+            doc.apply_format_in_mode("ol", ViewMode::Wysiwyg);
+            assert_eq!(
+                format!(
+                    "ol={} checklist={} content={:?}",
+                    doc.active_formats.ol, doc.active_formats.checklist, doc.content
+                ),
+                format!("ol=false checklist=true content={source:?}"),
+                "{source} after ol click"
+            );
+        }
+    }
+
+    /// Delete, Enter, Backspace, End, and type at the markers round 6 changed.
+    #[test]
+    fn edit_probes_for_nested_lazy_and_crlf_markers() {
+        let nested = "- foo\n  *";
+        let mut nested_end =
+            DocumentTab::new("e".into(), "t.md".into(), nested.to_string(), None, None);
+        nested_end.place(6, false);
+        nested_end.move_end(false);
+        assert_eq!(nested_end.cursor_offset(), nested.len());
+        nested_end.smart_newline(false);
+        assert_eq!(nested_end.content, "- foo\n  *\n  ");
+        let mut nested_type =
+            DocumentTab::new("t".into(), "t.md".into(), nested.to_string(), None, None);
+        nested_type.place(6, false);
+        nested_type.move_home_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(nested_type.cursor_offset(), 6);
+        nested_type.edit(6..6, "Z");
+        assert_eq!(nested_type.content, "- foo\nZ  *");
+        let mut nested_del =
+            DocumentTab::new("d".into(), "t.md".into(), nested.to_string(), None, None);
+        nested_del.edit(8..9, "");
+        assert_eq!(nested_del.content, "- foo\n  ");
+        let mut nested_bs =
+            DocumentTab::new("b".into(), "t.md".into(), nested.to_string(), None, None);
+        nested_bs.place(nested.len(), false);
+        nested_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(nested_bs.content, "- foo\n  ");
+
+        let lazy = "- foo\nbar\n2. baz";
+        let mut lazy_end =
+            DocumentTab::new("e".into(), "t.md".into(), lazy.to_string(), None, None);
+        lazy_end.place(lazy.rfind('\n').unwrap() + 1, false);
+        lazy_end.move_end(false);
+        assert_eq!(lazy_end.cursor_offset(), lazy.len());
+        lazy_end.smart_newline(false);
+        assert_eq!(lazy_end.content, "- foo\nbar\n2. baz\n3. ");
+        let marker = lazy.rfind("2. ").unwrap();
+        let mut lazy_del =
+            DocumentTab::new("d".into(), "t.md".into(), lazy.to_string(), None, None);
+        lazy_del.edit(marker..marker + 3, "");
+        assert_eq!(lazy_del.content, "- foo\nbar\nbaz");
+        let mut lazy_bs = DocumentTab::new("b".into(), "t.md".into(), lazy.to_string(), None, None);
+        lazy_bs.place(lazy.len(), false);
+        lazy_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(lazy_bs.content, "- foo\nbar\n2. ba");
+        let mut lazy_type =
+            DocumentTab::new("t".into(), "t.md".into(), lazy.to_string(), None, None);
+        lazy_type.place(marker, false);
+        lazy_type.move_home_in_mode(false, ViewMode::Wysiwyg);
+        lazy_type.edit(lazy_type.cursor_offset()..lazy_type.cursor_offset(), "Z");
+        assert_eq!(lazy_type.content, "- foo\nbar\n2. Zbaz");
+
+        let crlf = "1. foo\r\n2.\r\n3. bar";
+        let third = crlf.rfind('\n').unwrap() + 1;
+        let mut crlf_end =
+            DocumentTab::new("e".into(), "t.md".into(), crlf.to_string(), None, None);
+        crlf_end.place(third, false);
+        crlf_end.move_end(false);
+        assert_eq!(crlf_end.cursor_offset(), crlf.len());
+        crlf_end.smart_newline(false);
+        assert_eq!(crlf_end.content, "1. foo\r\n2.\r\n3. bar\n4. ");
+        let mut crlf_del =
+            DocumentTab::new("d".into(), "t.md".into(), crlf.to_string(), None, None);
+        crlf_del.edit(third..third + 3, "");
+        assert_eq!(crlf_del.content, "1. foo\r\n2.\r\nbar");
+        let mut crlf_type =
+            DocumentTab::new("t".into(), "t.md".into(), crlf.to_string(), None, None);
+        crlf_type.place(third, false);
+        crlf_type.move_home_in_mode(false, ViewMode::Wysiwyg);
+        let home = crlf_type.cursor_offset();
+        crlf_type.edit(home..home, "Z");
+        assert_eq!(crlf_type.content, "1. foo\r\n2.\r\n3. Zbar");
+        let mut crlf_bs = DocumentTab::new("b".into(), "t.md".into(), crlf.to_string(), None, None);
+        crlf_bs.place(crlf.len(), false);
+        crlf_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(crlf_bs.content, "1. foo\r\n2.\r\n3. ba");
     }
 }
