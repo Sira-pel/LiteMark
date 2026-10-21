@@ -1097,9 +1097,23 @@ impl DocumentTab {
         if let Some((open_fence, close_fence)) = parsed
             .code_blocks
             .iter()
-            .find(|(open_r, close_r)| range.start >= open_r.start && range.end <= close_r.end)
+            .find(|(open_r, close_r)| {
+                range.start >= open_r.start
+                    && range.end <= close_r.end
+                    && (!close_r.is_empty() || range.start < close_r.end)
+            })
             .cloned()
         {
+            if close_fence.is_empty() {
+                let inner = self.content[open_fence.end..close_fence.end].to_string();
+                self.edit(open_fence.start..close_fence.end, &inner);
+                self.caret.move_to(floor_boundary(
+                    &self.content,
+                    open_fence.start + inner.len(),
+                ));
+                self.refresh_cursor();
+                return;
+            }
             let inner_start = open_fence.end.min(close_fence.start);
             let inner_end = close_fence.start;
             let mut inner = self.content[inner_start..inner_end].to_string();
