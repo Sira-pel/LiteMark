@@ -10,8 +10,9 @@ use crate::markdown::{
 
 use super::text_ops::{
     find_matches, find_next, find_prev, format_replacement, home_offset, line_col, line_end,
-    line_start_flags, move_vertical_collapsed, next_grapheme, previous_grapheme, replace_all,
-    Caret, DiffEdit, UndoHistory,
+    line_ending_len, line_ending_len_before, line_start_flags, move_vertical_collapsed,
+    next_grapheme, previous_grapheme, replace_all, snap_off_ending_interior, Caret, DiffEdit,
+    UndoHistory,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -240,8 +241,9 @@ impl DocumentTab {
             deleted,
             inserted: new_text.to_string(),
         });
-        let cursor = range.start + new_text.len();
+        let cursor_at = range.start + new_text.len();
         self.content.replace_range(range, new_text);
+        let cursor = snap_off_ending_interior(&self.content, cursor_at);
         self.revision = self.revision.wrapping_add(1);
         self.caret.move_to(cursor.min(self.content.len()));
         self.marked_range = None;
@@ -262,8 +264,13 @@ impl DocumentTab {
         let col = cursor - current_line_start;
         let prev_line_start = super::text_ops::home_offset(&self.content, current_line_start - 1);
         let current_line_end = super::text_ops::line_end(&self.content, current_line_start);
+        let break_len = line_ending_len_before(&self.content, current_line_start).max(1);
 
-        let prev_line = self.content[prev_line_start..current_line_start - 1].to_string();
+        let prev_line = self
+            .content
+            .get(prev_line_start..current_line_start - break_len)
+            .unwrap_or("")
+            .to_string();
         let curr_line = self.content[current_line_start..current_line_end].to_string();
         let curr_len = curr_line.len();
 
@@ -286,7 +293,7 @@ impl DocumentTab {
             return;
         }
         let col = cursor - current_line_start;
-        let next_line_start = current_line_end + 1;
+        let next_line_start = current_line_end + line_ending_len(&self.content, current_line_end);
         let next_line_end = super::text_ops::line_end(&self.content, next_line_start);
 
         let curr_line = self.content[current_line_start..current_line_end].to_string();
@@ -1175,6 +1182,13 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
+        let range = if mode == ViewMode::Wysiwyg && range.is_empty() {
+            let parsed = self.parsed();
+            let start = insertion_offset_off_setext(&self.content, &parsed, range.start);
+            start..start
+        } else {
+            range
+        };
         if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() && text != "\n" {
             let pf = self.pending_formats;
             if pf.bold || pf.italic || pf.underline || pf.strike || pf.code {
@@ -1228,7 +1242,13 @@ impl DocumentTab {
         let target = if !extend && !self.caret.range.is_empty() {
             self.selection_range().start
         } else {
-            previous_grapheme(&self.content, self.cursor_offset())
+            let pos = self.cursor_offset();
+            let ending = line_ending_len_before(&self.content, pos);
+            if ending > 0 {
+                pos - ending
+            } else {
+                previous_grapheme(&self.content, pos)
+            }
         };
         self.place(target, extend);
     }
@@ -1238,7 +1258,13 @@ impl DocumentTab {
         let target = if !extend && !self.caret.range.is_empty() {
             self.selection_range().end
         } else {
-            next_grapheme(&self.content, self.cursor_offset())
+            let pos = self.cursor_offset();
+            let ending = line_ending_len(&self.content, pos);
+            if ending > 0 {
+                pos + ending
+            } else {
+                next_grapheme(&self.content, pos)
+            }
         };
         self.place(target, extend);
     }
@@ -1322,7 +1348,12 @@ impl DocumentTab {
             }
         }
         pos = skip_hidden_left(&parsed, pos);
-        pos = previous_grapheme(&self.content, pos);
+        let ending = line_ending_len_before(&self.content, pos);
+        pos = if ending > 0 {
+            pos - ending
+        } else {
+            previous_grapheme(&self.content, pos)
+        };
         pos = skip_hidden_interior_left(&parsed, pos);
         if let Some(pline) = parsed.line_at_offset(pos) {
             if pos < pline.prefix_range.end {
@@ -1973,8 +2004,12 @@ impl DocumentTab {
             self.move_home(extend);
             return;
         }
-        let cursor = self.cursor_offset();
+        let mut cursor = self.cursor_offset();
         let parsed = self.parsed();
+        if on_setext(&parsed, cursor) {
+            cursor = retreat_off_setext(&parsed, cursor);
+        }
+        let cursor = snap_off_ending_interior(&self.content, cursor);
         if let Some(pline) = parsed.line_at_offset(cursor) {
             if let LineKind::TableRow {
                 ref cells,
@@ -2004,6 +2039,7 @@ impl DocumentTab {
         let line_start = super::text_ops::home_offset(&self.content, self.cursor_offset());
         let target = super::text_ops::line_end(&self.content, line_start);
         self.place(target, extend);
+        self.retreat_if_setext(extend);
     }
 
     pub fn select_line_up(&mut self) {
@@ -2026,7 +2062,8 @@ impl DocumentTab {
         let target = if cursor < current_line_end {
             current_line_end
         } else if current_line_end < self.content.len() {
-            let next_line_start = current_line_end + 1;
+            let next_line_start =
+                current_line_end + line_ending_len(&self.content, current_line_end);
             super::text_ops::line_end(&self.content, next_line_start)
         } else {
             self.content.len()
@@ -2041,6 +2078,7 @@ impl DocumentTab {
     pub fn move_doc_end(&mut self, extend: bool) {
         let len = self.content.len();
         self.place(len, extend);
+        self.retreat_if_setext(extend);
     }
 
     pub fn move_word_left(&mut self, extend: bool) {
@@ -2146,7 +2184,7 @@ impl DocumentTab {
 
     pub fn place(&mut self, offset: usize, extend: bool) {
         self.pending_formats = ActiveFormats::default();
-        let offset = floor_boundary(&self.content, offset);
+        let offset = floor_boundary(&self.content, snap_off_ending_interior(&self.content, offset));
         if extend {
             self.caret.select_to(offset);
         } else {
@@ -2271,6 +2309,24 @@ impl DocumentTab {
         let parsed = self.parsed();
         let (range, replacement) = setext_selection_edit(&self.content, &parsed, range);
         self.edit(range, &replacement);
+    }
+
+    fn retreat_if_setext(&mut self, extend: bool) {
+        let pos = self.cursor_offset();
+        let parsed = self.parsed();
+        if !on_setext(&parsed, pos) {
+            return;
+        }
+        let preferred = self.caret.preferred_col;
+        let target = retreat_off_setext(&parsed, pos);
+        if extend {
+            self.caret.select_to(target);
+        } else {
+            self.caret.range = target..target;
+            self.caret.reversed = false;
+        }
+        self.caret.preferred_col = preferred;
+        self.refresh_cursor();
     }
 
     fn snap_off_setext(&mut self, extend: bool, forward: bool) {
@@ -2499,21 +2555,7 @@ fn on_setext(parsed: &ParsedDocument, pos: usize) -> bool {
 }
 
 fn line_break_len(content: &str, pos: usize) -> usize {
-    let bytes = content.as_bytes();
-    if pos >= bytes.len() {
-        return 0;
-    }
-    if bytes[pos] == b'\r' {
-        if pos + 1 < bytes.len() && bytes[pos + 1] == b'\n' {
-            2
-        } else {
-            1
-        }
-    } else if bytes[pos] == b'\n' {
-        1
-    } else {
-        0
-    }
+    line_ending_len(content, pos)
 }
 
 /// End of a setext underline, including its line ending. `source_end + 1` covers LF.
@@ -2639,6 +2681,21 @@ fn setext_selection_edit(
     (deleted, replacement)
 }
 
+fn insertion_offset_off_setext(content: &str, parsed: &ParsedDocument, pos: usize) -> usize {
+    let pos = snap_off_ending_interior(content, pos.min(content.len()));
+    if !on_setext(parsed, pos) {
+        return pos;
+    }
+    let retreated = retreat_off_setext(parsed, pos);
+    if !on_setext(parsed, retreated) {
+        return retreated;
+    }
+    parsed
+        .line_at_offset(pos)
+        .map(|line| line.source.start)
+        .unwrap_or(0)
+}
+
 fn advance_past_setext(parsed: &ParsedDocument, content: &str, mut pos: usize) -> usize {
     let content_len = content.len();
     while on_setext(parsed, pos) {
@@ -2647,7 +2704,7 @@ fn advance_past_setext(parsed: &ParsedDocument, content: &str, mut pos: usize) -
         };
         let next = setext_terminator_end(content, line.source.end);
         if next >= content_len || next == pos {
-            return content_len;
+            return retreat_off_setext(parsed, line.source.start);
         }
         pos = next;
     }
@@ -4040,6 +4097,104 @@ mod tests {
         down.move_down(false);
         assert_caret_off_setext(&mut down);
         assert_eq!(down.cursor_offset(), after);
+    }
+
+    #[test]
+    fn crlf_and_bare_cr_carets_stay_out_of_the_line_ending() {
+        let crlf = "Foo\r\n---\r\nbar";
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), crlf.into(), None, None);
+        doc.place(0, false);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), 3, "End stops before CRLF");
+        doc.insert_text_in_mode(doc.cursor_offset()..doc.cursor_offset(), "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "FooX\r\n---\r\nbar");
+
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), "Foo\r\nbar\r\nbaz".into(), None, None);
+        doc.place(5, false);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), 8, "End on bar stops before its CRLF");
+
+        let bare = "Foo\rbar\rbaz";
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), bare.into(), None, None);
+        doc.place(0, false);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), 3);
+        doc.insert_text_in_mode(3..3, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "FooX\rbar\rbaz");
+
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), bare.into(), None, None);
+        doc.place(1, false);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "F\rbar\rbaz");
+
+        let setext = "Foo\r---\rbar";
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), setext.into(), None, None);
+        doc.place(4, false);
+        doc.select_line();
+        assert_eq!(doc.caret.range, 4..8);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "Foo\rbar");
+
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), setext.into(), None, None);
+        doc.place(0, false);
+        doc.move_down(false);
+        assert_eq!(doc.cursor_offset(), 8, "Down skips the hidden underline");
+        doc.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "Foo\rbar");
+
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), setext.into(), None, None);
+        doc.place(doc.content.len(), false);
+        doc.move_up(false);
+        assert_eq!(doc.cursor_offset(), 3, "Up from EOF leaves the underline");
+
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), crlf.into(), None, None);
+        doc.place(doc.content.len(), false);
+        for _ in 0..4 {
+            doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+        }
+        assert_ne!(doc.cursor_offset(), 9, "Left must not sit between CR and LF");
+        let at = doc.cursor_offset();
+        doc.insert_text_in_mode(at..at, "X", ViewMode::Wysiwyg);
+        assert!(
+            !doc.content.contains("\rX\n"),
+            "typed between CR and LF: {:?}",
+            doc.content
+        );
+    }
+
+    #[test]
+    fn eof_setext_typing_does_not_extend_the_underline() {
+        let md = "Foo\n---";
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), md.into(), None, None);
+        doc.place(0, false);
+        for _ in 0..6 {
+            doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+        }
+        assert_eq!(doc.cursor_offset(), 3);
+        doc.insert_text_in_mode(doc.cursor_offset()..doc.cursor_offset(), "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "FooX\n---");
+        assert!(matches!(
+            doc.parsed().lines[0].kind,
+            LineKind::Heading { level: 2 }
+        ));
+
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), md.into(), None, None);
+        doc.place(md.len(), false);
+        doc.move_home_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), 0);
+        doc.insert_text_in_mode(0..0, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "XFoo\n---");
+
+        let mut doc = DocumentTab::new("s".into(), "setext.md".into(), "Foo\r---".into(), None, None);
+        doc.place(0, false);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), 3);
+        doc.insert_text_in_mode(3..3, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "FooX\r---");
+        assert!(matches!(
+            doc.parsed().lines[0].kind,
+            LineKind::Heading { level: 2 }
+        ));
     }
 }
 

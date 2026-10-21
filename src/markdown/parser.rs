@@ -1049,10 +1049,6 @@ struct OpenFence {
     max_indent: usize,
 }
 
-fn leading_spaces(line: &str) -> usize {
-    line.bytes().take_while(|byte| *byte == b' ').count()
-}
-
 /// Setext underline: 0–3 spaces, one or more `=` or `-`, then only spaces or tabs.
 fn setext_level(line: &str) -> Option<u8> {
     let bytes = line.as_bytes();
@@ -1121,42 +1117,43 @@ fn is_thematic_break(line: &str) -> bool {
 }
 
 fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)> {
-    let indent = leading_spaces(line);
-    if indent > 3 {
-        return None;
-    }
-    opening_fence_parts(line, indent)
+    match_opening_fence_limited(line, 3)
 }
 
 fn match_opening_fence_limited(
     line: &str,
     max_indent: usize,
 ) -> Option<(u8, usize, usize, Option<String>)> {
-    let indent = leading_spaces(line);
-    if indent > max_indent {
+    let (index, column) = split_indent(line);
+    if index >= line.len() || column > max_indent {
         return None;
     }
-    opening_fence_parts(line, indent)
+    opening_fence_parts(line, index, column)
 }
 
-fn opening_fence_parts(line: &str, indent: usize) -> Option<(u8, usize, usize, Option<String>)> {
+/// `index` is the first marker byte. `column` counts tabs to the next multiple of 4.
+fn opening_fence_parts(
+    line: &str,
+    index: usize,
+    column: usize,
+) -> Option<(u8, usize, usize, Option<String>)> {
     let bytes = line.as_bytes();
-    if indent >= bytes.len() {
+    if index >= bytes.len() {
         return None;
     }
-    let marker = bytes[indent];
+    let marker = bytes[index];
     if marker != b'`' && marker != b'~' {
         return None;
     }
-    let mut index = indent;
-    while index < bytes.len() && bytes[index] == marker {
-        index += 1;
+    let mut end = index;
+    while end < bytes.len() && bytes[end] == marker {
+        end += 1;
     }
-    let len = index - indent;
+    let len = end - index;
     if len < 3 {
         return None;
     }
-    let rest = &line[index..];
+    let rest = &line[end..];
     if marker == b'`' && rest.contains('`') {
         return None;
     }
@@ -1166,37 +1163,32 @@ fn opening_fence_parts(line: &str, indent: usize) -> Option<(u8, usize, usize, O
     } else {
         Some(info.to_string())
     };
-    Some((marker, len, indent, info))
+    Some((marker, len, column, info))
 }
 
 fn is_closing_fence(line: &str, marker: u8, min_len: usize, max_indent: usize) -> bool {
-    let indent = leading_spaces(line);
-    if indent > max_indent {
+    let (index, column) = split_indent(line);
+    if index >= line.len() || column > max_indent {
         return false;
     }
     let bytes = line.as_bytes();
-    if indent >= bytes.len() || bytes[indent] != marker {
+    if bytes[index] != marker {
         return false;
     }
-    let mut index = indent;
-    while index < bytes.len() && bytes[index] == marker {
-        index += 1;
+    let mut end = index;
+    while end < bytes.len() && bytes[end] == marker {
+        end += 1;
     }
-    if index - indent < min_len {
+    if end - index < min_len {
         return false;
     }
-    bytes[index..]
+    bytes[end..]
         .iter()
         .all(|byte| *byte == b' ' || *byte == b'\t')
 }
 
-fn fence_content_strip(line: &str, indent: usize) -> usize {
-    let bytes = line.as_bytes();
-    let mut stripped = 0;
-    while stripped < indent && stripped < bytes.len() && bytes[stripped] == b' ' {
-        stripped += 1;
-    }
-    stripped
+fn fence_content_strip(line: &str, indent_columns: usize) -> usize {
+    prefix_through_column(line, indent_columns)
 }
 
 /// Bytes to hide so the rest of the line starts at column 4. Tabs advance to
@@ -1401,39 +1393,64 @@ fn list_content_column(line: &str, prefix_len: usize) -> usize {
     }
 }
 
-/// `[label]:` at indent ≤ 3, with no unescaped `]` inside the label.
-fn is_link_definition_line(line: &str) -> bool {
-    let (index, column) = split_indent(line);
-    if column > 3 || index >= line.len() || !line.is_char_boundary(index) {
+/// Link definitions and HTML blocks are not classified (LM-04, LM-14).
+/// These shapes are enough to leave the line as ordinary text, which is what
+/// red did. An unfinished `<a title="a lot` is not one of them.
+fn line_blocks_setext(line: &str) -> bool {
+    if html_block_kind(line).is_some() {
+        return true;
+    }
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    link_label_colon(trimmed)
+        || trimmed == "["
+        || trimmed.starts_with("]:")
+        || complete_tag_line(trimmed)
+}
+
+fn line_keeps_following_indent(line: &str) -> bool {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    trimmed.starts_with('<') || link_label_colon(trimmed) || trimmed == "[" || trimmed.starts_with("]:")
+}
+
+/// `[label]:` with the colon tight against the closing bracket.
+fn link_label_colon(trimmed: &str) -> bool {
+    let bytes = trimmed.as_bytes();
+    if bytes.first() != Some(&b'[') {
         return false;
     }
-    let bytes = line.as_bytes();
-    if bytes[index] != b'[' {
-        return false;
-    }
-    let mut cursor = index + 1;
+    let mut index = 1usize;
     let mut escaped = false;
-    let mut closed = false;
-    while cursor < bytes.len() {
+    while index < bytes.len() {
         if escaped {
             escaped = false;
-            cursor += 1;
+            index += 1;
             continue;
         }
-        match bytes[cursor] {
+        match bytes[index] {
             b'\\' => {
                 escaped = true;
-                cursor += 1;
+                index += 1;
             }
-            b']' => {
-                closed = true;
-                cursor += 1;
-                break;
-            }
-            _ => cursor += 1,
+            b']' => return bytes.get(index + 1) == Some(&b':'),
+            _ => index += 1,
         }
     }
-    closed && cursor < bytes.len() && bytes[cursor] == b':'
+    false
+}
+
+/// A whole line that is one tag, including `<pre/>`, which the HTML
+/// start-condition tests reject because `/` follows the name.
+fn complete_tag_line(trimmed: &str) -> bool {
+    let bytes = trimmed.as_bytes();
+    if bytes.first() != Some(&b'<') {
+        return false;
+    }
+    let Some(end) = trimmed.find('>') else {
+        return false;
+    };
+    bytes[end + 1..]
+        .iter()
+        .all(|byte| *byte == b' ' || *byte == b'\t')
 }
 
 fn is_paren_item_line(line: &str) -> bool {
@@ -1472,11 +1489,16 @@ fn paren_marker_prefix_len(line: &str) -> Option<usize> {
     Some(cursor)
 }
 
-fn paragraph_run_is_link_definition(lines: &[ParsedLine], markdown: &str) -> bool {
+fn paragraph_run_keeps_indent(lines: &[ParsedLine], markdown: &str) -> bool {
+    if paragraph_run_is_paren_item(lines, markdown) {
+        return true;
+    }
     let Some(start) = paragraph_run_start(lines) else {
         return false;
     };
-    is_link_definition_line(&markdown[lines[start].source.clone()])
+    lines[start..]
+        .iter()
+        .any(|line| line_keeps_following_indent(&markdown[line.source.clone()]))
 }
 
 fn paragraph_run_is_paren_item(lines: &[ParsedLine], markdown: &str) -> bool {
@@ -1486,44 +1508,21 @@ fn paragraph_run_is_paren_item(lines: &[ParsedLine], markdown: &str) -> bool {
     is_paren_item_line(&markdown[lines[start].source.clone()])
 }
 
-fn skip_link_definition_lines(lines: &[ParsedLine], markdown: &str, mut index: usize) -> usize {
-    while index < lines.len() {
-        let text = &markdown[lines[index].source.clone()];
-        if !is_link_definition_line(text) {
-            break;
-        }
-        index += 1;
-        while index < lines.len() {
-            let cont = &markdown[lines[index].source.clone()];
-            if is_link_definition_line(cont) {
-                break;
-            }
-            let (indent_bytes, _) = split_indent(cont);
-            if indent_bytes > 0 && indent_bytes < cont.len() {
-                index += 1;
-            } else {
-                break;
-            }
-        }
-    }
-    index
-}
-
-/// Setext promotes the paragraph suffix after leading link definitions.
-/// An HTML-block opener at the start of the run promotes nothing.
+/// Setext promotes an ordinary paragraph run and nothing else.
+/// A `)` item, or any line that still looks like a link definition or HTML,
+/// keeps the underline visible instead of being reclassified.
 fn setext_promote_from(lines: &[ParsedLine], markdown: &str, run_start: usize) -> Option<usize> {
     let first = &markdown[lines[run_start].source.clone()];
-    if html_block_kind(first).is_some() || is_paren_item_line(first) {
+    if is_paren_item_line(first) {
         return None;
     }
-    let mut index = run_start;
-    if is_link_definition_line(first) {
-        index = skip_link_definition_lines(lines, markdown, run_start);
-    }
-    if index >= lines.len() {
+    let blocked = lines[run_start..]
+        .iter()
+        .any(|line| line_blocks_setext(&markdown[line.source.clone()]));
+    if blocked {
         None
     } else {
-        Some(index)
+        Some(run_start)
     }
 }
 
@@ -1874,6 +1873,38 @@ fn close_finished_lists(lists: &mut Vec<ListFrame>, previous_blank: bool, line: 
     }
 }
 
+/// Backticks after a blockquote stay fences at any indent, which is what red
+/// did by trimming. Tildes stay at the top-level limit of 3 unless a list
+/// widens that limit, so `> foo` / `    ~~~` remains a paragraph.
+fn backtick_fence_limit(lines: &[ParsedLine]) -> usize {
+    if nearest_nonempty(lines).is_some_and(|prev| matches!(prev.kind, LineKind::Blockquote)) {
+        usize::MAX
+    } else {
+        3
+    }
+}
+
+fn match_opening_fence_marked(
+    line: &str,
+    backtick_limit: usize,
+    tilde_limit: usize,
+) -> Option<(u8, usize, usize, Option<String>)> {
+    let (index, column) = split_indent(line);
+    if index >= line.len() {
+        return None;
+    }
+    let marker = line.as_bytes()[index];
+    let limit = match marker {
+        b'`' => backtick_limit,
+        b'~' => tilde_limit,
+        _ => return None,
+    };
+    if column > limit {
+        return None;
+    }
+    opening_fence_parts(line, index, column)
+}
+
 fn nearest_nonempty(lines: &[ParsedLine]) -> Option<&ParsedLine> {
     lines
         .iter()
@@ -1988,12 +2019,16 @@ fn setext_is_lazy(lines: &[ParsedLine], markdown: &str, run_start: usize) -> boo
 }
 
 fn atx_heading(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
+    atx_heading_within(line, 3)
+}
+
+/// `max_indent` is a column, with tabs advancing to the next multiple of 4.
+/// Inside a list that column is the item content column plus 3, so a tab
+/// after `- foo` still opens a heading.
+fn atx_heading_within(line: &str, max_indent: usize) -> Option<(u8, std::ops::Range<usize>)> {
     let bytes = line.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() && index < 3 && bytes[index] == b' ' {
-        index += 1;
-    }
-    if index < bytes.len() && bytes[index] == b' ' {
+    let (mut index, column) = split_indent(line);
+    if column > max_indent || index >= bytes.len() {
         return None;
     }
     let mut level = 0u8;
@@ -2403,7 +2438,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         let fence_limit = lists
             .last()
             .map(|frame| frame.content_col.saturating_add(3))
-            .unwrap_or(3);
+            .unwrap_or_else(|| backtick_fence_limit(&lines));
         let skip_item_closer = lists.last().is_some_and(|frame| {
             frame.fence_marker.is_some_and(|(marker, len)| {
                 is_closing_fence(line, marker, len, frame.content_col.saturating_add(3))
@@ -2428,10 +2463,13 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             lines.push(parsed);
             continue;
         }
-        let opening_fence = if fence_limit <= 3 {
+        let opening_fence = if let Some(frame) = lists.last() {
+            let limit = frame.content_col.saturating_add(3);
+            match_opening_fence_marked(line, limit, limit)
+        } else if fence_limit == 3 {
             match_opening_fence(line)
         } else {
-            match_opening_fence_limited(line, fence_limit)
+            match_opening_fence_marked(line, fence_limit, 3)
         };
         if let Some((marker, len, indent, language)) = opening_fence {
             open_fence = Some(OpenFence {
@@ -2576,7 +2614,11 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             }
         }
 
-        if let Some((level, content)) = atx_heading(line) {
+        let atx_limit = lists
+            .last()
+            .map(|frame| frame.content_col.saturating_add(3))
+            .unwrap_or(3);
+        if let Some((level, content)) = atx_heading_within(line, atx_limit) {
             let parsed = atx_line(i, line_source, line, level, content);
             all_hidden.extend(parsed.hidden_ranges.iter().cloned());
             all_pairs.extend(parsed.inline_pairs.iter().cloned());
@@ -2631,12 +2673,9 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 });
                 if previous_is_paragraph {
                     // Indented code does not interrupt a paragraph. Hide the
-                    // whole leading run of spaces and tabs, except inside a
-                    // link definition or a `)` item whose continuation keeps
-                    // its indent.
-                    if !paragraph_run_is_link_definition(&lines, markdown)
-                        && !paragraph_run_is_paren_item(&lines, markdown)
-                    {
+                    // leading spaces, except a `)` item or an unclassified
+                    // link/HTML run, which keeps the indent red displayed.
+                    if !paragraph_run_keeps_indent(&lines, markdown) {
                         prefix_len = split_indent(line).0;
                     }
                 } else if let Some(column) = line_indent_column(line) {
@@ -2662,6 +2701,36 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                         continue;
                     }
                 }
+            }
+        }
+
+        // Red treats every trimmed backtick run as a fence. Keep a real indented
+        // code block when one already opened. Otherwise a tab or a deep indent
+        // after HTML or a quote would stay a paragraph and miss pulldown's code.
+        if prefix_len == 0 && matches!(kind, LineKind::Paragraph) {
+            if let Some((marker, len, indent, language)) =
+                match_opening_fence_marked(line, usize::MAX, 0)
+                    .filter(|(marker, _, _, _)| *marker == b'`')
+            {
+                open_fence = Some(OpenFence {
+                    marker,
+                    len,
+                    indent,
+                    open_range: sline.start..sline.end,
+                    max_indent: usize::MAX,
+                });
+                let parsed = structural_line(
+                    i,
+                    line_source,
+                    line,
+                    LineKind::CodeFence {
+                        language,
+                        opening: true,
+                    },
+                );
+                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                lines.push(parsed);
+                continue;
             }
         }
 
@@ -4201,12 +4270,12 @@ mod tests {
                 ],
             ),
             (
-                "ex215-link-def-then-setext",
+                "ex215-link-def-not-promoted",
                 "[foo]: /url\nbar\n===\n[foo]",
                 vec![
                     leaf("p", "[foo]: /url", "[foo]: /url"),
-                    leaf("h1", "bar", "bar"),
-                    leaf("setext", "", "==="),
+                    leaf("p", "bar", "bar"),
+                    leaf("p", "===", "==="),
                     leaf("p", "[foo]", "[foo]"),
                 ],
             ),
@@ -4333,6 +4402,156 @@ mod tests {
                 ],
             ),
         ]
+    }
+
+    #[test]
+    fn round4_link_html_and_tab_fences_match_red() {
+        fn kinds(md: &str) -> Vec<(String, String)> {
+            parse_document(md)
+                .lines
+                .iter()
+                .map(|line| (leaf_kind_token(&line.kind), line.display_text.clone()))
+                .collect()
+        }
+
+        assert_eq!(
+            kinds("[foo]:\n/url\n===\n"),
+            vec![
+                ("p".into(), "[foo]:".into()),
+                ("p".into(), "/url".into()),
+                ("p".into(), "===".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("[\nfoo\n]: /url\nbar\n===\n"),
+            vec![
+                ("p".into(), "[".into()),
+                ("p".into(), "foo".into()),
+                ("p".into(), "]: /url".into()),
+                ("p".into(), "bar".into()),
+                ("p".into(), "===".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("- foo\n\n    [bar]: /url\n===\n"),
+            vec![
+                ("ul:0".into(), "foo".into()),
+                ("empty".into(), "".into()),
+                ("p".into(), "    [bar]: /url".into()),
+                ("p".into(), "===".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("<pre/>\n===\n"),
+            vec![
+                ("p".into(), "<pre/>".into()),
+                ("p".into(), "===".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("<pre/>\n---\n"),
+            vec![
+                ("p".into(), "<pre/>".into()),
+                ("hr".into(), "".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("<!DOCTYPE html>\n    code\n"),
+            vec![
+                ("p".into(), "<!DOCTYPE html>".into()),
+                ("p".into(), "    code".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("<pre>\n</script>\n    x\n"),
+            vec![
+                ("p".into(), "<pre>".into()),
+                ("p".into(), "</script>".into()),
+                ("p".into(), "    x".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("- foo\n\t```\n"),
+            vec![
+                ("ul:0".into(), "foo".into()),
+                ("fence-open".into(), "".into()),
+                ("code".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("- foo\n\n\t```\n"),
+            vec![
+                ("ul:0".into(), "foo".into()),
+                ("empty".into(), "".into()),
+                ("fence-open".into(), "".into()),
+                ("code".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("> foo\n\n\t```\n"),
+            vec![
+                ("quote".into(), "foo".into()),
+                ("empty".into(), "".into()),
+                ("fence-open".into(), "".into()),
+                ("code".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("- foo\n\t# hi\n"),
+            vec![
+                ("ul:0".into(), "foo".into()),
+                ("h1".into(), "hi".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("1. foo\n\t# hi\n"),
+            vec![
+                ("ol:1:0".into(), "foo".into()),
+                ("h1".into(), "hi".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("10) foo\n\t# hi\n"),
+            vec![
+                ("p".into(), "10) foo".into()),
+                ("h1".into(), "hi".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("> foo\n\n      ```\n"),
+            vec![
+                ("quote".into(), "foo".into()),
+                ("empty".into(), "".into()),
+                ("fence-open".into(), "".into()),
+                ("code".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("> foo\n    ~~~\n"),
+            vec![
+                ("quote".into(), "foo".into()),
+                ("p".into(), "    ~~~".into()),
+                ("empty".into(), "".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("<!DOCTYPE html>\n\t```\n"),
+            vec![
+                ("p".into(), "<!DOCTYPE html>".into()),
+                ("fence-open".into(), "".into()),
+                ("code".into(), "".into()),
+            ]
+        );
     }
 
     #[test]

@@ -77,13 +77,15 @@ MUTANTS: dict[str, dict[str, str]] = {
         "file": "src/markdown/parser.rs",
         "label": "fence detector also matches line rust",
         "old": """fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)> {
-    let indent = leading_spaces(line);
+    match_opening_fence_limited(line, 3)
+}
 """,
         "new": """fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)> {
     if line.trim() == "rust" {
         return Some((b'`', 3, 0, Some("rust".to_string())));
     }
-    let indent = leading_spaces(line);
+    match_opening_fence_limited(line, 3)
+}
 """,
     },
     "links-plain": {

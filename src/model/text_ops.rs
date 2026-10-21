@@ -239,13 +239,106 @@ pub fn next_grapheme(content: &str, offset: usize) -> usize {
         .unwrap_or(content.len())
 }
 
+/// Byte length of the line ending at `offset`.
+/// A line ending is LF, a lone CR, or CRLF. Any other byte has length 0.
+pub fn line_ending_len(content: &str, offset: usize) -> usize {
+    let bytes = content.as_bytes();
+    if offset >= bytes.len() {
+        return 0;
+    }
+    match bytes[offset] {
+        b'\n' => 1,
+        b'\r' => usize::from(offset + 1 < bytes.len() && bytes[offset + 1] == b'\n') + 1,
+        _ => 0,
+    }
+}
+
+/// If `offset` sits on the LF of a CRLF, move it back to the CR.
+/// The caret then stands at the end of the line, never between the two bytes.
+pub fn snap_off_ending_interior(content: &str, offset: usize) -> usize {
+    let offset = offset.min(content.len());
+    if offset > 0
+        && line_ending_len(content, offset - 1) == 2
+        && content.as_bytes().get(offset) == Some(&b'\n')
+    {
+        offset - 1
+    } else {
+        offset
+    }
+}
+
+/// Byte length of the line ending that ends immediately before `offset`.
+pub fn line_ending_len_before(content: &str, offset: usize) -> usize {
+    if offset == 0 {
+        return 0;
+    }
+    let bytes = content.as_bytes();
+    if bytes[offset - 1] == b'\n' && offset >= 2 && bytes[offset - 2] == b'\r' {
+        2
+    } else if bytes[offset - 1] == b'\n' || bytes[offset - 1] == b'\r' {
+        1
+    } else {
+        0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TextLine {
+    start: usize,
+    /// First byte of the line ending, or `content.len()` when the line has none.
+    content_end: usize,
+    /// First byte of the next line.
+    next: usize,
+}
+
+/// The line that contains `offset`. A caret between CR and LF belongs to the
+/// line that owns that CRLF, and its content end is the CR, not the LF.
+fn line_span_at(content: &str, offset: usize) -> TextLine {
+    let bytes = content.as_bytes();
+    let offset = offset.min(bytes.len());
+    let mut start = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let ending = line_ending_len(content, index);
+        if ending > 0 {
+            let next = index + ending;
+            if offset < next {
+                return TextLine {
+                    start,
+                    content_end: index,
+                    next,
+                };
+            }
+            index = next;
+            start = next;
+        } else {
+            index += 1;
+        }
+    }
+    TextLine {
+        start,
+        content_end: bytes.len(),
+        next: bytes.len(),
+    }
+}
+
 /// 1-based line and column at a byte offset.
 pub fn line_col(content: &str, offset: usize) -> (usize, usize) {
     let offset = floor_char_boundary(content, offset.min(content.len()));
-    let before = &content[..offset];
-    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
-    let line_start = before.rfind('\n').map(|index| index + 1).unwrap_or(0);
-    let col = content[line_start..offset].chars().count() + 1;
+    let span = line_span_at(content, offset);
+    let mut line = 1usize;
+    let mut index = 0usize;
+    while index < span.start {
+        let ending = line_ending_len(content, index);
+        if ending > 0 {
+            line += 1;
+            index += ending;
+        } else {
+            index += 1;
+        }
+    }
+    let end = offset.min(span.content_end);
+    let col = content[span.start..end].chars().count() + 1;
     (line, col)
 }
 
@@ -254,12 +347,18 @@ pub fn line_start(content: &str, line_1: usize) -> usize {
         return 0;
     }
     let mut line = 1usize;
-    for (index, byte) in content.bytes().enumerate() {
-        if byte == b'\n' {
+    let mut index = 0usize;
+    let bytes = content.as_bytes();
+    while index < bytes.len() {
+        let ending = line_ending_len(content, index);
+        if ending > 0 {
             line += 1;
+            index += ending;
             if line == line_1 {
-                return index + 1;
+                return index;
             }
+        } else {
+            index += 1;
         }
     }
     content.len()
@@ -267,18 +366,12 @@ pub fn line_start(content: &str, line_1: usize) -> usize {
 
 pub fn line_end(content: &str, offset: usize) -> usize {
     let offset = floor_char_boundary(content, offset.min(content.len()));
-    content[offset..]
-        .find('\n')
-        .map(|index| offset + index)
-        .unwrap_or(content.len())
+    line_span_at(content, offset).content_end
 }
 
 pub fn home_offset(content: &str, offset: usize) -> usize {
     let offset = floor_char_boundary(content, offset.min(content.len()));
-    content[..offset]
-        .rfind('\n')
-        .map(|index| index + 1)
-        .unwrap_or(0)
+    line_span_at(content, offset).start
 }
 
 fn char_class(ch: char) -> u8 {
@@ -389,19 +482,16 @@ pub fn word_right(content: &str, offset: usize) -> usize {
     result_offset
 }
 
-/// Byte range of the logical line containing `offset`, including its newline.
+/// Byte range of the logical line containing `offset`, including its line ending.
 pub fn line_extent(content: &str, offset: usize) -> Range<usize> {
-    let start = home_offset(content, offset);
-    let mut end = line_end(content, start);
-    if content.as_bytes().get(end) == Some(&b'\n') {
-        end += 1;
-    }
-    start..end
+    let offset = floor_char_boundary(content, offset.min(content.len()));
+    let span = line_span_at(content, offset);
+    span.start..span.next
 }
 
 pub fn offset_at_line_col(content: &str, line_1: usize, col_1: usize) -> usize {
     let start = line_start(content, line_1);
-    if start >= content.len() && line_1 > 1 && content.lines().count() < line_1 {
+    if start >= content.len() {
         return content.len();
     }
     let end = line_end(content, start);
@@ -422,7 +512,7 @@ pub fn move_vertical_collapsed(content: &str, caret: &mut Caret, delta: i32, ext
     } else {
         line + 1
     };
-    let offset = offset_at_line_col(content, target_line, prefer);
+    let offset = snap_off_ending_interior(content, offset_at_line_col(content, target_line, prefer));
     if extend {
         caret.select_to(offset);
     } else if !caret.range.is_empty() && delta < 0 {
@@ -1138,6 +1228,12 @@ mod tests {
         assert_eq!(word_extent("hello, world", 5), 5..6);
         assert_eq!(line_extent("ab\ncd", 1), 0..3);
         assert_eq!(line_extent("ab\ncd", 4), 3..5);
+        assert_eq!(line_end("Foo\r\nbar", 0), 3);
+        assert_eq!(line_end("Foo\r\nbar", 4), 3);
+        assert_eq!(home_offset("Foo\r\nbar", 5), 5);
+        assert_eq!(line_extent("Foo\rbar\rbaz", 1), 0..4);
+        assert_eq!(line_end("Foo\rbar\rbaz", 0), 3);
+        assert_eq!(snap_off_ending_interior("Foo\r\nbar", 4), 3);
         let khmer = line_extent(content, content.len());
         assert!(content.is_char_boundary(khmer.start) && content.is_char_boundary(khmer.end));
     }
