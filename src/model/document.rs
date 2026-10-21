@@ -3579,6 +3579,80 @@ mod tests {
         assert_eq!(doc.content, "hello world");
         assert!(!doc.undo());
     }
+
+    /// End, then Home, Backspace, and typing, the way CHECKER-4-R3 drove them.
+    fn crlf_caret(source: &str) -> (usize, usize, String, String, String, String, String) {
+        let mut ended = DocumentTab::new("e".into(), "t.md".into(), source.into(), None, None);
+        ended.move_end(false);
+        let end_at = ended.cursor_offset();
+        let before_disp = ended.parsed().lines[0].display_text.clone();
+        ended.move_home_in_mode(false, ViewMode::Wysiwyg);
+        let home = ended.cursor_offset();
+
+        let mut typed = DocumentTab::new("z".into(), "t.md".into(), source.into(), None, None);
+        typed.move_end(false);
+        let at = typed.cursor_offset();
+        typed.edit(at..at, "Z");
+        let typed_content = typed.content.clone();
+        let typed_disp = typed.parsed().lines[0].display_text.clone();
+
+        let mut backspaced = DocumentTab::new("b".into(), "t.md".into(), source.into(), None, None);
+        backspaced.move_end(false);
+        backspaced.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        let bs_content = backspaced.content.clone();
+        let bs_disp = backspaced.parsed().lines[0].display_text.clone();
+
+        (
+            end_at,
+            home,
+            before_disp,
+            typed_content,
+            typed_disp,
+            bs_content,
+            bs_disp,
+        )
+    }
+
+    #[test]
+    fn crlf_home_after_end_on_1_dot_foo() {
+        let (end_at, home, before_disp, _, _, _, _) = crlf_caret("1. foo\r\n");
+        assert_eq!(end_at, 7, "end_at");
+        assert_eq!(home, 3, "home after end");
+        assert_eq!(before_disp, "foo\r", "before_disp");
+    }
+
+    #[test]
+    fn crlf_first_backspace_on_1_dot_foo() {
+        let (_, _, before_disp, _, _, bs_content, bs_disp) = crlf_caret("1. foo\r\n");
+        assert_eq!(before_disp, "foo\r", "before_disp");
+        assert_eq!(bs_content, "1. foo\n");
+        assert_eq!(bs_disp, "foo");
+    }
+
+    #[test]
+    fn crlf_type_z_at_end_on_1_dot_foo() {
+        let (_, _, before_disp, typed_content, typed_disp, _, _) = crlf_caret("1. foo\r\n");
+        assert_eq!(before_disp, "foo\r", "before_disp");
+        assert_eq!(typed_content, "1. foo\rZ\n");
+        assert_eq!(typed_disp, "foo\rZ");
+        assert_eq!(typed_disp, format!("{before_disp}Z"));
+    }
+
+    #[test]
+    fn bare_cr_after_marker_1_dot_crfoo_is_not_a_list_item() {
+        let source = "1.\rfoo";
+        let (end_at, home, before_disp, typed_content, typed_disp, bs_content, bs_disp) =
+            crlf_caret(source);
+        assert!(
+            matches!(parse_document(source).lines[0].kind, LineKind::Paragraph),
+            "1.\\rfoo must stay one paragraph, display {before_disp:?}"
+        );
+        assert_eq!(end_at, 6, "end_at");
+        assert_eq!(home, 0, "home");
+        assert_eq!(before_disp, "1.\rfoo");
+        assert_eq!(typed_content, "1.\rfooZ");
+        assert_eq!(typed_disp, "1.\rfooZ");
+        assert_eq!(bs_content, "1.\rfo");
+        assert_eq!(bs_disp, "1.\rfo");
+    }
 }
-
-

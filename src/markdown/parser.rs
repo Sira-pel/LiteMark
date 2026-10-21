@@ -165,8 +165,7 @@ fn source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
     }
     for piece in markdown.split_inclusive('\n') {
         let end = start + piece.len();
-        let mut text = piece.strip_suffix('\n').unwrap_or(piece);
-        text = text.strip_suffix('\r').unwrap_or(text);
+        let text = piece.strip_suffix('\n').unwrap_or(piece);
         lines.push(SourceLine { start, end, text });
         start = end;
     }
@@ -1061,7 +1060,7 @@ impl<'a> ColScan<'a> {
     fn is_at_eol(&self) -> bool {
         self.bytes
             .get(self.ix)
-            .map(|&byte| byte == b'\r' || byte == b'\n')
+            .map(|&byte| byte == b'\n')
             .unwrap_or(true)
     }
 
@@ -1137,9 +1136,8 @@ impl ListMarker {
 }
 
 pub fn scan_list_marker(line: &str) -> Option<ListMarker> {
-    let raw = line.strip_suffix('\r').unwrap_or(line);
-    let bytes = raw.as_bytes();
-    let indent_bytes = raw.len() - raw.trim_start().len();
+    let bytes = line.as_bytes();
+    let indent_bytes = line.len() - line.trim_start().len();
     let mut col = ColScan::new(bytes);
     col.skip_indent(indent_bytes);
     if col.ix >= bytes.len() {
@@ -2013,34 +2011,39 @@ task_tabs[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[
         );
     }
 
+    /// F3 was Low. Stripping the CR hid it from the caret, so the editor
+    /// keeps it in the line, the same as kit `4e72b711`. Pulldown still
+    /// treats CR as a line ending in HTML.
     #[test]
-    fn trailing_cr_is_not_part_of_the_line() {
+    fn trailing_cr_stays_in_the_editor_line() {
         let empty_dot = observe_line("1.\r\n", 0);
         assert!(
-            empty_dot.contains("ordered=true")
-                && empty_dot.contains("display=\"\"")
+            empty_dot.contains("Paragraph")
+                && empty_dot.contains("display=\"1.\\r\"")
                 && empty_dot.contains("map=ok"),
             "{empty_dot}"
         );
         let empty_paren = observe_line("1)\r\n", 0);
         assert!(
-            empty_paren.contains("ordered=true") && empty_paren.contains("display=\"\""),
+            empty_paren.contains("Paragraph") && empty_paren.contains("display=\"1)\\r\""),
             "{empty_paren}"
         );
         let foo = observe_line("1. foo\r\n", 0);
         assert!(
-            foo.contains("display=\"foo\"") && foo.contains("map=ok"),
+            foo.contains("ListItem")
+                && foo.contains("display=\"foo\\r\"")
+                && foo.contains("map=ok"),
             "{foo}"
         );
         let bare = observe_line("1. [ ]\r\n", 0);
         assert!(
-            bare.contains("task=none") && bare.contains("display=\"[ ]\""),
+            bare.contains("task=none") && bare.contains("display=\"[ ]\\r\""),
             "{bare}"
         );
         let task = observe_line("1. [ ] \r\n", 0);
         assert!(
             task.contains("task=unchecked")
-                && task.contains("display=\"\"")
+                && task.contains("display=\"\\r\"")
                 && task.contains("map=ok"),
             "{task}"
         );
