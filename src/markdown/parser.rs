@@ -1073,6 +1073,38 @@ fn is_thematic_break(line: &str) -> bool {
     count >= 3
 }
 
+/// A setext underline: 0–3 spaces, then one run of `=` or `-`, then spaces or tabs.
+/// This is not a heading. It only stops an extended thematic break from hiding the line.
+fn setext_underline_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    let mut spaces = 0;
+    while index < bytes.len() && bytes[index] == b' ' {
+        spaces += 1;
+        if spaces > 3 {
+            return false;
+        }
+        index += 1;
+    }
+    if index >= bytes.len() {
+        return false;
+    }
+    let marker = bytes[index];
+    if marker != b'-' && marker != b'=' {
+        return false;
+    }
+    let marker_at = index;
+    while index < bytes.len() && bytes[index] == marker {
+        index += 1;
+    }
+    if index == marker_at {
+        return false;
+    }
+    bytes[index..]
+        .iter()
+        .all(|byte| *byte == b' ' || *byte == b'\t')
+}
+
 /// `(bytes, column)` of the first non-space, non-tab. Tabs advance to the next multiple of 4.
 fn split_indent(line: &str) -> (usize, usize) {
     let bytes = line.as_bytes();
@@ -1609,12 +1641,15 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
-        // Horizontal rule. Indent of four or more keeps red's exact trim match.
-        if is_thematic_break(line)
-            || trimmed == "---"
-            || trimmed == "***"
-            || trimmed == "___"
-        {
+        // Horizontal rule. Red's exact trim match stays. A longer or spaced
+        // break stays a paragraph when it is a setext underline of the
+        // previous paragraph, which red also leaves as a paragraph.
+        let red_exact_rule = trimmed == "---" || trimmed == "***" || trimmed == "___";
+        let setext_underline = lines
+            .last()
+            .is_some_and(|prev| matches!(prev.kind, LineKind::Paragraph))
+            && setext_underline_line(line);
+        if red_exact_rule || (is_thematic_break(line) && !setext_underline) {
             let hidden = vec![line_start..line_end];
             all_hidden.extend(hidden.iter().cloned());
             let (display_text, offset_map) =
@@ -2702,6 +2737,21 @@ mod tests {
                 "spaced-dashes-after-paragraph",
                 "Foo\n- - -",
                 vec![leaf("p", "Foo", "Foo"), leaf("hr", "", "- - -")],
+            ),
+            (
+                "four-dashes-after-paragraph-stay-text",
+                "Foo\n ----\nFoo\n   ----      ",
+                vec![
+                    leaf("p", "Foo", "Foo"),
+                    leaf("p", " ----", " ----"),
+                    leaf("p", "Foo", "Foo"),
+                    leaf("p", "   ----      ", "   ----      "),
+                ],
+            ),
+            (
+                "four-dashes-at-top-are-hr",
+                "----",
+                vec![leaf("hr", "", "----")],
             ),
             (
                 "table-unchanged",
