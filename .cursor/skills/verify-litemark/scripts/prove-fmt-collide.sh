@@ -19,7 +19,7 @@ restore() {
 }
 trap restore EXIT
 
-rustfmt --edition 2021 "${target}"
+rustfmt --edition 2021 --config-path "${KIT_DIR}/rustfmt.toml" "${target}"
 python3 - "${target}" <<'PY'
 import sys
 from pathlib import Path

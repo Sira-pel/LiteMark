@@ -1,0 +1,4 @@
+# scripts/fmt-gate.sh passes this file as `cargo fmt -- --config-path`.
+# rustfmt loads this file and does not read ~/.config/rustfmt/rustfmt.toml.
+max_width = 100
+newline_style = "Unix"

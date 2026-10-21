@@ -50,12 +50,15 @@ cargo clippy --all-targets -- -D warnings
 
 `scripts/ci.sh` runs that contract. The blob's fmt step prints `Tree is not fmt-clean; skipping cargo fmt --check.` and exits 0 when the tree is dirty. `ci.sh` does not copy that skip.
 
-`fmt-gate.sh` runs `cargo fmt --check`. Each hunk is `path:line:sha256` in `fixtures/fmt-baseline.hunks`. The sha256 is the hunk body with ANSI stripped and `@@` line numbers folded, so the hash is the changed text. The `path:line` stays in the token, so a header that moves is still a new hunk.
+`fmt-gate.sh` runs `cargo fmt --check -- --config-path .cursor/skills/verify-litemark/rustfmt.toml`. That file pins `max_width = 100`. rustfmt does not read `~/.config/rustfmt/rustfmt.toml` for the gate. Each hunk is `path:line:sha256` in `fixtures/fmt-baseline.hunks`. The sha256 is the hunk body with ANSI stripped and `@@` line numbers folded, so the hash is the changed text. The `path:line` stays in the token, so a header that moves is still a new hunk.
 
 - A file absent from `fixtures/fmt-baseline.files` prints `fmt_new_file=<path>` and fails.
 - A header absent from the baseline prints `fmt_new_hunk=<path:line>` and fails.
 - A header that is on the baseline with a different body prints `fmt_hunk_body=<path:line>` and fails.
-- A clean gate prints `fmt_gate=pass`.
+- A baseline token left unmatched prints `fmt_baseline_stale=<n>` and fails.
+- A clean gate prints `fmt_baseline_stale=0` and `fmt_gate=pass`.
+
+`ci.sh` treats `cargo test` exit 0 as a pass only when the log contains `test result: ok. N passed` with N greater than 0. Otherwise it prints `test_result_ok=missing`. It treats the fmt gate as a pass only when the log contains the exact line `fmt_gate=pass`. Otherwise, when the gate exits 0, it prints `fmt_gate_pass=missing`.
 
 The baseline is the tip after the `src/markdown/mod.rs` reorder: `fmt_baseline_files=19` and `fmt_baseline_hunks=201`. `cargo fmt --check` on `main` (`fc681a8`) is 20 files and 202 hunks. The only header on main that the tip does not have is `src/markdown/mod.rs:1`. The tip adds no dirty hunk of its own.
 
@@ -72,6 +75,7 @@ Fmt red fixtures, each of which restores the file:
 - `scripts/prove-fmt-absorb.sh` inserts `let _new_break=1;` inside the `src/theme.rs:22` hunk and requires `fmt_hunk_body=src/theme.rs:22`.
 - `scripts/prove-fmt-collide.sh` rustfmts `src/model/settings.rs`, prepends `fn zz_coincide(){let _x=1;}`, and requires `fmt_hunk_body=src/model/settings.rs:1`.
 - `scripts/prove-fmt-shift.sh` puts 20 `// pad` lines at the top of `src/theme.rs` and requires `fmt_new_hunk=src/theme.rs:42`.
+- `scripts/prove-fmt-stale.sh` runs `rustfmt --config-path` on `src/theme.rs` and requires `fmt_baseline_stale=1` with gate exit 1.
 
 ### Environment prerequisites (Linux)
 
@@ -95,7 +99,7 @@ source .cursor/skills/verify-litemark/scripts/env.sh
 Doctor requires all of:
 
 - `rustc` runs
-- `target/debug/litemark` is executable
+- `LITEMARK_BIN` is the built `litemark` binary: basename `litemark`, ELF magic, and the byte string `litemark`. `LITEMARK_BIN=/bin/true` prints `doctor fail bin=/bin/true not-litemark`
 - `src/markdown/render_dump.rs` contains the exact line `fn dump_render_tree() {`
 - every small green fixture has `fixtures/<name>/input.md` and `fixtures/<name>/expect.txt`
 - `fixtures/large-doc/` has `seed.txt`, `input.sha256` (exact line `sha256=7eac2c0a0471e1b121b9a3b8c6a11020b4e2e98cffb26387f1db057596bd092c`), and `required-lines.txt` (exact line `lines=2001`)
@@ -216,14 +220,14 @@ Rules:
 
 | Script | Purpose |
 | --- | --- |
-| `scripts/env.sh` | `RUN_ID`, run dir, stable toolchain, wrap columns |
-| `scripts/launch.sh` | `cargo build`; do not start the GUI |
-| `scripts/doctor.sh` | Read-only harness health |
-| `scripts/ci.sh` | CI contract: `cargo build`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, `fmt-gate.sh`. Does not apt-install `libxcb1-dev` or `libfreetype6-dev`. Runs every step; Actions stops at the first failure. |
-| `scripts/fmt-gate.sh` | `cargo fmt --check` against `path:line:sha256` hunk bodies |
-| `scripts/fmt-hunks.py` | Parse hunks and decide `fmt_new_file`, `fmt_new_hunk`, `fmt_hunk_body` |
+| `scripts/env.sh` | `RUN_ID` (charset `[A-Za-z0-9._-]` and no `..`), run dir, stable toolchain, wrap columns. Default `LITEMARK_BIN` comes from `cargo metadata` `target_directory` |
+| `scripts/launch.sh` | `cargo build`; `READY` is `target_directory/debug/litemark`, which follows `CARGO_TARGET_DIR`. Does not start the GUI |
+| `scripts/doctor.sh` | Read-only harness health. Rejects an executable that is not the built `litemark` binary |
+| `scripts/ci.sh` | CI contract: `cargo build`, `cargo test` (requires `test result: ok. N passed`, N > 0), `cargo clippy --all-targets -- -D warnings`, `fmt-gate.sh` (requires `fmt_gate=pass`). Does not apt-install `libxcb1-dev` or `libfreetype6-dev`. Runs every step; Actions stops at the first failure. |
+| `scripts/fmt-gate.sh` | `cargo fmt --check -- --config-path` the kit `rustfmt.toml`, against `path:line:sha256` hunk bodies. Unmatched baseline tokens print `fmt_baseline_stale=<n>` and fail |
+| `scripts/fmt-hunks.py` | Parse hunks and decide `fmt_new_file`, `fmt_new_hunk`, `fmt_hunk_body`, `fmt_baseline_stale` |
 | `scripts/generate-large-doc.py` | Expand `large-doc/seed.txt`, assert `sha256_self=ok` and `input.sha256` |
-| `scripts/render_dump.sh` | One markdown file through the ignored dump test |
+| `scripts/render_dump.sh` | One markdown file through the ignored dump test. Refuses a symlink output (`render_refuse=symlink`) and an output that shares an inode with `expect.txt` or `required-lines.txt` (`render_refuse=same_inode`) |
 | `scripts/prove-markdown.sh` | Green corpus and red proofs (`broken_exact_line=`, `red_caught=<n>/<total>`) |
 | `scripts/prove-large-doc-seed.sh` | `sections=399` must print `green_fail=1` before any render |
 | `scripts/prove-green-can-fail.sh` | Seed one wrong headings expect line, require green exit non-zero, restore |
@@ -233,8 +237,18 @@ Rules:
 | `scripts/prove-fmt-absorb.sh` | `let _new_break=1;` inside `src/theme.rs:22`, require `fmt_hunk_body=src/theme.rs:22` |
 | `scripts/prove-fmt-collide.sh` | `fn zz_coincide(){let _x=1;}` at `src/model/settings.rs:1`, require `fmt_hunk_body=src/model/settings.rs:1` |
 | `scripts/prove-fmt-shift.sh` | 20 `// pad` lines, require `fmt_new_hunk=src/theme.rs:42` |
+| `scripts/prove-fmt-stale.sh` | `rustfmt src/theme.rs`, require `fmt_baseline_stale=1` and gate exit 1 |
+| `scripts/prove-fmt-user-config.sh` | `~/.config/rustfmt/rustfmt.toml` `max_width=40` keeps `fmt_gate=pass` and the fmt red fixtures failing |
+| `scripts/prove-ci-test-result.sh` | `.cargo/config.toml` `runner = "true"` plus a panicking test, require `test_result_ok=missing` |
+| `scripts/prove-fmt-gate-pass-line.sh` | `python3` stub that exits 0, require `fmt_gate_pass=missing` |
+| `scripts/prove-mutant-signals.sh` | SIGINT and SIGTERM mid-run leave `parser.rs` and `text_ops.rs` byte-identical |
+| `scripts/prove-run-id.sh` | Reject `RUN_ID` outside the safe charset; `cleanup_refuse` leaves the canary in place |
+| `scripts/prove-target-dir.sh` | `CARGO_TARGET_DIR` is the `READY` binary; the workspace `target/debug/litemark` stays unused |
+| `scripts/prove-doctor-bin.sh` | `LITEMARK_BIN=/bin/true` prints `doctor fail bin=/bin/true not-litemark` |
+| `scripts/prove-seed-sha-shape.sh` | `sha256=zzzz` and `sha256=00` fail the 64-hex large-doc line check |
+| `scripts/prove-render-symlink.sh` | Symlink and same-inode dump outputs are refused; the oracle bytes stay put |
 | `scripts/refuse-gui.sh` | Exit 2. Prints `reason=notes_dir_unisolated` and `reason=vulkan_icd_missing` |
-| `scripts/cleanup.sh` | Keep evidence and artifacts |
+| `scripts/cleanup.sh` | Remove logs only at `/tmp/litemark-verify-$RUN_ID/logs`. Keep evidence and artifacts |
 
 All scripts are executable. Source `env.sh` in the same shell before calling the others when you set `RUN_ID` yourself.
 
@@ -245,6 +259,7 @@ These limits stay in the kit. They are why a window journey is not a proof.
 - The GUI is not launched. `get_or_create_notes_dir` in `src/services/fs_service.rs` uses `dirs::document_dir()/Notes` and there is no override, so a start would write `Welcome.md` into the user documents directory. `scripts/refuse-gui.sh` prints the exact line `reason=notes_dir_unisolated path=dirs::document_dir()/Notes symbol=get_or_create_notes_dir file=src/services/fs_service.rs`.
 - No Vulkan ICD is installed at `/usr/share/vulkan/icd.d`. `mesa-vulkan-drivers` is not an allowed install for this kit. `scripts/refuse-gui.sh` prints the exact line `reason=vulkan_icd_missing path=/usr/share/vulkan/icd.d`. The script then prints `command=not-run target/debug/litemark` and exits 2.
 - Images are not a separate node in the dump. `![Alt text](https://example.com/note.png)` stays a paragraph. The exact line is `line[0] kind=Paragraph source=0..41 display="![Alt text](https://example.com/note.png)"`. The alt text is a segment: `segment[0][0] source=2..10 bold=false italic=false underline=false strike=false code=false link=- text="Alt text"`.
+- A `cargo` earlier on PATH that exits 0 is out of scope. The kit runs whatever `cargo` PATH resolves. It does not identify a replaced cargo binary.
 
 ## Maintenance
 
