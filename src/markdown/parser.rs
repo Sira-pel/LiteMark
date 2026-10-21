@@ -2355,4 +2355,104 @@ mod tests {
         expect_paint("footnote", "| a | b |\n| --- | --- |\n| c | d |\n[^1]: note", "Row h=true none,none [\"a\", \"b\"] | Delim | Row h=false none,none [\"c\", \"d\"] | Paragraph");
         expect_paint("backtick-info", "| a | b |\n| --- | --- |\n| c | d |\n``` not`fence", "Row h=true none,none [\"a\", \"b\"] | Delim | Row h=false none,none [\"c\", \"d\"] | Row h=false none,none [\"``` not`fence\", \"\"]");
     }
+
+    fn apply_at(source: &str, at: usize, cmd: &str) -> String {
+        let mut tab = crate::model::DocumentTab::new(
+            "t".to_string(),
+            "t.md".to_string(),
+            source.to_string(),
+            None,
+            None,
+        );
+        tab.place(at, false);
+        tab.apply_format_in_mode(cmd, crate::model::ViewMode::Wysiwyg);
+        tab.content
+    }
+
+    #[test]
+    fn wide_list_marker_fence_ends_before_heading() {
+        let source = "-    ```\n     code\n     ```\n  x\n| a | b |\n| --- | --- |\n| c | d |";
+        let at = source.find('\n').unwrap() + 1;
+        let edited = apply_at(source, at, "h1");
+        assert_eq!(
+            edited,
+            "-    ```\n   # code\n     ```\n  x\n| a | b |\n| --- | --- |\n| c | d |"
+        );
+        expect_paint(
+            "wide-marker-h1",
+            &edited,
+            "Fence open=true lang=None | Heading 1 | Code \"     ```\" | Paragraph | Row h=true none,none [\"a\", \"b\"] | Delim | Row h=false none,none [\"c\", \"d\"]",
+        );
+        let crlf = source.replace('\n', "\r\n");
+        let at_crlf = crlf.find('\n').unwrap() + 1;
+        let edited_crlf = apply_at(&crlf, at_crlf, "h1");
+        assert_eq!(
+            edited_crlf,
+            "-    ```\r\n   # code\r\n     ```\r\n  x\r\n| a | b |\r\n| --- | --- |\r\n| c | d |"
+        );
+        expect_paint(
+            "wide-marker-h1-crlf",
+            &edited_crlf,
+            "Fence open=true lang=None | Heading 1 | Code \"     ```\" | Paragraph | Row h=true none,none [\"a\", \"b\"] | Delim | Row h=false none,none [\"c\", \"d\"]",
+        );
+    }
+
+    #[test]
+    fn list_fence_at_column_four_opens() {
+        let source = "1.  foo\n\n    ```\n    bar\n    ```\n\n    baz\n\n    > bam";
+        expect_paint(
+            "cm-262",
+            source,
+            "List | Empty | Fence open=true lang=None | Code \"    bar\" | Fence open=false lang=None | Empty | Paragraph | Empty | Quote",
+        );
+        expect_paint(
+            "cm-262-crlf",
+            &source.replace('\n', "\r\n"),
+            "List | Empty | Fence open=true lang=None | Code \"    bar\" | Fence open=false lang=None | Empty | Paragraph | Empty | Quote",
+        );
+    }
+
+    #[test]
+    fn code_block_button_unwraps_list_fence_without_close() {
+        let source = "- [ ] ```\n      code\n      ```\n| a | b |\n| --- | --- |\n| c | d |";
+        let doc = parse_document(source);
+        assert!(
+            doc.code_blocks.iter().any(|(open, close)| {
+                open.start == 0 && (close.is_empty() && close.end > 0 || close.end > open.end)
+            }),
+            "code_blocks={:?}",
+            doc.code_blocks
+        );
+        let edited = apply_at(source, 0, "codeblock");
+        assert_eq!(
+            edited,
+            "      code\n      ```\n| a | b |\n| --- | --- |\n| c | d |"
+        );
+        expect_paint(
+            "task-fence-unwrapped",
+            &edited,
+            "Paragraph | Paragraph | Row h=true none,none [\"a\", \"b\"] | Delim | Row h=false none,none [\"c\", \"d\"]",
+        );
+    }
+
+    #[test]
+    fn indented_code_continues_after_column_four_marker() {
+        let source = "    ```\n    aaa\n    ```";
+        expect_paint(
+            "cm-133",
+            source,
+            "Code \"    ```\" | Code \"    aaa\" | Code \"    ```\"",
+        );
+        expect_paint(
+            "cm-133-crlf",
+            &source.replace('\n', "\r\n"),
+            "Code \"    ```\\r\" | Code \"    aaa\\r\" | Code \"    ```\\r\"",
+        );
+        let tabbed = "\t```\n\taaa\n\t```";
+        expect_paint(
+            "tab-indented-code",
+            tabbed,
+            "Code \"\\t```\" | Code \"\\taaa\" | Code \"\\t```\"",
+        );
+    }
 }
