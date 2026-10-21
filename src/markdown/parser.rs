@@ -189,7 +189,6 @@ pub fn parse_markdown(markdown: &str) -> Vec<Block> {
     while i < lines.len() {
         let line = lines[i].text;
         let line_source = lines[i].start..lines[i].end;
-
         let trimmed = line.trim();
 
         if trimmed.is_empty() {
@@ -200,8 +199,6 @@ pub fn parse_markdown(markdown: &str) -> Vec<Block> {
             continue;
         }
 
-        // Same fence walk as `parse_document`. A tilde fence is a code block,
-        // and an indented-4 backtick line is not a fence (`opening_fence`).
         if let FenceMark::Open { language } = &marks[i] {
             let open = i;
             let mut code_lines = Vec::new();
@@ -279,7 +276,6 @@ pub fn parse_markdown(markdown: &str) -> Vec<Block> {
             continue;
         }
 
-        // Markdown table. Column count is the delimiter row, which must match the header.
         if let Some(table) = table_block(&lines, i) {
             let table_start = lines[i].start;
             let table_end = lines[table.last].end;
@@ -506,7 +502,6 @@ pub enum TableColumnAlign {
     Right,
 }
 
-/// Inline code spans, including the backtick delimiters. An unclosed opener is not a span.
 fn code_span_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
     let bytes = line.as_bytes();
     let mut ranges = Vec::new();
@@ -544,13 +539,11 @@ fn code_span_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
     }
     ranges
 }
-
 fn index_in_ranges(ranges: &[std::ops::Range<usize>], index: usize) -> bool {
     ranges
         .iter()
         .any(|range| index >= range.start && index < range.end)
 }
-
 fn separator_pipe(bytes: &[u8], code: &[std::ops::Range<usize>], index: usize) -> bool {
     if index >= bytes.len() || bytes[index] != b'|' || index_in_ranges(code, index) {
         return false;
@@ -563,9 +556,6 @@ fn separator_pipe(bytes: &[u8], code: &[std::ops::Range<usize>], index: usize) -
     }
     slashes.is_multiple_of(2)
 }
-
-/// Byte offsets of `|` that split a table cell.
-/// A backslash-escaped pipe stays in the cell, and so does a pipe inside a code span.
 pub fn unescaped_pipe_offsets(line: &str) -> Vec<usize> {
     let bytes = line.as_bytes();
     let code = code_span_ranges(line);
@@ -580,8 +570,6 @@ pub fn unescaped_pipe_offsets(line: &str) -> Vec<usize> {
     offsets
 }
 
-/// Raw cell slices for one row. Leading and trailing border pipes are optional.
-/// The returned ranges include the spaces next to the pipes; callers trim those.
 fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
     let bytes = line.as_bytes();
     let code = code_span_ranges(line);
@@ -599,7 +587,6 @@ fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
     if separator_pipe(bytes, &code, start) {
         start += 1;
     }
-
     let mut ranges = Vec::new();
     while start < end {
         let cell_start = start;
@@ -623,8 +610,6 @@ fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
     }
     ranges
 }
-
-/// Cell text between separator pipes. `\|` and a pipe inside `` ` ` `` stay in the cell.
 pub fn split_table_cells(line: &str) -> Vec<String> {
     table_cell_ranges(line)
         .into_iter()
@@ -632,9 +617,6 @@ pub fn split_table_cells(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// A delimiter cell is optional spaces, an optional colon, one or more hyphens,
-/// and an optional colon. Spaces may sit between the colons and the hyphens.
-/// A tab is not a space here: it disqualifies the cell.
 fn is_delimiter_cell(cell: &str) -> bool {
     let bytes = cell.as_bytes();
     let mut index = 0;
@@ -669,9 +651,6 @@ fn is_delimiter_cell(cell: &str) -> bool {
     }
     index == end
 }
-
-/// Alignment for a delimiter row, or `None` when the line is not one.
-/// A delimiter must contain a pipe, so a thematic break stays a break.
 fn delimiter_alignments(line: &str) -> Option<Vec<TableColumnAlign>> {
     if unescaped_pipe_offsets(line).is_empty() {
         return None;
@@ -690,8 +669,6 @@ fn delimiter_alignments(line: &str) -> Option<Vec<TableColumnAlign>> {
     }
     Some(alignments)
 }
-
-/// Columns of leading spaces and tabs. A tab advances to the next multiple of 4.
 fn leading_columns(line: &str) -> usize {
     let mut columns = 0;
     for byte in line.bytes() {
@@ -703,45 +680,74 @@ fn leading_columns(line: &str) -> usize {
     }
     columns
 }
-
-/// Text after a CommonMark indent of 0–3 columns.
-/// `None` when the line is indented four or more, which is indented code.
-fn after_block_indent(line: &str) -> Option<&str> {
+fn body_at_indent(line: &str, floor: usize) -> Option<&str> {
     let bytes = line.as_bytes();
-    let mut index = 0;
-    let mut column = 0;
-    while index < bytes.len() {
+    let mut index = 0usize;
+    let mut column = 0usize;
+    let limit = floor + 3;
+    while index < bytes.len() && column < floor {
         match bytes[index] {
-            b' ' => {
-                if column >= 3 {
-                    return None;
-                }
-                column += 1;
-                index += 1;
-            }
+            b' ' => column += 1,
             b'\t' => {
-                if column >= 3 {
-                    return None;
-                }
                 let next = column + 4 - (column % 4);
-                if next > 3 {
+                if next > limit {
                     return None;
                 }
                 column = next;
-                index += 1;
+            }
+            _ => return None,
+        }
+        index += 1;
+    }
+    if column < floor {
+        return None;
+    }
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' => {
+                if column >= limit {
+                    return None;
+                }
+                column += 1;
+            }
+            b'\t' => {
+                if column >= limit {
+                    return None;
+                }
+                let next = column + 4 - (column % 4);
+                if next > limit {
+                    return None;
+                }
+                column = next;
             }
             _ => return Some(&line[index..]),
         }
+        index += 1;
     }
     Some(&line[index..])
 }
-
+fn marker_run(body: &str) -> Option<(u8, usize)> {
+    let bytes = body.as_bytes();
+    let marker = *bytes.first()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let mut length = 0;
+    while length < bytes.len() && bytes[length] == marker {
+        length += 1;
+    }
+    if length < 3 || (marker == b'`' && bytes[length..].contains(&b'`')) {
+        return None;
+    }
+    Some((marker, length))
+}
+fn after_block_indent(line: &str) -> Option<&str> {
+    body_at_indent(line, 0)
+}
 fn is_blank_line(line: &str) -> bool {
     line.bytes()
         .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
 }
-
-/// CommonMark §4.1. Three or more of one marker, spaces and tabs allowed between them.
 fn is_thematic_break(line: &str) -> bool {
     let Some(body) = after_block_indent(line) else {
         return false;
@@ -763,8 +769,6 @@ fn is_thematic_break(line: &str) -> bool {
     }
     count >= 3
 }
-
-/// CommonMark §4.2. One to six `#`, then whitespace or the end of the line.
 fn is_atx_heading_line(line: &str) -> bool {
     let Some(body) = after_block_indent(line) else {
         return false;
@@ -779,32 +783,11 @@ fn is_atx_heading_line(line: &str) -> bool {
     }
     level == bytes.len() || matches!(bytes[level], b' ' | b'\t' | b'\r')
 }
-
-/// CommonMark §4.5. An opening fence is three or more backticks or tildes.
-/// A backtick info string cannot itself contain a backtick.
 fn opening_fence(line: &str) -> Option<(u8, usize)> {
-    let body = after_block_indent(line)?;
-    let bytes = body.as_bytes();
-    let marker = *bytes.first()?;
-    if marker != b'`' && marker != b'~' {
-        return None;
-    }
-    let mut length = 0;
-    while length < bytes.len() && bytes[length] == marker {
-        length += 1;
-    }
-    if length < 3 {
-        return None;
-    }
-    if marker == b'`' && bytes[length..].contains(&b'`') {
-        return None;
-    }
-    Some((marker, length))
+    marker_run(after_block_indent(line)?)
 }
-
-/// CommonMark §4.5 closing fence: the same marker, at least as long, then only whitespace.
-fn closes_fence(line: &str, marker: u8, length: usize) -> bool {
-    let Some(body) = after_block_indent(line) else {
+fn closes_at(line: &str, marker: u8, length: usize, floor: usize) -> bool {
+    let Some(body) = body_at_indent(line, floor) else {
         return false;
     };
     let bytes = body.as_bytes();
@@ -817,9 +800,6 @@ fn closes_fence(line: &str, marker: u8, length: usize) -> bool {
             .iter()
             .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
 }
-
-/// Info string after the opening run. Empty text is no language.
-/// The run length is the one `opening_fence` counted, not a fixed three.
 fn fence_language(line: &str, length: usize) -> Option<String> {
     let body = after_block_indent(line).unwrap_or(line);
     let info = body.get(length..).unwrap_or("").trim();
@@ -829,47 +809,154 @@ fn fence_language(line: &str, length: usize) -> Option<String> {
         Some(info.to_string())
     }
 }
-
-/// The only fence walk. Each line is outside, the opening run, content, or the closer.
-/// Callers read this. They do not keep a second `(marker, length)`.
+#[derive(Clone)]
 enum FenceMark {
     Outside,
     Open { language: Option<String> },
     Inside,
     Close,
 }
-
+fn list_marker(line: &str) -> Option<(usize, usize)> {
+    let body = after_block_indent(line)?;
+    let base = line.len() - body.len();
+    let mut column = leading_columns(line);
+    let bytes = body.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let marker_len = if matches!(bytes[0], b'-' | b'+' | b'*') {
+        1
+    } else if bytes[0].is_ascii_digit() {
+        let mut count = 0;
+        while count < bytes.len() && bytes[count].is_ascii_digit() {
+            count += 1;
+        }
+        if count == 0 || count > 9 || count >= bytes.len() || !matches!(bytes[count], b'.' | b')') {
+            return None;
+        }
+        count + 1
+    } else {
+        return None;
+    };
+    if bytes.len() > marker_len && !matches!(bytes[marker_len], b' ' | b'\t') {
+        return None;
+    }
+    column += marker_len;
+    let mut content = base + marker_len;
+    if bytes.len() > marker_len && bytes[marker_len] == b' ' {
+        column += 1;
+        content += 1;
+    } else if bytes.len() > marker_len && bytes[marker_len] == b'\t' {
+        column += 4 - (column % 4);
+        content += 1;
+    } else {
+        column += 1;
+    }
+    Some((column, content))
+}
+fn task_rest(content: &str) -> Option<&str> {
+    let bytes = content.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'[' || bytes[2] != b']' {
+        return None;
+    }
+    if !matches!(bytes[1], b' ' | b'x' | b'X') {
+        return None;
+    }
+    if bytes.len() == 3 {
+        return Some("");
+    }
+    if matches!(bytes[3], b' ' | b'\t') {
+        Some(&content[4..])
+    } else {
+        None
+    }
+}
+fn item_fence(content: &str) -> Option<(u8, usize, Option<String>)> {
+    let rest = task_rest(content).unwrap_or(content);
+    let body = after_block_indent(rest)?;
+    let (marker, length) = marker_run(body)?;
+    Some((marker, length, fence_language(body, length)))
+}
+fn interrupts_paragraph(line: &str) -> bool {
+    opening_fence(line).is_some()
+        || is_thematic_break(line)
+        || is_atx_heading_line(line)
+        || is_blockquote_marker(line)
+        || is_list_marker_line(line)
+        || is_html_block_start(line)
+        || after_block_indent(line).is_some_and(is_footnote_definition)
+}
 fn fence_marks(lines: &[SourceLine<'_>]) -> Vec<FenceMark> {
-    let mut marks = Vec::with_capacity(lines.len());
-    let mut open: Option<(u8, usize)> = None;
-    for line in lines {
-        if let Some((marker, length)) = open {
-            if closes_fence(line.text, marker, length) {
-                marks.push(FenceMark::Close);
+    let mut marks = vec![FenceMark::Outside; lines.len()];
+    let mut open: Option<(u8, usize, usize, bool)> = None;
+    let mut list_floor: Option<usize> = None;
+    let mut lazy = false;
+    let mut index = 0;
+    while index < lines.len() {
+        let text = lines[index].text;
+        if let Some((marker, length, floor, in_list)) = open {
+            if in_list && !is_blank_line(text) && leading_columns(text) < floor {
                 open = None;
-            } else {
-                marks.push(FenceMark::Inside);
+                list_floor = None;
+                lazy = false;
+                continue;
             }
+            if closes_at(text, marker, length, floor) {
+                marks[index] = FenceMark::Close;
+                open = None;
+                lazy = false;
+            } else {
+                marks[index] = FenceMark::Inside;
+            }
+            index += 1;
             continue;
         }
-        if let Some((marker, length)) = opening_fence(line.text) {
-            marks.push(FenceMark::Open {
-                language: fence_language(line.text, length),
-            });
-            open = Some((marker, length));
+        if let Some(floor) = list_floor {
+            if is_blank_line(text) {
+                lazy = false;
+                index += 1;
+                continue;
+            }
+            if leading_columns(text) < floor && (!lazy || interrupts_paragraph(text)) {
+                list_floor = None;
+                lazy = false;
+                continue;
+            }
+        }
+        if let Some((floor, at)) = list_marker(text) {
+            list_floor = Some(floor);
+            let content = text.get(at..).unwrap_or("");
+            if let Some((marker, length, language)) = item_fence(content) {
+                marks[index] = FenceMark::Open { language };
+                open = Some((marker, length, floor, true));
+                lazy = false;
+            } else {
+                lazy = true;
+            }
+            index += 1;
             continue;
         }
-        marks.push(FenceMark::Outside);
+        let floor = list_floor.unwrap_or(0);
+        if leading_columns(text) < 4 {
+            if let Some(body) = body_at_indent(text, floor) {
+                if let Some((marker, length)) = marker_run(body) {
+                    marks[index] = FenceMark::Open {
+                        language: fence_language(body, length),
+                    };
+                    open = Some((marker, length, floor, list_floor.is_some()));
+                    lazy = false;
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+        index += 1;
     }
     marks
 }
-
-/// CommonMark §5.1. A `>` marker, with or without a following space.
 fn is_blockquote_marker(line: &str) -> bool {
     after_block_indent(line).is_some_and(|body| body.as_bytes().first() == Some(&b'>'))
 }
-
-/// CommonMark §5.2 and §5.3. Bullet or 1–9 digit `.` / `)` marker, then whitespace or end.
 fn is_list_marker_line(line: &str) -> bool {
     let Some(body) = after_block_indent(line) else {
         return false;
@@ -897,87 +984,16 @@ fn is_list_marker_line(line: &str) -> bool {
     };
     rest.is_empty() || matches!(rest[0], b' ' | b'\t' | b'\r')
 }
-
-/// CommonMark §4.6 block-tag names for HTML block type 6.
 fn is_html_block_tag(name: &[u8]) -> bool {
-    const TAGS: [&str; 62] = [
-        "address",
-        "article",
-        "aside",
-        "base",
-        "basefont",
-        "blockquote",
-        "body",
-        "caption",
-        "center",
-        "col",
-        "colgroup",
-        "dd",
-        "details",
-        "dialog",
-        "dir",
-        "div",
-        "dl",
-        "dt",
-        "fieldset",
-        "figcaption",
-        "figure",
-        "footer",
-        "form",
-        "frame",
-        "frameset",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "head",
-        "header",
-        "hr",
-        "html",
-        "iframe",
-        "legend",
-        "li",
-        "link",
-        "main",
-        "menu",
-        "menuitem",
-        "nav",
-        "noframes",
-        "ol",
-        "optgroup",
-        "option",
-        "p",
-        "param",
-        "search",
-        "section",
-        "summary",
-        "table",
-        "tbody",
-        "td",
-        "tfoot",
-        "th",
-        "thead",
-        "title",
-        "tr",
-        "track",
-        "ul",
-    ];
-    let mut lower = [0u8; 16];
-    if name.is_empty() || name.len() > lower.len() {
-        return false;
-    }
-    for (slot, byte) in lower.iter_mut().zip(name.iter()) {
-        *slot = byte.to_ascii_lowercase();
-    }
-    let Ok(key) = std::str::from_utf8(&lower[..name.len()]) else {
+    let Ok(key) = std::str::from_utf8(name) else {
         return false;
     };
-    TAGS.binary_search(&key).is_ok()
+    if key.is_empty() || key.len() > 16 {
+        return false;
+    }
+    const TAGS: &str = "address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem nav noframes ol optgroup option p param search section summary table tbody td tfoot th thead title tr track ul";
+    TAGS.split(' ').any(|tag| tag.eq_ignore_ascii_case(key))
 }
-
-/// CommonMark §4.6 types 1–6. Assumes `rest` is the line after the leading `<`.
 fn html_block_type_1_to_6(rest: &[u8]) -> bool {
     const TYPE_1: [&[u8]; 4] = [b"script", b"pre", b"style", b"textarea"];
     for tag in TYPE_1 {
@@ -1012,8 +1028,6 @@ fn html_block_type_1_to_6(rest: &[u8]) -> bool {
         || matches!(after[0], b' ' | b'\t' | b'\r' | b'\n' | b'>')
         || after.starts_with(b"/>")
 }
-
-/// CommonMark §4.6. An HTML block of type 1–6, indented 0–3 columns.
 fn is_html_block_start(line: &str) -> bool {
     let Some(body) = after_block_indent(line) else {
         return false;
@@ -1021,8 +1035,6 @@ fn is_html_block_start(line: &str) -> bool {
     let bytes = body.as_bytes();
     bytes.first() == Some(&b'<') && html_block_type_1_to_6(&bytes[1..])
 }
-
-/// Every leading space and tab, matching pulldown `LineStart::scan_all_space`.
 fn strip_all_space_and_tab(line: &str) -> &str {
     let bytes = line.as_bytes();
     let mut index = 0;
@@ -1031,20 +1043,12 @@ fn strip_all_space_and_tab(line: &str) -> &str {
     }
     &line[index..]
 }
-
-/// ASCII punctuation from CommonMark: U+0021–002F, U+003A–0040, U+005B–0060, U+007B–007E.
 fn is_ascii_punctuation(byte: u8) -> bool {
     matches!(byte, b'!'..=b'/' | b':'..=b'@' | b'['..=b'`' | b'{'..=b'~')
 }
-
-/// pulldown `is_ascii_whitespace`: U+0009 through U+000D, or a space.
 fn is_pulldown_whitespace(byte: u8) -> bool {
     (0x09..=0x0d).contains(&byte) || byte == b' '
 }
-
-/// Byte length of a footnote label after the opening `[^`, including the closing `]`.
-/// Mirrors pulldown `scan_link_label_rest` with the table-row linebreak handler,
-/// which refuses a line break. A whitespace-only label is not a label.
 fn footnote_label_byte_len(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut index = 0;
@@ -1106,10 +1110,6 @@ fn footnote_label_byte_len(text: &str) -> Option<usize> {
         Some(index + 1)
     }
 }
-
-/// `[^label]:` when footnotes are enabled. The HTML exporter sets `ENABLE_FOOTNOTES`.
-/// GFM 0.29 mentions footnotes only in the introduction and has no definition section.
-/// pulldown `scan_paragraph_interrupt_no_table` ends the row on this form.
 fn is_footnote_definition(line: &str) -> bool {
     let bytes = line.as_bytes();
     if !bytes.starts_with(b"[^") {
@@ -1120,16 +1120,12 @@ fn is_footnote_definition(line: &str) -> bool {
     };
     bytes.get(2 + label_len) == Some(&b':')
 }
-
-/// No cells, or only the whitespace pulldown `scan_whitespace_no_nl` accepts.
 fn is_empty_table_row(line: &str) -> bool {
     table_cell_ranges(line).is_empty()
         || line
             .bytes()
             .all(|byte| matches!(byte, b' ' | b'\t' | 0x0b | 0x0c | b'\r'))
 }
-
-/// GFM breaks a table on a blank line or a block start after every leading space and tab.
 fn line_breaks_table(line: &str) -> bool {
     if is_blank_line(line) {
         return true;
@@ -1143,13 +1139,11 @@ fn line_breaks_table(line: &str) -> bool {
         || is_html_block_start(body)
         || is_footnote_definition(body)
 }
-
 struct TableBlock {
     last: usize,
     delimiter: usize,
     alignments: Vec<TableColumnAlign>,
 }
-
 struct DetectedTable {
     first: usize,
     last: usize,
@@ -1157,8 +1151,6 @@ struct DetectedTable {
     source: std::ops::Range<usize>,
     alignments: Vec<TableColumnAlign>,
 }
-
-/// Header plus a same-width delimiter, both indented under four columns.
 fn table_block(lines: &[SourceLine<'_>], start: usize) -> Option<TableBlock> {
     if start + 1 >= lines.len() || line_breaks_table(lines[start].text) {
         return None;
@@ -1190,7 +1182,6 @@ fn table_block(lines: &[SourceLine<'_>], start: usize) -> Option<TableBlock> {
         alignments,
     })
 }
-
 /// `---` is unset, `:---` is left, `:---:` is center, and `---:` is right.
 pub fn table_column_align(cell: &str) -> TableColumnAlign {
     let cell = cell.trim();
@@ -1680,8 +1671,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     let mut open_fence_range: Option<std::ops::Range<usize>> = None;
     let fence_at = fence_marks(&raw_lines);
 
-    // Header plus a same-width delimiter. Body rows stop at the next block.
-    // Lines inside `fence_at` are not scanned: that walk owns the fence.
     let mut table_ranges: Vec<DetectedTable> = Vec::new();
     {
         let mut idx = 0;
@@ -1717,8 +1706,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         let trimmed_start = line.trim_start();
         let indent_len = line.len() - trimmed_start.len();
 
-        // Fence lines use `fence_at`, the walk the table scan already used.
-        // A shorter run or an info string is `Inside`, so it stays content.
         match &fence_at[i] {
             FenceMark::Open { language } => {
                 let full_with_nl = sline.start..sline.end;
@@ -1780,7 +1767,25 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             FenceMark::Outside => {}
         }
 
-        if matches!(fence_at[i], FenceMark::Inside) {
+        let marker_bytes = line.trim_start().as_bytes();
+        let indented_marker = matches!(fence_at[i], FenceMark::Outside)
+            && leading_columns(line) >= 4
+            && !table_ranges
+                .iter()
+                .any(|table| i >= table.first && i <= table.last)
+            && !matches!(
+                lines.last().map(|item| &item.kind),
+                Some(LineKind::Paragraph | LineKind::ListItem { .. } | LineKind::Blockquote)
+            )
+            && marker_bytes.first().is_some_and(|marker| {
+                matches!(*marker, b'`' | b'~')
+                    && marker_bytes
+                        .iter()
+                        .take_while(|byte| *byte == marker)
+                        .count()
+                        >= 3
+            });
+        if matches!(fence_at[i], FenceMark::Inside) || indented_marker {
             lines.push(ParsedLine {
                 line_index: i,
                 source: line_source.clone(),
@@ -1838,7 +1843,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
-        // Table rows. Only the delimiter line is hidden; cells follow its width.
         if let Some(table) = table_ranges
             .iter()
             .find(|table| i >= table.first && i <= table.last)
@@ -2296,11 +2300,9 @@ mod tests {
             })
             .collect()
     }
-
     fn expect_paint(name: &str, markdown: &str, expected: &str) {
         assert_eq!(painted(markdown).join(" | "), expected, "{name}");
     }
-
     #[test]
     fn fence_paint_follows_scanner() {
         expect_paint(
@@ -2334,7 +2336,6 @@ mod tests {
             "Paragraph | Row h=true none,none [\"a\", \"b\"] | Delim | Row h=false none,none [\"c\", \"d\"] | Row h=false none,none [\"``\", \"\"]",
         );
     }
-
     #[test]
     #[rustfmt::skip]
     fn gfm_table_columns_follow_the_delimiter() {
@@ -2346,7 +2347,6 @@ mod tests {
         expect_paint("code-pipe", "| a | b |\n| --- | --- |\n| `c|d` | e |", "Row h=true none,none [\"a\", \"b\"] | Delim | Row h=false none,none [\"`c|d`\", \"e\"]");
         expect_paint("pipe-row-no-delim", "| a | b |\n| c | d |", "Paragraph | Paragraph");
     }
-
     #[test]
     #[rustfmt::skip]
     fn table_membership_kinds_and_cells() {
