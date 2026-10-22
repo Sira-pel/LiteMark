@@ -73,7 +73,16 @@ fn main() {
                 KeyBinding::new("ctrl-shift-x", ToggleStrikethrough, None),
                 KeyBinding::new("ctrl-s", SaveFile, None),
                 KeyBinding::new("ctrl-o", OpenFile, None),
-                KeyBinding::new("ctrl-n", NewTab, None),
+                KeyBinding::new("ctrl-n", NewNote, None),
+                KeyBinding::new("ctrl-t", NewTab, None),
+                KeyBinding::new("ctrl-delete", DeleteNote, None),
+                // Sidebar tree navigation
+                KeyBinding::new("up", SelectPrev, Some("Sidebar")),
+                KeyBinding::new("down", SelectNext, Some("Sidebar")),
+                KeyBinding::new("enter", Confirm, Some("Sidebar")),
+                KeyBinding::new("space", Confirm, Some("Sidebar")),
+                KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
+                KeyBinding::new("right", SidebarExpand, Some("Sidebar")),
                 KeyBinding::new("ctrl-w", CloseActiveTab, None),
                 KeyBinding::new("ctrl-f", FindReplace, None),
                 KeyBinding::new("ctrl-\\", ToggleSidebar, None),
@@ -115,6 +124,13 @@ fn main() {
                 KeyBinding::new("escape", CancelMenu, Some("Menu")),
                 KeyBinding::new("left", PrevMenu, Some("Menu")),
                 KeyBinding::new("right", NextMenu, Some("Menu")),
+                // Prompt modal navigation (delete/confirm dialogs)
+                KeyBinding::new("up", PromptUp, Some("PromptModal")),
+                KeyBinding::new("down", PromptDown, Some("PromptModal")),
+                KeyBinding::new("left", PromptUp, Some("PromptModal")),
+                KeyBinding::new("right", PromptDown, Some("PromptModal")),
+                KeyBinding::new("enter", PromptConfirm, Some("PromptModal")),
+                KeyBinding::new("space", PromptConfirm, Some("PromptModal")),
                 // Text editing. Menu arrows stay on the Menu context.
                 KeyBinding::new("left", EditorLeft, Some("Editor")),
                 KeyBinding::new("right", EditorRight, Some("Editor")),
@@ -139,7 +155,9 @@ fn main() {
                 KeyBinding::new("ctrl-shift-home", EditorSelectDocStart, Some("Editor")),
                 KeyBinding::new("ctrl-shift-end", EditorSelectDocEnd, Some("Editor")),
                 KeyBinding::new("ctrl-backspace", EditorDeleteWordLeft, Some("Editor")),
-                KeyBinding::new("ctrl-delete", EditorDeleteWordRight, Some("Editor")),
+                // ctrl-delete is reserved for DeleteNote (move note to Trash);
+                // the editor's delete-word-right chord is intentionally not
+                // bound here so the global shortcut can win.
                 KeyBinding::new("ctrl-shift-backspace", EditorDeleteLineStart, Some("Editor")),
                 KeyBinding::new("ctrl-shift-delete", EditorDeleteLineEnd, Some("Editor")),
                 KeyBinding::new("backspace", EditorBackspace, Some("Editor")),

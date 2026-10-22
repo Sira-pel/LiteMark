@@ -320,6 +320,15 @@ pub fn safe_rename(old_path: &Path, new_name: &str) -> io::Result<PathBuf> {
     if clean_name.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty name"));
     }
+    let clean_name = if old_path.is_file() && !clean_name.contains('.') {
+        if let Some(ext) = old_path.extension().and_then(|e| e.to_str()) {
+            format!("{clean_name}.{ext}")
+        } else {
+            clean_name
+        }
+    } else {
+        clean_name
+    };
     let Some(parent) = old_path.parent() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -348,6 +357,87 @@ pub fn next_available_filename(dir: &Path, desired: &str) -> String {
         clean
     };
     unique_name(&desired, &|name| dir.join(name).exists())
+}
+
+/// Copy a note's content into `dest_dir` under a non-colliding name.
+/// The original file is left untouched.
+pub fn copy_note_into_workspace(src: &Path, dest_dir: &Path, content: &str) -> io::Result<PathBuf> {
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Untitled.md");
+    let target_name = next_available_filename(dest_dir, name);
+    safe_create_file(dest_dir, &target_name, content)
+}
+
+/// Move a note file into `dest_dir` keeping its name (auto-uniquified on
+/// collision). Moving into the note's own folder is a no-op. Returns the
+/// new path.
+pub fn move_note(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
+    if src.parent() == Some(dest_dir) {
+        return Ok(src.to_path_buf());
+    }
+    let target = dest_dir.join(next_available_filename(dest_dir, name));
+    rename_noreplace(src, &target)?;
+    fsync_parent(&target)?;
+    fsync_parent(src)?;
+    Ok(target)
+}
+
+/// Move a folder into `dest_dir` keeping its name (auto-uniquified on
+/// collision). Moving into the folder's own parent is a no-op. Returns
+/// the new path.
+pub fn move_folder(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
+    if src.parent() == Some(dest_dir) {
+        return Ok(src.to_path_buf());
+    }
+    let target = dest_dir.join(unique_name(name, &|candidate| {
+        dest_dir.join(candidate).exists()
+    }));
+    rename_noreplace(src, &target)?;
+    fsync_parent(&target)?;
+    fsync_parent(src)?;
+    Ok(target)
+}
+
+/// Recursively copy a folder into `dest_dir` under a non-colliding name.
+/// The original folder is left untouched. Returns the new path.
+pub fn copy_folder(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
+    let target = dest_dir.join(unique_name(name, &|candidate| {
+        dest_dir.join(candidate).exists()
+    }));
+    copy_dir_recursive(src, &target)?;
+    fsync_parent(&target)?;
+    Ok(target)
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        // DirEntry::metadata does not follow symlinks, so directory
+        // traversal cannot escape the tree via a symlinked dir.
+        if entry.metadata()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Ask the session bus whether a file dialog can be shown.
@@ -592,6 +682,147 @@ mod tests {
         assert_eq!(fs::read_to_string(&created).unwrap(), "keep");
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn safe_rename_preserves_extension_when_omitted() {
+        let temp_dir = std::env::temp_dir().join(format!("litemark-rename-ext-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let file = safe_create_file(&temp_dir, "Draft.md", "hello").unwrap();
+        let renamed = safe_rename(&file, "FinalDraft").unwrap();
+        assert_eq!(renamed.file_name().unwrap(), "FinalDraft.md");
+        assert!(renamed.exists());
+
+        // Explicit new extension is respected
+        let txt = safe_rename(&renamed, "FinalDraft.txt").unwrap();
+        assert_eq!(txt.file_name().unwrap(), "FinalDraft.txt");
+        assert!(txt.exists());
+
+        // Folder rename does NOT add an extension
+        let folder = safe_create_folder(&temp_dir, "MyDocs").unwrap();
+        let renamed_folder = safe_rename(&folder, "Archive").unwrap();
+        assert_eq!(renamed_folder.file_name().unwrap(), "Archive");
+        assert!(renamed_folder.is_dir());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn creating_folder_preserves_existing_notes() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-workflow-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let welcome = safe_create_file(&temp_dir, "Welcome.md", "# Welcome").unwrap();
+        let nested = safe_create_folder(&temp_dir, "Existing").unwrap();
+        let nested_note = safe_create_file(&nested, "Inner.md", "inner").unwrap();
+
+        // Simulate the new-folder workflow: create one more folder, then rescan.
+        safe_create_folder(&temp_dir, "New Folder").unwrap();
+        let scanned = scan_workspace_dir(&temp_dir);
+
+        let file_paths: Vec<_> = scanned.files.iter().map(|f| f.path.clone()).collect();
+        assert!(file_paths.contains(&welcome), "existing root note must survive");
+        assert!(file_paths.contains(&nested_note), "nested note must survive");
+        assert_eq!(scanned.folders.len(), 2, "old and new folders are both listed");
+
+        // Content is untouched.
+        assert_eq!(fs::read_to_string(&welcome).unwrap(), "# Welcome");
+        assert_eq!(fs::read_to_string(&nested_note).unwrap(), "inner");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn copy_note_into_workspace_handles_collisions() {
+        let src_dir = std::env::temp_dir().join(format!("litemark-copy-src-{}", std::process::id()));
+        let dst_dir = std::env::temp_dir().join(format!("litemark-copy-dst-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&src_dir);
+        let _ = fs::remove_dir_all(&dst_dir);
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dst_dir).unwrap();
+
+        let src = safe_create_file(&src_dir, "Welcome.md", "current draft").unwrap();
+        let copied = copy_note_into_workspace(&src, &dst_dir, "current draft").unwrap();
+        assert_eq!(copied.file_name().unwrap(), "Welcome.md");
+        assert_eq!(fs::read_to_string(&copied).unwrap(), "current draft");
+        assert!(src.exists(), "the original must be left untouched");
+
+        // Second copy picks the next free name.
+        let second = copy_note_into_workspace(&src, &dst_dir, "again").unwrap();
+        assert_eq!(second.file_name().unwrap(), "Welcome 2.md");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "again");
+
+        let _ = fs::remove_dir_all(&src_dir);
+        let _ = fs::remove_dir_all(&dst_dir);
+    }
+
+    #[test]
+    fn move_note_relocates_and_uniquifies() {
+        let root =
+            std::env::temp_dir().join(format!("litemark-move-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dst_dir).unwrap();
+
+        let src = safe_create_file(&src_dir, "Note.md", "data").unwrap();
+        let moved = move_note(&src, &dst_dir).unwrap();
+        assert_eq!(moved, dst_dir.join("Note.md"));
+        assert_eq!(fs::read_to_string(&moved).unwrap(), "data");
+        assert!(!src.exists(), "move must not leave the original behind");
+
+        // Same-folder move is a no-op (must NOT create "Note 2.md").
+        let again = move_note(&moved, &dst_dir).unwrap();
+        assert_eq!(again, moved);
+
+        // Collision picks the next free name instead of clobbering.
+        let other = safe_create_file(&src_dir, "Note.md", "other").unwrap();
+        let second = move_note(&other, &dst_dir).unwrap();
+        assert_eq!(second, dst_dir.join("Note 2.md"));
+        assert_eq!(fs::read_to_string(&second).unwrap(), "other");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_and_copy_folder_relocate_contents() {
+        let root = std::env::temp_dir().join(format!("litemark-fmove-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let src_dir = root.join("src");
+        let dst_dir = root.join("dst");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dst_dir).unwrap();
+
+        let folder = safe_create_folder(&src_dir, "Docs").unwrap();
+        safe_create_file(&folder, "A.md", "alpha").unwrap();
+        let sub = safe_create_folder(&folder, "sub").unwrap();
+        safe_create_file(&sub, "B.md", "beta").unwrap();
+
+        // Move the whole folder into dst.
+        let moved = move_folder(&folder, &dst_dir).unwrap();
+        assert_eq!(moved, dst_dir.join("Docs"));
+        assert!(!folder.exists(), "move must not leave the original behind");
+        assert_eq!(fs::read_to_string(moved.join("A.md")).unwrap(), "alpha");
+        assert_eq!(fs::read_to_string(moved.join("sub/B.md")).unwrap(), "beta");
+
+        // Same-parent move is a no-op (must NOT create "Docs 2").
+        assert_eq!(move_folder(&moved, &dst_dir).unwrap(), moved);
+
+        // Copy duplicates the whole tree under a non-colliding name.
+        let copied = copy_folder(&moved, &dst_dir).unwrap();
+        assert_eq!(copied, dst_dir.join("Docs 2"));
+        assert_eq!(fs::read_to_string(copied.join("A.md")).unwrap(), "alpha");
+        assert_eq!(fs::read_to_string(copied.join("sub/B.md")).unwrap(), "beta");
+        assert!(moved.exists(), "copy must not remove the original");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
