@@ -43,24 +43,16 @@ MUTANTS: dict[str, dict[str, str]] = {
     "nested-lists-flat": {
         "file": "src/markdown/parser.rs",
         "label": "unordered list indent_cols + 7",
-        "old": """            } else if trimmed_start.starts_with("- ")
-                || trimmed_start.starts_with("* ")
-                || trimmed_start.starts_with("+ ")
-            {
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: None,
+        "old": """                kind = LineKind::ListItem {
+                    ordered: item.ordered,
+                    number: item.number,
+                    task: item.task.as_ref().map(|task| task.checked),
                     indent_cols: indent_len,
 """,
-        "new": """            } else if trimmed_start.starts_with("- ")
-                || trimmed_start.starts_with("* ")
-                || trimmed_start.starts_with("+ ")
-            {
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: None,
+        "new": """                kind = LineKind::ListItem {
+                    ordered: item.ordered,
+                    number: item.number,
+                    task: item.task.as_ref().map(|task| task.checked),
                     indent_cols: indent_len + 7,
 """,
     },

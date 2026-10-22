@@ -561,7 +561,9 @@ pub fn table_column_align(cell: &str) -> TableColumnAlign {
 pub enum LineKind {
     Empty,
     Paragraph,
-    Heading { level: u8 }, // 1..=6
+    Heading {
+        level: u8,
+    }, // 1..=6
     Blockquote,
     ListItem {
         ordered: bool,
@@ -731,7 +733,9 @@ impl RowOffsetMap {
             }
             let overlap_start = d.start.max(disp_range.start);
             let overlap_end = d.end.min(disp_range.end);
-            if overlap_end > overlap_start || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end) {
+            if overlap_end > overlap_start
+                || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end)
+            {
                 let src_start = s.start + (overlap_start - d.start);
                 let src_end = s.start + (overlap_end - d.start);
                 let new_d_start = overlap_start - disp_range.start;
@@ -1000,6 +1004,456 @@ fn parse_inline_syntax(
     (raw_hidden, inline_pairs, styled_segments)
 }
 
+/// Tab, VT, FF, or space. Pulldown `is_ascii_whitespace_no_nl`.
+fn is_ascii_whitespace_no_nl(byte: u8) -> bool {
+    byte == b'\t' || byte == 0x0b || byte == 0x0c || byte == b' '
+}
+
+/// Column scanner for list padding. Tabs expand to the next stop of 4,
+/// counted from the byte after the previous tab (pulldown `scan_space_inner`).
+#[derive(Clone, Copy)]
+struct ColScan<'a> {
+    bytes: &'a [u8],
+    ix: usize,
+    tab_start: usize,
+    spaces_remaining: usize,
+}
+
+impl<'a> ColScan<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            ix: 0,
+            tab_start: 0,
+            spaces_remaining: 0,
+        }
+    }
+
+    fn scan_space(&mut self, n_space: usize) -> bool {
+        self.scan_space_inner(n_space) == 0
+    }
+
+    fn scan_space_upto(&mut self, n_space: usize) -> usize {
+        n_space - self.scan_space_inner(n_space)
+    }
+
+    fn scan_space_inner(&mut self, mut n_space: usize) -> usize {
+        let n_from_remaining = self.spaces_remaining.min(n_space);
+        self.spaces_remaining -= n_from_remaining;
+        n_space -= n_from_remaining;
+        while n_space > 0 && self.ix < self.bytes.len() {
+            match self.bytes[self.ix] {
+                b' ' => {
+                    self.ix += 1;
+                    n_space -= 1;
+                }
+                b'\t' => {
+                    let spaces = 4 - (self.ix - self.tab_start) % 4;
+                    self.ix += 1;
+                    self.tab_start = self.ix;
+                    let n = spaces.min(n_space);
+                    n_space -= n;
+                    self.spaces_remaining = spaces - n;
+                }
+                _ => break,
+            }
+        }
+        n_space
+    }
+
+    /// End of an editor line. A CR ends the marker only when it is the line
+    /// ending (`2.\r` in a CRLF line). `1.\rfoo` keeps the CR in the text.
+    fn is_at_eol(&self) -> bool {
+        match self.bytes.get(self.ix) {
+            None => true,
+            Some(&b'\n') => true,
+            Some(&b'\r') => self.ix + 1 >= self.bytes.len() || self.bytes[self.ix + 1] == b'\n',
+            Some(_) => false,
+        }
+    }
+
+    fn skip_indent(&mut self, indent: usize) {
+        while self.ix < indent {
+            if self.bytes.get(self.ix) == Some(&b'\t') {
+                self.ix += 1;
+                self.tab_start = self.ix;
+                self.spaces_remaining = 0;
+            } else {
+                self.ix += 1;
+            }
+        }
+    }
+}
+
+fn rest_is_blank(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() && is_ascii_whitespace_no_nl(bytes[index]) {
+        index += 1;
+    }
+    index == bytes.len() || bytes[index] == b'\n' || bytes[index] == b'\r'
+}
+
+/// One list marker, shared by the parser and the editing helpers.
+///
+/// Ordered markers are 1–9 digits and then `.` or `)`. Padding after `.`, `)`,
+/// or a bullet is 1–4 columns (tabs use a stop of 4). Five or more columns
+/// keep one column in the marker and leave the rest as content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListMarker {
+    pub indent_bytes: usize,
+    pub ordered: bool,
+    pub number: usize,
+    pub punct: u8,
+    /// Byte offset where the marker and its padding end.
+    pub marker_end: usize,
+    pub task: Option<TaskMarker>,
+}
+
+/// GFM task marker. `checkbox_at` is the `[`. `end` is after the required
+/// whitespace and any further run of tab, VT, FF, or space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskMarker {
+    pub checked: bool,
+    pub checkbox_at: usize,
+    pub end: usize,
+}
+
+impl ListMarker {
+    pub fn prefix_end(&self) -> usize {
+        self.task
+            .as_ref()
+            .map(|task| task.end)
+            .unwrap_or(self.marker_end)
+    }
+
+    /// The next Enter continuation, including its leading newline.
+    pub fn continuation(&self, indent: &str) -> String {
+        let punct = self.punct as char;
+        if self.task.is_some() {
+            if self.ordered {
+                format!("\n{indent}{}{punct} [ ] ", self.number + 1)
+            } else {
+                format!("\n{indent}{punct} [ ] ")
+            }
+        } else if self.ordered {
+            format!("\n{indent}{}{punct} ", self.number + 1)
+        } else {
+            format!("\n{indent}{punct} ")
+        }
+    }
+}
+
+pub fn scan_list_marker(line: &str) -> Option<ListMarker> {
+    let bytes = line.as_bytes();
+    let indent_bytes = line.len() - line.trim_start().len();
+    let mut col = ColScan::new(bytes);
+    col.skip_indent(indent_bytes);
+    if col.ix >= bytes.len() {
+        return None;
+    }
+    let (ordered, number, punct) = if matches!(bytes[col.ix], b'-' | b'+' | b'*') {
+        let punct = bytes[col.ix];
+        col.ix += 1;
+        if col.scan_space(1) || col.is_at_eol() {
+            (false, 0, punct)
+        } else {
+            return None;
+        }
+    } else if bytes[col.ix].is_ascii_digit() {
+        parse_ordered_marker(&mut col)?
+    } else {
+        return None;
+    };
+    let marker_end = finish_list_padding(&mut col);
+    let task = task_marker_at(bytes, marker_end);
+    Some(ListMarker {
+        indent_bytes,
+        ordered,
+        number,
+        punct,
+        marker_end,
+        task,
+    })
+}
+
+fn parse_ordered_marker(col: &mut ColScan<'_>) -> Option<(bool, usize, u8)> {
+    let bytes = col.bytes;
+    let start = col.ix;
+    let mut ix = start + 1;
+    let mut value = u64::from(bytes[start] - b'0');
+    while ix < bytes.len() && ix - start < 10 {
+        let byte = bytes[ix];
+        ix += 1;
+        if byte.is_ascii_digit() {
+            value = value * 10 + u64::from(byte - b'0');
+        } else if byte == b'.' || byte == b')' {
+            col.ix = ix;
+            if col.scan_space(1) || col.is_at_eol() {
+                return Some((true, value as usize, byte));
+            }
+            return None;
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
+/// Consume 0–3 extra padding columns after the required separator.
+/// Four extra columns (five total) stay with the content.
+fn finish_list_padding(col: &mut ColScan<'_>) -> usize {
+    let saved = *col;
+    if rest_is_blank(&col.bytes[col.ix..]) {
+        return col.ix;
+    }
+    let post_indent = col.scan_space_upto(4);
+    if post_indent < 4 {
+        col.ix
+    } else {
+        *col = saved;
+        col.ix
+    }
+}
+
+fn task_marker_at(bytes: &[u8], at: usize) -> Option<TaskMarker> {
+    if bytes.get(at) != Some(&b'[') {
+        return None;
+    }
+    let checked = match bytes.get(at + 1) {
+        Some(&byte) if is_ascii_whitespace_no_nl(byte) => false,
+        Some(b'x') | Some(b'X') => true,
+        _ => return None,
+    };
+    if bytes.get(at + 2) != Some(&b']') {
+        return None;
+    }
+    let after = at + 3;
+    let follows = bytes
+        .get(after)
+        .copied()
+        .is_some_and(is_ascii_whitespace_no_nl);
+    if !follows {
+        return None;
+    }
+    let mut end = after + 1;
+    while end < bytes.len() && is_ascii_whitespace_no_nl(bytes[end]) {
+        end += 1;
+    }
+    Some(TaskMarker {
+        checked,
+        checkbox_at: at,
+        end,
+    })
+}
+
+/// Columns of leading spaces and tabs. A tab advances to the next stop of 4.
+fn leading_column(line: &str) -> usize {
+    let mut column = 0usize;
+    for byte in line.bytes() {
+        match byte {
+            b' ' => column += 1,
+            b'\t' => column += 4 - (column % 4),
+            _ => break,
+        }
+    }
+    column
+}
+
+fn column_at(line: &str, byte_index: usize) -> usize {
+    let mut column = 0usize;
+    for (index, byte) in line.bytes().enumerate() {
+        if index >= byte_index {
+            break;
+        }
+        if byte == b'\t' {
+            column += 4 - (column % 4);
+        } else {
+            column += 1;
+        }
+    }
+    column
+}
+
+fn line_is_blank(line: &str) -> bool {
+    line.trim().is_empty()
+}
+
+/// Open list items, so a marker can be refused when it would interrupt a
+/// paragraph or when it starts at column 4 or later outside a parent item.
+struct ListWalk {
+    open: Vec<usize>,
+    /// Paragraph-open flag per container. Index 0 is the document. Index
+    /// `i + 1` is the content of `open[i]`.
+    para: Vec<bool>,
+}
+
+impl Default for ListWalk {
+    fn default() -> Self {
+        Self {
+            open: Vec::new(),
+            para: vec![false],
+        }
+    }
+}
+
+fn marker_is_empty(line: &str, item: &ListMarker) -> bool {
+    item.task.is_none() && rest_is_blank(&line.as_bytes()[item.marker_end..])
+}
+
+/// A line the block parser records as a heading, rule, fence, quote, or table
+/// rather than as paragraph text. Those lines close a list item.
+fn is_structural_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        return true;
+    }
+    if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+        return true;
+    }
+    let trimmed_start = line.trim_start();
+    let indent = line.len() - trimmed_start.len();
+    if indent <= 3 {
+        const HEADINGS: [&str; 6] = ["###### ", "##### ", "#### ", "### ", "## ", "# "];
+        if HEADINGS
+            .iter()
+            .any(|prefix| trimmed_start.starts_with(prefix))
+        {
+            return true;
+        }
+    }
+    if trimmed_start.starts_with("> ") || trimmed_start == ">" {
+        return true;
+    }
+    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2
+}
+
+impl ListWalk {
+    fn in_paragraph(&self) -> bool {
+        self.para.last().copied().unwrap_or(false)
+    }
+
+    fn set_paragraph(&mut self, open: bool) {
+        if let Some(flag) = self.para.last_mut() {
+            *flag = open;
+        }
+    }
+
+    /// A dedented line stays in the item when it is paragraph continuation
+    /// text (a lazy continuation). A marker that would start a list in the
+    /// parent container closes the item instead.
+    fn continues_lazily(&self, line: &str) -> bool {
+        if !self.in_paragraph() {
+            return false;
+        }
+        if is_structural_line(line) {
+            return false;
+        }
+        let Some(item) = scan_list_marker(line) else {
+            return true;
+        };
+        let marker_col = leading_column(line);
+        let parent_depth = self.open.len().saturating_sub(1);
+        let nested = parent_depth > 0;
+        if marker_col > 3 && !nested {
+            return true;
+        }
+        let parent_para = self.para.get(parent_depth).copied().unwrap_or(false);
+        let empty = marker_is_empty(line, &item);
+        parent_para && (empty || (item.ordered && item.number != 1))
+    }
+
+    fn prepare(&mut self, line: &str) {
+        if line_is_blank(line) {
+            return;
+        }
+        let column = leading_column(line);
+        while self
+            .open
+            .last()
+            .copied()
+            .is_some_and(|content| column < content)
+        {
+            if self.continues_lazily(line) {
+                return;
+            }
+            self.open.pop();
+            self.para.pop();
+        }
+    }
+
+    /// A list marker this line is allowed to be, or nothing.
+    ///
+    /// CommonMark list items, rule 1 exception: an empty marker cannot
+    /// interrupt a paragraph, and an ordered marker interrupts only when its
+    /// start number is 1. That includes a paragraph inside a parent item
+    /// (examples 285, 304, 367). A blank line ends that paragraph, so the
+    /// same marker can then open a nested list. A lazy continuation stays in
+    /// the item, and a marker after it can start a new list (example 283,
+    /// including a CRLF empty item). Rule 4: a marker at column 4 or later is
+    /// indented code unless it sits in a parent item (examples 1, 2, 107, and
+    /// the nested marker in 296).
+    fn take_list(&mut self, line: &str) -> Option<ListMarker> {
+        self.prepare(line);
+        let item = scan_list_marker(line)?;
+        let marker_col = leading_column(line);
+        let nested = !self.open.is_empty();
+        if marker_col > 3 && !nested {
+            return None;
+        }
+        let empty = marker_is_empty(line, &item);
+        if self.in_paragraph() && (empty || (item.ordered && item.number != 1)) {
+            return None;
+        }
+        let has_text = !rest_is_blank(&line.as_bytes()[item.prefix_end()..]);
+        self.open.push(column_at(line, item.marker_end));
+        self.para.push(has_text);
+        let parent = self.para.len() - 2;
+        self.para[parent] = false;
+        Some(item)
+    }
+
+    fn note_block(&mut self, line: &str) {
+        self.prepare(line);
+        self.set_paragraph(false);
+    }
+
+    fn note_blank(&mut self) {
+        self.set_paragraph(false);
+    }
+
+    fn note_paragraph(&mut self) {
+        self.set_paragraph(true);
+    }
+}
+
+/// The list marker `parse_document` keeps for the line that begins at `line_start`.
+pub fn accepted_list_marker(markdown: &str, line_start: usize) -> Option<ListMarker> {
+    let doc = parse_document(markdown);
+    let line = doc
+        .lines
+        .iter()
+        .find(|line| line.source.start == line_start)?;
+    if !matches!(line.kind, LineKind::ListItem { .. }) {
+        return None;
+    }
+    scan_list_marker(&markdown[line.source.start..line.source.end])
+}
+
+/// Wysiwyg checkbox click. An unchecked box (space, tab, VT, or FF) becomes
+/// `[x]`. A ticked box becomes `[ ]`.
+pub fn checkbox_click_replacement(current: &str) -> &'static str {
+    let bytes = current.as_bytes();
+    if bytes.len() == 3 && bytes[0] == b'[' && bytes[2] == b']' {
+        if is_ascii_whitespace_no_nl(bytes[1]) {
+            return "[x]";
+        }
+        if bytes[1] == b'x' || bytes[1] == b'X' {
+            return "[ ]";
+        }
+    }
+    "[ ]"
+}
+
 #[allow(clippy::single_range_in_vec_init)]
 pub fn parse_document(markdown: &str) -> ParsedDocument {
     let raw_lines = if markdown.is_empty() {
@@ -1067,6 +1521,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }
     }
 
+    let mut list_walk = ListWalk::default();
     for (i, sline) in raw_lines.iter().enumerate() {
         let line = sline.text;
         let line_start = sline.start;
@@ -1078,6 +1533,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 
         // Check code block fences
         if trimmed.starts_with("```") {
+            list_walk.note_block(line);
             let full_with_nl = sline.start..sline.end;
             if !in_code_block {
                 in_code_block = true;
@@ -1140,6 +1596,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }
 
         if in_code_block {
+            list_walk.note_block(line);
             lines.push(ParsedLine {
                 line_index: i,
                 source: line_source.clone(),
@@ -1163,6 +1620,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }
 
         if trimmed.is_empty() {
+            list_walk.note_blank();
             lines.push(ParsedLine {
                 line_index: i,
                 source: line_source.clone(),
@@ -1179,6 +1637,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 
         // Horizontal Rule
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+            list_walk.note_block(line);
             let hidden = vec![line_start..line_end];
             all_hidden.extend(hidden.iter().cloned());
             let (display_text, offset_map) =
@@ -1201,6 +1660,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         if let Some(&(tbl_first, _tbl_last, ref tbl_src, ref tbl_aligns)) =
             table_ranges.iter().find(|&&(f, l, _, _)| i >= f && i <= l)
         {
+            list_walk.note_block(line);
             let is_separator = trimmed.contains('-')
                 && trimmed
                     .chars()
@@ -1244,8 +1704,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     cells.push(c_start..c_end);
                     if c_end > c_start {
                         let inner_slice = &line[(c_start - line_start)..(c_end - line_start)];
-                        let (c_hid, c_pairs, c_segs) =
-                            parse_inline_syntax(inner_slice, c_start);
+                        let (c_hid, c_pairs, c_segs) = parse_inline_syntax(inner_slice, c_start);
                         row_hidden.extend(c_hid);
                         row_pairs.extend(c_pairs);
                         row_segments.extend(c_segs);
@@ -1310,67 +1769,27 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             }
         }
 
-        if prefix_len == 0 {
-            if let Some(_rest) = trimmed_start
-                .strip_prefix("- [ ] ")
-                .or_else(|| trimmed_start.strip_prefix("* [ ] "))
-                .or_else(|| trimmed_start.strip_prefix("+ [ ] "))
-            {
-                let cb_start = line_start + indent_len + 2;
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: Some(false),
-                    indent_cols: indent_len,
-                    checkbox_source: Some(cb_start..(cb_start + 3)),
-                };
-                prefix_len = indent_len + 6;
-            } else if let Some(_rest) = trimmed_start
-                .strip_prefix("- [x] ")
-                .or_else(|| trimmed_start.strip_prefix("- [X] "))
-                .or_else(|| trimmed_start.strip_prefix("* [x] "))
-                .or_else(|| trimmed_start.strip_prefix("* [X] "))
-                .or_else(|| trimmed_start.strip_prefix("+ [x] "))
-                .or_else(|| trimmed_start.strip_prefix("+ [X] "))
-            {
-                let cb_start = line_start + indent_len + 2;
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: Some(true),
-                    indent_cols: indent_len,
-                    checkbox_source: Some(cb_start..(cb_start + 3)),
-                };
-                prefix_len = indent_len + 6;
-            } else if trimmed_start.starts_with("- ")
-                || trimmed_start.starts_with("* ")
-                || trimmed_start.starts_with("+ ")
-            {
-                kind = LineKind::ListItem {
-                    ordered: false,
-                    number: 0,
-                    task: None,
-                    indent_cols: indent_len,
-                    checkbox_source: None,
-                };
-                prefix_len = indent_len + 2;
-            } else if trimmed_start.starts_with("> ") {
-                kind = LineKind::Blockquote;
-                prefix_len = indent_len + 2;
-            } else if let Some(dot_pos) = trimmed_start.find(". ") {
-                if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
-                    if let Ok(num) = trimmed_start[..dot_pos].parse::<usize>() {
-                        kind = LineKind::ListItem {
-                            ordered: true,
-                            number: num,
-                            task: None,
-                            indent_cols: indent_len,
-                            checkbox_source: None,
-                        };
-                        prefix_len = indent_len + dot_pos + 2;
-                    }
-                }
-            }
+        if prefix_len > 0 {
+            list_walk.note_block(line);
+        } else if let Some(item) = list_walk.take_list(line) {
+            let checkbox_source = item.task.as_ref().map(|task| {
+                let start = line_start + task.checkbox_at;
+                start..start + 3
+            });
+            kind = LineKind::ListItem {
+                ordered: item.ordered,
+                number: item.number,
+                task: item.task.as_ref().map(|task| task.checked),
+                indent_cols: indent_len,
+                checkbox_source,
+            };
+            prefix_len = item.prefix_end();
+        } else if trimmed_start.starts_with("> ") {
+            list_walk.note_block(line);
+            kind = LineKind::Blockquote;
+            prefix_len = indent_len + 2;
+        } else {
+            list_walk.note_paragraph();
         }
 
         let prefix_range = line_start..(line_start + prefix_len);
@@ -1543,14 +1962,34 @@ mod tests {
         let md = "| **Col 1** | Col 2 |\n| :--- | :--- |\n| Val A | ~~Val B~~ |";
         let doc = parse_document(md);
         assert_eq!(doc.lines.len(), 3);
-        assert!(matches!(doc.lines[0].kind, LineKind::TableRow { is_header: true, .. }));
+        assert!(matches!(
+            doc.lines[0].kind,
+            LineKind::TableRow {
+                is_header: true,
+                ..
+            }
+        ));
         assert!(matches!(doc.lines[1].kind, LineKind::TableDelimiter));
-        assert!(matches!(doc.lines[2].kind, LineKind::TableRow { is_header: false, .. }));
+        assert!(matches!(
+            doc.lines[2].kind,
+            LineKind::TableRow {
+                is_header: false,
+                ..
+            }
+        ));
         assert_eq!(doc.lines[0].display_text, "| **Col 1** | Col 2 |");
         // Verify Col 1 is bold (via **), but Col 2 is not forced bold
-        let bold_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| s.bold).collect();
+        let bold_segs: Vec<_> = doc.lines[0]
+            .styled_segments
+            .iter()
+            .filter(|s| s.bold)
+            .collect();
         assert!(!bold_segs.is_empty());
-        let normal_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| !s.bold).collect();
+        let normal_segs: Vec<_> = doc.lines[0]
+            .styled_segments
+            .iter()
+            .filter(|s| !s.bold)
+            .collect();
         assert!(!normal_segs.is_empty());
     }
 
@@ -1599,5 +2038,551 @@ mod tests {
             assert_eq!(line.offset_map.source_to_display(src_idx), disp_idx);
         }
     }
-}
 
+    fn kind_report(md: &str, kind: &LineKind) -> String {
+        match kind {
+            LineKind::Empty => "Empty".to_string(),
+            LineKind::Paragraph => "Paragraph".to_string(),
+            LineKind::Heading { level } => format!("Heading level={level}"),
+            LineKind::Blockquote => "Blockquote".to_string(),
+            LineKind::ListItem {
+                ordered,
+                number,
+                task,
+                indent_cols,
+                checkbox_source,
+            } => {
+                let task = match task {
+                    None => "none",
+                    Some(false) => "unchecked",
+                    Some(true) => "checked",
+                };
+                let checkbox = match checkbox_source {
+                    Some(range) => format!("{:?}", &md[range.clone()]),
+                    None => "-".to_string(),
+                };
+                format!(
+                    "ListItem ordered={ordered} number={number} task={task} indent={indent_cols} checkbox={checkbox}"
+                )
+            }
+            LineKind::CodeFence { language, opening } => {
+                format!("CodeFence opening={opening} language={language:?}")
+            }
+            LineKind::CodeLine => "CodeLine".to_string(),
+            LineKind::HorizontalRule => "HorizontalRule".to_string(),
+            LineKind::TableDelimiter => "TableDelimiter".to_string(),
+            LineKind::TableRow {
+                is_header, cells, ..
+            } => format!("TableRow header={is_header} cells={}", cells.len()),
+        }
+    }
+
+    fn strike_report(md: &str, line: &ParsedLine) -> String {
+        let mut parts = Vec::new();
+        for segment in &line.styled_segments {
+            if segment.strike {
+                parts.push(format!("{:?}", &md[segment.source.clone()]));
+            }
+        }
+        if parts.is_empty() {
+            "-".to_string()
+        } else {
+            parts.join(",")
+        }
+    }
+
+    fn link_report(line: &ParsedLine) -> String {
+        let mut urls = Vec::new();
+        for segment in &line.styled_segments {
+            if let Some(url) = &segment.link_url {
+                urls.push(format!("{url:?}"));
+            }
+        }
+        if urls.is_empty() {
+            "-".to_string()
+        } else {
+            urls.join(",")
+        }
+    }
+
+    fn map_status(md: &str, line: &ParsedLine) -> String {
+        for (idx, ch) in line.display_text.char_indices() {
+            let src = line.offset_map.display_to_source(idx);
+            if !md.is_char_boundary(src) {
+                return format!("fail boundary {src}");
+            }
+            match md[src..].chars().next() {
+                Some(got) if got == ch => {}
+                other => {
+                    return format!("fail display {ch:?}@{idx} source {other:?}@{src}");
+                }
+            }
+        }
+        "ok".to_string()
+    }
+
+    fn observe_line(md: &str, index: usize) -> String {
+        let doc = parse_document(md);
+        let line = &doc.lines[index];
+        format!(
+            "{} display={:?} strike={} link={} map={}",
+            kind_report(md, &line.kind),
+            line.display_text,
+            strike_report(md, line),
+            link_report(line),
+            map_status(md, line),
+        )
+    }
+
+    fn observe_doc(label: &str, md: &str) -> String {
+        let doc = parse_document(md);
+        let mut out = String::new();
+        for index in 0..doc.lines.len() {
+            if index > 0 {
+                out.push('\n');
+            }
+            out.push_str(&format!("{label}[{index}] {}", observe_line(md, index)));
+        }
+        out
+    }
+
+    /// CommonMark examples 265, 266, 283, 296, and 302, plus GFM ordered tasks.
+    #[test]
+    fn markers_match_gfm() {
+        let observed = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            observe_doc("cm302", "1. foo\n2. bar\n3) baz"),
+            observe_doc("cm296", "10) foo\n    - bar"),
+            observe_doc("cm266", "1234567890. not ok"),
+            observe_doc("cm265", "123456789. ok"),
+            observe_doc("task", "1. [ ] first\n2. [x] second"),
+            observe_doc("ex283", "1. foo\n2.\n3. bar"),
+            observe_doc("eol_dot", "1."),
+            observe_doc("eol_paren", "1)"),
+            observe_doc("tab_dot", "1.\tfoo"),
+            observe_doc("tab_paren", "1)\tfoo"),
+            observe_doc("task_tab", "1. [ ]\tfoo"),
+            observe_doc("task_eol", "1. [ ]"),
+            observe_doc("task_x_eol", "1. [x]"),
+            observe_doc("task_sp_eol", "1. [ ] "),
+            observe_doc("task_tight", "1. [ ]foo"),
+            observe_doc("task_gap", "1.  [ ] foo"),
+            observe_doc("bullet_gap", "-  [ ] foo"),
+            observe_doc("task_spaces", "1. [ ]  foo"),
+            observe_doc("task_tabs", "1. [ ]\t\tbar"),
+        );
+        let expected = "\
+cm302[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+cm302[1] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"bar\" strike=- link=- map=ok
+cm302[2] ListItem ordered=true number=3 task=none indent=0 checkbox=- display=\"baz\" strike=- link=- map=ok
+cm296[0] ListItem ordered=true number=10 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+cm296[1] ListItem ordered=false number=0 task=none indent=4 checkbox=- display=\"bar\" strike=- link=- map=ok
+cm266[0] Paragraph display=\"1234567890. not ok\" strike=- link=- map=ok
+cm265[0] ListItem ordered=true number=123456789 task=none indent=0 checkbox=- display=\"ok\" strike=- link=- map=ok
+task[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"first\" strike=- link=- map=ok
+task[1] ListItem ordered=true number=2 task=checked indent=0 checkbox=\"[x]\" display=\"second\" strike=- link=- map=ok
+ex283[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+ex283[1] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok
+ex283[2] ListItem ordered=true number=3 task=none indent=0 checkbox=- display=\"bar\" strike=- link=- map=ok
+eol_dot[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok
+eol_paren[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok
+tab_dot[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+tab_paren[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+task_tab[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
+task_eol[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]\" strike=- link=- map=ok
+task_x_eol[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[x]\" strike=- link=- map=ok
+task_sp_eol[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\" strike=- link=- map=ok
+task_tight[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]foo\" strike=- link=- map=ok
+task_gap[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
+bullet_gap[0] ListItem ordered=false number=0 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
+task_spaces[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok
+task_tabs[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"bar\" strike=- link=- map=ok";
+        assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn task_eol_is_not_a_task() {
+        for (source, line) in [
+            (
+                "1. [ ]",
+                "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]\" strike=- link=- map=ok",
+            ),
+            (
+                "1. [x]",
+                "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[x]\" strike=- link=- map=ok",
+            ),
+            (
+                "1. [X]",
+                "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[X]\" strike=- link=- map=ok",
+            ),
+            (
+                "1) [ ]",
+                "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]\" strike=- link=- map=ok",
+            ),
+            (
+                "- [ ]",
+                "ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"[ ]\" strike=- link=- map=ok",
+            ),
+            (
+                "1. [ ] ",
+                "ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\" strike=- link=- map=ok",
+            ),
+            (
+                "1. [ ]\t",
+                "ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\" strike=- link=- map=ok",
+            ),
+        ] {
+            assert_eq!(observe_line(source, 0), line, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn list_padding_is_one_to_four_columns() {
+        for (source, ordered, task) in [
+            ("1.  foo", true, "none"),
+            ("1.   foo", true, "none"),
+            ("1.    foo", true, "none"),
+            ("1)  foo", true, "none"),
+            ("1. \tfoo", true, "none"),
+            ("1.  [ ] foo", true, "unchecked"),
+            ("1.   [ ] foo", true, "unchecked"),
+            ("1.    [ ] foo", true, "unchecked"),
+            ("-  [ ] foo", false, "unchecked"),
+        ] {
+            let checkbox = if task == "none" {
+                "-".to_string()
+            } else {
+                "\"[ ]\"".to_string()
+            };
+            let number = usize::from(ordered);
+            assert_eq!(
+                observe_line(source, 0),
+                format!(
+                    "ListItem ordered={ordered} number={number} task={task} indent=0 checkbox={checkbox} display=\"foo\" strike=- link=- map=ok"
+                ),
+                "{source:?}"
+            );
+        }
+        assert_eq!(
+            observe_line("1.     foo", 0),
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"    foo\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("1.     [ ] foo", 0),
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"    [ ] foo\" strike=- link=- map=ok"
+        );
+    }
+
+    /// F3 was Low. Stripping the CR hid it from the caret, so the editor
+    /// keeps it in the line, the same as kit `4e72b711`. A trailing CR is a
+    /// line ending for the marker scan, so `1.\r` is an empty item whose
+    /// display is the CR. `1.\rfoo` stays a paragraph (the CR is not the end).
+    #[test]
+    fn trailing_cr_stays_in_the_editor_line() {
+        assert_eq!(
+            observe_line("1.\r\n", 0),
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\\r\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("1)\r\n", 0),
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\\r\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("1. foo\r\n", 0),
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\\r\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("1. [ ]\r\n", 0),
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]\\r\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("1. [ ] \r\n", 0),
+            "ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\\r\" strike=- link=- map=ok"
+        );
+    }
+
+    #[test]
+    fn unordered_task_uses_task_marker() {
+        assert_eq!(
+            observe_line("- [ ]\tfoo", 0),
+            "ListItem ordered=false number=0 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("- [ ]  foo", 0),
+            "ListItem ordered=false number=0 task=unchecked indent=0 checkbox=\"[ ]\" display=\"foo\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("* [x] bar", 0),
+            "ListItem ordered=false number=0 task=checked indent=0 checkbox=\"[x]\" display=\"bar\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("+ [ ] baz", 0),
+            "ListItem ordered=false number=0 task=unchecked indent=0 checkbox=\"[ ]\" display=\"baz\" strike=- link=- map=ok"
+        );
+    }
+
+    #[test]
+    fn task_bracket_accepts_tab_vt_ff() {
+        for (source, checkbox) in [
+            ("1. [\t] foo", "\"[\\t]\""),
+            ("1. [\u{b}] foo", "\"[\\u{b}]\""),
+            ("1. [\u{c}] foo", "\"[\\u{c}]\""),
+        ] {
+            assert_eq!(
+                observe_line(source, 0),
+                format!(
+                    "ListItem ordered=true number=1 task=unchecked indent=0 checkbox={checkbox} display=\"foo\" strike=- link=- map=ok"
+                ),
+                "{source:?}"
+            );
+        }
+        assert_eq!(
+            observe_line("1. [ ]\u{a0}foo", 0),
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]\\u{a0}foo\" strike=- link=- map=ok"
+        );
+    }
+
+    /// Examples 285 and 367: an empty marker does not interrupt a paragraph.
+    #[test]
+    fn empty_marker_does_not_interrupt_paragraph() {
+        let ex285 = observe_doc("ex285", "foo\n*\n\nfoo\n1.\n");
+        assert_eq!(
+            ex285,
+            "\
+ex285[0] Paragraph display=\"foo\" strike=- link=- map=ok
+ex285[1] Paragraph display=\"*\" strike=- link=- map=ok
+ex285[2] Empty display=\"\" strike=- link=- map=ok
+ex285[3] Paragraph display=\"foo\" strike=- link=- map=ok
+ex285[4] Paragraph display=\"1.\" strike=- link=- map=ok
+ex285[5] Empty display=\"\" strike=- link=- map=ok"
+        );
+        let ex367 = observe_doc("ex367", "*foo bar\n*\n");
+        assert_eq!(
+            ex367,
+            "\
+ex367[0] Paragraph display=\"*foo bar\" strike=- link=- map=ok
+ex367[1] Paragraph display=\"*\" strike=- link=- map=ok
+ex367[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        let dash = observe_doc("dash", "foo\n-\n");
+        assert_eq!(
+            dash,
+            "\
+dash[0] Paragraph display=\"foo\" strike=- link=- map=ok
+dash[1] Paragraph display=\"-\" strike=- link=- map=ok
+dash[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+    }
+
+    /// Example 304: after paragraph text, only an ordered marker with start 1 interrupts.
+    #[test]
+    fn ordered_marker_interrupts_only_when_start_is_one() {
+        let paren = observe_doc(
+            "paren304",
+            "The number of windows in my house is\n14)  The number of doors is 6.\n",
+        );
+        assert_eq!(
+            paren,
+            "\
+paren304[0] Paragraph display=\"The number of windows in my house is\" strike=- link=- map=ok
+paren304[1] Paragraph display=\"14)  The number of doors is 6.\" strike=- link=- map=ok
+paren304[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        let dot = observe_doc(
+            "ex304",
+            "The number of windows in my house is\n14.  The number of doors is 6.\n",
+        );
+        assert_eq!(
+            dot,
+            "\
+ex304[0] Paragraph display=\"The number of windows in my house is\" strike=- link=- map=ok
+ex304[1] Paragraph display=\"14.  The number of doors is 6.\" strike=- link=- map=ok
+ex304[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        let start = observe_doc(
+            "ex305",
+            "The number of windows in my house is\n1.  The number of doors is 6.\n",
+        );
+        assert_eq!(
+            start,
+            "\
+ex305[0] Paragraph display=\"The number of windows in my house is\" strike=- link=- map=ok
+ex305[1] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"The number of doors is 6.\" strike=- link=- map=ok
+ex305[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        let start_paren = observe_doc(
+            "paren305",
+            "The number of windows in my house is\n1)  The number of doors is 6.\n",
+        );
+        assert_eq!(
+            start_paren,
+            "\
+paren305[0] Paragraph display=\"The number of windows in my house is\" strike=- link=- map=ok
+paren305[1] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"The number of doors is 6.\" strike=- link=- map=ok
+paren305[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+    }
+
+    /// A marker at column 4 or later is not a list item unless a parent item contains it.
+    #[test]
+    fn marker_at_column_four_is_not_a_list_item() {
+        let tabbed = observe_doc("tab", " \t63.\tnot\n");
+        assert_eq!(
+            tabbed,
+            "\
+tab[0] Paragraph display=\" \\t63.\\tnot\" strike=- link=- map=ok
+tab[1] Empty display=\"\" strike=- link=- map=ok"
+        );
+        let indented = observe_doc("code", "    - code\n");
+        assert_eq!(
+            indented,
+            "\
+code[0] Paragraph display=\"    - code\" strike=- link=- map=ok
+code[1] Empty display=\"\" strike=- link=- map=ok"
+        );
+        let nested = observe_doc("nest", "10) foo\n    - bar\n");
+        assert_eq!(
+            nested,
+            "\
+nest[0] ListItem ordered=true number=10 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+nest[1] ListItem ordered=false number=0 task=none indent=4 checkbox=- display=\"bar\" strike=- link=- map=ok
+nest[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+    }
+
+    #[test]
+    fn checkbox_click_ticks_tab_vt_ff_and_unticks() {
+        fn click(source: &str) -> String {
+            let doc = parse_document(source);
+            let LineKind::ListItem {
+                checkbox_source: Some(range),
+                ..
+            } = &doc.lines[0].kind
+            else {
+                panic!("no checkbox in {source:?}");
+            };
+            let replacement = checkbox_click_replacement(&source[range.clone()]);
+            let mut out = source.to_string();
+            out.replace_range(range.clone(), replacement);
+            out
+        }
+
+        assert_eq!(click("1. [\t] a"), "1. [x] a");
+        assert_eq!(click("1. [\u{b}] a"), "1. [x] a");
+        assert_eq!(click("1. [\u{c}] a"), "1. [x] a");
+        assert_eq!(click("1) [\t] a"), "1) [x] a");
+        assert_eq!(click("- [\t] a"), "- [x] a");
+        assert_eq!(click("1. [ ] a"), "1. [x] a");
+        assert_eq!(click("1. [x] a"), "1. [ ] a");
+        assert_eq!(click("1. [X] a"), "1. [ ] a");
+        assert_eq!(click(&click("1. [\t] a")), "1. [ ] a");
+        assert_eq!(click(&click("1. [\u{b}] a")), "1. [ ] a");
+        assert_eq!(click(&click("1. [\u{c}] a")), "1. [ ] a");
+    }
+
+    /// CommonMark list items, exception 1 (spec lines 4123–4129): an empty
+    /// marker, or an ordered marker whose start is not 1, does not interrupt
+    /// paragraph continuation text. That includes the paragraph inside a
+    /// parent item. A blank line ends the paragraph, and a start of 1 with
+    /// text still opens a nested list.
+    #[test]
+    fn nested_marker_does_not_interrupt_item_paragraph() {
+        assert_eq!(
+            observe_doc("star", "- foo\n  *\n"),
+            "\
+star[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+star[1] Paragraph display=\"  *\" strike=- link=- map=ok
+star[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("one", "- foo\n  1.\n"),
+            "\
+one[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+one[1] Paragraph display=\"  1.\" strike=- link=- map=ok
+one[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("two", "- foo\n  bar\n  2) baz\n"),
+            "\
+two[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+two[1] Paragraph display=\"  bar\" strike=- link=- map=ok
+two[2] Paragraph display=\"  2) baz\" strike=- link=- map=ok
+two[3] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("fourteen", "- parent\n  14) a\n"),
+            "\
+fourteen[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"parent\" strike=- link=- map=ok
+fourteen[1] Paragraph display=\"  14) a\" strike=- link=- map=ok
+fourteen[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("checked", "- parent\n  14) [x] a\n"),
+            "\
+checked[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"parent\" strike=- link=- map=ok
+checked[1] Paragraph display=\"  14) [x] a\" strike=- link=- map=ok
+checked[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("blank", "- parent\n\n  *\n"),
+            "\
+blank[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"parent\" strike=- link=- map=ok
+blank[1] Empty display=\"\" strike=- link=- map=ok
+blank[2] ListItem ordered=false number=0 task=none indent=2 checkbox=- display=\"\" strike=- link=- map=ok
+blank[3] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("start", "- foo\n  1. x\n"),
+            "\
+start[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+start[1] ListItem ordered=true number=1 task=none indent=2 checkbox=- display=\"x\" strike=- link=- map=ok
+start[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("after", "- parent\n\n  14) a\n"),
+            "\
+after[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"parent\" strike=- link=- map=ok
+after[1] Empty display=\"\" strike=- link=- map=ok
+after[2] ListItem ordered=true number=14 task=none indent=2 checkbox=- display=\"a\" strike=- link=- map=ok
+after[3] Empty display=\"\" strike=- link=- map=ok"
+        );
+    }
+
+    /// Laziness (spec lines 4814–4821): `bar` continues the item, and `2. baz`
+    /// then starts a new list. `foo` then `2. baz` stays one paragraph
+    /// (example 304).
+    #[test]
+    fn ordered_marker_after_dedent_stays_list() {
+        assert_eq!(
+            observe_doc("lazy", "- foo\nbar\n2. baz\n"),
+            "\
+lazy[0] ListItem ordered=false number=0 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+lazy[1] Paragraph display=\"bar\" strike=- link=- map=ok
+lazy[2] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"baz\" strike=- link=- map=ok
+lazy[3] Empty display=\"\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_doc("para", "foo\n2. baz\n"),
+            "\
+para[0] Paragraph display=\"foo\" strike=- link=- map=ok
+para[1] Paragraph display=\"2. baz\" strike=- link=- map=ok
+para[2] Empty display=\"\" strike=- link=- map=ok"
+        );
+    }
+
+    /// Example 283 with CR LF: `2.\r` is an empty item, so `3. bar` stays item 3.
+    #[test]
+    fn crlf_empty_item_does_not_drop_next_item() {
+        assert_eq!(
+            observe_doc("crlf", "1. foo\r\n2.\r\n3. bar"),
+            "\
+crlf[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\\r\" strike=- link=- map=ok
+crlf[1] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"\\r\" strike=- link=- map=ok
+crlf[2] ListItem ordered=true number=3 task=none indent=0 checkbox=- display=\"bar\" strike=- link=- map=ok"
+        );
+        assert_eq!(
+            observe_line("1.\rfoo", 0),
+            "Paragraph display=\"1.\\rfoo\" strike=- link=- map=ok"
+        );
+    }
+}

@@ -182,6 +182,7 @@ green_names=(
   headings
   emphasis
   nested-lists
+  markers-strike
   tables
   fenced-code
   links

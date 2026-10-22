@@ -51,6 +51,7 @@ green_fixtures=(
   headings
   emphasis
   nested-lists
+  markers-strike
   tables
   fenced-code
   links
