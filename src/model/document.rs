@@ -2072,37 +2072,25 @@ impl DocumentTab {
         self.refresh_cursor();
     }
 
-    /// Up/Down land on a source column. Pull a caret or selection anchor that
-    /// stopped inside a hidden closing-hash run back to the visible end, and
-    /// keep the column the next vertical move should reuse.
+    /// Up/Down and a mode switch land on a source column. A collapsed caret
+    /// that stopped inside a hidden closing-hash run moves to the visible
+    /// end. A selection keeps both endpoints.
     fn snap_caret_to_visible_line_end(&mut self) {
+        if !self.caret.range.is_empty() {
+            return;
+        }
+        let offset = self.cursor_offset();
         let parsed = self.parsed();
-        let mode = self.view_mode;
-        let snap = |offset: usize| -> usize {
-            let Some(line) = parsed.line_at_offset(offset) else {
-                return offset;
-            };
-            let vend = visible_line_end(line, mode);
-            if offset > vend && offset <= line.source.end {
-                vend
-            } else {
-                offset
-            }
+        let Some(line) = parsed.line_at_offset(offset) else {
+            return;
         };
-        let prefer = self.caret.preferred_col;
-        let mut start = snap(self.caret.range.start);
-        let mut end = snap(self.caret.range.end);
-        let mut reversed = self.caret.reversed;
-        if start > end {
-            std::mem::swap(&mut start, &mut end);
-            reversed = !reversed;
+        let vend = visible_line_end(line, self.view_mode);
+        if offset > vend && offset <= line.source.end {
+            let prefer = self.caret.preferred_col;
+            self.caret.range = vend..vend;
+            self.caret.reversed = false;
+            self.caret.preferred_col = prefer;
         }
-        if start == end {
-            reversed = false;
-        }
-        self.caret.range = start..end;
-        self.caret.reversed = reversed;
-        self.caret.preferred_col = prefer;
     }
 
     pub fn move_home(&mut self, extend: bool) {
