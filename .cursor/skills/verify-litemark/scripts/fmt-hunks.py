@@ -103,6 +103,10 @@ def gate(root: Path, log_path: Path, files_path: Path, hunks_path: Path, fmt_sta
     print(f"fmt_baseline_hunks={len(baseline)}")
     print(f"fmt_observed_hunks={len(observed)}")
     print(f"fmt_cargo_status={fmt_status}")
+    stale = sum(baseline_counts.values())
+    print(f"fmt_baseline_stale={stale}")
+    if stale:
+        fail = 1
     if fmt_status != 0 and len(observed) == 0:
         print(f"fmt_gate=fail reason=cargo_fmt_check_exit={fmt_status} hunks=0")
         return 1

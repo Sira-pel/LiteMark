@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    parse_document, split_table_cells, unescaped_pipe_offsets, InlineTagKind, LineKind,
-    ParsedDocument, TableColumnAlign,
+    accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlineTagKind,
+    LineKind, ParsedDocument, TableColumnAlign,
 };
 
 use super::text_ops::{
@@ -332,7 +332,12 @@ impl DocumentTab {
         // 0. Table rows: continuation or exit
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow { ref cells, is_header, .. } = pline.kind {
+            if let LineKind::TableRow {
+                ref cells,
+                is_header,
+                ..
+            } = pline.kind
+            {
                 let col_count = cells.len().max(2);
                 let is_empty_row = cells.iter().all(|c| {
                     if c.end <= self.content.len() && c.start <= c.end {
@@ -348,7 +353,12 @@ impl DocumentTab {
                         let after_delim = delim_line.source.end;
                         // Check if there is already a body row after delimiter
                         if let Some(first_body) = parsed.lines.get(pline.line_index + 2) {
-                            if let LineKind::TableRow { ref cells, is_header: false, .. } = first_body.kind {
+                            if let LineKind::TableRow {
+                                ref cells,
+                                is_header: false,
+                                ..
+                            } = first_body.kind
+                            {
                                 if let Some(first_cell) = cells.first() {
                                     self.caret.move_to(first_cell.start);
                                     self.refresh_cursor();
@@ -368,13 +378,15 @@ impl DocumentTab {
 
                 if is_empty_row {
                     // Empty row: remove this empty row, keeping header, and exit table to a new line below
-                    let remove_start = if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' {
-                        line_start - 1
-                    } else {
-                        line_start
-                    };
+                    let remove_start =
+                        if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' {
+                            line_start - 1
+                        } else {
+                            line_start
+                        };
                     let remove_end = line_end_pos;
-                    let has_newline_after = remove_end < self.content.len() && self.content.as_bytes()[remove_end] == b'\n';
+                    let has_newline_after = remove_end < self.content.len()
+                        && self.content.as_bytes()[remove_end] == b'\n';
                     let replacement = if has_newline_after { "" } else { "\n" };
                     self.edit(remove_start..remove_end, replacement);
                     let target = (remove_start + 1).min(self.content.len());
@@ -398,14 +410,21 @@ impl DocumentTab {
                                 let before = &self.content[cell_start..range.start];
                                 let after = &self.content[range.end..cell_end];
                                 if !after.trim().is_empty() {
-                                    split_cell_info = Some((k, cell_start, cell_end, before.to_string(), after.trim().to_string()));
+                                    split_cell_info = Some((
+                                        k,
+                                        cell_start,
+                                        cell_end,
+                                        before.to_string(),
+                                        after.trim().to_string(),
+                                    ));
                                 }
                                 break;
                             }
                         }
                     }
 
-                    if let Some((col_idx, _c_start, c_end, before_str, after_str)) = split_cell_info {
+                    if let Some((col_idx, _c_start, c_end, before_str, after_str)) = split_cell_info
+                    {
                         // Split the cell into current row and a new row below in a single undo step
                         let repl = if before_str.ends_with(' ') { "" } else { " " };
                         let rest_of_line = &self.content[c_end..line_end_pos];
@@ -445,86 +464,48 @@ impl DocumentTab {
 
         let line = &self.content[line_start..line_end_pos];
         let trimmed_start = line.trim_start();
-        let indent_len = line.len() - trimmed_start.len();
-        let indent = &line[..indent_len];
+        let indent = &line[..line.len() - trimmed_start.len()];
 
-        // 1. Task lists: "- [ ] ", "- [x] ", etc.
-        let task_prefixes = [
-            "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-        ];
-        if let Some(&prefix) = task_prefixes.iter().find(|&&p| trimmed_start.starts_with(p)) {
-            let is_empty_task = trimmed_start.len() == prefix.len()
-                || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
-            if is_empty_task {
+        if let Some(item) = accepted_list_marker(&self.content, line_start) {
+            let body = &line[item.prefix_end()..];
+            // The caret stops before a CR line ending, so the CR is not in
+            // `body`. An ordered task or a paren marker still does not exit
+            // when that ending is a CR. A plain `1. ` or `- [ ] ` does.
+            let ending_is_cr = self.content.as_bytes().get(line_end_pos) == Some(&b'\r');
+            let cr_keeps_item =
+                ending_is_cr && (item.punct == b')' || (item.ordered && item.task.is_some()));
+            let is_empty = body.trim().is_empty() && !cr_keeps_item;
+            if is_empty {
                 if !range.is_empty() {
                     self.edit(range, "\n");
                     return;
                 }
-                if !indent.is_empty() {
-                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
-                    self.edit(line_start..line_start + outdent_len, "");
-                } else {
-                    self.edit(line_start..line_end_pos, "");
-                }
-            } else {
-                let bullet_char = prefix.chars().next().unwrap_or('-');
-                let ins = format!("\n{}{} [ ] ", indent, bullet_char);
-                self.edit(range, &ins);
-            }
-            return;
-        }
-
-        // 2. Bullet lists: "- ", "* ", "+ "
-        let bullet_prefixes = ["- ", "* ", "+ "];
-        if let Some(&prefix) = bullet_prefixes.iter().find(|&&p| trimmed_start.starts_with(p)) {
-            let is_empty_bullet = trimmed_start.len() == prefix.len()
-                || (trimmed_start.len() > prefix.len() && trimmed_start[prefix.len()..].trim().is_empty());
-            if is_empty_bullet {
-                if !range.is_empty() {
-                    self.edit(range, "\n");
-                    return;
-                }
-                if !indent.is_empty() {
-                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
-                    self.edit(line_start..line_start + outdent_len, "");
-                } else {
-                    self.edit(line_start..line_end_pos, "");
-                }
-            } else {
-                let ins = format!("\n{}{}", indent, prefix);
-                self.edit(range, &ins);
-            }
-            return;
-        }
-
-        // 3. Numbered lists: digits + ". "
-        if let Some(dot_pos) = trimmed_start.find(". ") {
-            if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
-                if let Ok(num) = trimmed_start[..dot_pos].parse::<usize>() {
-                    let marker_len = dot_pos + 2;
-                    let is_empty_num = trimmed_start.len() == marker_len
-                        || (trimmed_start.len() > marker_len && trimmed_start[marker_len..].trim().is_empty());
-                    if is_empty_num {
-                        if !range.is_empty() {
-                            self.edit(range, "\n");
-                            return;
-                        }
-                        if !indent.is_empty() {
-                            let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
-                            self.edit(line_start..line_start + outdent_len, "");
-                        } else {
-                            self.edit(line_start..line_end_pos, "");
-                        }
+                if item.indent_bytes > 0 {
+                    let indent = &line[..item.indent_bytes];
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 {
+                        1
                     } else {
-                        let ins = format!("\n{}{}. ", indent, num + 1);
-                        self.edit(range, &ins);
-                    }
-                    return;
+                        2
+                    };
+                    self.edit(line_start..line_start + outdent_len, "");
+                } else {
+                    // A CRLF ending loses the CR with the marker, leaving LF.
+                    // The caret never stood on that CR.
+                    let remove_end = if line_ending_len(&self.content, line_end_pos) == 2 {
+                        line_end_pos + 1
+                    } else {
+                        line_end_pos
+                    };
+                    self.edit(line_start..remove_end, "");
                 }
+            } else {
+                let kept = &line[..item.indent_bytes];
+                self.edit(range, &item.continuation(kept));
             }
+            return;
         }
 
-        // 4. Blockquotes: "> "
+        // Blockquotes: "> "
         if trimmed_start.starts_with("> ") || trimmed_start == ">" {
             let is_empty_quote = trimmed_start == ">"
                 || trimmed_start == "> "
@@ -612,26 +593,20 @@ impl DocumentTab {
             }
         }
 
-        let trimmed = line_before.trim_start();
-        let indent_len = line_before.len() - trimmed.len();
-        let indent = &line_before[..indent_len];
-
-        // 3. Task list prefix at cursor boundary
-        for prefix in [
-            "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-        ] {
-            if trimmed == prefix {
-                let start = cursor - 4;
-                self.edit(start..cursor, "");
-                return true;
-            }
-        }
-
-        // 4. Bullet list prefix at cursor boundary
-        for prefix in ["- ", "* ", "+ "] {
-            if trimmed == prefix {
-                if !indent.is_empty() {
-                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
+        if let Some(item) = accepted_list_marker(&self.content, line_start) {
+            if item.prefix_end() == line_before.len() {
+                if item.task.is_some() {
+                    let start = line_start + item.marker_end;
+                    self.edit(start..cursor, "");
+                    return true;
+                }
+                if item.indent_bytes > 0 {
+                    let indent = &line_before[..item.indent_bytes];
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 {
+                        1
+                    } else {
+                        2
+                    };
                     self.edit(line_start..line_start + outdent_len, "");
                 } else {
                     self.edit(line_start..cursor, "");
@@ -640,23 +615,7 @@ impl DocumentTab {
             }
         }
 
-        // 5. Numbered list prefix at cursor boundary
-        if let Some(dot_pos) = trimmed.find(". ") {
-            if dot_pos > 0
-                && trimmed[..dot_pos].chars().all(|c| c.is_ascii_digit())
-                && dot_pos + 2 == trimmed.len()
-            {
-                if !indent.is_empty() {
-                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 { 1 } else { 2 };
-                    self.edit(line_start..line_start + outdent_len, "");
-                } else {
-                    self.edit(line_start..cursor, "");
-                }
-                return true;
-            }
-        }
-
-        // 6. Blockquote prefix at cursor boundary
+        // Blockquote prefix at cursor boundary
         if line_before == "> " {
             self.edit(line_start..cursor, "");
             return true;
@@ -728,10 +687,16 @@ impl DocumentTab {
         let removed_total = lines_str.len() - replacement.len();
         self.edit(start_line..end_line, &replacement);
         if range.is_empty() {
-            let new_cursor = range.start.saturating_sub(first_line_stripped).max(start_line);
+            let new_cursor = range
+                .start
+                .saturating_sub(first_line_stripped)
+                .max(start_line);
             self.caret.move_to(new_cursor);
         } else {
-            let new_start = range.start.saturating_sub(first_line_stripped).max(start_line);
+            let new_start = range
+                .start
+                .saturating_sub(first_line_stripped)
+                .max(start_line);
             let new_end = range.end.saturating_sub(removed_total).max(new_start);
             self.caret.range = new_start..new_end;
         }
@@ -793,7 +758,8 @@ impl DocumentTab {
                 .find(|p| {
                     p.kind == tag_kind
                         && ((range.start >= p.open_delim.start && range.end <= p.close_delim.end)
-                            || (range.start <= p.open_delim.start && range.end >= p.close_delim.end))
+                            || (range.start <= p.open_delim.start
+                                && range.end >= p.close_delim.end))
                 })
                 .cloned()
             {
@@ -813,7 +779,10 @@ impl DocumentTab {
                 let new_end = new_start + inner_text.len();
                 self.edit(edit_range, &inner_text);
                 if range.is_empty() {
-                    let rel = range.start.saturating_sub(pair.inner.start).min(inner_text.len());
+                    let rel = range
+                        .start
+                        .saturating_sub(pair.inner.start)
+                        .min(inner_text.len());
                     self.caret.move_to(new_start + rel);
                 } else {
                     self.caret.range = new_start..new_end;
@@ -886,11 +855,21 @@ impl DocumentTab {
                 // In WYSIWYG mode, toggling bold/italic/underline/strike/code at an empty cursor toggles pending_formats!
                 if mode == ViewMode::Wysiwyg && tag_kind != InlineTagKind::Link {
                     match tag_kind {
-                        InlineTagKind::Bold => self.pending_formats.bold = !self.pending_formats.bold,
-                        InlineTagKind::Italic => self.pending_formats.italic = !self.pending_formats.italic,
-                        InlineTagKind::Underline => self.pending_formats.underline = !self.pending_formats.underline,
-                        InlineTagKind::Strike => self.pending_formats.strike = !self.pending_formats.strike,
-                        InlineTagKind::Code => self.pending_formats.code = !self.pending_formats.code,
+                        InlineTagKind::Bold => {
+                            self.pending_formats.bold = !self.pending_formats.bold
+                        }
+                        InlineTagKind::Italic => {
+                            self.pending_formats.italic = !self.pending_formats.italic
+                        }
+                        InlineTagKind::Underline => {
+                            self.pending_formats.underline = !self.pending_formats.underline
+                        }
+                        InlineTagKind::Strike => {
+                            self.pending_formats.strike = !self.pending_formats.strike
+                        }
+                        InlineTagKind::Code => {
+                            self.pending_formats.code = !self.pending_formats.code
+                        }
                         InlineTagKind::Link => {}
                     }
                     self.refresh_cursor();
@@ -898,7 +877,10 @@ impl DocumentTab {
                 }
 
                 // In Raw mode (or for Link), insert placeholder and select inner placeholder so a second press unwraps/removes it
-                self.edit(range.clone(), &format!("{}{}{}", prefix, placeholder, suffix));
+                self.edit(
+                    range.clone(),
+                    &format!("{}{}{}", prefix, placeholder, suffix),
+                );
                 let start = floor_boundary(&self.content, range.start + prefix.len());
                 let end = floor_boundary(&self.content, start + placeholder.len());
                 self.caret.range = start..end;
@@ -943,7 +925,8 @@ impl DocumentTab {
                     self.refresh_cursor();
                     return;
                 } else {
-                    let replacement = format!("{}{}{}{}{}", leading, prefix, core, suffix, trailing);
+                    let replacement =
+                        format!("{}{}{}{}{}", leading, prefix, core, suffix, trailing);
                     let inner_start = range.start + lead_len + prefix.len();
                     let inner_end = inner_start + core.len();
                     self.edit(range, &replacement);
@@ -961,7 +944,10 @@ impl DocumentTab {
 
             // Check if cursor is currently inside an existing table
             let in_table = parsed.lines.iter().find(|l| {
-                if let LineKind::TableRow { ref table_source, .. } = l.kind {
+                if let LineKind::TableRow {
+                    ref table_source, ..
+                } = l.kind
+                {
                     range.start >= table_source.start && range.start <= table_source.end
                 } else {
                     false
@@ -969,13 +955,19 @@ impl DocumentTab {
             });
 
             if let Some(table_line) = in_table {
-                if let LineKind::TableRow { ref cells, ref table_source, .. } = table_line.kind {
+                if let LineKind::TableRow {
+                    ref cells,
+                    ref table_source,
+                    ..
+                } = table_line.kind
+                {
                     let col_count = cells.len().max(2);
                     let row_str = format!("\n|{}", "  |".repeat(col_count));
                     let insert_pos = table_source.end;
                     self.edit(insert_pos..insert_pos, &row_str);
                     let target_pos = (insert_pos + 3).min(self.content.len());
-                    self.caret.move_to(floor_boundary(&self.content, target_pos));
+                    self.caret
+                        .move_to(floor_boundary(&self.content, target_pos));
                     self.refresh_cursor();
                     return;
                 }
@@ -1041,13 +1033,30 @@ impl DocumentTab {
         let lines_str = &self.content[start_line..end_line];
         let split_lines: Vec<&str> = lines_str.split('\n').collect();
 
-        // Check if all non-empty lines (or the single line) already match `target`
+        // Check if all non-empty lines (or the single line) already match `target`.
+        // An ordered task is a checklist too: the button is on, and turning it
+        // off must keep the ordered marker instead of writing `- [ ] `.
+        let mut line_at = Vec::with_capacity(split_lines.len());
+        let mut abs = start_line;
+        for (idx, line) in split_lines.iter().enumerate() {
+            line_at.push(abs);
+            abs += line.len();
+            if idx + 1 < split_lines.len() {
+                abs += 1;
+            }
+        }
         let all_match = split_lines
             .iter()
-            .filter(|l| !l.trim().is_empty() || split_lines.len() == 1)
-            .all(|line| {
-                let (_, existing, _) = parse_line_block_prefix(line);
-                existing == Some(target)
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty() || split_lines.len() == 1)
+            .all(|(idx, _line)| {
+                let at = line_at[idx];
+                if target == BlockFormatTarget::TaskList {
+                    accepted_list_marker(&self.content, at).is_some_and(|item| item.task.is_some())
+                } else {
+                    let (_, existing, _) = parse_line_block_prefix(&self.content, at);
+                    existing == Some(target)
+                }
             });
 
         let mut transformed = Vec::with_capacity(split_lines.len());
@@ -1055,14 +1064,19 @@ impl DocumentTab {
         let mut total_delta: isize = 0;
 
         for (idx, line) in split_lines.iter().enumerate() {
-            let (indent, _existing, prefix_end) = parse_line_block_prefix(line);
+            let (indent, _existing, prefix_end) =
+                parse_line_block_prefix(&self.content, line_at[idx]);
             let leading_spaces = if matches!(target, BlockFormatTarget::Heading(_)) {
                 &line[..indent.min(3)]
             } else {
                 &line[..indent]
             };
             let body = &line[prefix_end..];
-            let new_line = if all_match {
+            let new_line = if let Some(rewritten) =
+                ordered_checklist_line(&self.content, line_at[idx], target, all_match)
+            {
+                rewritten
+            } else if all_match {
                 format!("{}{}", leading_spaces, body)
             } else {
                 let new_prefix = match target {
@@ -1087,12 +1101,11 @@ impl DocumentTab {
         let replacement = transformed.join("\n");
         self.edit(start_line..end_line, &replacement);
         if range.is_empty() {
-            let new_cursor = (range.start as isize + first_delta)
-                .max(start_line as isize) as usize;
-            self.caret.move_to(floor_boundary(&self.content, new_cursor));
+            let new_cursor = (range.start as isize + first_delta).max(start_line as isize) as usize;
+            self.caret
+                .move_to(floor_boundary(&self.content, new_cursor));
         } else {
-            let new_start = (range.start as isize + first_delta)
-                .max(start_line as isize) as usize;
+            let new_start = (range.start as isize + first_delta).max(start_line as isize) as usize;
             let new_end = (range.end as isize + total_delta).max(new_start as isize) as usize;
             self.caret.range =
                 floor_boundary(&self.content, new_start)..floor_boundary(&self.content, new_end);
@@ -1122,13 +1135,12 @@ impl DocumentTab {
                 inner.pop();
             }
             let full_end = close_fence.end;
-            let trailing_nl = if full_end <= self.content.len()
-                && self.content[..full_end].ends_with('\n')
-            {
-                "\n"
-            } else {
-                ""
-            };
+            let trailing_nl =
+                if full_end <= self.content.len() && self.content[..full_end].ends_with('\n') {
+                    "\n"
+                } else {
+                    ""
+                };
             let replacement = format!("{}{}", inner, trailing_nl);
             self.edit(open_fence.start..full_end, &replacement);
             self.caret.move_to(floor_boundary(
@@ -1216,7 +1228,8 @@ impl DocumentTab {
                 let cursor_after = range.start + open.len() + text.len();
                 self.pending_formats = ActiveFormats::default();
                 self.edit(range, &wrapped);
-                self.caret.move_to(floor_boundary(&self.content, cursor_after));
+                self.caret
+                    .move_to(floor_boundary(&self.content, cursor_after));
                 self.refresh_cursor();
                 return;
             }
@@ -1300,10 +1313,8 @@ impl DocumentTab {
                             let target = skip_hidden_left(&parsed, cells[c_idx - 1].end);
                             self.place(target, extend);
                         } else {
-                            let prev_row_cell_end = parsed.lines[..pline.line_index]
-                                .iter()
-                                .rev()
-                                .find_map(|l| {
+                            let prev_row_cell_end =
+                                parsed.lines[..pline.line_index].iter().rev().find_map(|l| {
                                     if let LineKind::TableRow {
                                         cells: ref pcells,
                                         table_source: ref pts,
@@ -1390,9 +1401,8 @@ impl DocumentTab {
                             let target = skip_hidden_right(&parsed, cells[c_idx + 1].start);
                             self.place(target, extend);
                         } else {
-                            let next_row_cell_start = parsed.lines
-                                .get(pline.line_index + 1..)
-                                .and_then(|rest| {
+                            let next_row_cell_start =
+                                parsed.lines.get(pline.line_index + 1..).and_then(|rest| {
                                     rest.iter().find_map(|l| {
                                         if let LineKind::TableRow {
                                             cells: ref ncells,
@@ -1604,8 +1614,7 @@ impl DocumentTab {
 
         for l in &parsed.lines {
             if l.source.start >= table_source.start && l.source.end <= table_source.end {
-                if let LineKind::TableRow { ref raw_cells, .. } = l.kind
-                {
+                if let LineKind::TableRow { ref raw_cells, .. } = l.kind {
                     let r_idx = rows.len();
                     let line_text = self.content.get(l.source.clone()).unwrap_or("");
                     let split_cells = split_table_cells(line_text);
@@ -1620,7 +1629,9 @@ impl DocumentTab {
                             .position(|rc| cursor >= rc.start && cursor <= rc.end)
                         {
                             active_col = c_idx.min(num_cols - 1);
-                        } else if let Some(c_idx) = raw_cells.iter().rposition(|rc| rc.start <= cursor) {
+                        } else if let Some(c_idx) =
+                            raw_cells.iter().rposition(|rc| rc.start <= cursor)
+                        {
                             active_col = c_idx.min(num_cols - 1);
                         }
                     }
@@ -1716,7 +1727,8 @@ impl DocumentTab {
             format_markdown_table(&ctx.rows, &ctx.alignments, insert_idx, ctx.active_col);
         let base = ctx.table_source.start;
         self.edit(ctx.table_source, &new_table);
-        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.caret
+            .move_to(floor_boundary(&self.content, base + cell_rel.start));
         self.refresh_cursor();
     }
 
@@ -1734,7 +1746,8 @@ impl DocumentTab {
             format_markdown_table(&ctx.rows, &ctx.alignments, insert_idx, ctx.active_col);
         let base = ctx.table_source.start;
         self.edit(ctx.table_source, &new_table);
-        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.caret
+            .move_to(floor_boundary(&self.content, base + cell_rel.start));
         self.refresh_cursor();
     }
 
@@ -1798,7 +1811,8 @@ impl DocumentTab {
             format_markdown_table(&ctx.rows, &ctx.alignments, target_row, ctx.active_col);
         let base = ctx.table_source.start;
         self.edit(ctx.table_source, &new_table);
-        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.caret
+            .move_to(floor_boundary(&self.content, base + cell_rel.start));
         self.refresh_cursor();
     }
 
@@ -1825,7 +1839,8 @@ impl DocumentTab {
             format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, target_col);
         let base = ctx.table_source.start;
         self.edit(ctx.table_source, &new_table);
-        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.caret
+            .move_to(floor_boundary(&self.content, base + cell_rel.start));
         self.refresh_cursor();
     }
 
@@ -1862,7 +1877,8 @@ impl DocumentTab {
             format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, ctx.active_col);
         let base = ctx.table_source.start;
         self.edit(ctx.table_source, &new_table);
-        self.caret.move_to(floor_boundary(&self.content, base + cell_rel.start));
+        self.caret
+            .move_to(floor_boundary(&self.content, base + cell_rel.start));
         self.refresh_cursor();
     }
 
@@ -1874,7 +1890,12 @@ impl DocumentTab {
         let mut table_end = 0usize;
         let mut num_cols = 2usize;
         for line in &parsed.lines {
-            if let LineKind::TableRow { ref cells, ref table_source, .. } = line.kind {
+            if let LineKind::TableRow {
+                ref cells,
+                ref table_source,
+                ..
+            } = line.kind
+            {
                 if cursor >= table_source.start && cursor <= table_source.end {
                     in_table = true;
                     table_end = table_source.end;
@@ -1977,7 +1998,8 @@ impl DocumentTab {
                     return;
                 }
             }
-            let vis_start = skip_hidden_right(&parsed, pline.prefix_range.end).min(pline.source.end);
+            let vis_start =
+                skip_hidden_right(&parsed, pline.prefix_range.end).min(pline.source.end);
             self.place(vis_start, extend);
         } else {
             self.move_home(extend);
@@ -2343,7 +2365,57 @@ enum BlockFormatTarget {
     Blockquote,
 }
 
-fn parse_line_block_prefix(line: &str) -> (usize, Option<BlockFormatTarget>, usize) {
+/// Turning a checklist off on an ordered task keeps `N.` / `N)`.
+///
+/// A line that is not already a task stays on the shared `- [ ] ` path, so a
+/// plain ordered item still converts the same way the kit does. Markers the
+/// document does not accept (column 4 or more, or an interrupting empty
+/// marker) are not tasks here either.
+fn ordered_checklist_line(
+    content: &str,
+    line_start: usize,
+    target: BlockFormatTarget,
+    turn_off: bool,
+) -> Option<String> {
+    let line_end_pos = line_end(content, line_start);
+    let line = &content[line_start..line_end_pos];
+    let item = accepted_list_marker(content, line_start)?;
+    // An ordered task shows the checklist button on and the ordered-list
+    // button off. The ordered-list click leaves the line unchanged so it
+    // matches that off button.
+    if target == BlockFormatTarget::OrderedList {
+        if item.ordered && item.task.is_some() {
+            return Some(line.to_string());
+        }
+        return None;
+    }
+    if target != BlockFormatTarget::TaskList {
+        return None;
+    }
+    if !item.ordered || item.task.is_none() {
+        return None;
+    }
+    if !turn_off {
+        return Some(line.to_string());
+    }
+    let indent = &line[..item.indent_bytes];
+    let bytes = line.as_bytes();
+    let mut digit_end = item.indent_bytes;
+    while digit_end < bytes.len() && bytes[digit_end].is_ascii_digit() {
+        digit_end += 1;
+    }
+    let digits = &line[item.indent_bytes..digit_end];
+    let punct = item.punct as char;
+    let body = &line[item.prefix_end()..];
+    Some(format!("{indent}{digits}{punct} {body}"))
+}
+
+fn parse_line_block_prefix(
+    content: &str,
+    line_start: usize,
+) -> (usize, Option<BlockFormatTarget>, usize) {
+    let line_end_pos = line_end(content, line_start);
+    let line = &content[line_start..line_end_pos];
     let trimmed = line.trim_start();
     let indent = line.len() - trimmed.len();
     if indent <= 3 {
@@ -2364,30 +2436,15 @@ fn parse_line_block_prefix(line: &str) -> (usize, Option<BlockFormatTarget>, usi
             }
         }
     }
-    for pfx in [
-        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-    ] {
-        if trimmed.starts_with(pfx) {
-            return (indent, Some(BlockFormatTarget::TaskList), indent + pfx.len());
-        }
-    }
-    for pfx in ["- ", "* ", "+ "] {
-        if trimmed.starts_with(pfx) {
-            return (
-                indent,
-                Some(BlockFormatTarget::BulletList),
-                indent + pfx.len(),
-            );
-        }
-    }
-    if let Some(dot) = trimmed.find(". ") {
-        if dot > 0 && trimmed[..dot].chars().all(|c| c.is_ascii_digit()) {
-            return (
-                indent,
-                Some(BlockFormatTarget::OrderedList),
-                indent + dot + 2,
-            );
-        }
+    if let Some(item) = accepted_list_marker(content, line_start) {
+        let target = if item.task.is_some() && !item.ordered {
+            BlockFormatTarget::TaskList
+        } else if item.ordered {
+            BlockFormatTarget::OrderedList
+        } else {
+            BlockFormatTarget::BulletList
+        };
+        return (item.indent_bytes, Some(target), item.prefix_end());
     }
     if trimmed.starts_with("> ") {
         return (indent, Some(BlockFormatTarget::Blockquote), indent + 2);
@@ -2409,11 +2466,7 @@ fn compute_active_formats(
             LineKind::Heading { level: 1 } => fmt.h1 = true,
             LineKind::Heading { level: 2 } => fmt.h2 = true,
             LineKind::Heading { level: 3.. } => fmt.h3 = true,
-            LineKind::ListItem {
-                ordered,
-                task,
-                ..
-            } => {
+            LineKind::ListItem { ordered, task, .. } => {
                 if task.is_some() {
                     fmt.checklist = true;
                 } else if ordered {
@@ -2524,7 +2577,15 @@ fn outer_is_delimited(content: &str, start: usize, end: usize, prefix: &str, suf
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn block_prefix_len(line: &str) -> usize {
+    block_prefix_in(line, 0)
+}
+
+/// Prefix length of the line that starts at `line_start` in `content`.
+pub fn block_prefix_in(content: &str, line_start: usize) -> usize {
+    let line_end_pos = super::text_ops::line_end(content, line_start);
+    let line = &content[line_start..line_end_pos];
     let trimmed_start = line.trim_start();
     let indent_len = line.len() - trimmed_start.len();
 
@@ -2536,28 +2597,12 @@ pub fn block_prefix_len(line: &str) -> usize {
         }
     }
 
-    for prefix in [
-        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-    ] {
-        if trimmed_start.starts_with(prefix) {
-            return indent_len + prefix.len();
-        }
-    }
-
-    for prefix in ["- ", "* ", "+ "] {
-        if trimmed_start.starts_with(prefix) {
-            return indent_len + prefix.len();
-        }
+    if let Some(item) = accepted_list_marker(content, line_start) {
+        return item.prefix_end();
     }
 
     if trimmed_start.starts_with("> ") {
         return indent_len + 2;
-    }
-
-    if let Some(dot_pos) = trimmed_start.find(". ") {
-        if dot_pos > 0 && trimmed_start[..dot_pos].chars().all(|c| c.is_ascii_digit()) {
-            return indent_len + dot_pos + 2;
-        }
     }
 
     0
@@ -2707,7 +2752,8 @@ mod tests {
         doc.apply_format("bold");
         assert_eq!(doc.content, "abc");
 
-        let mut empty_doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), "".into(), None, None);
+        let mut empty_doc =
+            DocumentTab::new("tab-1".into(), "Doc.md".into(), "".into(), None, None);
         empty_doc.apply_format("bold");
         assert_eq!(empty_doc.content, "**bold text**");
 
@@ -2750,13 +2796,7 @@ mod tests {
     #[test]
     fn select_line_up_and_down_multiline() {
         let text = "Line one\nLine two\nLine three";
-        let mut doc = DocumentTab::new(
-            "tab-1".into(),
-            "Doc.md".into(),
-            text.into(),
-            None,
-            None,
-        );
+        let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), text.into(), None, None);
         // "Line one" is 0..8, newline at 8
         // "Line two" is 9..17, newline at 17
         // "Line three" is 18..28
@@ -3033,7 +3073,8 @@ mod tests {
         assert_eq!(doc.cursor_offset(), 9);
 
         // 2. Numbered list continuation and exit
-        let mut doc2 = DocumentTab::new("2".into(), "test.md".into(), "1. First".into(), None, None);
+        let mut doc2 =
+            DocumentTab::new("2".into(), "test.md".into(), "1. First".into(), None, None);
         doc2.caret.move_to(8);
         doc2.smart_newline(false);
         assert_eq!(doc2.content, "1. First\n2. ");
@@ -3043,7 +3084,13 @@ mod tests {
         assert_eq!(doc2.content, "1. First\n");
 
         // 3. Task list continuation and exit
-        let mut doc3 = DocumentTab::new("3".into(), "test.md".into(), "- [ ] Todo".into(), None, None);
+        let mut doc3 = DocumentTab::new(
+            "3".into(),
+            "test.md".into(),
+            "- [ ] Todo".into(),
+            None,
+            None,
+        );
         doc3.caret.move_to(10);
         doc3.smart_newline(false);
         assert_eq!(doc3.content, "- [ ] Todo\n- [ ] ");
@@ -3068,25 +3115,39 @@ mod tests {
     #[test]
     fn test_smart_backspace_boundaries() {
         // 1. Heading demotion
-        let mut doc = DocumentTab::new("1".into(), "test.md".into(), "# Heading".into(), None, None);
+        let mut doc =
+            DocumentTab::new("1".into(), "test.md".into(), "# Heading".into(), None, None);
         doc.caret.move_to(2); // right after "# "
         doc.smart_backspace();
         assert_eq!(doc.content, "Heading");
         assert_eq!(doc.cursor_offset(), 0);
 
-        let mut doc_h2 = DocumentTab::new("2".into(), "test.md".into(), "## Heading".into(), None, None);
+        let mut doc_h2 = DocumentTab::new(
+            "2".into(),
+            "test.md".into(),
+            "## Heading".into(),
+            None,
+            None,
+        );
         doc_h2.caret.move_to(3); // right after "## "
         doc_h2.smart_backspace();
         assert_eq!(doc_h2.content, "# Heading");
 
         // 2. Bullet list prefix removal
-        let mut doc_bullet = DocumentTab::new("3".into(), "test.md".into(), "- Item".into(), None, None);
+        let mut doc_bullet =
+            DocumentTab::new("3".into(), "test.md".into(), "- Item".into(), None, None);
         doc_bullet.caret.move_to(2); // right after "- "
         doc_bullet.smart_backspace();
         assert_eq!(doc_bullet.content, "Item");
 
         // 3. Task list prefix demotion
-        let mut doc_task = DocumentTab::new("4".into(), "test.md".into(), "- [ ] Task".into(), None, None);
+        let mut doc_task = DocumentTab::new(
+            "4".into(),
+            "test.md".into(),
+            "- [ ] Task".into(),
+            None,
+            None,
+        );
         doc_task.caret.move_to(6); // right after "- [ ] "
         doc_task.smart_backspace();
         assert_eq!(doc_task.content, "- Task");
@@ -3098,7 +3159,13 @@ mod tests {
         assert_eq!(doc_pair.content, "");
 
         // 5. Indented list item outdent on backspace
-        let mut doc_indent = DocumentTab::new("6".into(), "test.md".into(), "  - Subitem".into(), None, None);
+        let mut doc_indent = DocumentTab::new(
+            "6".into(),
+            "test.md".into(),
+            "  - Subitem".into(),
+            None,
+            None,
+        );
         doc_indent.caret.move_to(4); // right after "  - "
         doc_indent.smart_backspace();
         assert_eq!(doc_indent.content, "- Subitem");
@@ -3106,7 +3173,13 @@ mod tests {
 
     #[test]
     fn test_indent_and_outdent() {
-        let mut doc = DocumentTab::new("1".into(), "test.md".into(), "- Item 1\n- Item 2".into(), None, None);
+        let mut doc = DocumentTab::new(
+            "1".into(),
+            "test.md".into(),
+            "- Item 1\n- Item 2".into(),
+            None,
+            None,
+        );
         doc.caret.move_to(0);
         doc.indent();
         assert_eq!(doc.content, "  - Item 1\n- Item 2");
@@ -3147,14 +3220,22 @@ mod tests {
             ("code", "hello `world`"),
             ("link", "hello [world](https://)"),
         ] {
-            let mut doc =
-                DocumentTab::new("t".into(), "test.md".into(), "hello world".into(), None, None);
+            let mut doc = DocumentTab::new(
+                "t".into(),
+                "test.md".into(),
+                "hello world".into(),
+                None,
+                None,
+            );
             doc.place(8, false); // inside "world"
             doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
             assert_eq!(doc.content, expected_wrapped, "apply {cmd} failed");
             // Pressing the exact same command again must cleanly undo/unwrap it!
             doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
-            assert_eq!(doc.content, "hello world", "second press of {cmd} did not unwrap");
+            assert_eq!(
+                doc.content, "hello world",
+                "second press of {cmd} did not unwrap"
+            );
         }
 
         // 2. Block toggling ON and OFF idempotently, plus switching between block types
@@ -3175,11 +3256,15 @@ mod tests {
             assert_eq!(doc.content, expected_line, "apply block {cmd} failed");
             // Pressing a second time toggles off back to "My line"
             doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
-            assert_eq!(doc.content, "My line", "second press of block {cmd} did not toggle off");
+            assert_eq!(
+                doc.content, "My line",
+                "second press of block {cmd} did not toggle off"
+            );
         }
 
         // 3. Switching directly from Bullet List to Numbered List to Checklist without stacking
-        let mut doc = DocumentTab::new("s".into(), "test.md".into(), "Task item".into(), None, None);
+        let mut doc =
+            DocumentTab::new("s".into(), "test.md".into(), "Task item".into(), None, None);
         doc.place(2, false);
         doc.apply_format_in_mode("ul", ViewMode::Wysiwyg);
         assert_eq!(doc.content, "- Task item");
@@ -3398,7 +3483,13 @@ mod tests {
     #[test]
     fn test_table_row_and_column_manipulations_and_undo() {
         let initial_table = "| Column 1 | Column 2 |\n| :--- | :--- |\n| Item 1 | Item 2 |";
-        let mut doc = DocumentTab::new("t".into(), "test.md".into(), initial_table.into(), None, None);
+        let mut doc = DocumentTab::new(
+            "t".into(),
+            "test.md".into(),
+            initial_table.into(),
+            None,
+            None,
+        );
 
         // Place cursor in Item 1
         let pos = doc.content.find("Item 1").unwrap() + 2;
@@ -3406,7 +3497,9 @@ mod tests {
 
         // Add row above
         doc.table_add_row_above();
-        assert!(doc.content.contains("| Column 1 | Column 2 |\n| :--- | :--- |\n|  |  |\n| Item 1 | Item 2 |"));
+        assert!(doc
+            .content
+            .contains("| Column 1 | Column 2 |\n| :--- | :--- |\n|  |  |\n| Item 1 | Item 2 |"));
         assert!(doc.undo());
         assert_eq!(doc.content, initial_table);
 
@@ -3487,10 +3580,7 @@ mod tests {
         doc.table_add_row_below();
         assert!(doc.content.contains("| :--- | --- |"));
         assert!(!doc.content.contains("| :--- | :--- |"));
-        assert_eq!(
-            doc.content,
-            "| a | b |\n| :--- | --- |\n| 1 | 2 |\n|  |  |"
-        );
+        assert_eq!(doc.content, "| a | b |\n| :--- | --- |\n| 1 | 2 |\n|  |  |");
     }
 
     #[test]
@@ -3540,7 +3630,13 @@ mod tests {
 
     #[test]
     fn test_task_list_asterisk_continuation() {
-        let mut doc = DocumentTab::new("t".into(), "test.md".into(), "* [x] done".into(), None, None);
+        let mut doc = DocumentTab::new(
+            "t".into(),
+            "test.md".into(),
+            "* [x] done".into(),
+            None,
+            None,
+        );
         doc.place("* [x] done".len(), false);
 
         // Enter on "* [x] done" must continue with "* [ ] ", not "- [ ] "
@@ -3593,6 +3689,113 @@ mod tests {
         // Enter on root "- " exits the list, removing the marker
         doc.smart_newline(false);
         assert_eq!(doc.content, "");
+    }
+
+    fn edit_probe(source: &str) -> (usize, usize, String, String, String, usize, String) {
+        let prefix_len = block_prefix_len(source);
+        let marker_len = crate::model::text_ops::list_marker_len(source);
+        let mut newline_doc =
+            DocumentTab::new("n".into(), "t.md".into(), source.into(), None, None);
+        newline_doc.place(source.len(), false);
+        newline_doc.smart_newline(false);
+        let mut backspace_doc =
+            DocumentTab::new("b".into(), "t.md".into(), source.into(), None, None);
+        backspace_doc.place(source.len(), false);
+        backspace_doc.smart_backspace();
+        let mut toggle_doc = DocumentTab::new("o".into(), "t.md".into(), source.into(), None, None);
+        toggle_doc.place(source.len(), false);
+        toggle_doc.apply_format_in_mode("ol", ViewMode::Wysiwyg);
+        let mut home_doc = DocumentTab::new("h".into(), "t.md".into(), source.into(), None, None);
+        home_doc.place(0, false);
+        home_doc.move_home_in_mode(false, ViewMode::Wysiwyg);
+        let mut typed = source.to_string();
+        let at = if prefix_len > 0 { prefix_len } else { 0 };
+        typed.insert(at, 'Z');
+        (
+            prefix_len,
+            marker_len,
+            newline_doc.content,
+            backspace_doc.content,
+            toggle_doc.content,
+            home_doc.cursor_offset(),
+            typed,
+        )
+    }
+
+    #[test]
+    fn editing_helpers_accept_dot_and_paren() {
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("1. foo");
+        assert_eq!(prefix, 3, "ed-dot prefix_len");
+        assert_eq!(marker, 3, "ed-dot list_marker_len");
+        assert_eq!(newline, "1. foo\n2. ", "ed-dot newline");
+        assert_eq!(toggle, "foo", "ed-dot ol_toggle");
+        assert_eq!(home, 3, "ed-dot home_from_0");
+        assert_eq!(typed, "1. Zfoo", "ed-dot type_at_0");
+
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("1) foo");
+        assert_eq!(prefix, 3, "ed-paren prefix_len");
+        assert_eq!(marker, 3, "ed-paren list_marker_len");
+        assert_eq!(newline, "1) foo\n2) ", "ed-paren newline");
+        assert_eq!(toggle, "foo", "ed-paren ol_toggle");
+        assert_eq!(home, 3, "ed-paren home_from_0");
+        assert_eq!(typed, "1) Zfoo", "ed-paren type_at_0");
+
+        let (_prefix, _marker, newline, backspace, _toggle, _home, _typed) = edit_probe("1. ");
+        assert_eq!(newline, "", "ed-marker-dot newline");
+        assert_eq!(backspace, "", "ed-marker-dot backspace");
+
+        let (_prefix, _marker, newline, backspace, toggle, _home, typed) = edit_probe("1) ");
+        assert_eq!(newline, "", "ed-marker-paren newline");
+        assert_eq!(backspace, "", "ed-marker-paren backspace");
+        assert_eq!(toggle, "", "ed-marker-paren ol_toggle");
+        assert_eq!(typed, "1) Z", "ed-marker-paren type_at_0");
+
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("1. [ ] foo");
+        assert_eq!(prefix, 7, "ed-task prefix_len");
+        assert_eq!(marker, 7, "ed-task list_marker_len");
+        assert_eq!(newline, "1. [ ] foo\n2. [ ] ", "ed-task newline");
+        // The ordered-list button is off on an ordered task, so the click keeps the line.
+        assert_eq!(toggle, "1. [ ] foo", "ed-task ol_toggle");
+        assert_eq!(home, 7, "ed-task home_from_0");
+        assert_eq!(typed, "1. [ ] Zfoo", "ed-task type_at_0");
+
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("1) [ ] foo");
+        assert_eq!(prefix, 7, "ed-task-paren prefix_len");
+        assert_eq!(marker, 7, "ed-task-paren list_marker_len");
+        assert_eq!(newline, "1) [ ] foo\n2) [ ] ", "ed-task-paren newline");
+        assert_eq!(toggle, "1) [ ] foo", "ed-task-paren ol_toggle");
+        assert_eq!(home, 7, "ed-task-paren home_from_0");
+        assert_eq!(typed, "1) [ ] Zfoo", "ed-task-paren type_at_0");
+
+        let (prefix, marker, newline, _backspace, _toggle, home, typed) = edit_probe("- [ ] foo");
+        assert_eq!(prefix, 6, "ed-bullet-task prefix_len");
+        assert_eq!(marker, 6, "ed-bullet-task list_marker_len");
+        assert_eq!(newline, "- [ ] foo\n- [ ] ", "ed-bullet-task newline");
+        assert_eq!(home, 6, "ed-bullet-task home_from_0");
+        assert_eq!(typed, "- [ ] Zfoo", "ed-bullet-task type_at_0");
+
+        let (prefix, marker, newline, _backspace, toggle, home, typed) = edit_probe("10) foo");
+        assert_eq!(prefix, 4, "ed-ten prefix_len");
+        assert_eq!(marker, 4, "ed-ten list_marker_len");
+        assert_eq!(newline, "10) foo\n11) ", "ed-ten newline");
+        assert_eq!(toggle, "foo", "ed-ten ol_toggle");
+        assert_eq!(home, 4, "ed-ten home_from_0");
+        assert_eq!(typed, "10) Zfoo", "ed-ten type_at_0");
+
+        let (prefix, _marker, newline, backspace, toggle, home, typed) = edit_probe("1)");
+        assert_eq!(prefix, 2, "ed-empty-paren prefix_len");
+        assert_eq!(newline, "", "ed-empty-paren newline");
+        assert_eq!(backspace, "", "ed-empty-paren backspace");
+        assert_eq!(toggle, "", "ed-empty-paren ol_toggle");
+        assert_eq!(home, 2, "ed-empty-paren home_from_0");
+        assert_eq!(typed, "1)Z", "ed-empty-paren type_at_0");
+
+        let (prefix, _marker, newline, backspace, _toggle, home, typed) = edit_probe("1.");
+        assert_eq!(prefix, 2, "ed-empty-dot prefix_len");
+        assert_eq!(newline, "", "ed-empty-dot newline");
+        assert_eq!(backspace, "", "ed-empty-dot backspace");
+        assert_eq!(home, 2, "ed-empty-dot home_from_0");
+        assert_eq!(typed, "1.Z", "ed-empty-dot type_at_0");
     }
 
     #[test]
@@ -3710,5 +3913,333 @@ mod tests {
         doc.place(4, false);
         doc.move_line_up();
         assert_eq!(doc.content, "Bbb\nAaa\nCcc");
+    }
+
+    /// End, then Home, Backspace, and typing, the way CHECKER-4-R3 drove them.
+    fn crlf_caret(source: &str) -> (usize, usize, String, String, String, String, String) {
+        let mut ended = DocumentTab::new("e".into(), "t.md".into(), source.into(), None, None);
+        ended.move_end(false);
+        let end_at = ended.cursor_offset();
+        let before_disp = ended.parsed().lines[0].display_text.clone();
+        ended.move_home_in_mode(false, ViewMode::Wysiwyg);
+        let home = ended.cursor_offset();
+
+        let mut typed = DocumentTab::new("z".into(), "t.md".into(), source.into(), None, None);
+        typed.move_end(false);
+        let at = typed.cursor_offset();
+        typed.edit(at..at, "Z");
+        let typed_content = typed.content.clone();
+        let typed_disp = typed.parsed().lines[0].display_text.clone();
+
+        let mut backspaced = DocumentTab::new("b".into(), "t.md".into(), source.into(), None, None);
+        backspaced.move_end(false);
+        backspaced.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        let bs_content = backspaced.content.clone();
+        let bs_disp = backspaced.parsed().lines[0].display_text.clone();
+
+        (
+            end_at,
+            home,
+            before_disp,
+            typed_content,
+            typed_disp,
+            bs_content,
+            bs_disp,
+        )
+    }
+
+    #[test]
+    fn crlf_home_after_end_on_1_dot_foo() {
+        let (end_at, home, before_disp, _, _, _, _) = crlf_caret("1. foo\r\n");
+        assert_eq!(end_at, 6, "end_at");
+        assert_eq!(home, 3, "home after end");
+        assert_eq!(before_disp, "foo", "before_disp");
+    }
+
+    #[test]
+    fn crlf_first_backspace_on_1_dot_foo() {
+        let (_, _, before_disp, _, _, bs_content, bs_disp) = crlf_caret("1. foo\r\n");
+        assert_eq!(before_disp, "foo", "before_disp");
+        assert_eq!(bs_content, "1. fo\r\n");
+        assert_eq!(bs_disp, "fo");
+    }
+
+    #[test]
+    fn crlf_type_z_at_end_on_1_dot_foo() {
+        let (_, _, before_disp, typed_content, typed_disp, _, _) = crlf_caret("1. foo\r\n");
+        assert_eq!(before_disp, "foo", "before_disp");
+        assert_eq!(typed_content, "1. fooZ\r\n");
+        assert_eq!(typed_disp, "fooZ");
+        assert_eq!(typed_disp, format!("{before_disp}Z"));
+    }
+
+    #[test]
+    fn bare_cr_after_marker_1_dot_crfoo_is_not_a_list_item() {
+        let source = "1.\rfoo";
+        let (end_at, home, before_disp, typed_content, typed_disp, bs_content, bs_disp) =
+            crlf_caret(source);
+        let doc = parse_document(source);
+        assert!(
+            matches!(
+                doc.lines[0].kind,
+                LineKind::ListItem {
+                    ordered: true,
+                    number: 1,
+                    ..
+                }
+            ),
+            "1. before a bare CR is an empty item, display {before_disp:?}"
+        );
+        assert!(
+            matches!(doc.lines[1].kind, LineKind::Paragraph),
+            "foo after the bare CR is its own line"
+        );
+        assert_eq!(doc.lines[1].display_text, "foo");
+        assert_eq!(end_at, 2, "end_at");
+        assert_eq!(home, 2, "home");
+        assert_eq!(before_disp, "");
+        assert_eq!(typed_content, "1.Z\rfoo");
+        assert_eq!(typed_disp, "1.Z");
+        assert_eq!(bs_content, "\rfoo");
+        assert_eq!(bs_disp, "");
+    }
+
+    fn place_end(content: &str) -> DocumentTab {
+        let mut doc = DocumentTab::new("p".into(), "t.md".into(), content.to_string(), None, None);
+        doc.move_end(false);
+        doc
+    }
+
+    #[test]
+    fn checklist_toggle_keeps_ordered_marker() {
+        for (source, off, on) in [
+            ("1. [x] a", "1. a", "- [ ] a"),
+            ("1) [x] a", "1) a", "- [ ] a"),
+            ("12. [X] a", "12. a", "- [ ] a"),
+        ] {
+            let mut doc =
+                DocumentTab::new("c".into(), "t.md".into(), source.to_string(), None, None);
+            assert!(doc.active_formats.checklist, "{source} checklist");
+            assert!(!doc.active_formats.ol, "{source} ol");
+            doc.apply_format_in_mode("checklist", ViewMode::Wysiwyg);
+            assert_eq!(doc.content, off, "{source} off");
+            assert!(!doc.active_formats.checklist, "{source} checklist off");
+            assert!(doc.active_formats.ol, "{source} ol on");
+            doc.apply_format_in_mode("checklist", ViewMode::Wysiwyg);
+            assert_eq!(doc.content, on, "{source} on");
+            assert!(doc.active_formats.checklist, "{source} checklist on");
+            assert!(!doc.active_formats.ol, "{source} ol off");
+        }
+    }
+
+    #[test]
+    fn edit_probes_for_interrupted_and_indented_markers() {
+        // Empty `*` after a paragraph stays text. End lands on that line; Enter inserts a newline.
+        let mut entered = DocumentTab::new("e".into(), "t.md".into(), "foo\n*".into(), None, None);
+        entered.place(4, false);
+        entered.move_end(false);
+        assert_eq!(entered.cursor_offset(), 5);
+        entered.smart_newline(false);
+        assert_eq!(entered.content, "foo\n*\n");
+        let mut typed = DocumentTab::new("t".into(), "t.md".into(), "foo\n*".into(), None, None);
+        typed.place(5, false);
+        typed.move_home_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(typed.cursor_offset(), 4);
+        typed.edit(4..4, "Z");
+        assert_eq!(typed.content, "foo\nZ*");
+        let mut deleted = DocumentTab::new("d".into(), "t.md".into(), "foo\n*".into(), None, None);
+        deleted.edit(4..5, "");
+        assert_eq!(deleted.content, "foo\n");
+        let mut backspaced =
+            DocumentTab::new("b".into(), "t.md".into(), "foo\n*".into(), None, None);
+        backspaced.place(5, false);
+        backspaced.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(backspaced.content, "foo\n");
+
+        // `14)` after paragraph text is not a list marker.
+        let paren = "The number of windows in my house is\n14)  The number of doors is 6.";
+        let mut paren_enter =
+            DocumentTab::new("e".into(), "t.md".into(), paren.to_string(), None, None);
+        paren_enter.place(paren.find('\n').unwrap() + 1, false);
+        paren_enter.move_end(false);
+        let paren_end = paren_enter.cursor_offset();
+        assert_eq!(paren_end, paren.len());
+        paren_enter.smart_newline(false);
+        assert_eq!(paren_enter.content, format!("{paren}\n"));
+        let marker_at = paren.find("14)").unwrap();
+        let mut paren_type =
+            DocumentTab::new("t".into(), "t.md".into(), paren.to_string(), None, None);
+        paren_type.edit(marker_at..marker_at, "Z");
+        assert_eq!(
+            paren_type.content,
+            "The number of windows in my house is\nZ14)  The number of doors is 6."
+        );
+        let mut paren_bs =
+            DocumentTab::new("b".into(), "t.md".into(), paren.to_string(), None, None);
+        paren_bs.place(marker_at + "14)  ".len(), false);
+        paren_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(
+            paren_bs.content,
+            "The number of windows in my house is\n14) The number of doors is 6."
+        );
+
+        // Column 4 marker is text. Enter does not continue a list.
+        let indented = " \t63.\tnot";
+        let mut ind_enter = place_end(indented);
+        assert_eq!(ind_enter.cursor_offset(), indented.len());
+        ind_enter.smart_newline(false);
+        assert_eq!(ind_enter.content, " \t63.\tnot\n \t");
+        let mut ind_type =
+            DocumentTab::new("t".into(), "t.md".into(), indented.to_string(), None, None);
+        ind_type.move_home_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(ind_type.cursor_offset(), 0);
+        ind_type.edit(0..0, "Z");
+        assert_eq!(ind_type.content, "Z \t63.\tnot");
+        let mut ind_bs = place_end(indented);
+        ind_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(ind_bs.content, " \t63.\tno");
+
+        // A nested marker under a parent item still continues.
+        let nested_src = "10) foo\n    - bar";
+        let mut nested = DocumentTab::new(
+            "n".into(),
+            "t.md".into(),
+            nested_src.to_string(),
+            None,
+            None,
+        );
+        nested.place(nested_src.find("    - bar").unwrap(), false);
+        nested.move_end(false);
+        assert_eq!(nested.cursor_offset(), nested_src.len());
+        nested.smart_newline(false);
+        assert_eq!(nested.content, "10) foo\n    - bar\n    - ");
+    }
+
+    #[test]
+    fn enter_keeps_cr_on_ordered_task_and_paren_marker() {
+        let mut task =
+            DocumentTab::new("t".into(), "t.md".into(), "1. [ ] \r\n".into(), None, None);
+        task.place(crate::model::text_ops::line_end(&task.content, 0), false);
+        task.smart_newline(false);
+        assert_eq!(task.content, "1. [ ] \n2. [ ] \r\n");
+        let mut paren = DocumentTab::new("p".into(), "t.md".into(), "1) \r\n".into(), None, None);
+        paren.place(crate::model::text_ops::line_end(&paren.content, 0), false);
+        paren.smart_newline(false);
+        assert_eq!(paren.content, "1) \n2) \r\n");
+        // Plain dot and bullet markers still exit, the same as the kit.
+        let mut dot = DocumentTab::new("d".into(), "t.md".into(), "1. \r\n".into(), None, None);
+        dot.place(crate::model::text_ops::line_end(&dot.content, 0), false);
+        dot.smart_newline(false);
+        assert_eq!(dot.content, "\n");
+        let mut bullet =
+            DocumentTab::new("b".into(), "t.md".into(), "- [ ] \r\n".into(), None, None);
+        bullet.place(crate::model::text_ops::line_end(&bullet.content, 0), false);
+        bullet.smart_newline(false);
+        assert_eq!(bullet.content, "\n");
+    }
+
+    /// Ordered-list button is off on an ordered task, and the click leaves
+    /// the number and the box in place.
+    #[test]
+    fn ordered_button_off_does_not_strip_task() {
+        for source in ["1. [x] a", "1) [x] a", "12. [X] a"] {
+            let mut doc =
+                DocumentTab::new("o".into(), "t.md".into(), source.to_string(), None, None);
+            assert_eq!(
+                format!(
+                    "ol={} checklist={} content={:?}",
+                    doc.active_formats.ol, doc.active_formats.checklist, doc.content
+                ),
+                format!("ol=false checklist=true content={source:?}"),
+                "{source} before"
+            );
+            doc.apply_format_in_mode("ol", ViewMode::Wysiwyg);
+            assert_eq!(
+                format!(
+                    "ol={} checklist={} content={:?}",
+                    doc.active_formats.ol, doc.active_formats.checklist, doc.content
+                ),
+                format!("ol=false checklist=true content={source:?}"),
+                "{source} after ol click"
+            );
+        }
+    }
+
+    /// Delete, Enter, Backspace, End, and type at the markers round 6 changed.
+    #[test]
+    fn edit_probes_for_nested_lazy_and_crlf_markers() {
+        let nested = "- foo\n  *";
+        let mut nested_end =
+            DocumentTab::new("e".into(), "t.md".into(), nested.to_string(), None, None);
+        nested_end.place(6, false);
+        nested_end.move_end(false);
+        assert_eq!(nested_end.cursor_offset(), nested.len());
+        nested_end.smart_newline(false);
+        assert_eq!(nested_end.content, "- foo\n  *\n  ");
+        let mut nested_type =
+            DocumentTab::new("t".into(), "t.md".into(), nested.to_string(), None, None);
+        nested_type.place(6, false);
+        nested_type.move_home_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(nested_type.cursor_offset(), 6);
+        nested_type.edit(6..6, "Z");
+        assert_eq!(nested_type.content, "- foo\nZ  *");
+        let mut nested_del =
+            DocumentTab::new("d".into(), "t.md".into(), nested.to_string(), None, None);
+        nested_del.edit(8..9, "");
+        assert_eq!(nested_del.content, "- foo\n  ");
+        let mut nested_bs =
+            DocumentTab::new("b".into(), "t.md".into(), nested.to_string(), None, None);
+        nested_bs.place(nested.len(), false);
+        nested_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(nested_bs.content, "- foo\n  ");
+
+        let lazy = "- foo\nbar\n2. baz";
+        let mut lazy_end =
+            DocumentTab::new("e".into(), "t.md".into(), lazy.to_string(), None, None);
+        lazy_end.place(lazy.rfind('\n').unwrap() + 1, false);
+        lazy_end.move_end(false);
+        assert_eq!(lazy_end.cursor_offset(), lazy.len());
+        lazy_end.smart_newline(false);
+        assert_eq!(lazy_end.content, "- foo\nbar\n2. baz\n3. ");
+        let marker = lazy.rfind("2. ").unwrap();
+        let mut lazy_del =
+            DocumentTab::new("d".into(), "t.md".into(), lazy.to_string(), None, None);
+        lazy_del.edit(marker..marker + 3, "");
+        assert_eq!(lazy_del.content, "- foo\nbar\nbaz");
+        let mut lazy_bs = DocumentTab::new("b".into(), "t.md".into(), lazy.to_string(), None, None);
+        lazy_bs.place(lazy.len(), false);
+        lazy_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(lazy_bs.content, "- foo\nbar\n2. ba");
+        let mut lazy_type =
+            DocumentTab::new("t".into(), "t.md".into(), lazy.to_string(), None, None);
+        lazy_type.place(marker, false);
+        lazy_type.move_home_in_mode(false, ViewMode::Wysiwyg);
+        lazy_type.edit(lazy_type.cursor_offset()..lazy_type.cursor_offset(), "Z");
+        assert_eq!(lazy_type.content, "- foo\nbar\n2. Zbaz");
+
+        let crlf = "1. foo\r\n2.\r\n3. bar";
+        let third = crlf.rfind('\n').unwrap() + 1;
+        let mut crlf_end =
+            DocumentTab::new("e".into(), "t.md".into(), crlf.to_string(), None, None);
+        crlf_end.place(third, false);
+        crlf_end.move_end(false);
+        assert_eq!(crlf_end.cursor_offset(), crlf.len());
+        crlf_end.smart_newline(false);
+        assert_eq!(crlf_end.content, "1. foo\r\n2.\r\n3. bar\n4. ");
+        let mut crlf_del =
+            DocumentTab::new("d".into(), "t.md".into(), crlf.to_string(), None, None);
+        crlf_del.edit(third..third + 3, "");
+        assert_eq!(crlf_del.content, "1. foo\r\n2.\r\nbar");
+        let mut crlf_type =
+            DocumentTab::new("t".into(), "t.md".into(), crlf.to_string(), None, None);
+        crlf_type.place(third, false);
+        crlf_type.move_home_in_mode(false, ViewMode::Wysiwyg);
+        let home = crlf_type.cursor_offset();
+        crlf_type.edit(home..home, "Z");
+        assert_eq!(crlf_type.content, "1. foo\r\n2.\r\n3. Zbar");
+        let mut crlf_bs = DocumentTab::new("b".into(), "t.md".into(), crlf.to_string(), None, None);
+        crlf_bs.place(crlf.len(), false);
+        crlf_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(crlf_bs.content, "1. foo\r\n2.\r\n3. ba");
     }
 }

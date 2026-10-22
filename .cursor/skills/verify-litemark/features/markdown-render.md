@@ -7,6 +7,7 @@ Markdown render is the editor's view of a note: each source line becomes a kind,
 - `render-headings` shows `# Title` as heading level 1 with display `Title`.
 - `render-emphasis` marks bold, italic, strike, and code segments.
 - `render-lists` keeps nested indent, tasks, and ordered numbers.
+- `render-markers` accepts `1)` and `10)` ordered markers, rejects a 10-digit marker, treats `1. [ ] ` (whitespace after `]`) as a task and a bare `1. [ ]` as an ordered item whose display is `[ ]`, accepts a tab after `.` or `)`, and keeps `1.` / `1)` / `2.` as empty ordered items.
 - `render-tables` reads a header row, alignments, and body cells.
 - `render-code` reads a rust fence and the code line.
 - `render-leaf-blocks` reads a dash line as a horizontal rule, a four-star break, a four-space line as a paragraph, a tilde line as a paragraph, a closing-hash heading, and an empty ATX heading.
@@ -31,6 +32,7 @@ Preconditions:
 - **Headings.** Run `.cursor/skills/verify-litemark/scripts/prove-markdown.sh green`. Fixture `headings` passes only when the dump is byte-identical to `.cursor/skills/verify-litemark/fixtures/headings/expect.txt`. That file contains the exact line `line[0] kind=Heading level=1 source=0..7 display="Title"`.
 - **Emphasis.** The same command's `emphasis` fixture contains the exact line `segment[0][1] source=9..13 bold=true italic=false underline=false strike=false code=false link=- text="bold"`.
 - **Nested lists.** The `nested-lists` expect contains the exact line `line[1] kind=ListItem ordered=false number=0 task=none indent_cols=2 checkbox=- source=9..18 display="child"`.
+- **Markers.** The `markers-strike` expect contains the exact lines `line[2] kind=ListItem ordered=true number=3 task=none indent_cols=0 checkbox=- source=14..20 display="baz"`, `line[5] kind=Paragraph source=39..57 display="1234567890. not ok"`, `line[7] kind=ListItem ordered=true number=1 task=unchecked indent_cols=0 checkbox=75..78 source=72..84 display="first"`, `line[10] kind=ListItem ordered=true number=2 task=none indent_cols=0 checkbox=- source=106..108 display=""`, `line[14] kind=ListItem ordered=true number=1 task=none indent_cols=0 checkbox=- source=122..128 display="foo"`, `line[16] kind=ListItem ordered=true number=1 task=unchecked indent_cols=0 checkbox=139..142 source=136..148 display="third"`, and `line[17] kind=ListItem ordered=true number=1 task=none indent_cols=0 checkbox=- source=149..155 display="[ ]"`.
 - **Tables.** The `tables` expect contains the exact line `line[0] kind=TableRow header=true cells=2 source=0..14 display="| Name | Qty |"` and `cell[0][1] source=9..12 align=right text="Qty"`.
 - **Fenced code.** The `fenced-code` expect contains the exact line `line[0] kind=CodeFence opening=true language="rust" source=0..7 display=""` and `line[1] kind=CodeLine source=8..20 display="fn main() {}"`.
 - **Leaf blocks.** The `leaf-blocks` expect contains the exact line `line[0] kind=Paragraph source=0..3 display="Foo"`, `line[1] kind=HorizontalRule source=4..7 display=""`, `line[2] kind=HorizontalRule source=8..12 display=""`, `line[3] kind=Paragraph source=13..25 display="    indented"`, `line[4] kind=Paragraph source=26..29 display="~~~"`, `line[7] kind=Heading level=2 source=40..49 display="foo"`, and `line[8] kind=Heading level=1 source=50..51 display=""`. The dash line has `row[1][0] display=0..0 text=""`.
@@ -49,6 +51,7 @@ Preconditions:
 ## Gotchas
 
 - A trailing newline becomes a final `kind=Empty` line (`parse_document` appends one when the source ends with `\n`).
+- `1.  [ ] foo` and `-  [ ] foo` are tasks, display `foo`. Padding after `.`, `)`, or a bullet is 1 to 4 columns. Five columns (`1.     foo`) stay a list item whose display keeps the leftover spaces.
 - `wrap_cols=40` is the harness column count. The editor derives columns from glyph width in `src/ui/text_editor.rs`. Do not treat 40 as that pixel width.
 - Image syntax is not a `LineKind`. The alt text is a segment and the display string still contains `![Alt text](https://example.com/note.png)`.
 - Table display text keeps the pipe row. Delimiter rows are `kind=TableDelimiter` with an empty display string.

@@ -7,6 +7,8 @@ use std::ops::Range;
 use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::markdown::scan_list_marker;
+
 /// Maximum total bytes of deleted + inserted text kept on the undo and redo stacks.
 pub const UNDO_BYTE_BUDGET: usize = 256 * 1024;
 
@@ -631,40 +633,12 @@ fn split_nl(line: &str) -> (&str, &str) {
     }
 }
 
-/// Byte length of a markdown list marker, including its trailing space.
+/// Byte length of a markdown list marker, including its padding and task prefix.
 pub fn list_marker_len(line: &str) -> usize {
-    let indent = line.len() - line.trim_start().len();
-    let rest = &line[indent..];
-    let marker = if rest.starts_with("- [ ] ")
-        || rest.starts_with("- [x] ")
-        || rest.starts_with("- [X] ")
-        || rest.starts_with("* [ ] ")
-        || rest.starts_with("* [x] ")
-        || rest.starts_with("* [X] ")
-    {
-        6
-    } else if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
-        2
+    if let Some(item) = scan_list_marker(line) {
+        item.prefix_end()
     } else {
-        ordered_marker_len(rest).unwrap_or(0)
-    };
-    indent + marker
-}
-
-fn ordered_marker_len(rest: &str) -> Option<usize> {
-    let digits = rest
-        .bytes()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    if digits == 0 {
-        return None;
-    }
-    let after = &rest[digits..];
-    if let Some(stripped) = after.strip_prefix(". ") {
-        let _ = stripped;
-        Some(digits + 2)
-    } else {
-        None
+        line.len() - line.trim_start().len()
     }
 }
 

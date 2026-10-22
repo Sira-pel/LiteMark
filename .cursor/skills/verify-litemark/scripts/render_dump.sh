@@ -18,6 +18,20 @@ if [[ ! -f "$1" ]]; then
   echo "missing input $1" >&2
   exit 1
 fi
+if [[ -L "$2" ]]; then
+  echo "render_refuse=symlink path=$2"
+  exit 1
+fi
+if [[ -e "$2" ]]; then
+  out_id="$(stat -c '%d:%i' -- "$2")"
+  while IFS= read -r -d '' oracle; do
+    oracle_id="$(stat -c '%d:%i' -- "${oracle}")"
+    if [[ "${out_id}" == "${oracle_id}" ]]; then
+      echo "render_refuse=same_inode path=$2"
+      exit 1
+    fi
+  done < <(find "${KIT_DIR}/fixtures" -type f \( -name 'expect.txt' -o -name 'required-lines.txt' \) -print0)
+fi
 mkdir -p "$(dirname "$2")"
 input="$(readlink -f "$1")"
 output="$(readlink -f "$2")"

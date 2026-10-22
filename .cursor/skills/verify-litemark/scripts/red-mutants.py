@@ -44,18 +44,18 @@ MUTANTS: dict[str, dict[str, str]] = {
         "file": "src/markdown/parser.rs",
         "label": "unordered list indent_cols + 7",
         "old": """                kind = LineKind::ListItem {
-                    ordered: marker.ordered,
-                    number: marker.number,
-                    task: marker.task,
-                    indent_cols: marker.column,
+                    ordered: item.ordered,
+                    number: item.number,
+                    task: item.task.as_ref().map(|task| task.checked),
+                    indent_cols: indent_len,
                     checkbox_source,
                 };
 """,
         "new": """                kind = LineKind::ListItem {
-                    ordered: marker.ordered,
-                    number: marker.number,
-                    task: marker.task,
-                    indent_cols: marker.column + if marker.ordered { 0 } else { 7 },
+                    ordered: item.ordered,
+                    number: item.number,
+                    task: item.task.as_ref().map(|task| task.checked),
+                    indent_cols: indent_len + if item.ordered { 0 } else { 7 },
                     checkbox_source,
                 };
 """,
@@ -76,16 +76,9 @@ MUTANTS: dict[str, dict[str, str]] = {
     "fenced-code-no-fence": {
         "file": "src/markdown/parser.rs",
         "label": "fence detector also matches line rust",
-        "old": """fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)> {
-    match_opening_fence_limited(line, 3)
-}
+        "old": """        if trimmed.starts_with("```") && !skip_rejected {
 """,
-        "new": """fn match_opening_fence(line: &str) -> Option<(u8, usize, usize, Option<String>)> {
-    if line.trim() == "rust" {
-        return Some((b'`', 3, 0, Some("rust".to_string())));
-    }
-    match_opening_fence_limited(line, 3)
-}
+        "new": """        if (trimmed.starts_with("```") || trimmed == "rust") && !skip_rejected {
 """,
     },
     "links-plain": {

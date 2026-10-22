@@ -16,9 +16,23 @@ if [[ -z "${rustc_version}" ]]; then
 fi
 say "rustc=${rustc_version}"
 
-if [[ ! -x "${LITEMARK_BIN}" ]]; then
+litemark_binary() {
+  local bin="$1"
+  local magic base
+  [[ -f "${bin}" && -x "${bin}" ]] || return 1
+  base="$(basename -- "${bin}")"
+  [[ "${base}" == "litemark" ]] || return 1
+  magic="$(od -An -t x1 -N 4 -- "${bin}" | tr -d '[:space:]')"
+  [[ "${magic}" == "7f454c46" ]] || return 1
+  grep -a -m 1 -F -q --binary-files=text 'litemark' -- "${bin}"
+}
+
+if [[ ! -e "${LITEMARK_BIN}" ]]; then
   say "doctor fail bin=${LITEMARK_BIN} missing"
   say "run .cursor/skills/verify-litemark/scripts/launch.sh"
+  fail=1
+elif ! litemark_binary "${LITEMARK_BIN}"; then
+  say "doctor fail bin=${LITEMARK_BIN} not-litemark"
   fail=1
 else
   say "bin=${LITEMARK_BIN}"
@@ -37,6 +51,7 @@ green_fixtures=(
   headings
   emphasis
   nested-lists
+  markers-strike
   tables
   fenced-code
   leaf-blocks

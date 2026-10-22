@@ -1,8 +1,8 @@
 use crate::actions::*;
-use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
-use crate::model::text_ops::{
-    home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
+use crate::markdown::{
+    checkbox_click_replacement, export_stem, parse_document, render_export, TableColumnAlign,
 };
+use crate::model::text_ops::{home_offset, offset_to_utf16, range_from_utf16, range_to_utf16};
 use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
@@ -1043,7 +1043,12 @@ impl LiteMarkApp {
     }
 
     pub fn toggle_folder(&mut self, folder_id: &str) {
-        if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.id == folder_id) {
+        if let Some(folder) = self
+            .workspace
+            .folders
+            .iter_mut()
+            .find(|f| f.id == folder_id)
+        {
             folder.is_open = !folder.is_open;
         }
     }
@@ -1702,7 +1707,7 @@ impl LiteMarkApp {
                 if let Some(tab) = self.active_tab_mut() {
                     if !tab.is_read_only() && range.end <= tab.content.len() {
                         let current = &tab.content[range.clone()];
-                        let replacement = if current == "[ ]" { "[x]" } else { "[ ]" };
+                        let replacement = checkbox_click_replacement(current);
                         tab.edit(range, replacement);
                     }
                 }
@@ -1802,7 +1807,9 @@ impl LiteMarkApp {
             }
         }
 
-        let is_table = self.active_tab().is_some_and(|tab| tab.active_formats.table);
+        let is_table = self
+            .active_tab()
+            .is_some_and(|tab| tab.active_formats.table);
         self.open_menu = None;
         self.editor_context_menu = Some(EditorContextMenu {
             position: event.position,
@@ -1836,12 +1843,7 @@ impl LiteMarkApp {
                 tab.marked_range.clone(),
             )
         } else {
-            (
-                String::new(),
-                Arc::new(parse_document("")),
-                0..0,
-                None,
-            )
+            (String::new(), Arc::new(parse_document("")), 0..0, None)
         };
         let font_family = match view_mode {
             ViewMode::Wysiwyg => Theme::FONT_PROSE.into(),
@@ -1967,9 +1969,7 @@ impl EntityInputHandler for LiteMarkApp {
         if self.settings.view_mode == ViewMode::Wysiwyg && range.is_empty() && text != "\n" {
             let cursor = range.start;
             let line_start = home_offset(&content, cursor);
-            let line_end_pos = line_end(&content, cursor);
-            let line = &content[line_start..line_end_pos];
-            let prefix_len = block_prefix_len(line);
+            let prefix_len = block_prefix_in(&content, line_start);
             if prefix_len > 0 && cursor < line_start + prefix_len {
                 let target = line_start + prefix_len;
                 range = target..target;
@@ -2166,7 +2166,10 @@ impl EntityInputHandler for LiteMarkApp {
                 let x1 = cell.shaped.x_for_index(local_end);
                 return Some(Bounds::from_corners(
                     point(cell.text_origin.x + x0, cell.text_origin.y),
-                    point(cell.text_origin.x + x1.max(x0), cell.text_origin.y + row.line_height),
+                    point(
+                        cell.text_origin.x + x1.max(x0),
+                        cell.text_origin.y + row.line_height,
+                    ),
                 ));
             }
         }
@@ -3113,172 +3116,172 @@ impl Render for LiteMarkApp {
                 )
             } else {
                 let (point, anchor, width, items) = match open_id {
-                MenuId::File => (
-                    Point::new(px(8.0), px(76.0)),
-                    Corner::TopLeft,
-                    px(220.0),
-                    build_file_menu_items(
-                        active_tab_has_pdf,
-                        on_new_tab.clone(),
-                        on_new_folder.clone(),
-                        on_open.clone(),
-                        on_choose_dir.clone(),
-                        on_save.clone(),
-                        on_save_as.clone(),
-                        on_export_html.clone(),
-                        on_export_md.clone(),
-                        on_export_txt.clone(),
-                        on_view_pdf.clone(),
-                        on_close_active_tab.clone(),
-                    ),
-                ),
-                MenuId::Edit => (
-                    Point::new(px(48.0), px(76.0)),
-                    Corner::TopLeft,
-                    px(200.0),
-                    build_edit_menu_items(
-                        on_undo.clone(),
-                        on_redo.clone(),
-                        on_cut.clone(),
-                        on_copy.clone(),
-                        on_paste.clone(),
-                        on_select_all.clone(),
-                        on_toggle_find.clone(),
-                        on_open_replace.clone(),
-                    ),
-                ),
-                MenuId::View => (
-                    Point::new(px(92.0), px(76.0)),
-                    Corner::TopLeft,
-                    px(220.0),
-                    build_view_menu_items(
-                        self.settings.view_mode,
-                        self.settings.show_line_numbers,
-                        self.settings.word_wrap,
-                        self.show_sidebar,
-                        self.settings.content_alignment,
-                        on_set_view_mode.clone(),
-                        on_toggle_line_numbers.clone(),
-                        on_toggle_word_wrap.clone(),
-                        on_set_content_alignment.clone(),
-                        on_zoom_in.clone(),
-                        on_zoom_out.clone(),
-                        on_reset_zoom.clone(),
-                        on_toggle_sidebar.clone(),
-                        on_toggle_zen.clone(),
-                    ),
-                ),
-                MenuId::Settings => (
-                    Point::new(window.viewport_size().width - px(8.0), px(76.0)),
-                    Corner::TopRight,
-                    px(220.0),
-                    build_settings_menu_items(
-                        self.settings.theme,
-                        self.settings.base_font_size,
-                        on_set_theme.clone(),
-                        on_set_font_size.clone(),
-                        on_open_shortcuts.clone(),
-                        on_open_about.clone(),
-                    ),
-                ),
-                MenuId::Hamburger => {
-                    let file_items = build_file_menu_items(
-                        active_tab_has_pdf,
-                        on_new_tab.clone(),
-                        on_new_folder.clone(),
-                        on_open.clone(),
-                        on_choose_dir.clone(),
-                        on_save.clone(),
-                        on_save_as.clone(),
-                        on_export_html.clone(),
-                        on_export_md.clone(),
-                        on_export_txt.clone(),
-                        on_view_pdf.clone(),
-                        on_close_active_tab.clone(),
-                    );
-                    let edit_items = build_edit_menu_items(
-                        on_undo.clone(),
-                        on_redo.clone(),
-                        on_cut.clone(),
-                        on_copy.clone(),
-                        on_paste.clone(),
-                        on_select_all.clone(),
-                        on_toggle_find.clone(),
-                        on_open_replace.clone(),
-                    );
-                    let view_items = build_view_menu_items(
-                        self.settings.view_mode,
-                        self.settings.show_line_numbers,
-                        self.settings.word_wrap,
-                        self.show_sidebar,
-                        self.settings.content_alignment,
-                        on_set_view_mode.clone(),
-                        on_toggle_line_numbers.clone(),
-                        on_toggle_word_wrap.clone(),
-                        on_set_content_alignment.clone(),
-                        on_zoom_in.clone(),
-                        on_zoom_out.clone(),
-                        on_reset_zoom.clone(),
-                        on_toggle_sidebar.clone(),
-                        on_toggle_zen.clone(),
-                    );
-                    let items = vec![
-                        MenuItem::submenu("File", None, file_items),
-                        MenuItem::submenu("Edit", None, edit_items),
-                        MenuItem::submenu("View", None, view_items),
-                    ];
-                    (
+                    MenuId::File => (
                         Point::new(px(8.0), px(76.0)),
                         Corner::TopLeft,
-                        px(180.0),
-                        items,
-                    )
-                }
-                MenuId::Overflow => {
-                    let overflow_x = if is_narrow {
-                        (window.viewport_size().width / 2.0 + px(128.0))
-                            .min(window.viewport_size().width - px(8.0))
-                    } else {
-                        (window.viewport_size().width / 2.0 + px(270.0))
-                            .min(window.viewport_size().width - px(8.0))
-                    };
-                    (
-                        Point::new(
-                            overflow_x.min(window.viewport_size().width - px(8.0)),
-                            px(76.0),
+                        px(220.0),
+                        build_file_menu_items(
+                            active_tab_has_pdf,
+                            on_new_tab.clone(),
+                            on_new_folder.clone(),
+                            on_open.clone(),
+                            on_choose_dir.clone(),
+                            on_save.clone(),
+                            on_save_as.clone(),
+                            on_export_html.clone(),
+                            on_export_md.clone(),
+                            on_export_txt.clone(),
+                            on_view_pdf.clone(),
+                            on_close_active_tab.clone(),
                         ),
-                        Corner::TopRight,
-                        px(210.0),
-                        build_overflow_menu_items(
-                            is_narrow,
-                            on_format.clone(),
-                            on_insert_table.clone(),
+                    ),
+                    MenuId::Edit => (
+                        Point::new(px(48.0), px(76.0)),
+                        Corner::TopLeft,
+                        px(200.0),
+                        build_edit_menu_items(
+                            on_undo.clone(),
+                            on_redo.clone(),
+                            on_cut.clone(),
+                            on_copy.clone(),
+                            on_paste.clone(),
+                            on_select_all.clone(),
                             on_toggle_find.clone(),
-                            on_close_menu.clone(),
+                            on_open_replace.clone(),
                         ),
-                    )
-                }
-                MenuId::Table => unreachable!(),
-            };
+                    ),
+                    MenuId::View => (
+                        Point::new(px(92.0), px(76.0)),
+                        Corner::TopLeft,
+                        px(220.0),
+                        build_view_menu_items(
+                            self.settings.view_mode,
+                            self.settings.show_line_numbers,
+                            self.settings.word_wrap,
+                            self.show_sidebar,
+                            self.settings.content_alignment,
+                            on_set_view_mode.clone(),
+                            on_toggle_line_numbers.clone(),
+                            on_toggle_word_wrap.clone(),
+                            on_set_content_alignment.clone(),
+                            on_zoom_in.clone(),
+                            on_zoom_out.clone(),
+                            on_reset_zoom.clone(),
+                            on_toggle_sidebar.clone(),
+                            on_toggle_zen.clone(),
+                        ),
+                    ),
+                    MenuId::Settings => (
+                        Point::new(window.viewport_size().width - px(8.0), px(76.0)),
+                        Corner::TopRight,
+                        px(220.0),
+                        build_settings_menu_items(
+                            self.settings.theme,
+                            self.settings.base_font_size,
+                            on_set_theme.clone(),
+                            on_set_font_size.clone(),
+                            on_open_shortcuts.clone(),
+                            on_open_about.clone(),
+                        ),
+                    ),
+                    MenuId::Hamburger => {
+                        let file_items = build_file_menu_items(
+                            active_tab_has_pdf,
+                            on_new_tab.clone(),
+                            on_new_folder.clone(),
+                            on_open.clone(),
+                            on_choose_dir.clone(),
+                            on_save.clone(),
+                            on_save_as.clone(),
+                            on_export_html.clone(),
+                            on_export_md.clone(),
+                            on_export_txt.clone(),
+                            on_view_pdf.clone(),
+                            on_close_active_tab.clone(),
+                        );
+                        let edit_items = build_edit_menu_items(
+                            on_undo.clone(),
+                            on_redo.clone(),
+                            on_cut.clone(),
+                            on_copy.clone(),
+                            on_paste.clone(),
+                            on_select_all.clone(),
+                            on_toggle_find.clone(),
+                            on_open_replace.clone(),
+                        );
+                        let view_items = build_view_menu_items(
+                            self.settings.view_mode,
+                            self.settings.show_line_numbers,
+                            self.settings.word_wrap,
+                            self.show_sidebar,
+                            self.settings.content_alignment,
+                            on_set_view_mode.clone(),
+                            on_toggle_line_numbers.clone(),
+                            on_toggle_word_wrap.clone(),
+                            on_set_content_alignment.clone(),
+                            on_zoom_in.clone(),
+                            on_zoom_out.clone(),
+                            on_reset_zoom.clone(),
+                            on_toggle_sidebar.clone(),
+                            on_toggle_zen.clone(),
+                        );
+                        let items = vec![
+                            MenuItem::submenu("File", None, file_items),
+                            MenuItem::submenu("Edit", None, edit_items),
+                            MenuItem::submenu("View", None, view_items),
+                        ];
+                        (
+                            Point::new(px(8.0), px(76.0)),
+                            Corner::TopLeft,
+                            px(180.0),
+                            items,
+                        )
+                    }
+                    MenuId::Overflow => {
+                        let overflow_x = if is_narrow {
+                            (window.viewport_size().width / 2.0 + px(128.0))
+                                .min(window.viewport_size().width - px(8.0))
+                        } else {
+                            (window.viewport_size().width / 2.0 + px(270.0))
+                                .min(window.viewport_size().width - px(8.0))
+                        };
+                        (
+                            Point::new(
+                                overflow_x.min(window.viewport_size().width - px(8.0)),
+                                px(76.0),
+                            ),
+                            Corner::TopRight,
+                            px(210.0),
+                            build_overflow_menu_items(
+                                is_narrow,
+                                on_format.clone(),
+                                on_insert_table.clone(),
+                                on_toggle_find.clone(),
+                                on_close_menu.clone(),
+                            ),
+                        )
+                    }
+                    MenuId::Table => unreachable!(),
+                };
 
-            Some(
-                render_dropdown_menu(
-                    MenuProps {
-                        id: ("menu-dropdown", open_id as usize).into(),
-                        point,
-                        anchor_corner: anchor,
-                        width,
-                        items,
-                        focus_handle: self.menu_focus_handle.clone(),
-                        selected_index: self.menu_selected_ix,
-                        open_submenu_ix: self.menu_open_submenu_ix,
-                        on_close: on_close_menu.clone(),
-                        on_set_submenu: on_set_submenu.clone(),
-                    },
-                    &theme,
+                Some(
+                    render_dropdown_menu(
+                        MenuProps {
+                            id: ("menu-dropdown", open_id as usize).into(),
+                            point,
+                            anchor_corner: anchor,
+                            width,
+                            items,
+                            focus_handle: self.menu_focus_handle.clone(),
+                            selected_index: self.menu_selected_ix,
+                            open_submenu_ix: self.menu_open_submenu_ix,
+                            on_close: on_close_menu.clone(),
+                            on_set_submenu: on_set_submenu.clone(),
+                        },
+                        &theme,
+                    )
+                    .into_any_element(),
                 )
-                .into_any_element(),
-            )
             }
         } else {
             None
