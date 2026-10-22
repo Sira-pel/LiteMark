@@ -4242,4 +4242,130 @@ mod tests {
         crlf_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
         assert_eq!(crlf_bs.content, "1. foo\r\n2.\r\n3. ba");
     }
+
+    /// R5-1. Click, End, and Right share the visible end of a closing-hash
+    /// heading. Delete there leaves the heading word `foo`. Enter there breaks
+    /// after the heading.
+    #[test]
+    fn closing_hash_click_end_delete_and_enter_keep_the_heading() {
+        let src = "# foo #\nnext";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        let click = {
+            let parsed = doc.parsed();
+            let line = &parsed.lines[0];
+            assert_eq!(line.display_text, "foo");
+            line.offset_map.display_to_source(line.display_text.len())
+        };
+
+        doc.place(0, false);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), click, "End lands on the click");
+        doc.place(4, false);
+        doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), click, "Right lands on the click");
+        doc.place(7, false);
+        assert_eq!(doc.cursor_offset(), click, "place at the source end snaps to the click");
+
+        doc.place(click, false);
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# foo #\next");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "foo");
+        assert_eq!(parsed.lines[1].display_text, "ext");
+        assert!(matches!(parsed.lines[0].kind, LineKind::Heading { level: 1 }));
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(click, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "# foo #\n\nnext");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "foo");
+        assert_eq!(parsed.lines[1].display_text, "");
+        assert_eq!(parsed.lines[2].display_text, "next");
+        assert!(matches!(parsed.lines[0].kind, LineKind::Heading { level: 1 }));
+        assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
+        assert!(matches!(parsed.lines[2].kind, LineKind::Paragraph));
+
+        let src = "## foo ##\nbar";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        let click = {
+            let parsed = doc.parsed();
+            let line = &parsed.lines[0];
+            assert_eq!(line.display_text, "foo");
+            line.offset_map.display_to_source(line.display_text.len())
+        };
+        doc.place(0, false);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), click);
+        doc.place(5, false);
+        doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), click);
+        doc.place(click, false);
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "## foo ##\nar");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "foo");
+        assert_eq!(parsed.lines[1].display_text, "ar");
+        assert!(matches!(parsed.lines[0].kind, LineKind::Heading { level: 2 }));
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(click, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "## foo ##\n\nbar");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "foo");
+        assert_eq!(parsed.lines[1].display_text, "");
+        assert_eq!(parsed.lines[2].display_text, "bar");
+        assert!(matches!(parsed.lines[0].kind, LineKind::Heading { level: 2 }));
+        assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
+        assert!(matches!(parsed.lines[2].kind, LineKind::Paragraph));
+    }
+
+    /// R5-2. Enter at the end of a spaced or starred rule inserts the same
+    /// plain break Enter inserts after `---`.
+    #[test]
+    fn enter_on_spaced_rules_inserts_a_plain_break() {
+        let rules = [
+            "---",
+            "- - -",
+            "* * *",
+            "-     -      -      -",
+            " **  * ** * ** * **",
+        ];
+        for rule in rules {
+            let src = format!("{rule}\nnext");
+            let end = {
+                let parsed = parse_document(&src);
+                assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
+                assert_eq!(parsed.lines[0].display_text, "");
+                parsed.lines[0].source.end
+            };
+            let mut doc = DocumentTab::new("t".into(), "t.md".into(), src, None, None);
+            doc.place(end, false);
+            doc.smart_newline(false);
+            assert_eq!(doc.content, format!("{rule}\n\nnext"));
+            let parsed = doc.parsed();
+            assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
+            assert_eq!(parsed.lines[0].display_text, "");
+            assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
+            assert_eq!(parsed.lines[1].display_text, "");
+            assert_eq!(parsed.lines[2].display_text, "next");
+        }
+    }
+
+    /// R5-3. Enter at offset 4 of `Foo\rBar` inserts a blank line between them.
+    #[test]
+    fn enter_at_start_of_bare_cr_line_inserts_a_line() {
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), "Foo\rBar".into(), None, None);
+        doc.place(4, false);
+        assert_eq!(doc.cursor_offset(), 4);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "Foo\r\n\nBar");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines.len(), 3);
+        assert_eq!(parsed.lines[0].display_text, "Foo");
+        assert_eq!(parsed.lines[1].display_text, "");
+        assert_eq!(parsed.lines[2].display_text, "Bar");
+        assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
+    }
 }

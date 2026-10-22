@@ -3785,4 +3785,45 @@ bare[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\
 bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
         );
     }
+
+    /// R5-4. Stars, underscores, and dashes inside an open HTML block stay
+    /// visible text. They are not a thematic break.
+    #[test]
+    fn extended_rules_inside_html_stay_visible_text() {
+        let outside = parse_document("Foo\n****\n");
+        assert!(matches!(outside.lines[1].kind, LineKind::HorizontalRule));
+        assert_eq!(outside.lines[1].display_text, "");
+        let kept = "- item\n<br>\n---\n";
+        let list_rule = parse_document(kept);
+        assert!(matches!(list_rule.lines[2].kind, LineKind::HorizontalRule));
+        assert_eq!(list_rule.lines[2].display_text, "");
+        assert_eq!(&kept[list_rule.lines[2].source.clone()], "---");
+
+        let cases = [
+            ("<pre>\n****\n", 1, "****"),
+            ("<div>\n****\n", 1, "****"),
+            ("<!--\n****\n", 1, "****"),
+            ("<script>\n****\n", 1, "****"),
+            ("<pre>\n____\n", 1, "____"),
+            ("<pre>\n_ _ _\n", 1, "_ _ _"),
+            ("<pre>\n* * *\n", 1, "* * *"),
+            ("<pre>\n- - -\n", 1, "- - -"),
+            ("<pre>\n\n****\n", 2, "****"),
+            ("Para\n<pre>\n****\n", 2, "****"),
+            ("<pre>\n   ****\n", 1, "   ****"),
+            ("<pre>\n*\t*\t*\n", 1, "*\t*\t*"),
+            ("<pre>\r****\r", 1, "****"),
+        ];
+        for (src, index, display) in cases {
+            let doc = parse_document(src);
+            let line = &doc.lines[index];
+            assert_eq!(&src[line.source.clone()], display, "{src:?}");
+            assert_eq!(line.display_text, display, "{src:?}");
+            assert!(
+                matches!(line.kind, LineKind::Paragraph),
+                "{src:?} kind {:?}",
+                line.kind
+            );
+        }
+    }
 }
