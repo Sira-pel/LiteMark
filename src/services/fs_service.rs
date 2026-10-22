@@ -72,7 +72,11 @@ pub fn seed_welcome_note(notes_dir: &Path) {
 }
 
 pub fn sanitize_name(name: &str) -> String {
+    // Trim whitespace first so a leading dot after spaces is still stripped:
+    // " .hidden" must become "hidden", not ".hidden" (which would create a
+    // note that never shows up in the sidebar).
     name.replace(['/', '\\', '\0'], "_")
+        .trim()
         .trim_matches('.')
         .trim()
         .to_string()
@@ -433,6 +437,11 @@ pub fn copy_folder(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+    // Create the destination first, outside the cleanup's reach: if
+    // create_dir fails because something else took the name in between the
+    // uniqueness check and here, the cleanup must not delete that real
+    // folder — it only ever removes a folder this copy created.
+    fs::create_dir(dest)?;
     if let Err(err) = copy_dir_inner(src, dest) {
         // Never leave a half-copied folder behind.
         let _ = fs::remove_dir_all(dest);
@@ -442,7 +451,6 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
 }
 
 fn copy_dir_inner(src: &Path, dest: &Path) -> io::Result<()> {
-    fs::create_dir(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         // DirEntry::file_type does not follow symlinks: skip links entirely.
@@ -646,6 +654,10 @@ mod tests {
         assert_eq!(sanitize_name("../../etc/passwd"), "_.._etc_passwd");
         assert_eq!(sanitize_name("My Notes/File.md"), "My Notes_File.md");
         assert_eq!(sanitize_name("..hidden.."), "hidden");
+        // Leading whitespace must not hide a dot from the trim, or the
+        // created note would be invisible in the sidebar.
+        assert_eq!(sanitize_name(" .hidden"), "hidden");
+        assert_eq!(sanitize_name("  "), "");
     }
 
     #[test]
