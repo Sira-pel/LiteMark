@@ -1276,7 +1276,7 @@ fn atx_heading_within(line: &str, max_indent: usize) -> Option<(u8, std::ops::Ra
         }
     } else {
         end = bytes.len();
-        while end > content_start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+        while end > content_start && bytes[end - 1] == b' ' {
             end -= 1;
         }
     }

@@ -1367,6 +1367,9 @@ impl DocumentTab {
             return;
         }
         if let Some(pline) = parsed.line_at_offset(pos) {
+            if extend && pos > visible_line_end(pline, self.view_mode) && pos <= pline.source.end {
+                return self.move_left(true);
+            }
             if let LineKind::TableRow {
                 ref cells,
                 ref raw_cells,
@@ -1413,9 +1416,9 @@ impl DocumentTab {
             }
             if pos <= pline.prefix_range.end && pos >= pline.source.start {
                 if pline.source.start > 0 {
-                    let prev_end = pline.source.start - 1;
-                    let snapped = skip_hidden_left(&parsed, prev_end);
-                    self.place(snapped, extend);
+                    let prev = pline.source.start - 1;
+                    let snapped = skip_hidden_left(&parsed, prev);
+                    self.place(if extend { prev } else { snapped }, extend);
                 } else {
                     self.place(0, extend);
                 }
@@ -1504,6 +1507,9 @@ impl DocumentTab {
             }
             let vend = visible_line_end(pline, self.view_mode);
             let source_end = pline.source.end;
+            if extend && pos >= vend && pos < source_end {
+                return self.move_right(true);
+            }
             if pos >= vend && vend < source_end {
                 let break_len = line_ending_len(&self.content, source_end);
                 if break_len > 0 {
@@ -2135,11 +2141,17 @@ impl DocumentTab {
     pub fn move_end(&mut self, extend: bool) {
         self.pending_formats = ActiveFormats::default();
         let cursor = self.cursor_offset();
-        let parsed = self.parsed();
-        let target = parsed
-            .line_at_offset(cursor)
-            .map(|line| visible_line_end(line, self.view_mode))
-            .unwrap_or_else(|| super::text_ops::line_end(&self.content, cursor));
+        let start = super::text_ops::home_offset(&self.content, cursor);
+        let nl = self.content[start..]
+            .find('\n')
+            .map_or(self.content.len(), |i| start + i);
+        let target = if extend {
+            nl
+        } else {
+            self.parsed()
+                .line_at_offset(cursor)
+                .map_or(nl, |l| visible_line_end(l, self.view_mode))
+        };
         self.place(target, extend);
     }
 
@@ -2158,27 +2170,21 @@ impl DocumentTab {
 
     pub fn select_line_down(&mut self) {
         let cursor = self.cursor_offset();
-        let target = {
-            let parsed = self.parsed();
-            let source_end = parsed
-                .line_at_offset(cursor)
+        let parsed = self.parsed();
+        let source_end = parsed
+            .line_at_offset(cursor)
+            .map(|line| line.source.end)
+            .unwrap_or_else(|| super::text_ops::line_end(&self.content, cursor));
+        let target = if cursor < source_end {
+            source_end
+        } else if source_end < self.content.len() {
+            let next = source_end + line_ending_len(&self.content, source_end);
+            parsed
+                .line_at_offset(next)
                 .map(|line| line.source.end)
-                .unwrap_or_else(|| super::text_ops::line_end(&self.content, cursor));
-            let vend = parsed
-                .line_at_offset(cursor)
-                .map(|line| visible_line_end(line, self.view_mode))
-                .unwrap_or(source_end);
-            if cursor < vend {
-                vend
-            } else if source_end < self.content.len() {
-                let next = source_end + line_ending_len(&self.content, source_end);
-                parsed
-                    .line_at_offset(next)
-                    .map(|line| visible_line_end(line, self.view_mode))
-                    .unwrap_or_else(|| super::text_ops::line_end(&self.content, next))
-            } else {
-                self.content.len()
-            }
+                .unwrap_or_else(|| super::text_ops::line_end(&self.content, next))
+        } else {
+            self.content.len()
         };
         self.place(target, true);
     }
@@ -2295,11 +2301,14 @@ impl DocumentTab {
         } else {
             let cursor = self.cursor_offset();
             let raw = super::text_ops::line_end(&self.content, cursor);
-            let target = self
-                .parsed()
-                .line_at_offset(cursor)
-                .map(|line| visible_line_end(line, self.view_mode))
-                .unwrap_or(raw);
+            let target = self.parsed().line_at_offset(cursor).map_or(raw, |line| {
+                let vend = visible_line_end(line, self.view_mode);
+                if cursor < vend {
+                    line.source.end
+                } else {
+                    vend
+                }
+            });
             if target > cursor {
                 self.edit(cursor..target, "");
             }
@@ -2331,14 +2340,14 @@ impl DocumentTab {
 
     pub fn place(&mut self, offset: usize, extend: bool) {
         self.pending_formats = ActiveFormats::default();
-        let mut offset = floor_boundary(
-            &self.content,
-            snap_off_ending_interior(&self.content, offset),
-        );
-        if let Some(line) = self.parsed().line_at_offset(offset) {
-            let vend = visible_line_end(line, self.view_mode);
-            if offset > vend && offset <= line.source.end {
-                offset = vend;
+        let mut offset = floor_boundary(&self.content, offset);
+        if !extend {
+            offset = snap_off_ending_interior(&self.content, offset);
+            if let Some(line) = self.parsed().line_at_offset(offset) {
+                let vend = visible_line_end(line, self.view_mode);
+                if offset > vend && offset <= line.source.end {
+                    offset = vend;
+                }
             }
         }
         if extend {

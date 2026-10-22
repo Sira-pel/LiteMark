@@ -112,7 +112,7 @@ pub fn move_vertical_visual(
     }
     let parsed = parse_document(content);
     let snap = |offset: usize| -> usize {
-        let Some(line) = parsed.line_at_offset(offset) else {
+        let Some(line) = parsed.line_at_offset(offset).filter(|_| !extend) else {
             return offset;
         };
         let vend = visible_line_end(line, mode);
