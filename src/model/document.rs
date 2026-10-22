@@ -327,7 +327,7 @@ impl DocumentTab {
         }
         let parsed = self.parsed();
         let line = parsed.line_at_offset(range.start)?;
-        let vend = visible_line_end(line);
+        let vend = visible_line_end(line, self.view_mode);
         if range.start == vend && vend < line.source.end {
             Some(line.source.end)
         } else {
@@ -879,7 +879,7 @@ impl DocumentTab {
                 let line_s = home_offset(&self.content, cursor);
                 let line_e = parsed
                     .line_at_offset(cursor)
-                    .map(visible_line_end)
+                    .map(|line| visible_line_end(line, self.view_mode))
                     .unwrap_or_else(|| line_end(&self.content, cursor));
                 let w_start = word_start.max(line_s);
                 let w_end = word_end.min(line_e);
@@ -1127,10 +1127,12 @@ impl DocumentTab {
                 &line[..indent]
             };
             let raw_body = &line[prefix_end..];
-            let has_hidden_closer = self
-                .parsed()
-                .line_at_offset(line_at[idx])
-                .is_some_and(|parsed_line| visible_line_end(parsed_line) < parsed_line.source.end);
+            let has_hidden_closer =
+                self.parsed()
+                    .line_at_offset(line_at[idx])
+                    .is_some_and(|parsed_line| {
+                        visible_line_end(parsed_line, self.view_mode) < parsed_line.source.end
+                    });
             let strip_closer = has_hidden_closer
                 && (all_match || !matches!(target, BlockFormatTarget::Heading(_)));
             let body = if strip_closer {
@@ -1500,7 +1502,7 @@ impl DocumentTab {
             if pos < pline.prefix_range.end {
                 pos = pline.prefix_range.end;
             }
-            let vend = visible_line_end(pline);
+            let vend = visible_line_end(pline, self.view_mode);
             let source_end = pline.source.end;
             if pos >= vend && vend < source_end {
                 let break_len = line_ending_len(&self.content, source_end);
@@ -1641,7 +1643,7 @@ impl DocumentTab {
                         return;
                     }
                 }
-                let vend = visible_line_end(pline);
+                let vend = visible_line_end(pline, self.view_mode);
                 if cursor == vend && vend < pline.source.end {
                     let after = pline.source.end;
                     let break_len = line_ending_len(&self.content, after);
@@ -2073,7 +2075,7 @@ impl DocumentTab {
         let Some(line) = parsed.line_at_offset(offset) else {
             return;
         };
-        let vend = visible_line_end(line);
+        let vend = visible_line_end(line, self.view_mode);
         if offset > vend && offset <= line.source.end {
             let prefer = self.caret.preferred_col;
             if self.caret.range.is_empty() {
@@ -2139,7 +2141,7 @@ impl DocumentTab {
         let parsed = self.parsed();
         let target = parsed
             .line_at_offset(cursor)
-            .map(visible_line_end)
+            .map(|line| visible_line_end(line, self.view_mode))
             .unwrap_or_else(|| super::text_ops::line_end(&self.content, cursor));
         self.place(target, extend);
     }
@@ -2167,7 +2169,7 @@ impl DocumentTab {
                 .unwrap_or_else(|| super::text_ops::line_end(&self.content, cursor));
             let vend = parsed
                 .line_at_offset(cursor)
-                .map(visible_line_end)
+                .map(|line| visible_line_end(line, self.view_mode))
                 .unwrap_or(source_end);
             if cursor < vend {
                 vend
@@ -2175,7 +2177,7 @@ impl DocumentTab {
                 let next = source_end + line_ending_len(&self.content, source_end);
                 parsed
                     .line_at_offset(next)
-                    .map(visible_line_end)
+                    .map(|line| visible_line_end(line, self.view_mode))
                     .unwrap_or_else(|| super::text_ops::line_end(&self.content, next))
             } else {
                 self.content.len()
@@ -2210,7 +2212,7 @@ impl DocumentTab {
         };
         let mut target = super::text_ops::word_right(&self.content, origin);
         if let Some(line) = self.parsed().line_at_offset(origin) {
-            let vend = visible_line_end(line);
+            let vend = visible_line_end(line, self.view_mode);
             if vend < line.source.end
                 && origin <= vend
                 && target > vend
@@ -2247,7 +2249,7 @@ impl DocumentTab {
             let cursor = self.cursor_offset();
             let mut target = super::text_ops::word_right(&self.content, cursor);
             if let Some(line) = self.parsed().line_at_offset(cursor) {
-                let vend = visible_line_end(line);
+                let vend = visible_line_end(line, self.view_mode);
                 if vend < line.source.end && cursor <= vend && target > vend {
                     target = vend;
                 }
@@ -2267,8 +2269,22 @@ impl DocumentTab {
         } else {
             let cursor = self.cursor_offset();
             let target = super::text_ops::home_offset(&self.content, cursor);
-            if target < cursor {
-                self.edit(target..cursor, "");
+            let end = {
+                let parsed = self.parsed();
+                match parsed.line_at_offset(cursor) {
+                    Some(line) => {
+                        let vend = visible_line_end(line, self.view_mode);
+                        if cursor == vend && vend < line.source.end {
+                            line.source.end
+                        } else {
+                            cursor
+                        }
+                    }
+                    None => cursor,
+                }
+            };
+            if target < end {
+                self.edit(target..end, "");
             }
         }
     }
@@ -2285,7 +2301,7 @@ impl DocumentTab {
             let target = self
                 .parsed()
                 .line_at_offset(cursor)
-                .map(visible_line_end)
+                .map(|line| visible_line_end(line, self.view_mode))
                 .unwrap_or(raw);
             if target > cursor {
                 self.edit(cursor..target, "");
@@ -2309,21 +2325,7 @@ impl DocumentTab {
     }
 
     pub fn select_line(&mut self) {
-        let cursor = self.cursor_offset();
-        let range = {
-            let parsed = self.parsed();
-            match parsed.line_at_offset(cursor) {
-                Some(line) => {
-                    let vend = visible_line_end(line);
-                    if vend < line.source.end {
-                        line.source.start..vend
-                    } else {
-                        super::text_ops::line_extent(&self.content, cursor)
-                    }
-                }
-                None => super::text_ops::line_extent(&self.content, cursor),
-            }
-        };
+        let range = super::text_ops::line_extent(&self.content, self.cursor_offset());
         self.caret.range = range;
         self.caret.reversed = false;
         self.caret.preferred_col = None;
@@ -2337,7 +2339,7 @@ impl DocumentTab {
             snap_off_ending_interior(&self.content, offset),
         );
         if let Some(line) = self.parsed().line_at_offset(offset) {
-            let vend = visible_line_end(line);
+            let vend = visible_line_end(line, self.view_mode);
             if offset > vend && offset <= line.source.end {
                 offset = vend;
             }
@@ -2705,11 +2707,11 @@ fn skip_hidden_interior_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
     pos
 }
 
-/// End of the text the caret can stand on. A closing-hash heading hides the
-/// closer, so this is the click, End, and Right target. Every other line
-/// keeps the source end.
-fn visible_line_end(line: &ParsedLine) -> usize {
-    if matches!(line.kind, LineKind::Heading { .. }) {
+/// End of the text the caret can stand on. A rendered closing-hash heading
+/// hides the closer, so this is the click, End, and Right target. Raw paints
+/// the source, and every other line keeps the source end.
+pub(crate) fn visible_line_end(line: &ParsedLine, mode: ViewMode) -> usize {
+    if mode != ViewMode::Raw && matches!(line.kind, LineKind::Heading { .. }) {
         line.offset_map.display_to_source(line.display_text.len())
     } else {
         line.source.end
@@ -2718,7 +2720,7 @@ fn visible_line_end(line: &ParsedLine) -> usize {
 
 fn skip_hidden_right(parsed: &ParsedDocument, mut pos: usize) -> usize {
     if let Some(line) = parsed.line_at_offset(pos) {
-        let vend = visible_line_end(line);
+        let vend = visible_line_end(line, ViewMode::Wysiwyg);
         if pos == vend && vend < line.source.end {
             return pos;
         }
@@ -4923,7 +4925,14 @@ mod tests {
             bounds: None,
         };
         doc.caret.move_to(0);
-        let hit = move_vertical_visual(&paint, &doc.content, &mut doc.caret, 1, false);
+        let hit = move_vertical_visual(
+            &paint,
+            &doc.content,
+            &mut doc.caret,
+            1,
+            false,
+            ViewMode::Wysiwyg,
+        );
         assert!(hit);
         assert_eq!(doc.cursor_offset(), vend);
         let at = doc.cursor_offset();
@@ -4935,5 +4944,34 @@ mod tests {
             parsed.lines[0].kind,
             LineKind::Heading { level: 1 }
         ));
+
+        let mut raw = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        raw.caret.move_to(0);
+        let raw_hit = move_vertical_visual(
+            &paint,
+            &raw.content,
+            &mut raw.caret,
+            1,
+            false,
+            ViewMode::Raw,
+        );
+        assert!(raw_hit);
+        assert_eq!(raw.cursor_offset(), src.len());
+        let at = raw.cursor_offset();
+        raw.insert_text_in_mode(at..at, "X", ViewMode::Raw);
+        assert_eq!(raw.content, "# foo #X");
+
+        let mut shift = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        shift.caret.move_to(0);
+        let shift_hit = move_vertical_visual(
+            &paint,
+            &shift.content,
+            &mut shift.caret,
+            1,
+            true,
+            ViewMode::Wysiwyg,
+        );
+        assert!(shift_hit);
+        assert_eq!(shift.caret.range, 0..vend);
     }
 }

@@ -1037,23 +1037,22 @@ struct OpenFence {
 
 /// Thematic break: the line trims to `---`, `***`, or `___`.
 ///
-/// At document level (`parent_col == 0`) only 0–3 leading spaces count. Four
-/// spaces or a tab stay a paragraph. This parser has no indented-code kind, so
-/// `    ---\rnext\r` stays text after the bare-CR split. Inside a list the same
-/// 0–3 spaces are counted past the item's content column, so `- item` followed
-/// by `    ---` is still a rule.
+/// At document level (`parent_col == 0`) only columns 0–3 count. A tab is
+/// column 4, so `\t---` stays a paragraph. This parser has no indented-code
+/// kind, so `    ---\rnext\r` stays text after the bare-CR split. Inside a
+/// list the same 0–3 columns are counted past the item's content column, and
+/// a tab stops at the next multiple of 4, so `- item` followed by `\t---` is
+/// a rule.
 fn exact_thematic_break(line: &str, parent_col: usize) -> bool {
     let trimmed = line.trim();
     if !(trimmed == "---" || trimmed == "***" || trimmed == "___") {
         return false;
     }
-    let Some(spaces) = leading_spaces(line) else {
-        return false;
-    };
-    if spaces <= 3 {
+    let column = leading_column(line);
+    if column <= 3 {
         return true;
     }
-    parent_col > 0 && spaces >= parent_col && spaces - parent_col <= 3
+    parent_col > 0 && column >= parent_col && column - parent_col <= 3
 }
 
 /// `(bytes, column)` of the first non-space, non-tab. Tabs advance to the next multiple of 4.

@@ -11,8 +11,10 @@ use std::sync::Arc;
 use gpui::*;
 
 use crate::markdown::{
-    LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
+    parse_document, LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment,
+    TableColumnAlign,
 };
+use crate::model::document::visible_line_end;
 use crate::model::text_ops::{visual_rows, Caret};
 use crate::model::ViewMode;
 
@@ -103,10 +105,23 @@ pub fn move_vertical_visual(
     caret: &mut Caret,
     delta: i32,
     extend: bool,
+    mode: ViewMode,
 ) -> bool {
     if paint.rows.is_empty() {
         return false;
     }
+    let parsed = parse_document(content);
+    let snap = |offset: usize| -> usize {
+        let Some(line) = parsed.line_at_offset(offset) else {
+            return offset;
+        };
+        let vend = visible_line_end(line, mode);
+        if offset > vend && offset <= line.source.end {
+            vend
+        } else {
+            offset
+        }
+    };
     let cursor = if !extend && !caret.range.is_empty() {
         if delta < 0 {
             caret.range.start
@@ -165,7 +180,7 @@ pub fn move_vertical_visual(
 
     let target_ix = if delta < 0 {
         if current_row_ix == 0 {
-            let target = 0;
+            let target = snap(0);
             if extend {
                 caret.select_to(target);
             } else {
@@ -176,7 +191,7 @@ pub fn move_vertical_visual(
         current_row_ix.saturating_sub((-delta) as usize)
     } else {
         if current_row_ix + 1 >= paint.rows.len() {
-            let target = content.len();
+            let target = snap(content.len());
             if extend {
                 caret.select_to(target);
             } else {
@@ -217,6 +232,7 @@ pub fn move_vertical_visual(
             .clamp(target_row.byte_start, target_row.byte_end)
             .min(content.len())
     };
+    let target_source = snap(target_source);
 
     if extend {
         caret.select_to(target_source);
