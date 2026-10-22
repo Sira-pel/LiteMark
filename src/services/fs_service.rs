@@ -29,31 +29,22 @@ unsafe extern "C" {
 
 pub const INITIAL_MARKDOWN: &str = r#"# Welcome to LiteMark
 
-A super lightweight, high-performance **Markdown & Plain Text Editor** designed with dedicated notes folder management and native Linux desktop performance.
+LiteMark is a native Markdown and text editor for Linux. Notes start in `~/Documents/Notes`.
 
-## ✨ Key Features
-- **WYSIWYG Rich Markdown:** All markdown features work natively without showing raw syntax clutter!
-- **Dedicated Notes Folder:** Automatically manages your notes in `~/Documents/Notes`.
-- **Formatting Included:** **Bold**, *italic*, <u>underline</u>, and ~~strikethrough~~.
-- **Header Levels:** Clean H1, H2, and H3 headers.
-- **Lists & Checklists:**
-  - [x] Lightweight & low memory usage
-  - [x] Open & save both .txt and .md files
-  - [x] 1-Click install as desktop app or native .deb package
-- **Quotes & Code Blocks:**
-  > "Simplicity is prerequisite for reliability." — Edsger W. Dijkstra
+## Formatting
+
+- **Bold**, *italic*, <u>underline</u>, and ~~strikethrough~~
+- Headings, lists, and task lists
+- [x] Open and save `.md` and `.txt` files
+- [x] Switch between the raw view and the WYSIWYG view
+
+> A quote.
 
 ```
-// Ultra-fast, zero-bloat native performance
 fn main() {
     println!("Hello from LiteMark!");
 }
 ```
-
----
-
-## 🚀 Native Performance (Rust with GPUI)
-Running with **GPUI** hardware-accelerated Vulkan pipeline tailored for Ubuntu with minimal memory footprint!
 "#;
 
 pub fn get_or_create_notes_dir() -> PathBuf {
