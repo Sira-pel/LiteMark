@@ -1,87 +1,92 @@
 # LiteMark
 
-**LiteMark** is an ultra-fast, native Linux Markdown and plain text editor with an authentic Ubuntu Yaru visual aesthetic. Built from the ground up using **Rust** and **GPUI** with **Vulkan hardware acceleration**, LiteMark delivers instantaneous sub-30ms startup times, minimal resource footprint, and fluid 60+ FPS text editing.
+LiteMark is a native Markdown and text editor for Linux. It edits Markdown and plain text in a raw view or a WYSIWYG view, and stores notes in a folder (by default `~/Documents/Notes`).
 
----
+## Features
 
-## ✨ Features
+- Raw Markdown and a WYSIWYG view of the same document. Line numbers are available in the raw view.
+- Headings, bold, italic, underline, strikethrough, links, lists, task lists, quotes, inline code, and code blocks.
+- Tables: a size picker, and a right-click menu to add or delete rows and columns and to set column alignment.
+- Find and replace, with match case.
+- A notes sidebar for creating notes and folders, renaming, and moving items to the trash. Trashing a note with unsaved edits asks first.
+- Open `.md`, `.txt`, and `.pdf` files. A PDF is opened as extracted text.
+- Export the current document as HTML, Markdown, or plain text.
+- Saves write a temporary file and rename it into place. Saving a new path does not replace an existing file.
+- Tabs, undo and redo, zoom, word wrap, centered or left-aligned text, dark / light / system theme, and zen mode.
+- Settings are stored in the user config directory as `litemark/settings.json`.
 
-- **Blazing Fast Native Performance**: Pure Rust desktop application using the GPUI modern UI framework with GPU/Vulkan acceleration.
-- **Instant WYSIWYG & Markdown**: Live preview and editor rendering headers, lists, code blocks, blockquotes, checklists, and tables.
-- **Dedicated Notes Directory**: Automatically tracks and organizes documents in `~/Documents/Notes` with a built-in collapsible file tree sidebar.
-- **Ubuntu Yaru Design**: Native Ubuntu styling with seamless switching between Dark (`#300A24`, `#1E1E1E`, Aubergine/Orange `#E95420`) and Light modes.
-- **Find & Replace**: In-editor search and replace bar with match counters and navigation.
-- **PDF Import**: Pure-Rust PDF text extraction using `lopdf`.
-- **Keyboard Shortcuts**: Comprehensive GNOME-style shortcuts (`Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+B`, `Ctrl+I`, `Ctrl+F`, `Ctrl+H`, `Ctrl+\`, etc.).
-- **Debian Packaging**: Ready-to-install `.deb` package generation with desktop launcher and scalable icon integration.
+## Screenshots
 
----
+_Placeholder. Screenshots are not in the repository yet._
 
-## 🚀 Getting Started
+## Install from a .deb
 
-### Prerequisites
-
-Ensure you have Rust and standard Linux build dependencies installed on Ubuntu/Debian:
-
-```bash
-# Install Rust (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Install required system packages
-sudo apt update
-sudo apt install -y build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libvulkan1 vulkan-tools
-```
-
-### Running from Source
+The packaging script builds an amd64 package. `dpkg-dev` must be installed so the script can run `dpkg-shlibdeps`.
 
 ```bash
-# Debug run
-cargo run
-
-# Optimized release run
-cargo run --release
-```
-
----
-
-## 📦 Building Debian Package (.deb)
-
-LiteMark includes a script to build a standalone `.deb` package for Ubuntu:
-
-```bash
+sudo apt install -y dpkg-dev
 bash scripts/build-deb.sh
-```
-
-The resulting package will be in `build/litemark_1.0.0_amd64.deb`. You can install it on your system with:
-
-```bash
 sudo apt install ./build/litemark_1.0.0_amd64.deb
 ```
 
-Once installed, search for **LiteMark** in your Ubuntu Super / Applications menu or launch `litemark` from the terminal.
+The package recommends `xdg-desktop-portal` and a GTK or GNOME portal backend. Open and save dialogs use that portal.
 
----
+## Build from source
 
-## ⌨️ Shortcuts Reference
+Rust 1.85 or newer (stable). Dependencies in the lockfile use the 2024 edition, so an older toolchain will not compile this tree.
+
+```bash
+sudo apt update
+sudo apt install -y build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfreetype6-dev
+cargo build
+cargo test
+cargo run --release
+```
+
+`libxkbcommon-x11-dev` is required at link time. It provides the unversioned `libxkbcommon-x11.so`.
+
+## Runtime
+
+- A GPU with a Vulkan driver (`libvulkan1`).
+- X11 or Wayland (`libwayland-client0` on Wayland).
+- `libxcb1`, `libxkbcommon0`, and `libxkbcommon-x11-0`.
+- Fontconfig (`libfontconfig1`) and FreeType (`libfreetype6`).
+- `xdg-desktop-portal` and either `xdg-desktop-portal-gnome` or `xdg-desktop-portal-gtk` for file dialogs.
+
+## Keyboard shortcuts
 
 | Shortcut | Action |
-| :--- | :--- |
-| `Ctrl + N` | New File |
-| `Ctrl + O` | Open File Dialog |
-| `Ctrl + S` | Save File |
-| `Ctrl + \` | Toggle Notes Sidebar |
-| `Ctrl + F` | Find in Document |
-| `Ctrl + H` | Find & Replace |
-| `Ctrl + B` | Bold |
-| `Ctrl + I` | Italic |
-| `Ctrl + K` | Insert Link |
-| `Ctrl + Shift + X` | Strikethrough |
-| `Ctrl + Shift + C` | Code Block |
-| `Ctrl + Shift + D` | Toggle Dark / Light Theme |
-| `F11` | Toggle Fullscreen |
+| --- | --- |
+| Ctrl+N | New tab |
+| Ctrl+O | Open a file |
+| Ctrl+S | Save |
+| Ctrl+Shift+S | Save as |
+| Ctrl+W | Close the active tab |
+| Ctrl+F | Find |
+| Ctrl+H | Find and replace |
+| Ctrl+B / I / U | Bold / italic / underline |
+| Ctrl+Shift+X | Strikethrough |
+| Ctrl+1 / 2 / 3 | Heading 1 / 2 / 3 |
+| Ctrl+E | Inline code |
+| Ctrl+K | Insert a link |
+| Ctrl+Shift+C | Code block |
+| Ctrl+Shift+M | Toggle raw and WYSIWYG |
+| Ctrl+Shift+L | Toggle line numbers (raw view) |
+| Ctrl+Z | Undo |
+| Ctrl+Y or Ctrl+Shift+Z | Redo |
+| Ctrl+\ | Toggle the notes sidebar |
+| Ctrl+= / Ctrl+- / Ctrl+0 | Zoom in / out / reset |
+| F1 | Shortcuts |
+| F11 | Zen mode |
+| Escape | Leave zen mode, or close a dialog |
 
----
+## Limitations
 
-## 📄 License
+- Linux only for now.
+- PDF export is not implemented.
+- Opening a PDF extracts its text. The original pages are not drawn.
+- `scripts/build-deb.sh` produces an amd64 package.
 
-MIT License. See [Cargo.toml](Cargo.toml) for details.
+## License
+
+MIT. See [Cargo.toml](Cargo.toml).

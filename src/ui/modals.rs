@@ -422,7 +422,7 @@ where
                                 .text_size(px(13.0))
                                 .text_color(theme.text_primary)
                                 .line_height(relative(1.5))
-                                .child("An ultra-fast native Linux Markdown editor built with Rust and GPUI.")
+                                .child("A native Markdown and text editor for Linux.")
                         )
                 )
                 // Footer
