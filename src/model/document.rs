@@ -2066,6 +2066,10 @@ impl DocumentTab {
         self.refresh_cursor();
     }
 
+    pub fn set_view_mode(&mut self, mode: ViewMode) {
+        self.view_mode = mode;
+    }
+
     /// Up/Down land on a source column. Pull a caret that stopped inside a
     /// hidden closing-hash run back to the visible end, and keep the column
     /// the next vertical move should reuse.
@@ -4973,5 +4977,123 @@ mod tests {
         );
         assert!(shift_hit);
         assert_eq!(shift.caret.range, 0..vend);
+    }
+
+    fn heading_tab(text: &str) -> DocumentTab {
+        DocumentTab::new("t".into(), "t.md".into(), text.into(), None, None)
+    }
+
+    /// K1. Ancestor 7ad1cff rendered End on `# foo #` is offset 5, and typing
+    /// X there yields `# fooX #` (display `fooX`).
+    #[test]
+    fn raw_end_then_rendered_type_keeps_the_closer() {
+        let mut doc = heading_tab("# foo #");
+        doc.set_view_mode(ViewMode::Raw);
+        doc.place(0, false);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), 7);
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        let at = doc.cursor_offset();
+        doc.insert_text_in_mode(at..at, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# fooX #");
+        assert_eq!(doc.parsed().lines[0].display_text, "fooX");
+    }
+
+    /// Ancestor rendered End then Backspace yields `# fo #` (display `fo`).
+    #[test]
+    fn raw_end_then_rendered_backspace_deletes_visible_text() {
+        let mut doc = heading_tab("# foo #");
+        doc.set_view_mode(ViewMode::Raw);
+        doc.place(0, false);
+        doc.move_end(false);
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        doc.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# fo #");
+        assert_eq!(doc.parsed().lines[0].display_text, "fo");
+    }
+
+    /// Ancestor rendered End then Ctrl-Delete on `# foo #\nnext` leaves both lines.
+    #[test]
+    fn raw_end_then_rendered_ctrl_delete_keeps_the_next_line() {
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.set_view_mode(ViewMode::Raw);
+        doc.place(0, false);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), 7);
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        doc.delete_word_right();
+        assert_eq!(doc.content, "# foo #\nnext");
+        assert_eq!(doc.parsed().lines[0].display_text, "foo");
+        assert_eq!(doc.parsed().lines[1].display_text, "next");
+    }
+
+    /// Raw End, type X (`# foo #X`), switch to rendered, undo, redo, then type Y.
+    /// Ancestor rendered End then Y is `# fooY #`.
+    #[test]
+    fn undo_redo_after_raw_edit_then_rendered_types_at_the_visible_end() {
+        let mut doc = heading_tab("# foo #");
+        doc.set_view_mode(ViewMode::Raw);
+        doc.place(0, false);
+        doc.move_end(false);
+        let at = doc.cursor_offset();
+        doc.insert_text_in_mode(at..at, "X", ViewMode::Raw);
+        assert_eq!(doc.content, "# foo #X");
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        assert!(doc.undo());
+        assert_eq!(doc.content, "# foo #");
+        assert_eq!(doc.cursor_offset(), 5);
+        assert!(doc.redo());
+        assert_eq!(doc.content, "# foo #X");
+        assert_eq!(doc.cursor_offset(), "# foo #X".len());
+        assert!(doc.undo());
+        assert_eq!(doc.cursor_offset(), 5);
+        let at = doc.cursor_offset();
+        doc.insert_text_in_mode(at..at, "Y", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# fooY #");
+        assert_eq!(doc.parsed().lines[0].display_text, "fooY");
+    }
+
+    /// A caret that is valid in rendered mode stays put when the view becomes Raw.
+    #[test]
+    fn rendered_to_raw_keeps_a_valid_caret() {
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        doc.place(0, false);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), 5);
+        doc.set_view_mode(ViewMode::Raw);
+        assert_eq!(doc.cursor_offset(), 5);
+        assert_eq!(doc.content, "# foo #\nnext");
+        doc.place(2, false);
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), 2);
+        doc.place(0, false);
+        doc.set_view_mode(ViewMode::Raw);
+        assert_eq!(doc.cursor_offset(), 0);
+    }
+
+    /// Ancestor select-to-visible-end then Delete on `# foo #\nnext` is ` #\nnext`.
+    /// A reversed selection whose anchor sits on the raw end deletes to `#  #`.
+    #[test]
+    fn raw_selection_then_rendered_snaps_anchor_and_caret() {
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.set_view_mode(ViewMode::Raw);
+        doc.place(0, false);
+        doc.move_end(true);
+        assert_eq!(doc.caret.range, 0..7);
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.caret.range, 0..5);
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, " #\nnext");
+
+        let mut doc = heading_tab("# foo #");
+        doc.set_view_mode(ViewMode::Raw);
+        doc.caret.range = 2..7;
+        doc.caret.reversed = true;
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.caret.range, 2..5);
+        assert!(doc.caret.reversed);
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "#  #");
     }
 }
