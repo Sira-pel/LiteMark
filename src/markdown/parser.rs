@@ -3930,4 +3930,32 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             assert_eq!(&src[doc.lines[index].source.clone()], source, "{src:?}");
         }
     }
+
+    /// BASE `1d03313` display of `# foo #\t` is `foo #\t` (the tab stays, and
+    /// the hash is text). `#\t#` stays a heading whose display is `#`.
+    #[test]
+    fn tab_after_a_closing_hash_stays_in_the_heading_text() {
+        let doc = parse_document("# foo #\t");
+        assert!(matches!(doc.lines[0].kind, LineKind::Heading { level: 1 }));
+        assert_eq!(doc.lines[0].display_text, "foo #\t");
+
+        let kept = parse_document("# foo\t#");
+        assert_eq!(kept.lines[0].display_text, "foo\t#");
+
+        let trailed = parse_document("# foo\t");
+        assert_eq!(trailed.lines[0].display_text, "foo\t");
+
+        let spaces = parse_document("# foo #   ");
+        assert_eq!(spaces.lines[0].display_text, "foo");
+
+        let empty = parse_document("### ###");
+        assert_eq!(empty.lines[0].display_text, "");
+
+        let tab_hash = parse_document("#\t#");
+        assert!(matches!(
+            tab_hash.lines[0].kind,
+            LineKind::Heading { level: 1 }
+        ));
+        assert_eq!(tab_hash.lines[0].display_text, "#");
+    }
 }

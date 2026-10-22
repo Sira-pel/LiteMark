@@ -4973,7 +4973,12 @@ mod tests {
             ViewMode::Wysiwyg,
         );
         assert!(shift_hit);
-        assert_eq!(shift.caret.range, 0..vend);
+        // BASE `1d03313` Shift+Down on this last row selects `0..7`, and
+        // Delete clears the line. The collapsed Down above still types at
+        // the visible end.
+        assert_eq!(shift.caret.range, 0..7);
+        shift.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(shift.content, "");
     }
 
     fn heading_tab(text: &str) -> DocumentTab {
@@ -5225,5 +5230,261 @@ mod tests {
         doc.edit(range, "");
         assert_eq!(clip, "# Title #");
         assert_eq!(doc.content, "hello\n");
+    }
+
+    fn delete_forward(doc: &mut DocumentTab) {
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+    }
+
+    /// BASE `1d03313` `move_end(true)` then Delete. The selection runs to the
+    /// source end, and on CRLF through the CR up to the LF.
+    #[test]
+    fn shift_end_extend_deletes_through_the_closing_hash() {
+        let cases = [
+            ("# foo #", ""),
+            ("# foo #\nnext", "\nnext"),
+            ("## foo ##", ""),
+            ("## bar ##", ""),
+            ("### ###", ""),
+            ("# foo #   ", ""),
+            ("# foo #\r\nnext", "\nnext"),
+            ("# café #", ""),
+            ("# 😀 #", ""),
+        ];
+        for (src, after) in cases {
+            let mut doc = heading_tab(src);
+            doc.move_end(true);
+            delete_forward(&mut doc);
+            assert_eq!(doc.content, after, "end {src:?}");
+        }
+
+        let homes = [
+            ("# foo #", "# "),
+            ("# foo #\nnext", "# \nnext"),
+            ("## foo ##", "## "),
+            ("### ###", "### "),
+            ("# foo #   ", "# "),
+            ("# café #", "# "),
+            ("# 😀 #", "# "),
+        ];
+        for (src, after) in homes {
+            let mut doc = heading_tab(src);
+            doc.move_home_in_mode(false, ViewMode::Wysiwyg);
+            doc.move_end(true);
+            delete_forward(&mut doc);
+            assert_eq!(doc.content, after, "home-end {src:?}");
+        }
+
+        let src = "hello\n# foo #";
+        let mut doc = heading_tab(src);
+        doc.place(6, false);
+        doc.move_end(true);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "hello\n");
+    }
+
+    /// BASE `1d03313` `place` does not pull an extend target back to the
+    /// visible end. Mouse drag and Ctrl+Shift+End both `place` the offset.
+    #[test]
+    fn place_extend_onto_the_closing_hash_deletes_it() {
+        let mut doc = heading_tab("# foo #");
+        doc.place(0, false);
+        doc.place(7, true);
+        assert_eq!(doc.caret.range, 0..7);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "");
+
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.place(0, false);
+        doc.place(7, true);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "\nnext");
+
+        let mut doc = heading_tab("# foo #");
+        doc.place(0, false);
+        doc.place(6, true);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "#");
+
+        let mut doc = heading_tab("# foo #");
+        doc.place(5, false);
+        doc.place(7, true);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "# foo");
+
+        let src = "hello\n# Title #";
+        let mut doc = heading_tab(src);
+        doc.place(0, false);
+        doc.place(src.len(), true);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "");
+
+        let mut doc = heading_tab("# foo #");
+        doc.place(5, false);
+        doc.move_word_right(true);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "# foo");
+    }
+
+    fn paint_rows(doc: &mut DocumentTab) -> EditorPaint {
+        let parsed = doc.parsed();
+        let rows = parsed
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(ix, line)| PaintRow {
+                line_index: ix,
+                byte_start: line.source.start,
+                byte_end: line.source.end,
+                origin: point(px(0.0), px(28.0 * ix as f32)),
+                line_height: px(28.0),
+                shaped: ShapedLine::default(),
+                offset_map: line.offset_map.clone(),
+                checkbox_hit: None,
+                link_hits: Vec::new(),
+                cells: Vec::new(),
+            })
+            .collect();
+        let n = parsed.lines.len() as f32;
+        EditorPaint {
+            wrap_cols: usize::MAX,
+            line_height: px(28.0),
+            total_height: px(28.0 * n),
+            rows,
+            bounds: None,
+        }
+    }
+
+    /// BASE `1d03313` painted Shift+Down on the last row selects through the
+    /// closer. Delete then matches End.
+    #[test]
+    fn painted_shift_down_on_the_last_row_deletes_the_closing_hash() {
+        let mut doc = heading_tab("## bar ##");
+        let paint = paint_rows(&mut doc);
+        doc.caret.move_to(0);
+        assert!(move_vertical_visual(
+            &paint,
+            &doc.content,
+            &mut doc.caret,
+            1,
+            true,
+            ViewMode::Wysiwyg,
+        ));
+        assert_eq!(doc.caret.range, 0..9);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "");
+
+        let src = "hello\n# foo #";
+        let mut doc = heading_tab(src);
+        let paint = paint_rows(&mut doc);
+        doc.place(6, false);
+        assert!(move_vertical_visual(
+            &paint,
+            &doc.content,
+            &mut doc.caret,
+            1,
+            true,
+            ViewMode::Wysiwyg,
+        ));
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "hello\n");
+    }
+
+    /// BASE `1d03313` Ctrl+Shift+Down selects the source line, closer included.
+    #[test]
+    fn select_line_down_extends_through_the_closing_hash() {
+        let mut doc = heading_tab("# foo #");
+        doc.select_line_down();
+        assert_eq!(doc.caret.range, 0..7);
+        assert_eq!(doc.selected_text(), "# foo #");
+        doc.select_line_down();
+        assert_eq!(doc.caret.range, 0..7);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "");
+
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.select_line_down();
+        assert_eq!(doc.caret.range, 0..7);
+        assert_eq!(doc.selected_text(), "# foo #");
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "\nnext");
+
+        let mut doc = heading_tab("## bar ##");
+        doc.select_line_down();
+        assert_eq!(doc.selected_text(), "## bar ##");
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "");
+    }
+
+    /// BASE `1d03313` Ctrl+Shift+Delete from before the visible end removes the
+    /// closer. A caret already on the visible end stays a no-op
+    /// (`delete_to_end_and_word_right_keep_the_closing_hash`).
+    #[test]
+    fn delete_to_line_end_from_before_the_closer_matches_base() {
+        let mut doc = heading_tab("# foo #");
+        doc.place(0, false);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "");
+
+        let mut doc = heading_tab("# foo #");
+        doc.move_home_in_mode(false, ViewMode::Wysiwyg);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "# ");
+
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.place(0, false);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "\nnext");
+
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.move_home_in_mode(false, ViewMode::Wysiwyg);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "# \nnext");
+    }
+
+    /// BASE `1d03313` Shift+Right then Shift+Left on `5..7` types `# fooX\nnext`.
+    /// The place extend snap is what drops the closer.
+    #[test]
+    fn shift_right_then_left_on_a_closer_selection_types_over_it() {
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.caret.range = 5..7;
+        app_touch(&mut doc);
+        doc.move_right_in_mode(true, ViewMode::Wysiwyg);
+        doc.move_left_in_mode(true, ViewMode::Wysiwyg);
+        let range = doc.selection_range();
+        doc.insert_text_in_mode(range, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# fooX\nnext");
+    }
+
+    /// BASE `1d03313` Shift+Left then Shift+Right on `0..7` types `X\nnext`.
+    #[test]
+    fn shift_left_then_right_on_a_full_heading_selection_matches_base() {
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.caret.range = 0..7;
+        app_touch(&mut doc);
+        doc.move_left_in_mode(true, ViewMode::Wysiwyg);
+        doc.move_right_in_mode(true, ViewMode::Wysiwyg);
+        let range = doc.selection_range();
+        doc.insert_text_in_mode(range, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "X\nnext");
+    }
+
+    /// 7ad1cff paints `# foo ` as `foo` and its visible end is offset 5. Typing
+    /// X there yields `# fooX `. BASE has no redo snap and types `# foo X`.
+    /// Removing the snap call in `redo` leaves the caret on the trailing space
+    /// and the bytes become `# foo X`.
+    #[test]
+    fn redo_after_raw_closer_delete_types_at_the_visible_end() {
+        let mut doc = heading_tab("# foo #");
+        doc.set_view_mode(ViewMode::Raw);
+        doc.caret.range = 6..7;
+        doc.delete_forward_in_mode(ViewMode::Raw);
+        assert!(doc.undo());
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        assert!(doc.redo());
+        let range = doc.selection_range();
+        doc.insert_text_in_mode(range, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# fooX ");
+        assert_eq!(doc.caret.range, 6..6);
     }
 }
