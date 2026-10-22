@@ -2068,36 +2068,41 @@ impl DocumentTab {
 
     pub fn set_view_mode(&mut self, mode: ViewMode) {
         self.view_mode = mode;
+        self.snap_caret_to_visible_line_end();
+        self.refresh_cursor();
     }
 
-    /// Up/Down land on a source column. Pull a caret that stopped inside a
-    /// hidden closing-hash run back to the visible end, and keep the column
-    /// the next vertical move should reuse.
+    /// Up/Down land on a source column. Pull a caret or selection anchor that
+    /// stopped inside a hidden closing-hash run back to the visible end, and
+    /// keep the column the next vertical move should reuse.
     fn snap_caret_to_visible_line_end(&mut self) {
-        let offset = self.cursor_offset();
         let parsed = self.parsed();
-        let Some(line) = parsed.line_at_offset(offset) else {
-            return;
-        };
-        let vend = visible_line_end(line, self.view_mode);
-        if offset > vend && offset <= line.source.end {
-            let prefer = self.caret.preferred_col;
-            if self.caret.range.is_empty() {
-                self.caret.range = vend..vend;
-                self.caret.reversed = false;
-            } else if self.caret.reversed {
-                self.caret.range.start = vend;
+        let mode = self.view_mode;
+        let snap = |offset: usize| -> usize {
+            let Some(line) = parsed.line_at_offset(offset) else {
+                return offset;
+            };
+            let vend = visible_line_end(line, mode);
+            if offset > vend && offset <= line.source.end {
+                vend
             } else {
-                self.caret.range.end = vend;
+                offset
             }
-            if self.caret.range.start > self.caret.range.end {
-                let start = self.caret.range.end;
-                let end = self.caret.range.start;
-                self.caret.range = start..end;
-                self.caret.reversed = !self.caret.reversed;
-            }
-            self.caret.preferred_col = prefer;
+        };
+        let prefer = self.caret.preferred_col;
+        let mut start = snap(self.caret.range.start);
+        let mut end = snap(self.caret.range.end);
+        let mut reversed = self.caret.reversed;
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+            reversed = !reversed;
         }
+        if start == end {
+            reversed = false;
+        }
+        self.caret.range = start..end;
+        self.caret.reversed = reversed;
+        self.caret.preferred_col = prefer;
     }
 
     pub fn move_home(&mut self, extend: bool) {
@@ -2440,6 +2445,8 @@ impl DocumentTab {
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(caret);
+        self.snap_caret_to_visible_line_end();
+        self.refresh_cursor();
         true
     }
 
@@ -2450,6 +2457,8 @@ impl DocumentTab {
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(caret);
+        self.snap_caret_to_visible_line_end();
+        self.refresh_cursor();
         true
     }
 

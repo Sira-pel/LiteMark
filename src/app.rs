@@ -334,7 +334,7 @@ impl LiteMarkApp {
     pub fn active_tab_mut(&mut self) -> Option<&mut DocumentTab> {
         let mode = self.settings.view_mode;
         let tab = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id)?;
-        tab.view_mode = mode;
+        tab.set_view_mode(mode);
         Some(tab)
     }
 
@@ -562,6 +562,7 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_mode(&mut self) {
         self.settings.view_mode = self.settings.view_mode.toggle();
+        self.active_tab_mut();
         if self.settings.view_mode == ViewMode::Wysiwyg {
             if let Some(tab) = self.active_tab_mut() {
                 tab.snap_wysiwyg_table_delimiter();
@@ -644,6 +645,7 @@ impl LiteMarkApp {
 
     pub fn handle_set_view_mode(&mut self, mode: ViewMode) {
         self.settings.view_mode = mode;
+        self.active_tab_mut();
         if mode == ViewMode::Wysiwyg {
             if let Some(tab) = self.active_tab_mut() {
                 tab.snap_wysiwyg_table_delimiter();
