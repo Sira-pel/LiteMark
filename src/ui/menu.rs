@@ -201,6 +201,8 @@ where
     pub focus_handle: FocusHandle,
     pub selected_index: Option<usize>,
     pub open_submenu_ix: Option<usize>,
+    /// Keyboard selection inside the open submenu.
+    pub submenu_selected_index: Option<usize>,
     pub on_close: FClose,
     pub on_set_submenu: FSubmenu,
 }
@@ -424,7 +426,7 @@ where
                                     ("sub-menu", sub_ix).into(),
                                     sub_w,
                                     sub_items.clone(),
-                                    None,
+                                    props.submenu_selected_index,
                                     None,
                                     sub_cls,
                                     |_, _: &mut App| {},

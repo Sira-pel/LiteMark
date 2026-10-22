@@ -1,3 +1,4 @@
+use super::line_field::LineField;
 use super::primitives::{icon_button, render_icon};
 use crate::model::{WorkspaceDirectory, WorkspaceFile};
 use crate::theme::{sz, Theme};
@@ -8,6 +9,57 @@ use gpui::*;
 pub enum SidebarTarget {
     File(String),
     Folder(String),
+}
+
+/// Pending inline creation in the sidebar tree (`None` parent means workspace root).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarCreate {
+    pub parent: Option<String>,
+    pub is_folder: bool,
+}
+
+/// Payload carried while a note or folder row is being dragged.
+#[derive(Clone, Debug)]
+pub struct SidebarDrag {
+    pub target: SidebarTarget,
+    pub name: String,
+}
+
+/// Floating chip rendered under the cursor while dragging.
+pub struct DragItemGhost {
+    theme: Theme,
+    is_folder: bool,
+    name: SharedString,
+}
+
+impl Render for DragItemGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(10.0))
+            .py(px(5.0))
+            .rounded(sz::R_MD)
+            .bg(theme.menu_bg)
+            .border_1()
+            .border_color(theme.border_surface)
+            .shadow_lg()
+            .opacity(0.9)
+            .child(render_icon(
+                if self.is_folder { "folder" } else { "file-text" },
+                13.0,
+                theme.text_muted,
+            ))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_primary)
+                    .truncate()
+                    .child(self.name.clone()),
+            )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -26,11 +78,17 @@ pub enum SidebarTreeItem {
         file: crate::model::WorkspaceFile,
         depth: usize,
     },
+    /// Inline name editor shown while creating a note or folder.
+    CreateInput {
+        depth: usize,
+        is_folder: bool,
+    },
 }
 
 pub fn build_sidebar_tree(
     folders: &[crate::model::WorkspaceFolder],
     files: &[crate::model::WorkspaceFile],
+    creating: Option<&SidebarCreate>,
 ) -> Vec<SidebarTreeItem> {
     let mut items = Vec::new();
     let folder_ids: std::collections::HashSet<&str> =
@@ -42,8 +100,15 @@ pub fn build_sidebar_tree(
         folders: &[crate::model::WorkspaceFolder],
         files: &[crate::model::WorkspaceFile],
         folder_ids: &std::collections::HashSet<&str>,
+        creating: Option<(Option<&str>, bool)>,
         out: &mut Vec<SidebarTreeItem>,
     ) {
+        // The inline create editor sits at the top of the level it targets.
+        if let Some((create_parent, is_folder)) = creating {
+            if create_parent == parent_id {
+                out.push(SidebarTreeItem::CreateInput { depth, is_folder });
+            }
+        }
         let mut level_folders: Vec<&crate::model::WorkspaceFolder> = folders
             .iter()
             .filter(|f| {
@@ -65,7 +130,7 @@ pub fn build_sidebar_tree(
                 depth,
             });
             if is_open {
-                collect_level(Some(&fid), depth + 1, folders, files, folder_ids, out);
+                collect_level(Some(&fid), depth + 1, folders, files, folder_ids, creating, out);
             }
         }
 
@@ -90,94 +155,112 @@ pub fn build_sidebar_tree(
         }
     }
 
-    collect_level(None, 0, folders, files, &folder_ids, &mut items);
+    collect_level(
+        None,
+        0,
+        folders,
+        files,
+        &folder_ids,
+        creating.map(|c| (c.parent.as_deref(), c.is_folder)),
+        &mut items,
+    );
     items
 }
 
 #[allow(dead_code)]
 pub struct SidebarProps<
     FSelect,
-    FCreateFile,
-    FCreateFolder,
+    FBeginCreate,
     FDeleteFile,
     FDeleteFolder,
     FToggleFolder,
     FChooseDir,
     FClose,
     FContext,
+    FDropItem,
 > where
     FSelect: Fn(WorkspaceFile, &mut App) + 'static + Clone,
-    FCreateFile: Fn(Option<String>, String, &mut App) + 'static + Clone,
-    FCreateFolder: Fn(Option<String>, String, &mut App) + 'static + Clone,
+    FBeginCreate: Fn(Option<String>, bool, &mut App) + 'static + Clone,
     FDeleteFile: Fn(String, &mut App) + 'static + Clone,
     FDeleteFolder: Fn(String, &mut App) + 'static + Clone,
     FToggleFolder: Fn(String, &mut App) + 'static + Clone,
     FChooseDir: Fn(&mut App) + 'static + Clone,
     FClose: Fn(&mut App) + 'static + Clone,
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
+    FDropItem: Fn(SidebarTarget, Option<String>, bool, &mut App) + 'static + Clone,
 {
     pub workspace: WorkspaceDirectory,
-    pub active_file_id: Option<String>,
-    pub open_file_ids: Vec<String>,
+    pub selected_file_id: Option<String>,
+    pub selected_folder_id: Option<String>,
+    pub focus_handle: FocusHandle,
+    /// Workspace ids of tabs with unsaved changes (drives the dot).
+    pub modified_file_ids: Vec<String>,
     pub search_query: String,
-    pub creating_in_folder: Option<Option<String>>,
+    pub creating: Option<SidebarCreate>,
+    pub create_field: Entity<LineField>,
+    pub dragging: bool,
     pub on_select_file: FSelect,
-    pub on_create_file: FCreateFile,
-    pub on_create_folder: FCreateFolder,
+    pub on_begin_create: FBeginCreate,
     pub on_delete_file: FDeleteFile,
     pub on_delete_folder: FDeleteFolder,
     pub on_toggle_folder: FToggleFolder,
     pub on_choose_dir: FChooseDir,
     pub on_close: FClose,
     pub on_context_menu: FContext,
+    pub on_drop_item: FDropItem,
 }
 
 pub fn render_sidebar<
     FSelect,
-    FCreateFile,
-    FCreateFolder,
+    FBeginCreate,
     FDeleteFile,
     FDeleteFolder,
     FToggleFolder,
     FChooseDir,
     FClose,
     FContext,
+    FDropItem,
 >(
     props: SidebarProps<
         FSelect,
-        FCreateFile,
-        FCreateFolder,
+        FBeginCreate,
         FDeleteFile,
         FDeleteFolder,
         FToggleFolder,
         FChooseDir,
         FClose,
         FContext,
+        FDropItem,
     >,
     theme: &Theme,
 ) -> impl IntoElement
 where
     FSelect: Fn(WorkspaceFile, &mut App) + 'static + Clone,
-    FCreateFile: Fn(Option<String>, String, &mut App) + 'static + Clone,
-    FCreateFolder: Fn(Option<String>, String, &mut App) + 'static + Clone,
+    FBeginCreate: Fn(Option<String>, bool, &mut App) + 'static + Clone,
     FDeleteFile: Fn(String, &mut App) + 'static + Clone,
     FDeleteFolder: Fn(String, &mut App) + 'static + Clone,
     FToggleFolder: Fn(String, &mut App) + 'static + Clone,
     FChooseDir: Fn(&mut App) + 'static + Clone,
     FClose: Fn(&mut App) + 'static + Clone,
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
+    FDropItem: Fn(SidebarTarget, Option<String>, bool, &mut App) + 'static + Clone,
 {
     let on_select = props.on_select_file;
-    let on_create_file = props.on_create_file;
-    let on_create_folder = props.on_create_folder;
+    let on_begin_create = props.on_begin_create;
     let on_delete_file = props.on_delete_file;
     let on_delete_folder = props.on_delete_folder;
     let on_toggle_folder = props.on_toggle_folder;
     let on_choose_dir = props.on_choose_dir;
     let on_close = props.on_close;
     let on_context = props.on_context_menu;
-    let active_id = props.active_file_id;
-    let open_ids = props.open_file_ids;
+    let on_drop_item = props.on_drop_item;
+    let creating = props.creating.clone();
+    let create_field = props.create_field.clone();
+    let dragging = props.dragging;
+    let focus_handle = props.focus_handle;
+    let selected_file_id = props.selected_file_id;
+    let selected_folder_id = props.selected_folder_id;
+    let modified_ids = props.modified_file_ids;
 
     let total_notes = props.workspace.files.len();
     let query = props.search_query.to_lowercase();
@@ -193,14 +276,23 @@ where
             .map(|file| SidebarTreeItem::File { file, depth: 0 })
             .collect()
     } else {
-        build_sidebar_tree(&props.workspace.folders, &props.workspace.files)
+        build_sidebar_tree(
+            &props.workspace.folders,
+            &props.workspace.files,
+            creating.as_ref(),
+        )
     };
 
-    let show_empty_notes =
-        !is_searching && props.workspace.folders.is_empty() && props.workspace.files.is_empty();
+    let show_empty_notes = creating.is_none()
+        && !is_searching
+        && props.workspace.folders.is_empty()
+        && props.workspace.files.is_empty();
     let show_empty_search = is_searching && tree_items.is_empty();
 
     div()
+        .id("sidebar-root")
+        .key_context("Sidebar")
+        .track_focus(&focus_handle)
         .flex()
         .flex_col()
         .w(sz::SIDEBAR_W)
@@ -287,25 +379,25 @@ where
                         .flex_shrink_0()
                         .gap_0()
                         .child({
-                            let cf = on_create_file.clone();
+                            let bc = on_begin_create.clone();
                             icon_button(
                                 "sb-add-file",
                                 "file-plus",
                                 "New Note (Ctrl+N)",
                                 false,
                                 theme,
-                                move |_, _, cx| cf(None, "New Note.md".to_string(), cx),
+                                move |_, _, cx| bc(None, false, cx),
                             )
                         })
                         .child({
-                            let cdir = on_create_folder.clone();
+                            let bc = on_begin_create.clone();
                             icon_button(
                                 "sb-add-folder",
                                 "folder-plus",
                                 "New Folder",
                                 false,
                                 theme,
-                                move |_, _, cx| cdir(None, "New Folder".to_string(), cx),
+                                move |_, _, cx| bc(None, true, cx),
                             )
                         })
                         .child({
@@ -366,8 +458,18 @@ where
                 .flex_1()
                 .overflow_y_scroll()
                 .p(px(6.0))
+                // Dropping a note on the list (outside any folder row) moves
+                // it back to the workspace root; folder rows consume their
+                // own drops first.
+                .on_drop({
+                    let drop_item = on_drop_item.clone();
+                    move |drag: &SidebarDrag, window, cx| {
+                        let copy = window.modifiers().control;
+                        drop_item(drag.target.clone(), None, copy, cx);
+                    }
+                })
                 .when(show_empty_notes, |s| {
-                    let cf = on_create_file.clone();
+                    let bc = on_begin_create.clone();
                     s.child(
                         div()
                             .flex()
@@ -395,7 +497,7 @@ where
                                     .text_color(theme.text_hi)
                                     .hover(|h| h.underline())
                                     .on_click(move |_, _, cx| {
-                                        cf(None, "New Note.md".to_string(), cx)
+                                        bc(None, false, cx)
                                     })
                                     .child("New note (Ctrl+N)"),
                             ),
@@ -426,11 +528,40 @@ where
                         .gap(px(2.0))
                         .children(tree_items.into_iter().map(|item| {
                             match item {
+                                SidebarTreeItem::CreateInput { depth, is_folder } => {
+                                    let inset = if depth == 0 {
+                                        0.0
+                                    } else {
+                                        21.0 + depth as f32 * 14.0
+                                    };
+                                    div()
+                                        .id("sb-create-row")
+                                        .group("create-row")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(6.0))
+                                        .h(sz::ROW_H)
+                                        .ml(px(inset))
+                                        .pl(px(5.0))
+                                        .pr(px(6.0))
+                                        .rounded(sz::R_MD)
+                                        .bg(theme.row_active)
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .child(render_icon(
+                                            if is_folder { "folder-plus" } else { "file-plus" },
+                                            14.0,
+                                            theme.text_hi,
+                                        ))
+                                        .child(create_field.clone())
+                                }
                                 SidebarTreeItem::Folder { folder, depth } => {
                                     let folder_id = folder.id.clone();
                                     let is_open = folder.is_open;
-                                    let create = on_create_file.clone();
-                                    let create_dir = on_create_folder.clone();
+                                    let is_selected =
+                                        selected_folder_id.as_deref() == Some(&folder_id);
+                                    let create = on_begin_create.clone();
                                     let delete = on_delete_folder.clone();
                                     let on_context = on_context.clone();
                                     let toggle = on_toggle_folder.clone();
@@ -447,6 +578,16 @@ where
                                         .pr(px(6.0))
                                         .rounded(sz::R_MD)
                                         .cursor_pointer()
+                                        .bg(if is_selected {
+                                            theme.row_active
+                                        } else {
+                                            rgba(0x00000000)
+                                        })
+                                        .text_color(if is_selected {
+                                            theme.text_strong
+                                        } else {
+                                            theme.row_text
+                                        })
                                         .hover(|h| {
                                             h.bg(theme.row_hover).text_color(theme.text_primary)
                                         })
@@ -461,6 +602,46 @@ where
                                                 on_context(
                                                     SidebarTarget::Folder(id.clone()),
                                                     event.position,
+                                                    cx,
+                                                );
+                                            }
+                                        })
+                                        // Drop-target affordance while a note or
+                                        // folder is dragged.
+                                        .border_1()
+                                        .border_color(if dragging {
+                                            theme.text_faint
+                                        } else {
+                                            rgba(0x00000000)
+                                        })
+                                        .on_drag(
+                                            SidebarDrag {
+                                                target: SidebarTarget::Folder(folder_id.clone()),
+                                                name: name.clone(),
+                                            },
+                                            {
+                                                let theme = *theme;
+                                                move |value, _point, _window, cx| {
+                                                    cx.new(|_| DragItemGhost {
+                                                        theme,
+                                                        is_folder: matches!(
+                                                            value.target,
+                                                            SidebarTarget::Folder(_)
+                                                        ),
+                                                        name: value.name.clone().into(),
+                                                    })
+                                                }
+                                            },
+                                        )
+                                        .on_drop({
+                                            let fid = folder_id.clone();
+                                            let drop_item = on_drop_item.clone();
+                                            move |drag: &SidebarDrag, window, cx| {
+                                                let copy = window.modifiers().control;
+                                                drop_item(
+                                                    drag.target.clone(),
+                                                    Some(fid.clone()),
+                                                    copy,
                                                     cx,
                                                 );
                                             }
@@ -529,11 +710,7 @@ where
                                                         .hover(|h| h.bg(theme.bg_hover))
                                                         .on_click(move |_, _, cx| {
                                                             cx.stop_propagation();
-                                                            create(
-                                                                Some(id.clone()),
-                                                                "New Note.md".into(),
-                                                                cx,
-                                                            )
+                                                            create(Some(id.clone()), false, cx)
                                                         })
                                                         .child(render_icon(
                                                             "file-plus",
@@ -543,7 +720,7 @@ where
                                                 })
                                                 .child({
                                                     let id = folder_id.clone();
-                                                    let create_dir = create_dir.clone();
+                                                    let create = create.clone();
                                                     div()
                                                         .id(SharedString::from(format!(
                                                             "folder-mkdir-{}",
@@ -555,11 +732,7 @@ where
                                                         .hover(|h| h.bg(theme.bg_hover))
                                                         .on_click(move |_, _, cx| {
                                                             cx.stop_propagation();
-                                                            create_dir(
-                                                                Some(id.clone()),
-                                                                "New Folder".into(),
-                                                                cx,
-                                                            )
+                                                            create(Some(id.clone()), true, cx)
                                                         })
                                                         .child(render_icon(
                                                             "folder-plus",
@@ -591,13 +764,25 @@ where
                                         )
                                 }
                                 SidebarTreeItem::File { file, depth } => {
-                                    let is_active = active_id.as_deref() == Some(&file.id);
-                                    let is_open = open_ids.contains(&file.id);
+                                    let is_active =
+                                        selected_file_id.as_deref() == Some(&file.id);
+                                    let is_modified =
+                                        modified_ids.contains(&file.id);
                                     let file_clone = file.clone();
                                     let sel = on_select.clone();
                                     let del = on_delete_file.clone();
                                     let on_context = on_context.clone();
                                     let fid = file.id.clone();
+                                    // Root notes sit flush left (same edge as the
+                                    // folder rows themselves). Nested notes are
+                                    // inset so the highlight starts at the
+                                    // indicator bar. Either way the icon + text
+                                    // hug the bar (2px gap).
+                                    let inset = if depth == 0 {
+                                        0.0
+                                    } else {
+                                        21.0 + depth as f32 * 14.0
+                                    };
 
                                     div()
                                         .id(SharedString::from(file.id.clone()))
@@ -607,7 +792,8 @@ where
                                         .items_center()
                                         .justify_between()
                                         .h(sz::ROW_H)
-                                        .pl(px(8.0 + depth as f32 * 14.0))
+                                        .ml(px(inset))
+                                        .pl(px(5.0))
                                         .pr(px(6.0))
                                         .rounded(sz::R_MD)
                                         .cursor_pointer()
@@ -638,7 +824,27 @@ where
                                                 );
                                             }
                                         })
-                                        // Active 3px indicator bar
+                                        .on_drag(
+                                            SidebarDrag {
+                                                target: SidebarTarget::File(fid.clone()),
+                                                name: file.name.clone(),
+                                            },
+                                            {
+                                                let theme = *theme;
+                                                move |value, _point, _window, cx| {
+                                                    cx.new(|_| DragItemGhost {
+                                                        theme,
+                                                        is_folder: matches!(
+                                                            value.target,
+                                                            SidebarTarget::Folder(_)
+                                                        ),
+                                                        name: value.name.clone().into(),
+                                                    })
+                                                }
+                                            },
+                                        )
+                                        // Active 3px indicator bar, right before
+                                        // the note icon at the row's inset edge.
                                         .when(is_active, |s| {
                                             s.child(
                                                 div()
@@ -658,13 +864,6 @@ where
                                                 .min_w_0()
                                                 .items_center()
                                                 .gap(px(6.0))
-                                                // 12px blank spacer to align with folder chevron
-                                                .child(
-                                                    div()
-                                                        .w(px(12.0))
-                                                        .h(px(12.0))
-                                                        .flex_shrink_0(),
-                                                )
                                                 .child(render_icon(
                                                     "file-text",
                                                     14.0,
@@ -692,13 +891,13 @@ where
                                                 .flex_shrink_0()
                                                 .items_center()
                                                 .gap(px(6.0))
-                                                .when(is_open, |s| {
+                                                .when(is_modified, |s| {
                                                     s.child(
                                                         div()
                                                             .w(px(6.0))
                                                             .h(px(6.0))
                                                             .rounded_full()
-                                                            .bg(theme.text_faint),
+                                                            .bg(theme.text_hi),
                                                     )
                                                 })
                                                 .child({
@@ -714,10 +913,6 @@ where
                                                         .items_center()
                                                         .justify_center()
                                                         .cursor_pointer()
-                                                        .opacity(0.0)
-                                                        .group_hover("note-row", |s| {
-                                                            s.opacity(1.0)
-                                                        })
                                                         .hover(|h| {
                                                             h.bg(theme.bg_hover)
                                                                 .text_color(theme.text_primary)
@@ -774,6 +969,8 @@ where
 
 pub fn render_sidebar_context_menu<FRename, FDelete, FDismiss>(
     menu: &SidebarMenu,
+    selected_ix: usize,
+    focus_handle: FocusHandle,
     on_rename: FRename,
     on_delete: FDelete,
     on_dismiss: FDismiss,
@@ -787,6 +984,9 @@ where
     let dismiss_left = on_dismiss.clone();
     let dismiss_right = on_dismiss.clone();
     div()
+        .id("sidebar-context-overlay")
+        .key_context("PromptModal")
+        .track_focus(&focus_handle)
         .absolute()
         .size_full()
         .top_0()
@@ -821,7 +1021,16 @@ where
                         .py(px(6.0))
                         .cursor_pointer()
                         .text_size(px(13.0))
-                        .text_color(theme.text_primary)
+                        .text_color(if selected_ix == 0 {
+                            theme.text_hi
+                        } else {
+                            theme.text_primary
+                        })
+                        .bg(if selected_ix == 0 {
+                            theme.bg_hover
+                        } else {
+                            rgba(0x00000000)
+                        })
                         .hover(|style| style.bg(theme.bg_hover))
                         .on_click(move |_, _, cx| on_rename(cx))
                         .child("Rename")
@@ -834,7 +1043,16 @@ where
                         .py(px(6.0))
                         .cursor_pointer()
                         .text_size(px(13.0))
-                        .text_color(theme.text_primary)
+                        .text_color(if selected_ix == 1 {
+                            theme.text_hi
+                        } else {
+                            theme.text_primary
+                        })
+                        .bg(if selected_ix == 1 {
+                            theme.bg_hover
+                        } else {
+                            rgba(0x00000000)
+                        })
                         .hover(|style| style.bg(theme.bg_hover))
                         .on_click(move |_, _, cx| on_delete(cx))
                         .child("Delete")

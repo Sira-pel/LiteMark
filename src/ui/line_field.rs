@@ -8,7 +8,7 @@ use gpui::*;
 use unicode_segmentation::UnicodeSegmentation;
 
 type FieldChange = Arc<dyn Fn(&str, &mut App) + 'static>;
-type FieldSubmit = Arc<dyn Fn(bool, &mut App) + 'static>;
+type FieldSubmit = Arc<dyn Fn(&str, bool, &mut App) + 'static>;
 type FieldFocus = Arc<dyn Fn(&mut App) + 'static>;
 
 pub struct LineField {
@@ -69,7 +69,8 @@ impl LineField {
     #[allow(dead_code)]
     pub fn set_text(&mut self, text: impl Into<SharedString>) {
         self.content = text.into();
-        self.selected_range = self.content.len()..self.content.len();
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
         self.marked_range = None;
     }
 
@@ -368,8 +369,9 @@ impl LineField {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let text = self.content.to_string();
         let callback = self.on_submit.clone();
-        callback(false, cx);
+        callback(&text, false, cx);
     }
 
     fn submit_prev(
@@ -378,8 +380,9 @@ impl LineField {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let text = self.content.to_string();
         let callback = self.on_submit.clone();
-        callback(true, cx);
+        callback(&text, true, cx);
     }
 
     fn on_mouse_down(
