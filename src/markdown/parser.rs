@@ -258,7 +258,7 @@ pub fn parse_markdown(markdown: &str) -> Vec<Block> {
         }
 
         // Horizontal rule: exact `---`, `***`, or `___`, indent 0–3.
-        if exact_thematic_break(line) {
+        if exact_thematic_break(line, 0) {
             blocks.push(Block::HorizontalRule {
                 source: line_source,
             });
@@ -1035,16 +1035,25 @@ struct OpenFence {
     open_range: std::ops::Range<usize>,
 }
 
-/// Thematic break: the line trims to `---`, `***`, or `___`, with 0–3 leading
-/// spaces. BASE's trim alone also accepts four spaces and a tab. The spec
-/// calls that indent a code block. This parser has no indented-code kind, so
-/// those lines stay paragraphs (`    ---\rnext\r` after the CR split).
-fn exact_thematic_break(line: &str) -> bool {
-    if !matches!(leading_spaces(line), Some(spaces) if spaces <= 3) {
+/// Thematic break: the line trims to `---`, `***`, or `___`.
+///
+/// At document level (`parent_col == 0`) only 0–3 leading spaces count. Four
+/// spaces or a tab stay a paragraph. This parser has no indented-code kind, so
+/// `    ---\rnext\r` stays text after the bare-CR split. Inside a list the same
+/// 0–3 spaces are counted past the item's content column, so `- item` followed
+/// by `    ---` is still a rule.
+fn exact_thematic_break(line: &str, parent_col: usize) -> bool {
+    let trimmed = line.trim();
+    if !(trimmed == "---" || trimmed == "***" || trimmed == "___") {
         return false;
     }
-    let trimmed = line.trim();
-    trimmed == "---" || trimmed == "***" || trimmed == "___"
+    let Some(spaces) = leading_spaces(line) else {
+        return false;
+    };
+    if spaces <= 3 {
+        return true;
+    }
+    parent_col > 0 && spaces >= parent_col && spaces - parent_col <= 3
 }
 
 /// `(bytes, column)` of the first non-space, non-tab. Tabs advance to the next multiple of 4.
@@ -1719,8 +1728,9 @@ fn single_tab_marker(line: &str) -> bool {
 /// rather than as paragraph text. Those lines close a list item.
 ///
 /// Headings and thematic breaks use the same classifiers as the line loop.
-fn is_structural_line(line: &str) -> bool {
-    if atx_heading(line).is_some() || exact_thematic_break(line) {
+/// `parent_col` is the list content column, or 0 at document level.
+fn is_structural_line(line: &str, parent_col: usize) -> bool {
+    if atx_heading(line).is_some() || exact_thematic_break(line, parent_col) {
         return true;
     }
     let trimmed = line.trim();
@@ -1752,7 +1762,7 @@ impl ListWalk {
         if !self.in_paragraph() {
             return false;
         }
-        if is_structural_line(line) {
+        if is_structural_line(line, self.thematic_parent_col(line)) {
             return false;
         }
         let Some(item) = scan_list_marker(line) else {
@@ -1830,6 +1840,18 @@ impl ListWalk {
 
     fn note_paragraph(&mut self) {
         self.set_paragraph(true);
+    }
+
+    /// Content column of the deepest open item this line is indented into.
+    /// Document level is 0, so four leading spaces stay indented text.
+    fn thematic_parent_col(&self, line: &str) -> usize {
+        let column = leading_column(line);
+        self.open
+            .iter()
+            .rev()
+            .copied()
+            .find(|content| column >= *content)
+            .unwrap_or(0)
     }
 }
 
@@ -2043,8 +2065,9 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
-        // Horizontal rule: exact `---`, `***`, or `___`, indent 0–3.
-        if exact_thematic_break(line) {
+        // Horizontal rule: exact `---`, `***`, or `___`, indent 0–3 past the
+        // open list item (document level rejects four spaces and a tab).
+        if exact_thematic_break(line, list_walk.thematic_parent_col(line)) {
             list_walk.note_block(line);
             let hidden = vec![line_start..line_end];
             all_hidden.extend(hidden.iter().cloned());
@@ -3848,5 +3871,36 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
         assert!(matches!(doc.lines[1].kind, LineKind::Paragraph));
         assert_eq!(doc.lines[1].display_text, "next");
         assert_eq!(&src[doc.lines[1].source.clone()], "next");
+    }
+
+    /// A blank line leaves the item open. Four spaces is two past `- `'s
+    /// content column, so the line is a rule. The same bytes at column 0
+    /// stay a paragraph.
+    #[test]
+    fn four_space_rule_inside_an_open_list_is_a_rule() {
+        let top = "    ---\nnext\n";
+        let top_doc = parse_document(top);
+        assert!(matches!(top_doc.lines[0].kind, LineKind::Paragraph));
+        assert_eq!(top_doc.lines[0].display_text, "    ---");
+
+        let cases = [
+            ("- item\n\n    ---\n", 2),
+            ("1. item\n\n    ---\n", 2),
+            ("10) item\n\n    ---\n", 2),
+            ("- [ ] item\n\n    ---\n", 2),
+            ("1. [ ] item\n\n    ---\n", 2),
+            ("- a\n  - b\n\n    ---\n", 3),
+            ("- a\n  - b\n    <!DOCTYPE html>\n    ---\n", 3),
+        ];
+        for (src, index) in cases {
+            let doc = parse_document(src);
+            assert!(
+                matches!(doc.lines[index].kind, LineKind::HorizontalRule),
+                "{src:?} kind {:?}",
+                doc.lines[index].kind
+            );
+            assert_eq!(doc.lines[index].display_text, "", "{src:?}");
+            assert_eq!(&src[doc.lines[index].source.clone()], "    ---", "{src:?}");
+        }
     }
 }
