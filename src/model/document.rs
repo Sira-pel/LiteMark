@@ -279,6 +279,7 @@ impl DocumentTab {
 
         let new_cursor = (prev_line_start + col).min(prev_line_start + curr_len);
         self.caret.move_to(new_cursor);
+        self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
     }
 
@@ -312,7 +313,37 @@ impl DocumentTab {
         let new_line_start = current_line_start + next_len + ending_len;
         let new_cursor = (new_line_start + col).min(new_line_start + curr_len);
         self.caret.move_to(new_cursor);
+        self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
+    }
+
+    /// Enter at the visible end of a closing-hash heading inserts after the
+    /// closer, so the heading stays one line.
+    fn heading_newline_at(&mut self, range: &Range<usize>) -> Option<usize> {
+        if !range.is_empty() {
+            return None;
+        }
+        let parsed = self.parsed();
+        let line = parsed.line_at_offset(range.start)?;
+        let vend = visible_line_end(line);
+        if range.start == vend && vend < line.source.end {
+            Some(line.source.end)
+        } else {
+            None
+        }
+    }
+
+    /// `Foo\r` + `\n` + `Bar` is one CRLF ending. Enter at the start of the
+    /// bare-CR line has to insert two breaks to add a line.
+    fn bare_cr_needs_extra_break(&self, range: &Range<usize>) -> bool {
+        if !range.is_empty() {
+            return false;
+        }
+        let cursor = range.start;
+        let line_start = home_offset(&self.content, cursor);
+        cursor == line_start
+            && cursor > 0
+            && self.content.as_bytes().get(cursor - 1) == Some(&b'\r')
     }
 
     pub fn smart_newline(&mut self, is_shift: bool) {
@@ -321,6 +352,14 @@ impl DocumentTab {
         }
         let range = self.selection_range();
         if is_shift {
+            if let Some(at) = self.heading_newline_at(&range) {
+                self.edit(at..at, "\n");
+                return;
+            }
+            if self.bare_cr_needs_extra_break(&range) {
+                self.edit(range.start..range.start, "\n\n");
+                return;
+            }
             self.edit(range, "\n");
             return;
         }
@@ -462,37 +501,12 @@ impl DocumentTab {
             }
         }
 
-        // Closing-hash headings keep the caret on the visible end. Enter
-        // inserts after the hidden closer, so the heading stays one line.
-        let after_heading = parsed.line_at_offset(cursor).and_then(|pline| {
-            let vend = visible_line_end(pline);
-            if range.is_empty() && cursor == vend && vend < pline.source.end {
-                Some(pline.source.end)
-            } else {
-                None
-            }
-        });
-        if let Some(at) = after_heading {
+        if let Some(at) = self.heading_newline_at(&range) {
             self.edit(at..at, "\n");
             return;
         }
-        // A rule is a rule before any bullet-prefix match. `- - -` scans as a
-        // list marker and an indented star rule has a one-space indent.
-        let on_rule = parsed
-            .line_at_offset(cursor)
-            .is_some_and(|pline| matches!(pline.kind, LineKind::HorizontalRule));
-        if on_rule {
-            self.edit(range, "\n");
-            return;
-        }
-        // `Foo\r` + `\n` + `Bar` is one CRLF ending, so Enter at the start of
-        // the bare-CR line has to insert two breaks to add a line.
-        if range.is_empty()
-            && cursor == line_start
-            && cursor > 0
-            && self.content.as_bytes().get(cursor - 1) == Some(&b'\r')
-        {
-            self.edit(cursor..cursor, "\n\n");
+        if self.bare_cr_needs_extra_break(&range) {
+            self.edit(range.start..range.start, "\n\n");
             return;
         }
 
@@ -688,6 +702,7 @@ impl DocumentTab {
         } else {
             self.caret.range = (range.start + 2)..(range.end + added_len);
         }
+        self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
     }
 
@@ -734,6 +749,7 @@ impl DocumentTab {
             let new_end = range.end.saturating_sub(removed_total).max(new_start);
             self.caret.range = new_start..new_end;
         }
+        self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
     }
 
@@ -859,7 +875,10 @@ impl DocumentTab {
 
                 // Expand to word only if cursor is touching/inside an alphanumeric word on the same line
                 let line_s = home_offset(&self.content, cursor);
-                let line_e = line_end(&self.content, cursor);
+                let line_e = parsed
+                    .line_at_offset(cursor)
+                    .map(visible_line_end)
+                    .unwrap_or_else(|| line_end(&self.content, cursor));
                 let w_start = word_start.max(line_s);
                 let w_end = word_end.min(line_e);
                 let touching_word = (cursor > w_start
@@ -1064,8 +1083,8 @@ impl DocumentTab {
         let range = self.selection_range();
         let start_line = home_offset(&self.content, range.start);
         let end_line = line_end(&self.content, range.end);
-        let lines_str = &self.content[start_line..end_line];
-        let split_lines: Vec<&str> = lines_str.split('\n').collect();
+        let lines_owned = self.content[start_line..end_line].to_string();
+        let split_lines: Vec<&str> = lines_owned.split('\n').collect();
 
         // Check if all non-empty lines (or the single line) already match `target`.
         // An ordered task is a checklist too: the button is on, and turning it
@@ -1105,7 +1124,20 @@ impl DocumentTab {
             } else {
                 &line[..indent]
             };
-            let body = &line[prefix_end..];
+            let raw_body = &line[prefix_end..];
+            let has_hidden_closer = self
+                .parsed()
+                .line_at_offset(line_at[idx])
+                .is_some_and(|parsed_line| visible_line_end(parsed_line) < parsed_line.source.end);
+            let strip_closer = has_hidden_closer
+                && (all_match || !matches!(target, BlockFormatTarget::Heading(_)));
+            let body = if strip_closer {
+                crate::markdown::parser::atx_content_range(line)
+                    .map(|content| &line[content])
+                    .unwrap_or(raw_body)
+            } else {
+                raw_body
+            };
             let new_line = if let Some(rewritten) =
                 ordered_checklist_line(&self.content, line_at[idx], target, all_match)
             {
@@ -1610,10 +1642,9 @@ impl DocumentTab {
                 let vend = visible_line_end(pline);
                 if cursor == vend && vend < pline.source.end {
                     let after = pline.source.end;
-                    let next = after + line_ending_len(&self.content, after);
-                    if next < self.content.len() {
-                        let end = next_grapheme(&self.content, next);
-                        self.edit(next..end, "");
+                    let break_len = line_ending_len(&self.content, after);
+                    if break_len > 0 {
+                        self.edit(after..after + break_len, "");
                     }
                     return;
                 }
@@ -2020,13 +2051,45 @@ impl DocumentTab {
     pub fn move_up(&mut self, extend: bool) {
         self.pending_formats = ActiveFormats::default();
         move_vertical_collapsed(&self.content, &mut self.caret, -1, extend);
+        self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
     }
 
     pub fn move_down(&mut self, extend: bool) {
         self.pending_formats = ActiveFormats::default();
         move_vertical_collapsed(&self.content, &mut self.caret, 1, extend);
+        self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
+    }
+
+    /// Up/Down land on a source column. Pull a caret that stopped inside a
+    /// hidden closing-hash run back to the visible end, and keep the column
+    /// the next vertical move should reuse.
+    fn snap_caret_to_visible_line_end(&mut self) {
+        let offset = self.cursor_offset();
+        let parsed = self.parsed();
+        let Some(line) = parsed.line_at_offset(offset) else {
+            return;
+        };
+        let vend = visible_line_end(line);
+        if offset > vend && offset <= line.source.end {
+            let prefer = self.caret.preferred_col;
+            if self.caret.range.is_empty() {
+                self.caret.range = vend..vend;
+                self.caret.reversed = false;
+            } else if self.caret.reversed {
+                self.caret.range.start = vend;
+            } else {
+                self.caret.range.end = vend;
+            }
+            if self.caret.range.start > self.caret.range.end {
+                let start = self.caret.range.end;
+                let end = self.caret.range.start;
+                self.caret.range = start..end;
+                self.caret.reversed = !self.caret.reversed;
+            }
+            self.caret.preferred_col = prefer;
+        }
     }
 
     pub fn move_home(&mut self, extend: bool) {
@@ -2094,16 +2157,27 @@ impl DocumentTab {
 
     pub fn select_line_down(&mut self) {
         let cursor = self.cursor_offset();
-        let current_line_start = super::text_ops::home_offset(&self.content, cursor);
-        let current_line_end = super::text_ops::line_end(&self.content, current_line_start);
-        let target = if cursor < current_line_end {
-            current_line_end
-        } else if current_line_end < self.content.len() {
-            let next_line_start =
-                current_line_end + line_ending_len(&self.content, current_line_end);
-            super::text_ops::line_end(&self.content, next_line_start)
-        } else {
-            self.content.len()
+        let target = {
+            let parsed = self.parsed();
+            let source_end = parsed
+                .line_at_offset(cursor)
+                .map(|line| line.source.end)
+                .unwrap_or_else(|| super::text_ops::line_end(&self.content, cursor));
+            let vend = parsed
+                .line_at_offset(cursor)
+                .map(visible_line_end)
+                .unwrap_or(source_end);
+            if cursor < vend {
+                vend
+            } else if source_end < self.content.len() {
+                let next = source_end + line_ending_len(&self.content, source_end);
+                parsed
+                    .line_at_offset(next)
+                    .map(visible_line_end)
+                    .unwrap_or_else(|| super::text_ops::line_end(&self.content, next))
+            } else {
+                self.content.len()
+            }
         };
         self.place(target, true);
     }
@@ -2127,11 +2201,22 @@ impl DocumentTab {
     }
 
     pub fn move_word_right(&mut self, extend: bool) {
-        let target = if !extend && !self.caret.range.is_empty() {
-            super::text_ops::word_right(&self.content, self.selection_range().end)
+        let origin = if !extend && !self.caret.range.is_empty() {
+            self.selection_range().end
         } else {
-            super::text_ops::word_right(&self.content, self.cursor_offset())
+            self.cursor_offset()
         };
+        let mut target = super::text_ops::word_right(&self.content, origin);
+        if let Some(line) = self.parsed().line_at_offset(origin) {
+            let vend = visible_line_end(line);
+            if vend < line.source.end
+                && origin <= vend
+                && target > vend
+                && target <= line.source.end
+            {
+                target = super::text_ops::word_right(&self.content, line.source.end);
+            }
+        }
         self.place(target, extend);
     }
 
@@ -2158,7 +2243,13 @@ impl DocumentTab {
             self.edit(self.selection_range(), "");
         } else {
             let cursor = self.cursor_offset();
-            let target = super::text_ops::word_right(&self.content, cursor);
+            let mut target = super::text_ops::word_right(&self.content, cursor);
+            if let Some(line) = self.parsed().line_at_offset(cursor) {
+                let vend = visible_line_end(line);
+                if vend < line.source.end && cursor <= vend && target > vend {
+                    target = vend;
+                }
+            }
             if target > cursor {
                 self.edit(cursor..target, "");
             }
@@ -2188,7 +2279,12 @@ impl DocumentTab {
             self.edit(self.selection_range(), "");
         } else {
             let cursor = self.cursor_offset();
-            let target = super::text_ops::line_end(&self.content, cursor);
+            let raw = super::text_ops::line_end(&self.content, cursor);
+            let target = self
+                .parsed()
+                .line_at_offset(cursor)
+                .map(visible_line_end)
+                .unwrap_or(raw);
             if target > cursor {
                 self.edit(cursor..target, "");
             }
@@ -2211,7 +2307,21 @@ impl DocumentTab {
     }
 
     pub fn select_line(&mut self) {
-        let range = super::text_ops::line_extent(&self.content, self.cursor_offset());
+        let cursor = self.cursor_offset();
+        let range = {
+            let parsed = self.parsed();
+            match parsed.line_at_offset(cursor) {
+                Some(line) => {
+                    let vend = visible_line_end(line);
+                    if vend < line.source.end {
+                        line.source.start..vend
+                    } else {
+                        super::text_ops::line_extent(&self.content, cursor)
+                    }
+                }
+                None => super::text_ops::line_extent(&self.content, cursor),
+            }
+        };
         self.caret.range = range;
         self.caret.reversed = false;
         self.caret.preferred_col = None;
@@ -4432,36 +4542,102 @@ mod tests {
         assert!(matches!(parsed.lines[2].kind, LineKind::Paragraph));
     }
 
-    /// R5-2. Enter at the end of a spaced or starred rule inserts the same
-    /// plain break Enter inserts after `---`.
+    /// Enter after `---` inserts a plain break. The other rows are not rules
+    /// on BASE: a spaced dash or star line is a list, and the indented star
+    /// line is a paragraph whose indent Enter copies.
     #[test]
     fn enter_on_spaced_rules_inserts_a_plain_break() {
-        let rules = [
-            "---",
-            "- - -",
-            "* * *",
-            "-     -      -      -",
-            " **  * ** * ** * **",
-        ];
-        for rule in rules {
-            let src = format!("{rule}\nnext");
-            let end = {
-                let parsed = parse_document(&src);
-                assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
-                assert_eq!(parsed.lines[0].display_text, "");
-                parsed.lines[0].source.end
-            };
-            let mut doc = DocumentTab::new("t".into(), "t.md".into(), src, None, None);
-            doc.place(end, false);
-            doc.smart_newline(false);
-            assert_eq!(doc.content, format!("{rule}\n\nnext"));
-            let parsed = doc.parsed();
+        let src = "---\nnext";
+        let end = {
+            let parsed = parse_document(src);
             assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
             assert_eq!(parsed.lines[0].display_text, "");
-            assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
-            assert_eq!(parsed.lines[1].display_text, "");
-            assert_eq!(parsed.lines[2].display_text, "next");
-        }
+            parsed.lines[0].source.end
+        };
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(end, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "---\n\nnext");
+        let parsed = doc.parsed();
+        assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
+        assert_eq!(parsed.lines[0].display_text, "");
+        assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
+        assert_eq!(parsed.lines[1].display_text, "");
+        assert_eq!(parsed.lines[2].display_text, "next");
+
+        let src = "- - -\nnext";
+        let end = parse_document(src).lines[0].source.end;
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(end, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "- - -\n- \nnext");
+        let parsed = doc.parsed();
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::ListItem {
+                ordered: false,
+                indent_cols: 0,
+                ..
+            }
+        ));
+        assert_eq!(parsed.lines[0].display_text, "- -");
+        assert!(matches!(
+            parsed.lines[1].kind,
+            LineKind::ListItem { ordered: false, .. }
+        ));
+        assert_eq!(parsed.lines[1].display_text, "");
+        assert_eq!(parsed.lines[2].display_text, "next");
+
+        let src = "* * *\nnext";
+        let end = parse_document(src).lines[0].source.end;
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(end, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "* * *\n* \nnext");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "* *");
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::ListItem {
+                ordered: false,
+                indent_cols: 0,
+                ..
+            }
+        ));
+        assert_eq!(parsed.lines[1].display_text, "");
+        assert_eq!(parsed.lines[2].display_text, "next");
+
+        let src = "-     -      -      -\nnext";
+        let end = parse_document(src).lines[0].source.end;
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(end, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "-     -      -      -\n- \nnext");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "    -      -      -");
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::ListItem {
+                ordered: false,
+                indent_cols: 0,
+                ..
+            }
+        ));
+        assert_eq!(parsed.lines[1].display_text, "");
+        assert_eq!(parsed.lines[2].display_text, "next");
+
+        let src = " **  * ** * ** * **\nnext";
+        let end = parse_document(src).lines[0].source.end;
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(end, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, " **  * ** * ** * **\n \nnext");
+        let parsed = doc.parsed();
+        assert!(matches!(parsed.lines[0].kind, LineKind::Paragraph));
+        assert_eq!(parsed.lines[0].display_text, " **  * ** * ** * **");
+        assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
+        assert_eq!(parsed.lines[1].display_text, " ");
+        assert_eq!(parsed.lines[2].display_text, "next");
     }
 
     /// R5-3. Enter at offset 4 of `Foo\rBar` inserts a blank line between them.

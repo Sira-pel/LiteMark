@@ -257,12 +257,8 @@ pub fn parse_markdown(markdown: &str) -> Vec<Block> {
             continue;
         }
 
-        // Horizontal rule ---, ***, ___
-        if is_thematic_break(line)
-            || trimmed == "---"
-            || trimmed == "***"
-            || trimmed == "___"
-        {
+        // Horizontal rule: exact `---`, `***`, or `___`, indent 0–3.
+        if exact_thematic_break(line) {
             blocks.push(Block::HorizontalRule {
                 source: line_source,
             });
@@ -1039,70 +1035,16 @@ struct OpenFence {
     open_range: std::ops::Range<usize>,
 }
 
-/// Thematic break: 0–3 spaces, then three or more of one of `-` `_` `*`,
-/// with spaces or tabs allowed between them.
-fn is_thematic_break(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    let mut index = 0;
-    let mut spaces = 0;
-    while index < bytes.len() && bytes[index] == b' ' {
-        spaces += 1;
-        if spaces > 3 {
-            return false;
-        }
-        index += 1;
-    }
-    if index >= bytes.len() {
+/// Thematic break: the line trims to `---`, `***`, or `___`, with 0–3 leading
+/// spaces. BASE's trim alone also accepts four spaces and a tab. The spec
+/// calls that indent a code block. This parser has no indented-code kind, so
+/// those lines stay paragraphs (`    ---\rnext\r` after the CR split).
+fn exact_thematic_break(line: &str) -> bool {
+    if !matches!(leading_spaces(line), Some(spaces) if spaces <= 3) {
         return false;
     }
-    let marker = bytes[index];
-    if marker != b'-' && marker != b'_' && marker != b'*' {
-        return false;
-    }
-    let mut count = 0;
-    while index < bytes.len() {
-        if bytes[index] == b' ' || bytes[index] == b'\t' {
-            index += 1;
-        } else if bytes[index] == marker {
-            count += 1;
-            index += 1;
-        } else {
-            return false;
-        }
-    }
-    count >= 3
-}
-
-/// A setext underline: 0–3 spaces, then one run of `=` or `-`, then spaces or tabs.
-/// This is not a heading. It only stops an extended thematic break from hiding the line.
-fn setext_underline_line(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    let mut index = 0;
-    let mut spaces = 0;
-    while index < bytes.len() && bytes[index] == b' ' {
-        spaces += 1;
-        if spaces > 3 {
-            return false;
-        }
-        index += 1;
-    }
-    if index >= bytes.len() {
-        return false;
-    }
-    let marker = bytes[index];
-    if marker != b'-' && marker != b'=' {
-        return false;
-    }
-    let marker_at = index;
-    while index < bytes.len() && bytes[index] == marker {
-        index += 1;
-    }
-    if index == marker_at {
-        return false;
-    }
-    bytes[index..]
-        .iter()
-        .all(|byte| *byte == b' ' || *byte == b'\t')
+    let trimmed = line.trim();
+    trimmed == "---" || trimmed == "***" || trimmed == "___"
 }
 
 /// `(bytes, column)` of the first non-space, non-tab. Tabs advance to the next multiple of 4.
@@ -1334,6 +1276,12 @@ fn atx_heading_within(line: &str, max_indent: usize) -> Option<(u8, std::ops::Ra
         content_start += 1;
     }
     Some((level, content_start..end))
+}
+
+/// ATX content, with the opening marks and a closing-hash run removed.
+/// `# **foo** #` keeps the inner `**`.
+pub(crate) fn atx_content_range(line: &str) -> Option<std::ops::Range<usize>> {
+    atx_heading(line).map(|(_level, content)| content)
 }
 
 #[allow(clippy::single_range_in_vec_init)]
@@ -1771,10 +1719,8 @@ fn single_tab_marker(line: &str) -> bool {
 /// rather than as paragraph text. Those lines close a list item.
 ///
 /// Headings and thematic breaks use the same classifiers as the line loop.
-/// A setext-shaped dash run is included: it interrupts a list even when the
-/// line loop later keeps it as a paragraph under a real paragraph.
 fn is_structural_line(line: &str) -> bool {
-    if atx_heading(line).is_some() || is_thematic_break(line) {
+    if atx_heading(line).is_some() || exact_thematic_break(line) {
         return true;
     }
     let trimmed = line.trim();
@@ -1915,130 +1861,6 @@ pub fn checkbox_click_replacement(current: &str) -> &'static str {
     "[ ]"
 }
 
-/// Open HTML block. Leaf rules (fences, rules, headings, tables) consult
-/// `html_hides_leaf` and do not run while one of these is open.
-#[derive(Clone, Copy)]
-enum HtmlBlock {
-    /// Type 1. The line that contains the end tag is still inside the block.
-    EndTag(&'static [u8]),
-    /// Types 2–5. The line that contains the marker is still inside.
-    EndStr(&'static [u8]),
-    /// Type 6. A blank line ends the block and is not part of it.
-    Blank,
-}
-
-/// One predicate for every leaf rule. An open HTML block hides them.
-fn html_hides_leaf(open: bool) -> bool {
-    open
-}
-
-/// Type 6 started inside a list item ends when a line leaves that item.
-/// A column-0 `<div>` is a document block and stays open across the dedent.
-fn type6_left_list(walk: &ListWalk, line: &str, content: usize) -> bool {
-    !line_is_blank(line) && leading_column(line) < content && !walk.continues_lazily(line)
-}
-
-fn html_block_start(line: &str) -> Option<HtmlBlock> {
-    let bytes = line.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() && bytes[index] == b' ' {
-        index += 1;
-        if index > 3 {
-            return None;
-        }
-    }
-    if bytes.get(index) != Some(&b'<') {
-        return None;
-    }
-    let rest = &bytes[index..];
-    if rest.starts_with(b"<!--") {
-        return Some(HtmlBlock::EndStr(b"-->"));
-    }
-    if rest.starts_with(b"<?") {
-        return Some(HtmlBlock::EndStr(b"?>"));
-    }
-    if rest.starts_with(b"<![CDATA[") {
-        return Some(HtmlBlock::EndStr(b"]]>"));
-    }
-    if rest.len() >= 3 && rest[1] == b'!' && rest[2].is_ascii_alphabetic() {
-        return Some(HtmlBlock::EndStr(b">"));
-    }
-    if let Some(end_tag) = html_type1_end(rest) {
-        return Some(HtmlBlock::EndTag(end_tag));
-    }
-    if html_type6(rest) {
-        return Some(HtmlBlock::Blank);
-    }
-    None
-}
-
-fn html_block_ends(line: &str, open: HtmlBlock) -> bool {
-    let bytes = line.as_bytes();
-    match open {
-        HtmlBlock::EndTag(tag) => contains_ignore_ascii_case(bytes, tag),
-        HtmlBlock::EndStr(marker) => bytes.windows(marker.len()).any(|window| window == marker),
-        HtmlBlock::Blank => false,
-    }
-}
-
-fn html_type1_end(rest: &[u8]) -> Option<&'static [u8]> {
-    const TAGS: &[(&[u8], &[u8])] = &[
-        (b"pre", b"</pre>"),
-        (b"script", b"</script>"),
-        (b"style", b"</style>"),
-        (b"textarea", b"</textarea>"),
-    ];
-    let name = &rest[1..];
-    for (tag, end_tag) in TAGS {
-        if name.len() >= tag.len() && name[..tag.len()].eq_ignore_ascii_case(tag) {
-            let boundary = name.len() == tag.len() || html_type1_boundary(name[tag.len()]);
-            if boundary {
-                return Some(end_tag);
-            }
-        }
-    }
-    None
-}
-
-fn html_type1_boundary(byte: u8) -> bool {
-    byte == b'>' || byte == b' ' || byte == b'\t' || byte == 0x0b || byte == 0x0c
-}
-
-fn html_type6(rest: &[u8]) -> bool {
-    // CommonMark 0.31.2 type-6 block tags, comma-separated.
-    const NAMES: &str = "address,article,aside,base,basefont,blockquote,body,caption,center,col,\
-colgroup,dd,details,dialog,dir,div,dl,dt,fieldset,figcaption,figure,footer,form,frame,frameset,\
-h1,h2,h3,h4,h5,h6,head,header,hr,html,iframe,legend,li,link,main,menu,menuitem,nav,noframes,ol,\
-optgroup,option,p,param,search,section,source,summary,table,tbody,td,tfoot,th,thead,title,tr,\
-track,ul";
-    let mut name = &rest[1..];
-    if name.first() == Some(&b'/') {
-        name = &name[1..];
-    }
-    for tag in NAMES.split(',') {
-        let tag = tag.as_bytes();
-        if name.len() >= tag.len() && name[..tag.len()].eq_ignore_ascii_case(tag) {
-            let after = tag.len();
-            if after == name.len() || html_type6_boundary(name[after]) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn html_type6_boundary(byte: u8) -> bool {
-    byte == b'>' || byte == b'/' || byte == b' ' || byte == b'\t' || byte == 0x0b || byte == 0x0c
-}
-
-fn contains_ignore_ascii_case(hay: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || hay.len() < needle.len() {
-        return false;
-    }
-    hay.windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle))
-}
-
 #[allow(clippy::single_range_in_vec_init)]
 pub fn parse_document(markdown: &str) -> ParsedDocument {
     let raw_lines = if markdown.is_empty() {
@@ -2106,9 +1928,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     }
 
     let mut list_walk = ListWalk::default();
-    let mut html_open: Option<HtmlBlock> = None;
-    // Content column of the list item that contains a type-6 block, if any.
-    let mut html_list_col: Option<usize> = None;
     for (i, sline) in raw_lines.iter().enumerate() {
         let line = sline.text;
         let line_start = sline.start;
@@ -2155,10 +1974,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             }
             continue;
         }
-        let open_top = if html_hides_leaf(html_open.is_some())
-            || in_list_or_quote(&lines)
-            || backtick_info_rejects_fence(line)
-        {
+        let open_top = if in_list_or_quote(&lines) || backtick_info_rejects_fence(line) {
             None
         } else {
             strict_backtick_open(line)
@@ -2185,7 +2001,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
         let skip_rejected = !in_list_or_quote(&lines) && backtick_info_rejects_fence(line);
-        if trimmed.starts_with("```") && !skip_rejected && !html_hides_leaf(html_open.is_some()) {
+        if trimmed.starts_with("```") && !skip_rejected {
             list_walk.note_block(line);
             let lang = trimmed
                 .strip_prefix("```")
@@ -2211,32 +2027,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
-        let html_was_open = html_open.is_some();
-        if trimmed.is_empty() && matches!(html_open, Some(HtmlBlock::Blank)) {
-            html_open = None;
-            html_list_col = None;
-        } else if html_open.is_none() && !trimmed.is_empty() {
-            if let Some(started) = html_block_start(line) {
-                let col = leading_column(line);
-                html_list_col = list_walk
-                    .open
-                    .last()
-                    .copied()
-                    .filter(|content| col >= *content);
-                html_open = Some(started);
-            }
-        }
-        if html_was_open {
-            if let Some(content) = html_list_col {
-                if matches!(html_open, Some(HtmlBlock::Blank))
-                    && type6_left_list(&list_walk, line, content)
-                {
-                    html_open = None;
-                    html_list_col = None;
-                }
-            }
-        }
-
         if trimmed.is_empty() {
             list_walk.note_blank();
             lines.push(ParsedLine {
@@ -2253,17 +2043,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
-        // Horizontal rule. Red's exact trim match stays. A longer or spaced
-        // break stays a paragraph when it is a setext underline of the
-        // previous paragraph, which red also leaves as a paragraph.
-        let red_exact_rule = trimmed == "---" || trimmed == "***" || trimmed == "___";
-        let setext_underline = lines
-            .last()
-            .is_some_and(|prev| matches!(prev.kind, LineKind::Paragraph))
-            && setext_underline_line(line);
-        if !html_hides_leaf(html_open.is_some())
-            && (red_exact_rule || (is_thematic_break(line) && !setext_underline))
-        {
+        // Horizontal rule: exact `---`, `***`, or `___`, indent 0–3.
+        if exact_thematic_break(line) {
             list_walk.note_block(line);
             let hidden = vec![line_start..line_end];
             all_hidden.extend(hidden.iter().cloned());
@@ -2284,7 +2065,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }
 
         // Table rows
-        if !html_hides_leaf(html_open.is_some()) {
         if let Some(&(tbl_first, _tbl_last, ref tbl_src, ref tbl_aligns)) =
             table_ranges.iter().find(|&&(f, l, _, _)| i >= f && i <= l)
         {
@@ -2332,8 +2112,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     cells.push(c_start..c_end);
                     if c_end > c_start {
                         let inner_slice = &line[(c_start - line_start)..(c_end - line_start)];
-                        let (c_hid, c_pairs, c_segs) =
-                            parse_inline_syntax(inner_slice, c_start);
+                        let (c_hid, c_pairs, c_segs) = parse_inline_syntax(inner_slice, c_start);
                         row_hidden.extend(c_hid);
                         row_pairs.extend(c_pairs);
                         row_segments.extend(c_segs);
@@ -2376,26 +2155,21 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 continue;
             }
         }
-        }
 
-        if !html_hides_leaf(html_open.is_some()) {
-            if let Some((level, content)) = atx_heading(line) {
-                list_walk.note_block(line);
-                let parsed = atx_line(i, line_source, line, level, content);
-                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-                all_pairs.extend(parsed.inline_pairs.iter().cloned());
-                lines.push(parsed);
-                continue;
-            }
+        if let Some((level, content)) = atx_heading(line) {
+            list_walk.note_block(line);
+            let parsed = atx_line(i, line_source, line, level, content);
+            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+            all_pairs.extend(parsed.inline_pairs.iter().cloned());
+            lines.push(parsed);
+            continue;
         }
 
         // Determine block kind & prefix length
         let mut kind = LineKind::Paragraph;
         let mut prefix_len = 0usize;
 
-        if html_hides_leaf(html_open.is_some()) {
-            list_walk.note_block(line);
-        } else if let Some(item) = list_walk.take_list(line) {
+        if let Some(item) = list_walk.take_list(line) {
             let checkbox_source = item.task.as_ref().map(|task| {
                 let start = line_start + task.checkbox_at;
                 start..start + 3
@@ -2420,11 +2194,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         let body = &line[prefix_len..];
         let body_base = line_start + prefix_len;
         let (mut inline_hidden, inline_pairs, styled_segments) =
-            if html_hides_leaf(html_open.is_some()) {
-                (Vec::new(), Vec::new(), Vec::new())
-            } else {
-                parse_inline_syntax(body, body_base)
-            };
+            parse_inline_syntax(body, body_base);
 
         if prefix_len > 0 {
             inline_hidden.push(prefix_range.clone());
@@ -2447,12 +2217,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             offset_map,
             styled_segments,
         });
-        if let Some(open) = html_open {
-            if html_block_ends(line, open) {
-                html_open = None;
-                html_list_col = None;
-            }
-        }
     }
 
     if let Some(fence) = open_fence {
@@ -2881,23 +2645,31 @@ mod tests {
             (
                 "ex50-hr-long",
                 "_____________________________________",
-                vec![leaf("hr", "", "_____________________________________")],
+                vec![leaf(
+                    "p",
+                    "_____________________________________",
+                    "_____________________________________",
+                )],
             ),
-            ("ex51-hr-spaced", " - - -", vec![leaf("hr", "", " - - -")]),
+            (
+                "ex51-hr-spaced",
+                " - - -",
+                vec![leaf("ul:1", "- -", " - - -")],
+            ),
             (
                 "ex52-hr-stars",
                 " **  * ** * ** * **",
-                vec![leaf("hr", "", " **  * ** * ** * **")],
+                vec![leaf("p", " **  * ** * ** * **", " **  * ** * ** * **")],
             ),
             (
                 "ex53-hr-spaced-dashes",
                 "-     -      -      -",
-                vec![leaf("hr", "", "-     -      -      -")],
+                vec![leaf("ul:0", "    -      -      -", "-     -      -      -")],
             ),
             (
                 "ex54-hr-trailing-space",
                 "- - - -    ",
-                vec![leaf("hr", "", "- - - -    ")],
+                vec![leaf("ul:0", "- - -    ", "- - - -    ")],
             ),
             (
                 "ex55-not-hr",
@@ -2938,7 +2710,7 @@ mod tests {
                 "* Foo\n* * *\n* Bar",
                 vec![
                     leaf("ul:0", "Foo", "* Foo"),
-                    leaf("hr", "", "* * *"),
+                    leaf("ul:0", "* *", "* * *"),
                     leaf("ul:0", "Bar", "* Bar"),
                 ],
             ),
@@ -3055,9 +2827,9 @@ mod tests {
                 "ex77-four-stars",
                 "****\n## foo\n****",
                 vec![
-                    leaf("hr", "", "****"),
+                    leaf("p", "****", "****"),
                     leaf("h2", "foo", "## foo"),
-                    leaf("hr", "", "****"),
+                    leaf("p", "****", "****"),
                 ],
             ),
             (
@@ -3086,7 +2858,7 @@ mod tests {
                     leaf("p", "= =", "= ="),
                     leaf("empty", "", ""),
                     leaf("p", "Foo", "Foo"),
-                    leaf("hr", "", "--- -"),
+                    leaf("p", "--- -", "--- -"),
                 ],
             ),
             (
@@ -3327,7 +3099,7 @@ mod tests {
             (
                 "spaced-dashes-after-paragraph",
                 "Foo\n- - -",
-                vec![leaf("p", "Foo", "Foo"), leaf("hr", "", "- - -")],
+                vec![leaf("p", "Foo", "Foo"), leaf("ul:0", "- -", "- - -")],
             ),
             (
                 "four-dashes-after-paragraph-stay-text",
@@ -3342,7 +3114,7 @@ mod tests {
             (
                 "four-dashes-at-top-are-hr",
                 "----",
-                vec![leaf("hr", "", "----")],
+                vec![leaf("p", "----", "----")],
             ),
             (
                 "table-unchanged",
@@ -3960,13 +3732,16 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
         );
     }
 
-    /// R5-4. Stars, underscores, and dashes inside an open HTML block stay
-    /// visible text. They are not a thematic break.
+    /// Exact `---`, `***`, and `___` are rules, including after HTML, which is
+    /// BASE (no HTML-block guard). Every other shape is the paragraph or list
+    /// BASE already parses.
     #[test]
     fn extended_rules_inside_html_stay_visible_text() {
-        let outside = parse_document("Foo\n****\n");
-        assert!(matches!(outside.lines[1].kind, LineKind::HorizontalRule));
-        assert_eq!(outside.lines[1].display_text, "");
+        let outside_src = "Foo\n****\n";
+        let outside = parse_document(outside_src);
+        assert!(matches!(outside.lines[1].kind, LineKind::Paragraph));
+        assert_eq!(outside.lines[1].display_text, "****");
+        assert_eq!(&outside_src[outside.lines[1].source.clone()], "****");
         let kept = "- item\n<br>\n---\n";
         let list_rule = parse_document(kept);
         assert!(matches!(list_rule.lines[2].kind, LineKind::HorizontalRule));
@@ -3988,8 +3763,8 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
         let div_rule = "<div>\n---\n";
         let div_doc = parse_document(div_rule);
         assert_eq!(&div_rule[div_doc.lines[1].source.clone()], "---");
-        assert_eq!(div_doc.lines[1].display_text, "---");
-        assert!(matches!(div_doc.lines[1].kind, LineKind::Paragraph));
+        assert_eq!(div_doc.lines[1].display_text, "");
+        assert!(matches!(div_doc.lines[1].kind, LineKind::HorizontalRule));
 
         let cases = [
             ("<pre>\n****\n", 1, "****"),
@@ -3998,12 +3773,9 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             ("<script>\n****\n", 1, "****"),
             ("<pre>\n____\n", 1, "____"),
             ("<pre>\n_ _ _\n", 1, "_ _ _"),
-            ("<pre>\n* * *\n", 1, "* * *"),
-            ("<pre>\n- - -\n", 1, "- - -"),
             ("<pre>\n\n****\n", 2, "****"),
             ("Para\n<pre>\n****\n", 2, "****"),
             ("<pre>\n   ****\n", 1, "   ****"),
-            ("<pre>\n*\t*\t*\n", 1, "*\t*\t*"),
             ("<pre>\r****\r", 1, "****"),
         ];
         for (src, index, display) in cases {
@@ -4017,6 +3789,43 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
                 line.kind
             );
         }
+
+        let stars = "<pre>\n* * *\n";
+        let star_doc = parse_document(stars);
+        assert_eq!(&stars[star_doc.lines[1].source.clone()], "* * *");
+        assert_eq!(star_doc.lines[1].display_text, "* *");
+        assert!(matches!(
+            star_doc.lines[1].kind,
+            LineKind::ListItem {
+                ordered: false,
+                indent_cols: 0,
+                ..
+            }
+        ));
+        let dashes = "<pre>\n- - -\n";
+        let dash_doc = parse_document(dashes);
+        assert_eq!(&dashes[dash_doc.lines[1].source.clone()], "- - -");
+        assert_eq!(dash_doc.lines[1].display_text, "- -");
+        assert!(matches!(
+            dash_doc.lines[1].kind,
+            LineKind::ListItem {
+                ordered: false,
+                indent_cols: 0,
+                ..
+            }
+        ));
+        let tabs = "<pre>\n*\t*\t*\n";
+        let tab_doc = parse_document(tabs);
+        assert_eq!(&tabs[tab_doc.lines[1].source.clone()], "*\t*\t*");
+        assert_eq!(tab_doc.lines[1].display_text, "*\t*");
+        assert!(matches!(
+            tab_doc.lines[1].kind,
+            LineKind::ListItem {
+                ordered: false,
+                indent_cols: 0,
+                ..
+            }
+        ));
     }
 
     /// R6-9. Four spaces before `---` is indented text once a bare CR is a
