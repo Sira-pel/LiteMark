@@ -2176,7 +2176,7 @@ impl DocumentTab {
             .map(|line| line.source.end)
             .unwrap_or_else(|| super::text_ops::line_end(&self.content, cursor));
         let target = if cursor < source_end {
-            source_end
+            source_end + line_ending_len(&self.content, source_end).saturating_sub(1)
         } else if source_end < self.content.len() {
             let next = source_end + line_ending_len(&self.content, source_end);
             parsed
@@ -2304,7 +2304,8 @@ impl DocumentTab {
             let target = self.parsed().line_at_offset(cursor).map_or(raw, |line| {
                 let vend = visible_line_end(line, self.view_mode);
                 if cursor < vend {
-                    line.source.end
+                    let end = line.source.end;
+                    end + line_ending_len(&self.content, end).saturating_sub(1)
                 } else {
                     vend
                 }
@@ -5423,6 +5424,12 @@ mod tests {
         assert_eq!(doc.selected_text(), "## bar ##");
         delete_forward(&mut doc);
         assert_eq!(doc.content, "");
+
+        let mut doc = heading_tab("# foo #\r\nnext");
+        doc.select_line_down();
+        assert_eq!(doc.caret.range, 0..8);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "\nnext");
     }
 
     /// BASE `1d03313` Ctrl+Shift+Delete from before the visible end removes the
@@ -5446,6 +5453,16 @@ mod tests {
         assert_eq!(doc.content, "\nnext");
 
         let mut doc = heading_tab("# foo #\nnext");
+        doc.move_home_in_mode(false, ViewMode::Wysiwyg);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "# \nnext");
+
+        let mut doc = heading_tab("# foo #\r\nnext");
+        doc.place(0, false);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "\nnext");
+
+        let mut doc = heading_tab("# foo #\r\nnext");
         doc.move_home_in_mode(false, ViewMode::Wysiwyg);
         doc.delete_to_line_end();
         assert_eq!(doc.content, "# \nnext");
