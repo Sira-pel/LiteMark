@@ -4992,6 +4992,13 @@ mod tests {
         DocumentTab::new("t".into(), "t.md".into(), text.into(), None, None)
     }
 
+    /// `active_tab_mut` and `editor_surface` call `set_view_mode` with the
+    /// mode the tab already has, before a paint or an edit.
+    fn app_touch(doc: &mut DocumentTab) {
+        let mode = doc.view_mode;
+        doc.set_view_mode(mode);
+    }
+
     /// K1. Ancestor 7ad1cff rendered End on `# foo #` is offset 5, and typing
     /// X there yields `# fooX #` (display `fooX`).
     #[test]
@@ -5081,8 +5088,10 @@ mod tests {
         assert_eq!(doc.cursor_offset(), 0);
     }
 
-    /// Ancestor select-to-visible-end then Delete on `# foo #\nnext` is ` #\nnext`.
-    /// A reversed selection whose anchor sits on the raw end deletes to `#  #`.
+    /// BASE `1d03313` deletes these raw ranges. The switch to rendered must
+    /// leave the range in place. `# foo #\nnext` `0..7` deletes to `\nnext`.
+    /// `# foo #` `2..7` deletes to `# `. `7..12` deletes to `# foo #`.
+    /// `6..7` deletes to `# foo \nnext`.
     #[test]
     fn raw_selection_then_rendered_snaps_anchor_and_caret() {
         let mut doc = heading_tab("# foo #\nnext");
@@ -5091,18 +5100,142 @@ mod tests {
         doc.move_end(true);
         assert_eq!(doc.caret.range, 0..7);
         doc.set_view_mode(ViewMode::Wysiwyg);
-        assert_eq!(doc.caret.range, 0..5);
+        assert_eq!(doc.caret.range, 0..7);
         doc.delete_forward_in_mode(ViewMode::Wysiwyg);
-        assert_eq!(doc.content, " #\nnext");
+        assert_eq!(doc.content, "\nnext");
 
         let mut doc = heading_tab("# foo #");
         doc.set_view_mode(ViewMode::Raw);
         doc.caret.range = 2..7;
         doc.caret.reversed = true;
         doc.set_view_mode(ViewMode::Wysiwyg);
-        assert_eq!(doc.caret.range, 2..5);
+        assert_eq!(doc.caret.range, 2..7);
         assert!(doc.caret.reversed);
         doc.delete_forward_in_mode(ViewMode::Wysiwyg);
-        assert_eq!(doc.content, "#  #");
+        assert_eq!(doc.content, "# ");
+
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.set_view_mode(ViewMode::Raw);
+        doc.caret.range = 7..12;
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.caret.range, 7..12);
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# foo #");
+
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.set_view_mode(ViewMode::Raw);
+        doc.caret.range = 6..7;
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.caret.range, 6..7);
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# foo \nnext");
+    }
+
+    /// BASE `1d03313` select-all, then Delete, Backspace, type X, or cut, on a
+    /// document that ends on a closing-hash heading. Delete clears the file.
+    #[test]
+    fn rendered_select_all_on_a_final_heading_matches_base() {
+        for src in ["# foo #", "hello\n# Title #", "## foo ##", "### ###"] {
+            let mut doc = heading_tab(src);
+            doc.select_all();
+            app_touch(&mut doc);
+            doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "", "{src:?} delete");
+
+            let mut doc = heading_tab(src);
+            doc.select_all();
+            app_touch(&mut doc);
+            doc.smart_backspace_in_mode(ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "", "{src:?} backspace");
+
+            let mut doc = heading_tab(src);
+            doc.select_all();
+            app_touch(&mut doc);
+            let range = doc.selection_range();
+            doc.insert_text_in_mode(range, "X", ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "X", "{src:?} type");
+
+            let mut doc = heading_tab(src);
+            doc.select_all();
+            app_touch(&mut doc);
+            let clip = doc.selected_text();
+            let range = doc.selection_range();
+            doc.edit(range, "");
+            assert_eq!(clip, src, "{src:?} clip");
+            assert_eq!(doc.content, "", "{src:?} cut");
+        }
+    }
+
+    /// BASE `1d03313` select-line on the closing-hash heading, then the same
+    /// four edits. A following `hello\n` line stays. A one-line heading clears.
+    #[test]
+    fn rendered_select_line_on_a_final_heading_matches_base() {
+        for src in ["# foo #", "## foo ##", "### ###"] {
+            let mut doc = heading_tab(src);
+            doc.place(0, false);
+            doc.select_line();
+            app_touch(&mut doc);
+            doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "", "{src:?} delete");
+
+            let mut doc = heading_tab(src);
+            doc.place(0, false);
+            doc.select_line();
+            app_touch(&mut doc);
+            doc.smart_backspace_in_mode(ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "", "{src:?} backspace");
+
+            let mut doc = heading_tab(src);
+            doc.place(0, false);
+            doc.select_line();
+            app_touch(&mut doc);
+            let range = doc.selection_range();
+            doc.insert_text_in_mode(range, "X", ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "X", "{src:?} type");
+
+            let mut doc = heading_tab(src);
+            doc.place(0, false);
+            doc.select_line();
+            app_touch(&mut doc);
+            let clip = doc.selected_text();
+            let range = doc.selection_range();
+            doc.edit(range, "");
+            assert_eq!(clip, src, "{src:?} clip");
+            assert_eq!(doc.content, "", "{src:?} cut");
+        }
+
+        let src = "hello\n# Title #";
+        let at = src.rfind('\n').map(|index| index + 1).unwrap_or(0);
+        let mut doc = heading_tab(src);
+        doc.place(at, false);
+        doc.select_line();
+        app_touch(&mut doc);
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "hello\n");
+
+        let mut doc = heading_tab(src);
+        doc.place(at, false);
+        doc.select_line();
+        app_touch(&mut doc);
+        doc.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "hello\n");
+
+        let mut doc = heading_tab(src);
+        doc.place(at, false);
+        doc.select_line();
+        app_touch(&mut doc);
+        let range = doc.selection_range();
+        doc.insert_text_in_mode(range, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "hello\nX");
+
+        let mut doc = heading_tab(src);
+        doc.place(at, false);
+        doc.select_line();
+        app_touch(&mut doc);
+        let clip = doc.selected_text();
+        let range = doc.selection_range();
+        doc.edit(range, "");
+        assert_eq!(clip, "# Title #");
+        assert_eq!(doc.content, "hello\n");
     }
 }
