@@ -2282,12 +2282,8 @@ impl LiteMarkApp {
                     return None;
                 }
             };
-            let Some(sel) = self.submenu_selected_ix else {
-                return None;
-            };
-            let Some(item) = sub_items.get(sel) else {
-                return None;
-            };
+            let sel = self.submenu_selected_ix?;
+            let item = sub_items.get(sel)?;
             if item.disabled
                 || !matches!(
                     item.kind,
