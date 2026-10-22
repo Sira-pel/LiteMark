@@ -1915,6 +1915,124 @@ pub fn checkbox_click_replacement(current: &str) -> &'static str {
     "[ ]"
 }
 
+/// Open HTML block. Leaf rules (fences, rules, headings, tables) consult
+/// `html_hides_leaf` and do not run while one of these is open.
+#[derive(Clone, Copy)]
+enum HtmlBlock {
+    /// Type 1. The line that contains the end tag is still inside the block.
+    EndTag(&'static [u8]),
+    /// Types 2–5. The line that contains the marker is still inside.
+    EndStr(&'static [u8]),
+    /// Type 6. A blank line ends the block and is not part of it.
+    Blank,
+}
+
+/// One predicate for every leaf rule. An open HTML block hides them.
+fn html_hides_leaf(open: bool) -> bool {
+    open
+}
+
+fn html_block_start(line: &str) -> Option<HtmlBlock> {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() && bytes[index] == b' ' {
+        index += 1;
+        if index > 3 {
+            return None;
+        }
+    }
+    if bytes.get(index) != Some(&b'<') {
+        return None;
+    }
+    let rest = &bytes[index..];
+    if rest.starts_with(b"<!--") {
+        return Some(HtmlBlock::EndStr(b"-->"));
+    }
+    if rest.starts_with(b"<?") {
+        return Some(HtmlBlock::EndStr(b"?>"));
+    }
+    if rest.starts_with(b"<![CDATA[") {
+        return Some(HtmlBlock::EndStr(b"]]>"));
+    }
+    if rest.len() >= 3 && rest[1] == b'!' && rest[2].is_ascii_alphabetic() {
+        return Some(HtmlBlock::EndStr(b">"));
+    }
+    if let Some(end_tag) = html_type1_end(rest) {
+        return Some(HtmlBlock::EndTag(end_tag));
+    }
+    if html_type6(rest) {
+        return Some(HtmlBlock::Blank);
+    }
+    None
+}
+
+fn html_block_ends(line: &str, open: HtmlBlock) -> bool {
+    let bytes = line.as_bytes();
+    match open {
+        HtmlBlock::EndTag(tag) => contains_ignore_ascii_case(bytes, tag),
+        HtmlBlock::EndStr(marker) => bytes.windows(marker.len()).any(|window| window == marker),
+        HtmlBlock::Blank => false,
+    }
+}
+
+fn html_type1_end(rest: &[u8]) -> Option<&'static [u8]> {
+    const TAGS: &[(&[u8], &[u8])] = &[
+        (b"pre", b"</pre>"),
+        (b"script", b"</script>"),
+        (b"style", b"</style>"),
+        (b"textarea", b"</textarea>"),
+    ];
+    let name = &rest[1..];
+    for (tag, end_tag) in TAGS {
+        if name.len() >= tag.len() && name[..tag.len()].eq_ignore_ascii_case(tag) {
+            let boundary = name.len() == tag.len() || html_type1_boundary(name[tag.len()]);
+            if boundary {
+                return Some(end_tag);
+            }
+        }
+    }
+    None
+}
+
+fn html_type1_boundary(byte: u8) -> bool {
+    byte == b'>' || byte == b' ' || byte == b'\t' || byte == 0x0b || byte == 0x0c
+}
+
+fn html_type6(rest: &[u8]) -> bool {
+    // CommonMark 0.31.2 type-6 block tags, comma-separated.
+    const NAMES: &str = "address,article,aside,base,basefont,blockquote,body,caption,center,col,\
+colgroup,dd,details,dialog,dir,div,dl,dt,fieldset,figcaption,figure,footer,form,frame,frameset,\
+h1,h2,h3,h4,h5,h6,head,header,hr,html,iframe,legend,li,link,main,menu,menuitem,nav,noframes,ol,\
+optgroup,option,p,param,search,section,source,summary,table,tbody,td,tfoot,th,thead,title,tr,\
+track,ul";
+    let mut name = &rest[1..];
+    if name.first() == Some(&b'/') {
+        name = &name[1..];
+    }
+    for tag in NAMES.split(',') {
+        let tag = tag.as_bytes();
+        if name.len() >= tag.len() && name[..tag.len()].eq_ignore_ascii_case(tag) {
+            let after = tag.len();
+            if after == name.len() || html_type6_boundary(name[after]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn html_type6_boundary(byte: u8) -> bool {
+    byte == b'>' || byte == b'/' || byte == b' ' || byte == b'\t' || byte == 0x0b || byte == 0x0c
+}
+
+fn contains_ignore_ascii_case(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    hay.windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 #[allow(clippy::single_range_in_vec_init)]
 pub fn parse_document(markdown: &str) -> ParsedDocument {
     let raw_lines = if markdown.is_empty() {
@@ -1982,6 +2100,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     }
 
     let mut list_walk = ListWalk::default();
+    let mut html_open: Option<HtmlBlock> = None;
     for (i, sline) in raw_lines.iter().enumerate() {
         let line = sline.text;
         let line_start = sline.start;
@@ -2028,7 +2147,10 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             }
             continue;
         }
-        let open_top = if in_list_or_quote(&lines) || backtick_info_rejects_fence(line) {
+        let open_top = if html_hides_leaf(html_open.is_some())
+            || in_list_or_quote(&lines)
+            || backtick_info_rejects_fence(line)
+        {
             None
         } else {
             strict_backtick_open(line)
@@ -2055,7 +2177,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
         let skip_rejected = !in_list_or_quote(&lines) && backtick_info_rejects_fence(line);
-        if trimmed.starts_with("```") && !skip_rejected {
+        if trimmed.starts_with("```") && !skip_rejected && !html_hides_leaf(html_open.is_some()) {
             list_walk.note_block(line);
             let lang = trimmed
                 .strip_prefix("```")
@@ -2079,6 +2201,14 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             all_hidden.extend(parsed.hidden_ranges.iter().cloned());
             lines.push(parsed);
             continue;
+        }
+
+        if trimmed.is_empty() && matches!(html_open, Some(HtmlBlock::Blank)) {
+            html_open = None;
+        } else if html_open.is_none() && !trimmed.is_empty() {
+            if let Some(started) = html_block_start(line) {
+                html_open = Some(started);
+            }
         }
 
         if trimmed.is_empty() {
@@ -2105,7 +2235,9 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             .last()
             .is_some_and(|prev| matches!(prev.kind, LineKind::Paragraph))
             && setext_underline_line(line);
-        if red_exact_rule || (is_thematic_break(line) && !setext_underline) {
+        if !html_hides_leaf(html_open.is_some())
+            && (red_exact_rule || (is_thematic_break(line) && !setext_underline))
+        {
             list_walk.note_block(line);
             let hidden = vec![line_start..line_end];
             all_hidden.extend(hidden.iter().cloned());
@@ -2126,6 +2258,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }
 
         // Table rows
+        if !html_hides_leaf(html_open.is_some()) {
         if let Some(&(tbl_first, _tbl_last, ref tbl_src, ref tbl_aligns)) =
             table_ranges.iter().find(|&&(f, l, _, _)| i >= f && i <= l)
         {
@@ -2217,21 +2350,26 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 continue;
             }
         }
+        }
 
-        if let Some((level, content)) = atx_heading(line) {
-            list_walk.note_block(line);
-            let parsed = atx_line(i, line_source, line, level, content);
-            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-            all_pairs.extend(parsed.inline_pairs.iter().cloned());
-            lines.push(parsed);
-            continue;
+        if !html_hides_leaf(html_open.is_some()) {
+            if let Some((level, content)) = atx_heading(line) {
+                list_walk.note_block(line);
+                let parsed = atx_line(i, line_source, line, level, content);
+                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                all_pairs.extend(parsed.inline_pairs.iter().cloned());
+                lines.push(parsed);
+                continue;
+            }
         }
 
         // Determine block kind & prefix length
         let mut kind = LineKind::Paragraph;
         let mut prefix_len = 0usize;
 
-        if let Some(item) = list_walk.take_list(line) {
+        if html_hides_leaf(html_open.is_some()) {
+            list_walk.note_block(line);
+        } else if let Some(item) = list_walk.take_list(line) {
             let checkbox_source = item.task.as_ref().map(|task| {
                 let start = line_start + task.checkbox_at;
                 start..start + 3
@@ -2256,7 +2394,11 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         let body = &line[prefix_len..];
         let body_base = line_start + prefix_len;
         let (mut inline_hidden, inline_pairs, styled_segments) =
-            parse_inline_syntax(body, body_base);
+            if html_hides_leaf(html_open.is_some()) {
+                (Vec::new(), Vec::new(), Vec::new())
+            } else {
+                parse_inline_syntax(body, body_base)
+            };
 
         if prefix_len > 0 {
             inline_hidden.push(prefix_range.clone());
@@ -2279,6 +2421,11 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             offset_map,
             styled_segments,
         });
+        if let Some(open) = html_open {
+            if html_block_ends(line, open) {
+                html_open = None;
+            }
+        }
     }
 
     if let Some(fence) = open_fence {

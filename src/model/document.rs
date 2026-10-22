@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::markdown::{
     accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlineTagKind,
-    LineKind, ParsedDocument, TableColumnAlign,
+    LineKind, ParsedDocument, ParsedLine, TableColumnAlign,
 };
 
 use super::text_ops::{
@@ -460,6 +460,40 @@ impl DocumentTab {
                     return;
                 }
             }
+        }
+
+        // Closing-hash headings keep the caret on the visible end. Enter
+        // inserts after the hidden closer, so the heading stays one line.
+        let after_heading = parsed.line_at_offset(cursor).and_then(|pline| {
+            let vend = visible_line_end(pline);
+            if range.is_empty() && cursor == vend && vend < pline.source.end {
+                Some(pline.source.end)
+            } else {
+                None
+            }
+        });
+        if let Some(at) = after_heading {
+            self.edit(at..at, "\n");
+            return;
+        }
+        // A rule is a rule before any bullet-prefix match. `- - -` scans as a
+        // list marker and an indented star rule has a one-space indent.
+        let on_rule = parsed
+            .line_at_offset(cursor)
+            .is_some_and(|pline| matches!(pline.kind, LineKind::HorizontalRule));
+        if on_rule {
+            self.edit(range, "\n");
+            return;
+        }
+        // `Foo\r` + `\n` + `Bar` is one CRLF ending, so Enter at the start of
+        // the bare-CR line has to insert two breaks to add a line.
+        if range.is_empty()
+            && cursor == line_start
+            && cursor > 0
+            && self.content.as_bytes().get(cursor - 1) == Some(&b'\r')
+        {
+            self.edit(cursor..cursor, "\n\n");
+            return;
         }
 
         let line = &self.content[line_start..line_end_pos];
@@ -1432,6 +1466,24 @@ impl DocumentTab {
             if pos < pline.prefix_range.end {
                 pos = pline.prefix_range.end;
             }
+            let vend = visible_line_end(pline);
+            let source_end = pline.source.end;
+            if pos >= vend && vend < source_end {
+                let break_len = line_ending_len(&self.content, source_end);
+                if break_len > 0 {
+                    let next_line_start = source_end + break_len;
+                    let prefix_end = parsed
+                        .line_at_offset(next_line_start)
+                        .map(|nline| nline.prefix_range.end);
+                    if let Some(prefix_end) = prefix_end {
+                        let target = skip_hidden_right(&parsed, prefix_end);
+                        self.place(target, extend);
+                        return;
+                    }
+                }
+                self.place(vend, extend);
+                return;
+            }
         }
         pos = skip_hidden_right(&parsed, pos);
         if pos >= self.content.len() {
@@ -1554,6 +1606,16 @@ impl DocumentTab {
                     if at_cell_end_or_pipe {
                         return;
                     }
+                }
+                let vend = visible_line_end(pline);
+                if cursor == vend && vend < pline.source.end {
+                    let after = pline.source.end;
+                    let next = after + line_ending_len(&self.content, after);
+                    if next < self.content.len() {
+                        let end = next_grapheme(&self.content, next);
+                        self.edit(next..end, "");
+                    }
+                    return;
                 }
             }
         }
@@ -2008,8 +2070,12 @@ impl DocumentTab {
 
     pub fn move_end(&mut self, extend: bool) {
         self.pending_formats = ActiveFormats::default();
-        let line_start = super::text_ops::home_offset(&self.content, self.cursor_offset());
-        let target = super::text_ops::line_end(&self.content, line_start);
+        let cursor = self.cursor_offset();
+        let parsed = self.parsed();
+        let target = parsed
+            .line_at_offset(cursor)
+            .map(visible_line_end)
+            .unwrap_or_else(|| super::text_ops::line_end(&self.content, cursor));
         self.place(target, extend);
     }
 
@@ -2154,7 +2220,16 @@ impl DocumentTab {
 
     pub fn place(&mut self, offset: usize, extend: bool) {
         self.pending_formats = ActiveFormats::default();
-        let offset = floor_boundary(&self.content, snap_off_ending_interior(&self.content, offset));
+        let mut offset = floor_boundary(
+            &self.content,
+            snap_off_ending_interior(&self.content, offset),
+        );
+        if let Some(line) = self.parsed().line_at_offset(offset) {
+            let vend = visible_line_end(line);
+            if offset > vend && offset <= line.source.end {
+                offset = vend;
+            }
+        }
         if extend {
             self.caret.select_to(offset);
         } else {
@@ -2518,7 +2593,24 @@ fn skip_hidden_interior_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
     pos
 }
 
+/// End of the text the caret can stand on. A closing-hash heading hides the
+/// closer, so this is the click, End, and Right target. Every other line
+/// keeps the source end.
+fn visible_line_end(line: &ParsedLine) -> usize {
+    if matches!(line.kind, LineKind::Heading { .. }) {
+        line.offset_map.display_to_source(line.display_text.len())
+    } else {
+        line.source.end
+    }
+}
+
 fn skip_hidden_right(parsed: &ParsedDocument, mut pos: usize) -> usize {
+    if let Some(line) = parsed.line_at_offset(pos) {
+        let vend = visible_line_end(line);
+        if pos == vend && vend < line.source.end {
+            return pos;
+        }
+    }
     while let Some(h) = parsed
         .hidden_ranges
         .iter()
@@ -4264,7 +4356,11 @@ mod tests {
         doc.move_right_in_mode(false, ViewMode::Wysiwyg);
         assert_eq!(doc.cursor_offset(), click, "Right lands on the click");
         doc.place(7, false);
-        assert_eq!(doc.cursor_offset(), click, "place at the source end snaps to the click");
+        assert_eq!(
+            doc.cursor_offset(),
+            click,
+            "place at the source end snaps to the click"
+        );
 
         doc.place(click, false);
         doc.delete_forward_in_mode(ViewMode::Wysiwyg);
@@ -4272,7 +4368,10 @@ mod tests {
         let parsed = doc.parsed();
         assert_eq!(parsed.lines[0].display_text, "foo");
         assert_eq!(parsed.lines[1].display_text, "ext");
-        assert!(matches!(parsed.lines[0].kind, LineKind::Heading { level: 1 }));
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::Heading { level: 1 }
+        ));
 
         let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
         doc.place(click, false);
@@ -4282,7 +4381,10 @@ mod tests {
         assert_eq!(parsed.lines[0].display_text, "foo");
         assert_eq!(parsed.lines[1].display_text, "");
         assert_eq!(parsed.lines[2].display_text, "next");
-        assert!(matches!(parsed.lines[0].kind, LineKind::Heading { level: 1 }));
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::Heading { level: 1 }
+        ));
         assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
         assert!(matches!(parsed.lines[2].kind, LineKind::Paragraph));
 
@@ -4306,7 +4408,10 @@ mod tests {
         let parsed = doc.parsed();
         assert_eq!(parsed.lines[0].display_text, "foo");
         assert_eq!(parsed.lines[1].display_text, "ar");
-        assert!(matches!(parsed.lines[0].kind, LineKind::Heading { level: 2 }));
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::Heading { level: 2 }
+        ));
 
         let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
         doc.place(click, false);
@@ -4316,7 +4421,10 @@ mod tests {
         assert_eq!(parsed.lines[0].display_text, "foo");
         assert_eq!(parsed.lines[1].display_text, "");
         assert_eq!(parsed.lines[2].display_text, "bar");
-        assert!(matches!(parsed.lines[0].kind, LineKind::Heading { level: 2 }));
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::Heading { level: 2 }
+        ));
         assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
         assert!(matches!(parsed.lines[2].kind, LineKind::Paragraph));
     }
