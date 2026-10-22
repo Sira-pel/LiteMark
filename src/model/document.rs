@@ -123,6 +123,7 @@ pub struct DocumentTab {
     pub active_formats: ActiveFormats,
     pub pending_formats: ActiveFormats,
     pub caret: Caret,
+    pub view_mode: ViewMode,
     pub marked_range: Option<Range<usize>>,
     pub revision: u64,
     cached_parse: Option<(u64, Arc<ParsedDocument>)>,
@@ -158,6 +159,7 @@ impl DocumentTab {
             active_formats: ActiveFormats::default(),
             pending_formats: ActiveFormats::default(),
             caret: Caret::default(),
+            view_mode: ViewMode::Wysiwyg,
             marked_range: None,
             revision: 1,
             cached_parse: None,
@@ -2843,6 +2845,8 @@ fn placeholder_len(cmd: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::{move_vertical_visual, EditorPaint, PaintRow};
+    use gpui::{point, px, ShapedLine};
 
     #[test]
     fn test_compute_stats() {
@@ -4802,5 +4806,134 @@ mod tests {
         doc.delete_word_right();
         assert_eq!(doc.content, "# foo");
         assert_eq!(doc.parsed().lines[0].display_text, "foo");
+    }
+
+    /// K2. Select-line then Delete, and delete-to-line-start, at the visible
+    /// end of `# foo #\nnext`. BASE select-line uses `line_extent` (the whole
+    /// line, including the ending), so Delete leaves `next`. BASE
+    /// delete-to-line-start at the source end (offset 7, the closer is
+    /// visible there) leaves `\nnext`. The no-closer line matches both.
+    #[test]
+    fn select_line_delete_and_delete_to_line_start_match_base() {
+        let src = "# foo #\nnext";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(5, false);
+        assert_eq!(doc.cursor_offset(), 5);
+        doc.select_line();
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "next");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines.len(), 1);
+        assert_eq!(parsed.lines[0].display_text, "next");
+        assert!(matches!(parsed.lines[0].kind, LineKind::Paragraph));
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(5, false);
+        doc.delete_to_line_start();
+        assert_eq!(doc.content, "\nnext");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "");
+        assert!(matches!(parsed.lines[0].kind, LineKind::Empty));
+        assert_eq!(parsed.lines[1].display_text, "next");
+        assert!(matches!(parsed.lines[1].kind, LineKind::Paragraph));
+
+        let plain = "# foo\nnext";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), plain.into(), None, None);
+        doc.place(5, false);
+        doc.select_line();
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "next");
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), plain.into(), None, None);
+        doc.place(5, false);
+        doc.delete_to_line_start();
+        assert_eq!(doc.content, "\nnext");
+    }
+
+    /// K4. Raw paints the source, so End and place stay on the raw line end.
+    /// BASE `place` does not snap and BASE End on `# foo #\nnext` is offset 7.
+    /// Rendered mode still snaps that offset back to the visible end.
+    #[test]
+    fn raw_end_and_place_use_the_source_line_end() {
+        let src = "# foo #\nnext";
+        let mut rendered = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        rendered.view_mode = ViewMode::Wysiwyg;
+        rendered.place(0, false);
+        rendered.move_end(false);
+        assert_eq!(rendered.cursor_offset(), 5);
+        rendered.place(7, false);
+        assert_eq!(rendered.cursor_offset(), 5);
+
+        let mut raw = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        raw.view_mode = ViewMode::Raw;
+        raw.place(0, false);
+        raw.move_end(false);
+        assert_eq!(raw.cursor_offset(), 7);
+        raw.place(7, false);
+        assert_eq!(raw.cursor_offset(), 7);
+
+        let plain = "# foo\nnext";
+        let mut raw_plain = DocumentTab::new("t".into(), "t.md".into(), plain.into(), None, None);
+        raw_plain.view_mode = ViewMode::Raw;
+        raw_plain.place(0, false);
+        raw_plain.move_end(false);
+        assert_eq!(raw_plain.cursor_offset(), 5);
+        raw_plain.place(5, false);
+        assert_eq!(raw_plain.cursor_offset(), 5);
+    }
+
+    /// K3. Down on the only painted row of `# foo #` must land on the visible
+    /// end, the same snap `move_down` applies. Typing there keeps the closer.
+    /// BASE types at the source end and produces `# foo #X`, because BASE does
+    /// not hide the closer. The rendered snap inserts at offset 5.
+    #[test]
+    fn down_on_the_last_painted_row_snaps_before_the_closing_hash() {
+        let src = "# foo #";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        let (byte_start, byte_end, offset_map, vend) = {
+            let parsed = doc.parsed();
+            let line = &parsed.lines[0];
+            assert_eq!(line.display_text, "foo");
+            let vend = line.offset_map.display_to_source(line.display_text.len());
+            (
+                line.source.start,
+                line.source.end,
+                line.offset_map.clone(),
+                vend,
+            )
+        };
+        assert_eq!(vend, 5);
+        assert_eq!(doc.content.len(), 7);
+        let paint = EditorPaint {
+            wrap_cols: usize::MAX,
+            line_height: px(28.0),
+            total_height: px(28.0),
+            rows: vec![PaintRow {
+                line_index: 0,
+                byte_start,
+                byte_end,
+                origin: point(px(0.0), px(0.0)),
+                line_height: px(28.0),
+                shaped: ShapedLine::default(),
+                offset_map,
+                checkbox_hit: None,
+                link_hits: Vec::new(),
+                cells: Vec::new(),
+            }],
+            bounds: None,
+        };
+        doc.caret.move_to(0);
+        let hit = move_vertical_visual(&paint, &doc.content, &mut doc.caret, 1, false);
+        assert!(hit);
+        assert_eq!(doc.cursor_offset(), vend);
+        let at = doc.cursor_offset();
+        doc.insert_text_in_mode(at..at, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# fooX #");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "fooX");
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::Heading { level: 1 }
+        ));
     }
 }

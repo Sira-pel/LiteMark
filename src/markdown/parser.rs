@@ -3903,4 +3903,32 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             assert_eq!(&src[doc.lines[index].source.clone()], "    ---", "{src:?}");
         }
     }
+
+    /// K1. A tab inside an open list is a column stop of 4, same as BASE
+    /// `leading_column`. Extra indent past the item content column is 2, so
+    /// the line is a rule. A tab at column 0 stays a paragraph.
+    #[test]
+    fn tab_rule_inside_an_open_list_is_a_rule() {
+        let top = "\t---\n";
+        let top_doc = parse_document(top);
+        assert!(matches!(top_doc.lines[0].kind, LineKind::Paragraph));
+        assert_eq!(top_doc.lines[0].display_text, "\t---");
+        assert_eq!(&top[top_doc.lines[0].source.clone()], "\t---");
+
+        let cases = [
+            ("- item\n\n\t---\n", 2, "\t---"),
+            ("- item\n\t___\n", 1, "\t___"),
+            ("* item\n\t***\n", 1, "\t***"),
+        ];
+        for (src, index, source) in cases {
+            let doc = parse_document(src);
+            assert!(
+                matches!(doc.lines[index].kind, LineKind::HorizontalRule),
+                "{src:?} kind {:?}",
+                doc.lines[index].kind
+            );
+            assert_eq!(doc.lines[index].display_text, "", "{src:?}");
+            assert_eq!(&src[doc.lines[index].source.clone()], source, "{src:?}");
+        }
+    }
 }
