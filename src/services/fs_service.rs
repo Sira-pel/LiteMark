@@ -320,7 +320,16 @@ pub fn safe_rename(old_path: &Path, new_name: &str) -> io::Result<PathBuf> {
     if clean_name.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty name"));
     }
-    let clean_name = if old_path.is_file() && !clean_name.contains('.') {
+    // Preserve the original extension unless the new name already ends in a
+    // text-note extension. A dot mid-name (e.g. "v1.2 notes") is not an
+    // extension, so "n.md" renamed to "v1.2 notes" stays "v1.2 notes.md".
+    let keeps_note_ext = |name: &str| {
+        let lower = name.to_lowercase();
+        lower.ends_with(".md")
+            || lower.ends_with(".markdown")
+            || lower.ends_with(".txt")
+    };
+    let clean_name = if old_path.is_file() && !keeps_note_ext(&clean_name) {
         if let Some(ext) = old_path.extension().and_then(|e| e.to_str()) {
             format!("{clean_name}.{ext}")
         } else {
@@ -424,16 +433,29 @@ pub fn copy_folder(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+    if let Err(err) = copy_dir_inner(src, dest) {
+        // Never leave a half-copied folder behind.
+        let _ = fs::remove_dir_all(dest);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn copy_dir_inner(src: &Path, dest: &Path) -> io::Result<()> {
     fs::create_dir(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
+        // DirEntry::file_type does not follow symlinks: skip links entirely.
+        // Copying their targets could pull content from outside the folder,
+        // and a broken link would fail the copy halfway through.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let from = entry.path();
         let to = dest.join(entry.file_name());
-        // DirEntry::metadata does not follow symlinks, so directory
-        // traversal cannot escape the tree via a symlinked dir.
-        if entry.metadata()?.is_dir() {
+        if file_type.is_dir() {
             copy_dir_recursive(&from, &to)?;
-        } else {
+        } else if file_type.is_file() {
             fs::copy(&from, &to)?;
         }
     }
@@ -537,7 +559,15 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
                     continue;
                 }
 
-                if path.is_dir() {
+                // DirEntry::file_type does not follow symlinks: symlinked
+                // folders must not be expanded (a link back to a parent would
+                // recurse forever, and a link to /etc would let rename/trash
+                // act on real files outside the notes folder).
+                let Ok(entry_type) = entry.file_type() else {
+                    continue;
+                };
+
+                if entry_type.is_dir() {
                     let folder_id = format!("folder-{}", path.display());
                     folders.push(WorkspaceFolder {
                         id: folder_id.clone(),
@@ -547,7 +577,7 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
                         is_open: true,
                     });
                     walk(&path, Some(folder_id), folders, files);
-                } else if path.is_file() {
+                } else if entry_type.is_file() {
                     let file_type = FileType::from_filename(&file_name);
                     if matches!(file_type, FileType::Markdown | FileType::PlainText) {
                         let updated_at = entry
@@ -700,6 +730,15 @@ mod tests {
         assert_eq!(txt.file_name().unwrap(), "FinalDraft.txt");
         assert!(txt.exists());
 
+        // A dot mid-name is not an extension: "v1.2 notes" keeps ".md"
+        let dotted = safe_create_file(&temp_dir, "n.md", "dotted").unwrap();
+        let renamed_dotted = safe_rename(&dotted, "v1.2 notes").unwrap();
+        assert_eq!(renamed_dotted.file_name().unwrap(), "v1.2 notes.md");
+
+        // An explicit note extension in a dotted name is respected as-is
+        let renamed_md = safe_rename(&renamed_dotted, "v1.2.final.md").unwrap();
+        assert_eq!(renamed_md.file_name().unwrap(), "v1.2.final.md");
+
         // Folder rename does NOT add an extension
         let folder = safe_create_folder(&temp_dir, "MyDocs").unwrap();
         let renamed_folder = safe_rename(&folder, "Archive").unwrap();
@@ -707,6 +746,59 @@ mod tests {
         assert!(renamed_folder.is_dir());
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = std::env::temp_dir().join(format!("litemark-symlink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // A real folder with a note, plus a link back up to the workspace
+        // root (would recurse forever if followed).
+        let real = safe_create_folder(&temp_dir, "Real").unwrap();
+        safe_create_file(&real, "Note.md", "real").unwrap();
+        symlink(&temp_dir, temp_dir.join("loop")).unwrap();
+        // A link to a directory outside the workspace (would let rename and
+        // trash act outside the notes folder if followed).
+        symlink("/etc", temp_dir.join("etc-link")).unwrap();
+        // A broken link must not crash the scan.
+        symlink(temp_dir.join("does-not-exist"), temp_dir.join("broken")).unwrap();
+
+        let scanned = scan_workspace_dir(&temp_dir);
+        assert_eq!(scanned.folders.len(), 1, "only the real folder is listed");
+        assert_eq!(scanned.folders[0].name, "Real");
+        assert_eq!(scanned.files.len(), 1, "only the real note is indexed");
+        assert_eq!(scanned.files[0].name, "Note.md");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_folder_skips_symlinks_and_cleans_up() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("litemark-copysym-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let src = safe_create_folder(&root, "Src").unwrap();
+        safe_create_file(&src, "Note.md", "content").unwrap();
+        // A broken symlink previously failed the copy halfway, leaving a
+        // partial folder behind.
+        symlink(src.join("missing-file"), src.join("broken-link")).unwrap();
+
+        let dst_parent = safe_create_folder(&root, "Dst").unwrap();
+        let copied = copy_folder(&src, &dst_parent).unwrap();
+        assert!(copied.is_dir());
+        assert_eq!(fs::read_to_string(copied.join("Note.md")).unwrap(), "content");
+        assert!(!copied.join("broken-link").exists(), "symlinks are not copied");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

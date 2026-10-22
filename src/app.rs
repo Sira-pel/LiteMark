@@ -2060,7 +2060,10 @@ impl LiteMarkApp {
             prev_selected,
         } = closed;
         if let Some(placeholder_id) = placeholder_id {
-            self.tabs.retain(|tab| tab.id != placeholder_id);
+            // Only drop the placeholder while the user hasn't typed into it
+            // in the meantime; a used placeholder is real work, keep it open.
+            self.tabs
+                .retain(|tab| !(tab.id == placeholder_id && tab.content.is_empty() && !tab.is_modified));
         }
         for (ix, tab) in tabs {
             let at = ix.min(self.tabs.len());
