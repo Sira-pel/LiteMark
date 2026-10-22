@@ -1932,6 +1932,12 @@ fn html_hides_leaf(open: bool) -> bool {
     open
 }
 
+/// Type 6 started inside a list item ends when a line leaves that item.
+/// A column-0 `<div>` is a document block and stays open across the dedent.
+fn type6_left_list(walk: &ListWalk, line: &str, content: usize) -> bool {
+    !line_is_blank(line) && leading_column(line) < content && !walk.continues_lazily(line)
+}
+
 fn html_block_start(line: &str) -> Option<HtmlBlock> {
     let bytes = line.as_bytes();
     let mut index = 0usize;
@@ -2101,6 +2107,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 
     let mut list_walk = ListWalk::default();
     let mut html_open: Option<HtmlBlock> = None;
+    // Content column of the list item that contains a type-6 block, if any.
+    let mut html_list_col: Option<usize> = None;
     for (i, sline) in raw_lines.iter().enumerate() {
         let line = sline.text;
         let line_start = sline.start;
@@ -2203,11 +2211,29 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
+        let html_was_open = html_open.is_some();
         if trimmed.is_empty() && matches!(html_open, Some(HtmlBlock::Blank)) {
             html_open = None;
+            html_list_col = None;
         } else if html_open.is_none() && !trimmed.is_empty() {
             if let Some(started) = html_block_start(line) {
+                let col = leading_column(line);
+                html_list_col = list_walk
+                    .open
+                    .last()
+                    .copied()
+                    .filter(|content| col >= *content);
                 html_open = Some(started);
+            }
+        }
+        if html_was_open {
+            if let Some(content) = html_list_col {
+                if matches!(html_open, Some(HtmlBlock::Blank))
+                    && type6_left_list(&list_walk, line, content)
+                {
+                    html_open = None;
+                    html_list_col = None;
+                }
             }
         }
 
@@ -2424,6 +2450,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         if let Some(open) = html_open {
             if html_block_ends(line, open) {
                 html_open = None;
+                html_list_col = None;
             }
         }
     }
@@ -3945,6 +3972,24 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
         assert!(matches!(list_rule.lines[2].kind, LineKind::HorizontalRule));
         assert_eq!(list_rule.lines[2].display_text, "");
         assert_eq!(&kept[list_rule.lines[2].source.clone()], "---");
+        let indented = "- item\n  <div>\n---\n";
+        let indented_rule = parse_document(indented);
+        assert!(matches!(
+            indented_rule.lines[2].kind,
+            LineKind::HorizontalRule
+        ));
+        assert_eq!(indented_rule.lines[2].display_text, "");
+        assert_eq!(&indented[indented_rule.lines[2].source.clone()], "---");
+        let indented_blank = "- item\n\n  <div>\n---\n";
+        let blank_rule = parse_document(indented_blank);
+        assert!(matches!(blank_rule.lines[3].kind, LineKind::HorizontalRule));
+        assert_eq!(blank_rule.lines[3].display_text, "");
+        assert_eq!(&indented_blank[blank_rule.lines[3].source.clone()], "---");
+        let div_rule = "<div>\n---\n";
+        let div_doc = parse_document(div_rule);
+        assert_eq!(&div_rule[div_doc.lines[1].source.clone()], "---");
+        assert_eq!(div_doc.lines[1].display_text, "---");
+        assert!(matches!(div_doc.lines[1].kind, LineKind::Paragraph));
 
         let cases = [
             ("<pre>\n****\n", 1, "****"),
