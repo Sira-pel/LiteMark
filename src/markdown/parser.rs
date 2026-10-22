@@ -4018,4 +4018,26 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             );
         }
     }
+
+    /// R6-9. Four spaces before `---` is indented text once a bare CR is a
+    /// line break. This parser has no indented-code block (BASE shows
+    /// `    indented` as a paragraph). Pulldown, which does not split CR,
+    /// returns one code block for the unsplit bytes. The line must not be a
+    /// rule: display keeps `    ---`, then paragraph `next`.
+    #[test]
+    fn four_space_dash_rule_after_bare_cr_stays_text() {
+        let src = "    ---\rnext\r";
+        let doc = parse_document(src);
+        assert!(
+            !matches!(doc.lines[0].kind, LineKind::HorizontalRule),
+            "kind {:?}",
+            doc.lines[0].kind
+        );
+        assert!(matches!(doc.lines[0].kind, LineKind::Paragraph));
+        assert_eq!(doc.lines[0].display_text, "    ---");
+        assert_eq!(&src[doc.lines[0].source.clone()], "    ---");
+        assert!(matches!(doc.lines[1].kind, LineKind::Paragraph));
+        assert_eq!(doc.lines[1].display_text, "next");
+        assert_eq!(&src[doc.lines[1].source.clone()], "next");
+    }
 }

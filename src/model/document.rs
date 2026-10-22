@@ -4335,8 +4335,9 @@ mod tests {
         assert_eq!(crlf_bs.content, "1. foo\r\n2.\r\n3. ba");
     }
 
-    /// R5-1. Click, End, and Right share the visible end of a closing-hash
-    /// heading. Delete there leaves the heading word `foo`. Enter there breaks
+    /// R5-1 / R6-1. Click, End, and Right share the visible end of a closing-hash
+    /// heading. Delete there joins the next line the way a heading without a
+    /// closer does (`# foo\nnext` becomes `# foonext`). Enter there breaks
     /// after the heading.
     #[test]
     fn closing_hash_click_end_delete_and_enter_keep_the_heading() {
@@ -4364,10 +4365,12 @@ mod tests {
 
         doc.place(click, false);
         doc.delete_forward_in_mode(ViewMode::Wysiwyg);
-        assert_eq!(doc.content, "# foo #\next");
+        // BASE Delete at the source end (offset 7, closer still visible) is
+        // these bytes. Display `foo #next`: the hash is no longer a closer.
+        assert_eq!(doc.content, "# foo #next");
         let parsed = doc.parsed();
-        assert_eq!(parsed.lines[0].display_text, "foo");
-        assert_eq!(parsed.lines[1].display_text, "ext");
+        assert_eq!(parsed.lines.len(), 1);
+        assert_eq!(parsed.lines[0].display_text, "foo #next");
         assert!(matches!(
             parsed.lines[0].kind,
             LineKind::Heading { level: 1 }
@@ -4404,10 +4407,10 @@ mod tests {
         assert_eq!(doc.cursor_offset(), click);
         doc.place(click, false);
         doc.delete_forward_in_mode(ViewMode::Wysiwyg);
-        assert_eq!(doc.content, "## foo ##\nar");
+        assert_eq!(doc.content, "## foo ##bar");
         let parsed = doc.parsed();
-        assert_eq!(parsed.lines[0].display_text, "foo");
-        assert_eq!(parsed.lines[1].display_text, "ar");
+        assert_eq!(parsed.lines.len(), 1);
+        assert_eq!(parsed.lines[0].display_text, "foo ##bar");
         assert!(matches!(
             parsed.lines[0].kind,
             LineKind::Heading { level: 2 }
@@ -4475,5 +4478,153 @@ mod tests {
         assert_eq!(parsed.lines[1].display_text, "");
         assert_eq!(parsed.lines[2].display_text, "Bar");
         assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
+    }
+
+    /// R6-2. Up from the line under a closing-hash heading lands on the
+    /// visible end, not on the hidden `#`.
+    #[test]
+    fn up_onto_closing_hash_lands_on_the_visible_end() {
+        let src = "# foo #\nnext!!!!";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(src.len(), false);
+        assert_eq!(doc.cursor_offset(), src.len());
+        doc.move_up(false);
+        assert_eq!(doc.cursor_offset(), 5);
+        let at = doc.cursor_offset();
+        doc.insert_text_in_mode(at..at, "X", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# fooX #\nnext!!!!");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "fooX");
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::Heading { level: 1 }
+        ));
+    }
+
+    /// R6-3. Shift+Enter uses the same heading and bare-CR breaks as Enter.
+    #[test]
+    fn shift_enter_keeps_closing_hash_and_bare_cr_line() {
+        let src = "# foo #\nnext";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        let click = {
+            let line = &doc.parsed().lines[0];
+            line.offset_map.display_to_source(line.display_text.len())
+        };
+        doc.place(click, false);
+        doc.smart_newline(true);
+        assert_eq!(doc.content, "# foo #\n\nnext");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "foo");
+        assert_eq!(parsed.lines[1].display_text, "");
+        assert_eq!(parsed.lines[2].display_text, "next");
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::Heading { level: 1 }
+        ));
+        assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
+
+        let mut bare = DocumentTab::new("t".into(), "t.md".into(), "Foo\rBar".into(), None, None);
+        bare.place(4, false);
+        bare.smart_newline(true);
+        assert_eq!(bare.content, "Foo\r\n\nBar");
+        let parsed = bare.parsed();
+        assert_eq!(parsed.lines.len(), 3);
+        assert_eq!(parsed.lines[0].display_text, "Foo");
+        assert_eq!(parsed.lines[1].display_text, "");
+        assert_eq!(parsed.lines[2].display_text, "Bar");
+    }
+
+    /// R6-4. Toolbar toggles follow the visible heading text. A leftover
+    /// closer stays only when the line is still a heading, so pulldown does
+    /// not show the hash (`# foo ##`).
+    #[test]
+    fn toolbar_toggle_uses_visible_heading_text() {
+        let src = "# foo #\nnext";
+        let click_of = |text: &str| {
+            let doc = parse_document(text);
+            let line = &doc.lines[0];
+            line.offset_map.display_to_source(line.display_text.len())
+        };
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(click_of(src), false);
+        doc.apply_format_in_mode("h1", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "foo\nnext");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "foo");
+        assert!(matches!(parsed.lines[0].kind, LineKind::Paragraph));
+        assert_eq!(parsed.lines[1].display_text, "next");
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(click_of(src), false);
+        doc.apply_format_in_mode("ul", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "- foo\nnext");
+        assert_eq!(doc.parsed().lines[0].display_text, "foo");
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(click_of(src), false);
+        doc.apply_format_in_mode("ol", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "1. foo\nnext");
+        assert_eq!(doc.parsed().lines[0].display_text, "foo");
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(click_of(src), false);
+        doc.apply_format_in_mode("quote", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "> foo\nnext");
+        assert_eq!(doc.parsed().lines[0].display_text, "foo");
+
+        let src = "## foo ##\nbar";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(click_of(src), false);
+        doc.apply_format_in_mode("h1", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "# foo ##\nbar");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "foo");
+        assert!(matches!(
+            parsed.lines[0].kind,
+            LineKind::Heading { level: 1 }
+        ));
+    }
+
+    /// R6-5. Delete-to-end and delete-word-right at the visible end keep the
+    /// hidden closer. A heading without a closer is unchanged by delete-to-end
+    /// and loses the next word to delete-word-right.
+    #[test]
+    fn delete_to_end_and_word_right_keep_the_closing_hash() {
+        let src = "# foo #\nnext";
+        let click = {
+            let doc = parse_document(src);
+            let line = &doc.lines[0];
+            line.offset_map.display_to_source(line.display_text.len())
+        };
+        assert_eq!(click, 5);
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(click, false);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "# foo #\nnext");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "foo");
+        assert_eq!(parsed.lines[1].display_text, "next");
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.place(click, false);
+        doc.delete_word_right();
+        assert_eq!(doc.content, "# foo #\nnext");
+        let parsed = doc.parsed();
+        assert_eq!(parsed.lines[0].display_text, "foo");
+        assert_eq!(parsed.lines[1].display_text, "next");
+
+        let plain = "# foo\nnext";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), plain.into(), None, None);
+        doc.place(5, false);
+        doc.delete_to_line_end();
+        assert_eq!(doc.content, "# foo\nnext");
+        assert_eq!(doc.parsed().lines[0].display_text, "foo");
+
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), plain.into(), None, None);
+        doc.place(5, false);
+        doc.delete_word_right();
+        assert_eq!(doc.content, "# foo");
+        assert_eq!(doc.parsed().lines[0].display_text, "foo");
     }
 }
