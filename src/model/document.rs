@@ -1043,8 +1043,9 @@ impl DocumentTab {
                             pair.open_delim.start..pair.close_delim.end,
                             self.content[pair.inner.clone()].to_string(),
                         )
-                    } else if outer_is_link(&self.content, p_start, p_end) {
-                        let (outer_range, inner) = unwrap_outer_link(&self.content, p_start, p_end);
+                    } else if let Some((outer_range, inner)) =
+                        unwrap_outer_link(&self.content, p_start, p_end)
+                    {
                         (true, outer_range, inner)
                     } else {
                         (false, p_start..p_end, String::new())
@@ -3110,31 +3111,25 @@ fn is_single_link(text: &str) -> Option<&str> {
     Some(inner)
 }
 
-fn outer_is_link(content: &str, start: usize, end: usize) -> bool {
+fn unwrap_outer_link(content: &str, start: usize, end: usize) -> Option<(Range<usize>, String)> {
     if start == 0 || end > content.len() || start > end {
-        return false;
+        return None;
     }
     if !content.is_char_boundary(start) || !content.is_char_boundary(end) {
-        return false;
+        return None;
     }
     if !content[..start].ends_with('[') || !content[end..].starts_with("](") {
-        return false;
+        return None;
     }
     let rest = &content[end + 2..];
-    if let Some(close_idx) = rest.find(')') {
-        let url = &rest[..close_idx];
-        !url.contains('\n') && !url.contains('(') && !url.contains(']')
-    } else {
-        false
+    let close_idx = rest.find(')')?;
+    let url = &rest[..close_idx];
+    if url.contains('\n') || url.contains('(') || url.contains(']') {
+        return None;
     }
-}
-
-fn unwrap_outer_link(content: &str, start: usize, end: usize) -> (Range<usize>, String) {
     let edit_start = start - 1;
-    let rest = &content[end + 2..];
-    let close_idx = rest.find(')').unwrap();
     let edit_end = end + 2 + close_idx + 1;
-    (edit_start..edit_end, content[start..end].to_string())
+    Some((edit_start..edit_end, content[start..end].to_string()))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -6250,5 +6245,31 @@ mod tests {
         // Toggle off
         doc.apply_format("bold");
         assert_eq!(doc.content, doc_text);
+    }
+
+    #[test]
+    fn test_unwrap_outer_link_safety() {
+        // Valid link
+        let text = "before [inner](https://example.com) after";
+        let inner_start = text.find("inner").unwrap();
+        let inner_end = inner_start + "inner".len();
+        assert_eq!(
+            unwrap_outer_link(text, inner_start, inner_end),
+            Some((
+                text.find('[').unwrap()..(text.find(')').unwrap() + 1),
+                "inner".to_string()
+            ))
+        );
+
+        // Missing closing parenthesis must return None without panicking
+        let unclosed = "before [inner](https://example.com after";
+        let u_start = unclosed.find("inner").unwrap();
+        let u_end = u_start + "inner".len();
+        assert_eq!(unwrap_outer_link(unclosed, u_start, u_end), None);
+
+        // Out of bounds / invalid bounds must return None without panicking
+        assert_eq!(unwrap_outer_link(text, 0, text.len()), None);
+        assert_eq!(unwrap_outer_link(text, 100, 200), None);
+        assert_eq!(unwrap_outer_link("", 0, 0), None);
     }
 }
