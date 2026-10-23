@@ -10,6 +10,10 @@ actions!(
         SaveFile,
         OpenFile,
         NewTab,
+        NewNote,
+        DeleteNote,
+        SidebarCollapse,
+        SidebarExpand,
         CloseActiveTab,
         FindReplace,
         ToggleSidebar,
@@ -94,5 +98,8 @@ actions!(
         EditorSelectDocEnd,
         FindNextMatch,
         FindPrevMatch,
+        PromptUp,
+        PromptDown,
+        PromptConfirm,
     ]
 );

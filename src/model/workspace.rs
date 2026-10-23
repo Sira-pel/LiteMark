@@ -49,7 +49,7 @@ impl Default for WorkspaceDirectory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::sidebar::{build_sidebar_tree, SidebarTreeItem};
+    use crate::ui::sidebar::{build_sidebar_tree, SidebarCreate, SidebarTreeItem};
 
     fn make_folder(id: &str, name: &str, parent_id: Option<&str>, is_open: bool) -> WorkspaceFolder {
         WorkspaceFolder {
@@ -74,14 +74,14 @@ mod tests {
 
     #[test]
     fn test_build_sidebar_tree_empty() {
-        let tree = build_sidebar_tree(&[], &[]);
+        let tree = build_sidebar_tree(&[], &[], None);
         assert!(tree.is_empty());
     }
 
     #[test]
     fn test_build_sidebar_tree_folder_without_files() {
         let folders = vec![make_folder("f1", "New Folder", None, true)];
-        let tree = build_sidebar_tree(&folders, &[]);
+        let tree = build_sidebar_tree(&folders, &[], None);
         assert_eq!(tree.len(), 1);
         match &tree[0] {
             SidebarTreeItem::Folder { folder, depth } => {
@@ -103,7 +103,7 @@ mod tests {
         // When all are open
         let folders = vec![root_folder.clone(), sub_folder.clone()];
         let files = vec![sub_file.clone(), root_file.clone(), loose_file.clone()];
-        let tree = build_sidebar_tree(&folders, &files);
+        let tree = build_sidebar_tree(&folders, &files, None);
 
         // Order should be:
         // 1. Docs (depth 0)
@@ -152,7 +152,7 @@ mod tests {
         // Now test collapsed state: Docs is closed
         let closed_root = make_folder("f_root", "Docs", None, false);
         let folders_closed = vec![closed_root, sub_folder];
-        let tree_closed = build_sidebar_tree(&folders_closed, &files);
+        let tree_closed = build_sidebar_tree(&folders_closed, &files, None);
 
         // Only Docs (depth 0) and Welcome.md (depth 0) should be visible!
         assert_eq!(tree_closed.len(), 2);
@@ -170,5 +170,59 @@ mod tests {
             }
             _ => panic!("Expected Welcome.md at root"),
         }
+    }
+
+    #[test]
+    fn create_input_at_root_sits_at_top_of_tree() {
+        let folders = vec![make_folder("f1", "Docs", None, true)];
+        let files = vec![make_file("doc1", "Notes.md", None)];
+        let creating = SidebarCreate {
+            parent: None,
+            is_folder: false,
+        };
+        let tree = build_sidebar_tree(&folders, &files, Some(&creating));
+        assert_eq!(tree.len(), 3);
+        assert_eq!(
+            tree[0],
+            SidebarTreeItem::CreateInput {
+                depth: 0,
+                is_folder: false
+            }
+        );
+        assert!(matches!(&tree[1], SidebarTreeItem::Folder { .. }));
+        assert!(matches!(&tree[2], SidebarTreeItem::File { .. }));
+    }
+
+    #[test]
+    fn create_input_inside_folder_is_first_child_one_level_deeper() {
+        let folders = vec![make_folder("f1", "Docs", None, true)];
+        let files = vec![make_file("doc1", "Notes.md", None)];
+        let creating = SidebarCreate {
+            parent: Some("f1".to_string()),
+            is_folder: true,
+        };
+        let tree = build_sidebar_tree(&folders, &files, Some(&creating));
+        assert_eq!(tree.len(), 3);
+        assert!(matches!(&tree[0], SidebarTreeItem::Folder { .. }));
+        assert_eq!(
+            tree[1],
+            SidebarTreeItem::CreateInput {
+                depth: 1,
+                is_folder: true
+            }
+        );
+        assert!(matches!(&tree[2], SidebarTreeItem::File { .. }));
+    }
+
+    #[test]
+    fn create_input_for_closed_folder_is_hidden_until_opened() {
+        let folders = vec![make_folder("f1", "Docs", None, false)];
+        let creating = SidebarCreate {
+            parent: Some("f1".to_string()),
+            is_folder: false,
+        };
+        let tree = build_sidebar_tree(&folders, &[], Some(&creating));
+        assert_eq!(tree.len(), 1);
+        assert!(matches!(&tree[0], SidebarTreeItem::Folder { .. }));
     }
 }

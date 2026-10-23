@@ -1,8 +1,8 @@
 use crate::actions::*;
-use crate::markdown::{
-    checkbox_click_replacement, export_stem, parse_document, render_export, TableColumnAlign,
+use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
+use crate::model::text_ops::{
+    home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
 };
-use crate::model::text_ops::{home_offset, offset_to_utf16, range_from_utf16, range_to_utf16};
 use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
@@ -17,6 +17,18 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// An item action stored in a menu: run with the window and app.
+pub(crate) type MenuAction = Arc<dyn Fn(&mut Window, &mut App) + 'static>;
+
+/// Tabs closed optimistically during a trash, kept so they can be restored
+/// in place if the trash fails.
+pub(crate) struct OptimisticClose {
+    tabs: Vec<(usize, DocumentTab)>,
+    prev_active: String,
+    placeholder_id: Option<String>,
+    prev_selected: Option<SidebarTarget>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Prompt {
     CloseTab { id: String },
@@ -25,6 +37,16 @@ pub(crate) enum Prompt {
     DeleteFolder { id: String },
     TrashDirtyFile { id: String },
     TrashDirtyFolder { id: String },
+    /// A new workspace folder was picked; ask whether to copy the current
+    /// note into it before switching.
+    SwitchWorkspace { new_dir: PathBuf },
+}
+
+/// What to resume after an untitled tab is saved with a chosen name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingAfterSave {
+    CloseTab(String),
+    CloseWindow,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +68,14 @@ pub struct LiteMarkApp {
     pub open_menu: Option<MenuId>,
     pub menu_selected_ix: Option<usize>,
     pub menu_open_submenu_ix: Option<usize>,
+    pub submenu_selected_ix: Option<usize>,
+    pub menu_items_cache: Vec<MenuItem>,
+    /// Currently highlighted sidebar item (drives row highlight and the
+    /// Ctrl+Delete target). Falls back to the active tab's note when None.
+    pub selected_target: Option<SidebarTarget>,
+    /// True while the sidebar tree owns arrow-key navigation.
+    pub sidebar_keyboard: bool,
+    pub sidebar_focus_handle: FocusHandle,
     pub zen_mode: bool,
     pub zen_notice: bool,
     pub saved_toast: Option<String>,
@@ -62,6 +92,10 @@ pub struct LiteMarkApp {
     pub tab_ids: TabIds,
     pub error_message: Option<String>,
     pub prompt: Option<Prompt>,
+    pub prompt_focus_handle: FocusHandle,
+    pub prompt_selected_ix: usize,
+    pub save_as_tab: Option<String>,
+    pub pending_after_save: Option<PendingAfterSave>,
     pub editor_paint: Rc<RefCell<EditorPaint>>,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
@@ -77,7 +111,11 @@ pub struct LiteMarkApp {
     pub pending_rename_focus: bool,
     pub sidebar_menu: Option<SidebarMenu>,
     pub rename_target: Option<SidebarTarget>,
+    pub rename_value: String,
     pub rename_field: Entity<LineField>,
+    pub create_draft: Option<SidebarCreate>,
+    pub create_field: Entity<LineField>,
+    pub pending_create_focus: bool,
     pub field_owns_keys: bool,
     pub field_focus: TextInput,
     pub bounds_subscription: Option<Subscription>,
@@ -136,7 +174,7 @@ impl LiteMarkApp {
                     }),
                     Arc::new({
                         let app_handle = app_handle.clone();
-                        move |previous, app| {
+                        move |_text, previous, app| {
                             app_handle
                                 .update(app, |this, cx| {
                                     if previous {
@@ -178,7 +216,7 @@ impl LiteMarkApp {
                                 .ok();
                         }
                     }),
-                    Arc::new(|_, _| {}),
+                    Arc::new(|_text, _previous, _app| {}),
                     Arc::new({
                         let app_handle = app_handle.clone();
                         move |app| {
@@ -197,13 +235,29 @@ impl LiteMarkApp {
                     cx,
                     "rename-field",
                     "New name",
-                    Arc::new(|_, _| {}),
                     Arc::new({
                         let app_handle = app_handle.clone();
-                        move |_previous, app| {
+                        move |text, app| {
                             app_handle
                                 .update(app, |this, cx| {
-                                    this.commit_rename(cx);
+                                    this.rename_value = text.to_string();
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    }),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |text, _previous, app| {
+                            let text = text.to_string();
+                            app_handle
+                                .update(app, |this, cx| {
+                                    if this.save_as_tab.is_some() {
+                                        this.commit_save_naming(Some(text), cx);
+                                    } else {
+                                        this.rename_value = text.clone();
+                                        this.commit_rename(Some(text), cx);
+                                    }
                                     cx.notify();
                                 })
                                 .ok();
@@ -221,9 +275,49 @@ impl LiteMarkApp {
             }
         });
 
+        let create_field = cx.new({
+            let app_handle = app_handle.clone();
+            move |cx| {
+                LineField::new(
+                    cx,
+                    "create-field",
+                    "Name",
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |_text, app| {
+                            app_handle.update(app, |_, cx| cx.notify()).ok();
+                        }
+                    }),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |text, _previous, app| {
+                            let text = text.to_string();
+                            app_handle
+                                .update(app, |this, cx| {
+                                    this.commit_create(text, cx);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    }),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |app| {
+                            app_handle
+                                .update(app, |this, cx| this.claim_field(TextInput::Create, cx))
+                                .ok();
+                        }
+                    }),
+                )
+            }
+        });
+
+        let initial_selected = initial_tab.workspace_file_id.clone();
+
         Self {
             tabs: vec![initial_tab],
             active_tab_id: first_id,
+            selected_target: initial_selected.map(SidebarTarget::File),
             workspace,
             settings,
             show_sidebar: true,
@@ -234,6 +328,10 @@ impl LiteMarkApp {
             open_menu: None,
             menu_selected_ix: None,
             menu_open_submenu_ix: None,
+            submenu_selected_ix: None,
+            menu_items_cache: Vec::new(),
+            sidebar_keyboard: false,
+            sidebar_focus_handle: cx.focus_handle(),
             zen_mode: false,
             zen_notice: false,
             saved_toast: None,
@@ -245,10 +343,14 @@ impl LiteMarkApp {
             not_found: false,
             focus_handle: cx.focus_handle(),
             menu_focus_handle: cx.focus_handle(),
+            prompt_focus_handle: cx.focus_handle(),
             appearance_subscription: None,
             tab_ids,
             error_message,
             prompt: None,
+            prompt_selected_ix: 0,
+            save_as_tab: None,
+            pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             find_field,
             replace_field,
@@ -264,7 +366,11 @@ impl LiteMarkApp {
             pending_rename_focus: false,
             sidebar_menu: None,
             rename_target: None,
+            rename_value: String::new(),
             rename_field,
+            create_draft: None,
+            create_field,
+            pending_create_focus: false,
             field_owns_keys: false,
             field_focus: TextInput::Editor,
             bounds_subscription: None,
@@ -287,7 +393,12 @@ impl LiteMarkApp {
         match self.field_focus {
             TextInput::Find if self.show_find_replace => Some(self.find_field.clone()),
             TextInput::Replace if self.show_find_replace => Some(self.replace_field.clone()),
-            TextInput::Rename if self.rename_target.is_some() => Some(self.rename_field.clone()),
+            TextInput::Rename
+                if self.rename_target.is_some() || self.save_as_tab.is_some() =>
+            {
+                Some(self.rename_field.clone())
+            }
+            TextInput::Create if self.create_draft.is_some() => Some(self.create_field.clone()),
             _ => None,
         }
     }
@@ -306,6 +417,8 @@ impl LiteMarkApp {
             Some(self.replace_field.clone())
         } else if self.rename_field.read(cx).is_focused(window) {
             Some(self.rename_field.clone())
+        } else if self.create_field.read(cx).is_focused(window) {
+            Some(self.create_field.clone())
         } else {
             self.line_field_for_focus()
         };
@@ -356,13 +469,18 @@ impl LiteMarkApp {
         let plan = plan_close(&snaps, &id);
         match plan {
             ClosePlan::KeepLast => {}
-            ClosePlan::Prompt => self.prompt = Some(Prompt::CloseTab { id }),
+            ClosePlan::Prompt => self.show_prompt(Prompt::CloseTab { id }),
             ClosePlan::Close { next_active } => self.remove_tab(&id, next_active),
         }
     }
 
     pub fn handle_save(&mut self, cx: &mut Context<Self>) {
         let id = self.active_tab_id.clone();
+        // Untitled quick notes (Ctrl+T) are named at save time.
+        if self.tabs.iter().any(|t| t.id == id && t.file_path.is_none()) {
+            self.begin_save_naming(&id, cx);
+            return;
+        }
         match self.save_tab(&id) {
             Ok(title) => self.show_toast(format!("Saved {title}"), cx),
             Err(err) => self.show_error(err),
@@ -391,6 +509,7 @@ impl LiteMarkApp {
             if let Some(index) = tab_index_for_path(&paths, &path) {
                 self.active_tab_id = self.tabs[index].id.clone();
                 self.show_pdf_modal = true;
+                self.prompt_selected_ix = 0;
                 return;
             }
             match extract_text_from_pdf(&path) {
@@ -403,6 +522,7 @@ impl LiteMarkApp {
                     self.tabs.push(tab);
                     self.active_tab_id = new_id;
                     self.show_pdf_modal = true;
+                    self.prompt_selected_ix = 0;
                 }
                 Err(err) => self.show_error(format!("Couldn't open PDF: {err}")),
             }
@@ -620,8 +740,74 @@ impl LiteMarkApp {
         }
     }
 
-    pub fn handle_new_folder(&mut self) {
-        self.create_folder(None, "New Folder".into());
+    pub fn handle_new_folder(&mut self, cx: &mut Context<Self>) {
+        self.begin_create(None, true, cx);
+    }
+
+    /// Start inline creation of a note or folder in the sidebar tree.
+    /// Nothing is written to disk until the name is committed with Enter.
+    pub fn begin_create(
+        &mut self,
+        parent: Option<String>,
+        is_folder: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // The inline editor lives in the sidebar tree — make sure it's visible
+        // when creation is triggered from the menu bar or Ctrl+N.
+        if !self.show_sidebar {
+            self.show_sidebar = true;
+        }
+        if let Some(pid) = &parent {
+            if let Some(folder) = self
+                .workspace
+                .folders
+                .iter_mut()
+                .find(|f| &f.id == pid)
+            {
+                folder.is_open = true;
+            }
+        }
+        self.sidebar_menu = None;
+        self.create_draft = Some(SidebarCreate { parent, is_folder });
+        self.pending_create_focus = true;
+        let preset = if is_folder { "New Folder" } else { "Untitled.md" };
+        self.create_field.update(cx, |field, _cx| {
+            field.set_text(preset);
+        });
+        cx.notify();
+    }
+
+    pub fn cancel_create(&mut self, cx: &mut Context<Self>) {
+        self.create_draft = None;
+        self.field_owns_keys = false;
+        self.applied_focus = None;
+        cx.notify();
+    }
+
+    /// Commit the inline create editor. On failure the editor stays open so
+    /// the name can be fixed; an empty name cancels creation.
+    ///
+    /// `raw` is the text captured by the field before submit — it must not
+    /// be re-read from the field here, which would re-entrantly borrow it.
+    fn commit_create(&mut self, raw: String, cx: &mut Context<Self>) {
+        let Some(draft) = self.create_draft.take() else {
+            return;
+        };
+        let raw = raw.trim().to_string();
+        if raw.is_empty() {
+            self.cancel_create(cx);
+            return;
+        }
+        let result = if draft.is_folder {
+            self.create_folder(draft.parent.clone(), raw)
+        } else {
+            self.create_note(draft.parent.clone(), raw)
+        };
+        if let Err(err) = result {
+            self.create_draft = Some(draft);
+            self.show_error(err);
+        }
+        cx.notify();
     }
 
     pub fn handle_toggle_word_wrap(&mut self) {
@@ -746,6 +932,7 @@ impl LiteMarkApp {
         self.find_field.read(cx).is_focused(window)
             || self.replace_field.read(cx).is_focused(window)
             || self.rename_field.read(cx).is_focused(window)
+            || self.create_field.read(cx).is_focused(window)
     }
 
     fn show_error(&mut self, message: impl Into<String>) {
@@ -952,6 +1139,10 @@ impl LiteMarkApp {
         path: Option<PathBuf>,
         workspace_file_id: Option<String>,
     ) {
+        // Opening a note (sidebar click, creation, file open) selects it in
+        // the sidebar and hands keyboard focus back to the editor.
+        self.selected_target = workspace_file_id.clone().map(SidebarTarget::File);
+        self.sidebar_keyboard = false;
         if let Some(path) = path.as_ref() {
             let paths: Vec<Option<&Path>> = self
                 .tabs
@@ -986,6 +1177,7 @@ impl LiteMarkApp {
                 self.active_tab_id = tab.id.clone();
             }
         }
+        self.sync_selection_to_active_tab();
         self.refresh_find();
     }
 
@@ -1004,6 +1196,7 @@ impl LiteMarkApp {
                 None,
             ));
             self.active_tab_id = new_id;
+            self.sync_selection_to_active_tab();
             self.refresh_find();
             return;
         }
@@ -1043,13 +1236,157 @@ impl LiteMarkApp {
     }
 
     pub fn toggle_folder(&mut self, folder_id: &str) {
-        if let Some(folder) = self
-            .workspace
-            .folders
-            .iter_mut()
-            .find(|f| f.id == folder_id)
-        {
+        if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.id == folder_id) {
             folder.is_open = !folder.is_open;
+        }
+        // Clicking a folder selects it (Ctrl+Delete target) and keeps
+        // keyboard navigation in the sidebar tree.
+        self.selected_target = Some(SidebarTarget::Folder(folder_id.to_string()));
+        self.sidebar_keyboard = true;
+    }
+
+    /// Point the sidebar selection at the active tab's note (tab-bar clicks,
+    /// tab closes) and hand keyboard focus back to the editor.
+    fn sync_selection_to_active_tab(&mut self) {
+        self.selected_target = self
+            .active_tab()
+            .and_then(|tab| tab.workspace_file_id.clone())
+            .map(SidebarTarget::File);
+        self.sidebar_keyboard = false;
+    }
+
+    /// Flatten the visible sidebar tree into selection targets, in row order.
+    fn sidebar_visible_targets(&self) -> Vec<SidebarTarget> {
+        build_sidebar_tree(
+            &self.workspace.folders,
+            &self.workspace.files,
+            self.create_draft.as_ref(),
+        )
+        .iter()
+        .filter_map(|item| match item {
+            SidebarTreeItem::Folder { folder, .. } => {
+                Some(SidebarTarget::Folder(folder.id.clone()))
+            }
+            SidebarTreeItem::File { file, .. } => Some(SidebarTarget::File(file.id.clone())),
+            SidebarTreeItem::CreateInput { .. } => None,
+        })
+        .collect()
+    }
+
+    /// Move the sidebar selection through the visible tree (wrapping).
+    fn sidebar_move_selection(&mut self, delta: i32) {
+        let targets = self.sidebar_visible_targets();
+        if targets.is_empty() {
+            return;
+        }
+        let next = match &self.selected_target {
+            None => {
+                if delta < 0 {
+                    targets[targets.len() - 1].clone()
+                } else {
+                    targets[0].clone()
+                }
+            }
+            Some(current) => {
+                let pos = targets
+                    .iter()
+                    .position(|t| t == current)
+                    .map(|p| p as i32)
+                    .unwrap_or(0);
+                let len = targets.len() as i32;
+                let new_pos = (pos + delta).rem_euclid(len) as usize;
+                targets[new_pos].clone()
+            }
+        };
+        self.selected_target = Some(next);
+        self.sidebar_keyboard = true;
+    }
+
+    /// Enter in the sidebar: open the selected note (hands focus to the
+    /// editor) or toggle the selected folder.
+    fn sidebar_confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.selected_target.clone() else {
+            return;
+        };
+        match target {
+            SidebarTarget::Folder(id) => {
+                self.toggle_folder(&id);
+                cx.notify();
+            }
+            SidebarTarget::File(id) => {
+                let Some(file) = self
+                    .workspace
+                    .files
+                    .iter()
+                    .find(|f| f.id == id)
+                    .cloned()
+                else {
+                    return;
+                };
+                match read_note(&file.path) {
+                    Ok(content) => {
+                        self.open_loaded_tab(
+                            file.name.clone(),
+                            content,
+                            Some(file.path.clone()),
+                            Some(file.id.clone()),
+                        );
+                    }
+                    Err(err) => self.show_error(err),
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// Left arrow: collapse the selected folder, or move a note's selection
+    /// up to its parent folder.
+    fn sidebar_collapse(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.selected_target.clone() else {
+            return;
+        };
+        match target {
+            SidebarTarget::Folder(id) => {
+                if let Some(folder) = self
+                    .workspace
+                    .folders
+                    .iter_mut()
+                    .find(|f| f.id == id)
+                {
+                    folder.is_open = false;
+                }
+                self.sidebar_keyboard = true;
+            }
+            SidebarTarget::File(id) => {
+                let parent = self
+                    .workspace
+                    .files
+                    .iter()
+                    .find(|f| f.id == id)
+                    .and_then(|f| f.folder_id.clone());
+                if let Some(fid) = parent {
+                    self.selected_target = Some(SidebarTarget::Folder(fid));
+                }
+                self.sidebar_keyboard = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Right arrow: expand the selected folder, or open the selected note.
+    fn sidebar_expand(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.selected_target.clone() else {
+            return;
+        };
+        match target {
+            SidebarTarget::Folder(id) => {
+                if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.id == id) {
+                    folder.is_open = true;
+                }
+                self.sidebar_keyboard = true;
+                cx.notify();
+            }
+            SidebarTarget::File(_) => self.sidebar_confirm(cx),
         }
     }
 
@@ -1070,7 +1407,7 @@ impl LiteMarkApp {
         self.refresh_workspace_ids();
     }
 
-    fn create_note(&mut self, folder_id: Option<String>, desired: String) {
+    fn create_note(&mut self, folder_id: Option<String>, desired: String) -> Result<(), String> {
         let folders = self.folder_pairs();
         let dir = child_directory(&self.workspace.folder_path, &folders, folder_id.as_deref());
         let name = next_available_filename(&dir, &desired);
@@ -1094,27 +1431,38 @@ impl LiteMarkApp {
                     .unwrap_or(&name)
                     .to_string();
                 self.open_loaded_tab(display, String::new(), Some(path), file_id);
+                Ok(())
             }
-            Err(err) => self.show_error(format!("Couldn't create note: {err}")),
+            Err(err) => Err(format!("Couldn't create note: {err}")),
         }
     }
 
-    fn create_folder(&mut self, parent_id: Option<String>, desired: String) {
+    fn create_folder(&mut self, parent_id: Option<String>, desired: String) -> Result<(), String> {
         let folders = self.folder_pairs();
         let dir = child_directory(&self.workspace.folder_path, &folders, parent_id.as_deref());
         let name = unique_name(&sanitize_name(&desired), &|candidate| {
             dir.join(candidate).exists()
         });
         match safe_create_folder(&dir, &name) {
-            Ok(_) => {
+            Ok(path) => {
                 if let Some(pid) = &parent_id {
                     if let Some(folder) = self.workspace.folders.iter_mut().find(|f| &f.id == pid) {
                         folder.is_open = true;
                     }
                 }
                 self.rescan_workspace();
+                // Keep the fresh folder visible in the tree.
+                if let Some(folder) = self
+                    .workspace
+                    .folders
+                    .iter_mut()
+                    .find(|f| f.path == path)
+                {
+                    folder.is_open = true;
+                }
+                Ok(())
             }
-            Err(err) => self.show_error(format!("Couldn't create folder: {err}")),
+            Err(err) => Err(format!("Couldn't create folder: {err}")),
         }
     }
 
@@ -1128,6 +1476,243 @@ impl LiteMarkApp {
                     .map(|file| file.id.clone())
             });
         }
+    }
+
+    /// Number of keyboard-selectable actions in the currently open modal
+    /// popup (0 = no modal keyboard focus).
+    fn modal_choice_count(&self) -> usize {
+        if let Some(prompt) = &self.prompt {
+            self.prompt_modal_data(prompt).2.len()
+        } else if self.show_pdf_modal || self.sidebar_menu.is_some() {
+            2
+        } else if self.show_about_modal || self.show_shortcuts_modal {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Handle a note or folder dragged and dropped onto a sidebar folder,
+    /// or onto the notes list itself (`folder_id: None` = move to the
+    /// workspace root). A plain drop moves; holding Ctrl drops a copy.
+    fn handle_drop_item(
+        &mut self,
+        target: SidebarTarget,
+        folder_id: Option<String>,
+        copy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match target {
+            SidebarTarget::File(id) => self.move_or_copy_note(&id, folder_id, copy, cx),
+            SidebarTarget::Folder(id) => self.move_or_copy_folder(&id, folder_id, copy, cx),
+        }
+    }
+
+    fn move_or_copy_note(
+        &mut self,
+        file_id: &str,
+        folder_id: Option<String>,
+        copy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (dest_name, dest_path) = if let Some(dest_id) = folder_id {
+            let Some((name, path)) = self
+                .workspace
+                .folders
+                .iter()
+                .find(|f| f.id == dest_id)
+                .map(|f| (f.name.clone(), f.path.clone()))
+            else {
+                self.show_error("That folder is no longer available.");
+                return;
+            };
+            (name, path)
+        } else {
+            let root = self.workspace.folder_path.clone();
+            let name = root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("the workspace root")
+                .to_string();
+            (name, root)
+        };
+        let Some(file) = self
+            .workspace
+            .files
+            .iter()
+            .find(|f| f.id == file_id)
+            .cloned()
+        else {
+            self.show_error("That note is no longer in the folder.");
+            return;
+        };
+        if file.path.parent() == Some(dest_path.as_path()) {
+            return; // already in that folder
+        }
+        if copy {
+            let result = read_note(&file.path).and_then(|content| {
+                copy_note_into_workspace(&file.path, &dest_path, &content)
+                    .map_err(|err| err.to_string())
+            });
+            match result {
+                Ok(new_path) => {
+                    self.rescan_workspace();
+                    let new_file_id = self
+                        .workspace
+                        .files
+                        .iter()
+                        .find(|f| f.path == new_path)
+                        .map(|f| f.id.clone());
+                    let display = new_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(file.name.as_str())
+                        .to_string();
+                    self.open_loaded_tab(display, String::new(), Some(new_path), new_file_id);
+                    self.show_toast(format!("Copied {} to {dest_name}", file.name), cx);
+                }
+                Err(err) => self.show_error(format!("Couldn't copy note: {err}")),
+            }
+        } else {
+            match move_note(&file.path, &dest_path) {
+                Ok(new_path) if new_path != file.path => {
+                    self.retarget_open_tabs(&file.path, &new_path);
+                    self.rescan_workspace();
+                    self.show_toast(format!("Moved {} to {dest_name}", file.name), cx);
+                }
+                Ok(_) => {}
+                Err(err) => self.show_error(format!("Couldn't move note: {err}")),
+            }
+        }
+    }
+
+    fn move_or_copy_folder(
+        &mut self,
+        folder_id: &str,
+        dest_folder_id: Option<String>,
+        copy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((name, src)) = self
+            .workspace
+            .folders
+            .iter()
+            .find(|f| f.id == folder_id)
+            .map(|f| (f.name.clone(), f.path.clone()))
+        else {
+            self.show_error("That folder is no longer available.");
+            return;
+        };
+        let (dest_name, dest_path) = if let Some(dest_id) = dest_folder_id {
+            if dest_id == folder_id {
+                return; // dropped on itself
+            }
+            let Some((dname, dpath)) = self
+                .workspace
+                .folders
+                .iter()
+                .find(|f| f.id == dest_id)
+                .map(|f| (f.name.clone(), f.path.clone()))
+            else {
+                self.show_error("That folder is no longer available.");
+                return;
+            };
+            (dname, dpath)
+        } else {
+            let root = self.workspace.folder_path.clone();
+            let dname = root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("the workspace root")
+                .to_string();
+            (dname, root)
+        };
+        // Never move/copy a folder into its own descendant (or itself) —
+        // that would create a cycle on disk.
+        if dest_path.starts_with(&src) {
+            self.show_error("Can't move a folder into itself.");
+            return;
+        }
+        if src.parent() == Some(dest_path.as_path()) {
+            return; // already in that folder
+        }
+        if copy {
+            match copy_folder(&src, &dest_path) {
+                Ok(_) => {
+                    self.rescan_workspace();
+                    self.show_toast(format!("Copied {name} to {dest_name}"), cx);
+                }
+                Err(err) => self.show_error(format!("Couldn't copy folder: {err}")),
+            }
+        } else {
+            match move_folder(&src, &dest_path) {
+                Ok(new_path) if new_path != src => {
+                    self.retarget_open_tabs(&src, &new_path);
+                    self.rescan_workspace();
+                    self.show_toast(format!("Moved {name} to {dest_name}"), cx);
+                }
+                Ok(_) => {}
+                Err(err) => self.show_error(format!("Couldn't move folder: {err}")),
+            }
+        }
+    }
+
+    /// Route a picked workspace directory: when the current note lives on
+    /// disk inside the current workspace, ask whether to copy it into the
+    /// new one before switching; otherwise switch right away.
+    fn prepare_workspace_switch(&mut self, new_dir: PathBuf) {
+        if new_dir == self.workspace.folder_path {
+            self.rescan_workspace();
+            return;
+        }
+        if self.migratable_note_path().is_some() {
+            self.show_prompt(Prompt::SwitchWorkspace { new_dir });
+        } else {
+            self.apply_workspace_switch(new_dir, None);
+        }
+    }
+
+    /// Path of the active note if it is a text note stored inside the
+    /// current workspace (the only kind that can be copied to a new one).
+    fn migratable_note_path(&self) -> Option<PathBuf> {
+        let tab = self.active_tab()?;
+        if !matches!(tab.file_type, FileType::Markdown | FileType::PlainText) {
+            return None;
+        }
+        tab.file_path
+            .clone()
+            .filter(|path| path.starts_with(&self.workspace.folder_path))
+    }
+
+    /// Switch the workspace to `new_dir`, optionally copying the current
+    /// note (including unsaved edits) into it before the switch. The
+    /// original file on disk is never removed.
+    fn apply_workspace_switch(&mut self, new_dir: PathBuf, migrate_from: Option<PathBuf>) {
+        let mut migrated = None;
+        if let Some(old_path) = migrate_from {
+            let content = self
+                .active_tab()
+                .map(|tab| tab.content.clone())
+                .unwrap_or_default();
+            match copy_note_into_workspace(&old_path, &new_dir, &content) {
+                Ok(new_path) => migrated = Some(new_path),
+                Err(err) => self.show_error(format!("Couldn't copy note: {err}")),
+            }
+        }
+        self.workspace = scan_workspace_dir(&new_dir);
+        if let Some(new_path) = migrated {
+            if let Some(tab) = self.active_tab_mut() {
+                if let Some(name) = new_path.file_name().and_then(|n| n.to_str()) {
+                    tab.title = name.to_string();
+                }
+                tab.file_path = Some(new_path);
+                tab.is_modified = false;
+            }
+        }
+        // Selection ids are workspace-scoped and don't survive a switch.
+        self.selected_target = None;
+        self.sidebar_keyboard = false;
+        self.refresh_workspace_ids();
     }
 
     fn retarget_open_tabs(&mut self, old: &Path, new_path: &Path) {
@@ -1163,7 +1748,7 @@ impl LiteMarkApp {
             .iter()
             .filter(|tab| tab.file_path.as_ref() == Some(&file.path))
             .map(|tab| tab.is_modified);
-        self.prompt = Some(match plan_trash(modified) {
+        self.show_prompt(match plan_trash(modified) {
             TrashPlan::Prompt => Prompt::TrashDirtyFile { id },
             TrashPlan::Proceed => Prompt::DeleteFile { id },
         });
@@ -1190,7 +1775,7 @@ impl LiteMarkApp {
                     .is_some_and(|path| path.starts_with(&prefix))
             })
             .map(|tab| tab.is_modified);
-        self.prompt = Some(match plan_trash(modified) {
+        self.show_prompt(match plan_trash(modified) {
             TrashPlan::Prompt => Prompt::TrashDirtyFolder { id },
             TrashPlan::Proceed => Prompt::DeleteFolder { id },
         });
@@ -1246,17 +1831,117 @@ impl LiteMarkApp {
         };
         self.sidebar_menu = None;
         self.rename_target = Some(target);
+        self.rename_value = name.clone();
         self.pending_rename_focus = true;
         self.rename_field.update(cx, |field, _cx| {
             field.set_text(name);
         });
     }
 
-    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        self.rename_target = None;
+        self.save_as_tab = None;
+        self.pending_after_save = None;
+        self.rename_value.clear();
+        self.field_owns_keys = false;
+        self.applied_focus = None;
+        cx.notify();
+    }
+
+    /// Open the naming modal for saving an untitled tab (quick note).
+    /// Saving happens only after the user confirms a name with Enter.
+    fn begin_save_naming(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        let Some(title) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.title.clone())
+        else {
+            return;
+        };
+        self.sidebar_menu = None;
+        self.save_as_tab = Some(tab_id.to_string());
+        self.pending_rename_focus = true;
+        self.rename_value = title.clone();
+        self.rename_field.update(cx, |field, _cx| {
+            field.set_text(title);
+        });
+        cx.notify();
+    }
+
+    /// Commit the save-naming modal: set the chosen title on the untitled
+    /// tab and save it into the workspace root (plan_save appends `.md`
+    /// and picks a free name). Re-opens on error; resumes a pending close
+    /// flow on success.
+    fn commit_save_naming(
+        &mut self,
+        name_override: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_id) = self.save_as_tab.clone() else {
+            return;
+        };
+        let raw = name_override
+            .unwrap_or_else(|| self.rename_value.clone())
+            .trim()
+            .to_string();
+        if raw.is_empty() {
+            self.show_error("Enter a name.");
+            return;
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.title = raw;
+        }
+        match self.save_tab(&tab_id) {
+            Ok(title) => {
+                self.save_as_tab = None;
+                self.rename_value.clear();
+                self.field_owns_keys = false;
+                self.applied_focus = None;
+                self.show_toast(format!("Saved {title}"), cx);
+                match self.pending_after_save.take() {
+                    Some(PendingAfterSave::CloseTab(id)) => self.finish_close_saved(&id),
+                    Some(PendingAfterSave::CloseWindow) => self.resume_close_window(cx),
+                    None => {}
+                }
+            }
+            Err(err) => self.show_error(err),
+        }
+        cx.notify();
+    }
+
+    fn first_unnamed_dirty_tab(&self) -> Option<String> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.is_modified && tab.file_path.is_none())
+            .map(|tab| tab.id.clone())
+    }
+
+    /// Continue the close-window flow after a tab was saved with a name:
+    /// name the next untitled dirty tab, or finish the save-all.
+    fn resume_close_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.first_unnamed_dirty_tab() {
+            self.pending_after_save = Some(PendingAfterSave::CloseWindow);
+            self.begin_save_naming(&id, cx);
+            return;
+        }
+        match self.save_all_dirty() {
+            Ok(()) => self.allow_window_close = true,
+            Err(err) => {
+                self.show_error(err);
+                self.show_prompt(Prompt::CloseWindow);
+            }
+        }
+    }
+
+    fn commit_rename(&mut self, name_override: Option<String>, _cx: &mut Context<Self>) {
         let Some(target) = self.rename_target.take() else {
             return;
         };
-        let name = self.rename_field.read(cx).content().trim().to_string();
+        let name = name_override
+            .unwrap_or_else(|| self.rename_value.clone())
+            .trim()
+            .to_string();
         if name.is_empty() {
             self.show_error("Enter a name.");
             self.rename_target = Some(target);
@@ -1282,8 +1967,27 @@ impl LiteMarkApp {
         };
         match safe_rename(&old, &name) {
             Ok(new_path) => {
+                self.rename_value.clear();
                 self.retarget_open_tabs(&old, &new_path);
                 self.rescan_workspace();
+                // Item ids are path-based: remap the sidebar selection so the
+                // renamed item stays highlighted.
+                let (kind, old_id) = match &target {
+                    SidebarTarget::File(_) => ("file", format!("file-{}", old.display())),
+                    SidebarTarget::Folder(_) => {
+                        ("folder", format!("folder-{}", old.display()))
+                    }
+                };
+                let new_id = format!("{kind}-{}", new_path.display());
+                match &self.selected_target {
+                    Some(SidebarTarget::File(id)) if *id == old_id => {
+                        self.selected_target = Some(SidebarTarget::File(new_id));
+                    }
+                    Some(SidebarTarget::Folder(id)) if *id == old_id => {
+                        self.selected_target = Some(SidebarTarget::Folder(new_id));
+                    }
+                    _ => {}
+                }
             }
             Err(err) => {
                 self.show_error(format!("Couldn't rename: {err}"));
@@ -1292,7 +1996,86 @@ impl LiteMarkApp {
         }
     }
 
-    fn trash_file(&mut self, id: &str) {
+    /// Optimistically close the tabs whose file path matches `pred` and fix
+    /// up the active-tab selection. Returns enough state to restore them if
+    /// the operation that motivated the close fails.
+    fn optimistic_close_tabs(&mut self, pred: impl Fn(&Path) -> bool) -> OptimisticClose {
+        let prev_active = self.active_tab_id.clone();
+        let mut removed: Vec<(usize, DocumentTab)> = Vec::new();
+        let mut original_ix = 0usize;
+        self.tabs.retain(|tab| {
+            let keep = !tab
+                .file_path
+                .as_ref()
+                .is_some_and(|path| pred(path));
+            if !keep {
+                removed.push((original_ix, tab.clone()));
+            }
+            original_ix += 1;
+            keep
+        });
+
+        // Keep a valid selection: the tab that took the first closed tab's
+        // position, the last remaining tab, or a fresh placeholder when the
+        // last tab was closed (same as discard_tab's only-tab behavior).
+        let placeholder_id = if !self.tabs.iter().any(|t| t.id == self.active_tab_id) {
+            if self.tabs.is_empty() {
+                let new_id = self.tab_ids.alloc();
+                let number = new_id.trim_start_matches("tab-");
+                let title = format!("Untitled-{number}.md");
+                self.tabs.push(DocumentTab::new(
+                    new_id.clone(),
+                    title,
+                    String::new(),
+                    None,
+                    None,
+                ));
+                Some(new_id)
+            } else {
+                let pos = removed.first().map(|(ix, _)| *ix).unwrap_or(0);
+                if let Some(tab) = self.tabs.get(pos.min(self.tabs.len() - 1)) {
+                    self.active_tab_id = tab.id.clone();
+                }
+                None
+            }
+        } else {
+            None
+        };
+        self.refresh_find();
+        OptimisticClose {
+            tabs: removed,
+            prev_active,
+            placeholder_id,
+            prev_selected: self.selected_target.clone(),
+        }
+    }
+
+    /// Undo an optimistic tab closure (the trash failed): put the tabs back
+    /// in their original positions and restore the previous selection.
+    fn restore_optimistic_close(&mut self, closed: OptimisticClose, cx: &mut Context<Self>) {
+        let OptimisticClose {
+            tabs,
+            prev_active,
+            placeholder_id,
+            prev_selected,
+        } = closed;
+        if let Some(placeholder_id) = placeholder_id {
+            // Only drop the placeholder while the user hasn't typed into it
+            // in the meantime; a used placeholder is real work, keep it open.
+            self.tabs
+                .retain(|tab| !(tab.id == placeholder_id && tab.content.is_empty() && !tab.is_modified));
+        }
+        for (ix, tab) in tabs {
+            let at = ix.min(self.tabs.len());
+            self.tabs.insert(at, tab);
+        }
+        self.active_tab_id = prev_active;
+        self.selected_target = prev_selected;
+        self.refresh_find();
+        cx.notify();
+    }
+
+    fn trash_file(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(file) = self
             .workspace
             .files
@@ -1303,24 +2086,39 @@ impl LiteMarkApp {
             self.show_error("That note is no longer in the folder.");
             return;
         };
-        match move_to_trash(&file.path) {
-            Ok(()) => {
-                let closing: Vec<String> = self
-                    .tabs
-                    .iter()
-                    .filter(|tab| tab.file_path.as_ref() == Some(&file.path))
-                    .map(|tab| tab.id.clone())
-                    .collect();
-                self.rescan_workspace();
-                for tab_id in closing {
-                    self.discard_tab(&tab_id);
-                }
-            }
-            Err(err) => self.show_error(err),
+        // Optimistic removal: the note vanishes and its tabs close the same
+        // frame, while the (slow, portal-backed) trash runs in the
+        // background. On failure the closed tabs are restored and the
+        // rescan brings the note back — trashing is a rename, so a failed
+        // trash loses nothing.
+        self.workspace.files.retain(|f| f.path != file.path);
+        let closed = self.optimistic_close_tabs(|path| path == file.path.as_path());
+        // The selection pointed at the removed note — clear it (restored on
+        // failure together with the tabs).
+        if matches!(&self.selected_target, Some(SidebarTarget::File(fid)) if self.workspace.files.iter().all(|f| f.id != *fid))
+        {
+            self.selected_target = None;
         }
+        cx.notify();
+        let path = file.path.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { move_to_trash(&path) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => this.rescan_workspace(),
+                Err(err) => {
+                    this.restore_optimistic_close(closed, cx);
+                    this.rescan_workspace();
+                    this.show_error(err);
+                }
+            });
+        })
+        .detach();
     }
 
-    fn trash_folder(&mut self, id: &str) {
+    fn trash_folder(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(folder) = self
             .workspace
             .folders
@@ -1331,26 +2129,40 @@ impl LiteMarkApp {
             self.show_error("That folder is no longer available.");
             return;
         };
-        match move_to_trash(&folder.path) {
-            Ok(()) => {
-                let prefix = folder.path.clone();
-                let closing: Vec<String> = self
-                    .tabs
-                    .iter()
-                    .filter(|tab| {
-                        tab.file_path
-                            .as_ref()
-                            .is_some_and(|path| path.starts_with(&prefix))
-                    })
-                    .map(|tab| tab.id.clone())
-                    .collect();
-                self.rescan_workspace();
-                for tab_id in closing {
-                    self.discard_tab(&tab_id);
-                }
-            }
-            Err(err) => self.show_error(err),
+        // Same optimistic removal as trash_file, for the whole subtree.
+        let prefix = folder.path.clone();
+        self.workspace
+            .folders
+            .retain(|f| !f.path.starts_with(&prefix));
+        self.workspace
+            .files
+            .retain(|f| !f.path.starts_with(&prefix));
+        let closed = self.optimistic_close_tabs(|path| path.starts_with(&prefix));
+        // Clear the selection if it pointed into the removed subtree.
+        let selection_gone = match &self.selected_target {
+            Some(SidebarTarget::File(id)) => self.workspace.files.iter().all(|f| f.id != *id),
+            Some(SidebarTarget::Folder(id)) => self.workspace.folders.iter().all(|f| f.id != *id),
+            None => false,
+        };
+        if selection_gone {
+            self.selected_target = None;
         }
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { move_to_trash(&prefix) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => this.rescan_workspace(),
+                Err(err) => {
+                    this.restore_optimistic_close(closed, cx);
+                    this.rescan_workspace();
+                    this.show_error(err);
+                }
+            });
+        })
+        .detach();
     }
 
     fn save_all_dirty(&mut self) -> Result<(), String> {
@@ -1366,44 +2178,331 @@ impl LiteMarkApp {
         Ok(())
     }
 
+    /// Indices of selectable items (non-divider, non-heading, enabled) in
+    /// a list of menu items.
+    fn selectable_menu_ixs(items: &[MenuItem]) -> Vec<usize> {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                !item.disabled
+                    && !matches!(
+                        item.kind,
+                        MenuItemKind::Divider | MenuItemKind::Heading
+                    )
+            })
+            .map(|(ix, _)| ix)
+            .collect()
+    }
+
+    fn menu_selectable_ixs(&self) -> Vec<usize> {
+        Self::selectable_menu_ixs(&self.menu_items_cache)
+    }
+
+    /// Move the menu selection by `delta` items (wrapping), skipping
+    /// dividers, headings and disabled entries. With a submenu open,
+    /// navigation happens inside the submenu instead.
+    fn menu_move_selection(&mut self, delta: i32) {
+        if self.open_menu.is_none() || self.open_menu == Some(MenuId::Table) {
+            return;
+        }
+        if let Some(sub_ix) = self.menu_open_submenu_ix {
+            let sub_items = match self
+                .menu_items_cache
+                .get(sub_ix)
+                .map(|item| item.kind.clone())
+            {
+                Some(MenuItemKind::Submenu(items)) => items,
+                _ => {
+                    // The submenu no longer exists — close it and fall back.
+                    self.menu_open_submenu_ix = None;
+                    self.submenu_selected_ix = None;
+                    return;
+                }
+            };
+            let selectable = Self::selectable_menu_ixs(&sub_items);
+            if selectable.is_empty() {
+                return;
+            }
+            self.submenu_selected_ix = Some(match self.submenu_selected_ix {
+                None => {
+                    if delta < 0 {
+                        selectable[selectable.len() - 1]
+                    } else {
+                        selectable[0]
+                    }
+                }
+                Some(current) => {
+                    let pos = selectable.iter().position(|&ix| ix == current).unwrap_or(0);
+                    let len = selectable.len() as i32;
+                    selectable[((pos as i32 + delta).rem_euclid(len)) as usize]
+                }
+            });
+            return;
+        }
+        let selectable = self.menu_selectable_ixs();
+        if selectable.is_empty() {
+            return;
+        }
+        let next = match self.menu_selected_ix {
+            None => {
+                if delta < 0 {
+                    selectable[selectable.len() - 1]
+                } else {
+                    selectable[0]
+                }
+            }
+            Some(current) => {
+                let pos = selectable.iter().position(|&ix| ix == current).unwrap_or(0);
+                let len = selectable.len() as i32;
+                let new_pos = (pos as i32 + delta).rem_euclid(len) as usize;
+                selectable[new_pos]
+            }
+        };
+        self.menu_selected_ix = Some(next);
+    }
+
+    /// Close the menu and return the action to run for the selected item,
+    /// if any. The caller must run the action *outside* the view update —
+    /// item actions themselves update this view, so calling them from
+    /// inside a `view.update` would re-entrantly borrow it and panic.
+    fn menu_take_confirm_action(&mut self, cx: &mut Context<Self>) -> Option<MenuAction> {
+        if self.open_menu.is_none() || self.open_menu == Some(MenuId::Table) {
+            return None;
+        }
+        // Confirming with a submenu open activates the selected submenu item.
+        if let Some(sub_ix) = self.menu_open_submenu_ix {
+            let sub_items = match self
+                .menu_items_cache
+                .get(sub_ix)
+                .map(|item| item.kind.clone())
+            {
+                Some(MenuItemKind::Submenu(items)) => items,
+                _ => {
+                    self.menu_open_submenu_ix = None;
+                    self.submenu_selected_ix = None;
+                    cx.notify();
+                    return None;
+                }
+            };
+            let sel = self.submenu_selected_ix?;
+            let item = sub_items.get(sel)?;
+            if item.disabled
+                || !matches!(
+                    item.kind,
+                    MenuItemKind::Action | MenuItemKind::Check(_) | MenuItemKind::Radio(_)
+                )
+            {
+                return None;
+            }
+            let action = item.action.clone();
+            self.open_menu = None;
+            self.menu_selected_ix = None;
+            self.menu_open_submenu_ix = None;
+            self.submenu_selected_ix = None;
+            cx.notify();
+            return Some(action);
+        }
+        let ix = self.menu_selected_ix?;
+        let item = self.menu_items_cache.get(ix)?;
+        if item.disabled {
+            return None;
+        }
+        if matches!(item.kind, MenuItemKind::Submenu(_)) {
+            self.menu_open_submenu_ix = if self.menu_open_submenu_ix == Some(ix) {
+                None
+            } else {
+                Some(ix)
+            };
+            // Keyboard-opened submenus preselect their first selectable item.
+            self.submenu_selected_ix = match (&self.menu_open_submenu_ix, &item.kind) {
+                (Some(_), MenuItemKind::Submenu(sub_items)) => {
+                    Self::selectable_menu_ixs(sub_items).first().copied()
+                }
+                _ => None,
+            };
+            cx.notify();
+            return None;
+        }
+        if matches!(
+            item.kind,
+            MenuItemKind::Divider | MenuItemKind::Heading
+        ) {
+            return None;
+        }
+        let action = item.action.clone();
+        self.open_menu = None;
+        self.menu_selected_ix = None;
+        self.menu_open_submenu_ix = None;
+        self.submenu_selected_ix = None;
+        cx.notify();
+        Some(action)
+    }
+
+    /// Open a prompt and preselect its default choice so Enter confirms it.
+    fn show_prompt(&mut self, prompt: Prompt) {
+        let (_, _, choices) = self.prompt_modal_data(&prompt);
+        self.prompt_selected_ix = choices
+            .iter()
+            .position(|(_, default)| *default)
+            .unwrap_or(0);
+        self.prompt = Some(prompt);
+    }
+
+    /// Title, message and button choices for a prompt. The bool marks the
+    /// default choice.
+    fn prompt_modal_data(
+        &self,
+        prompt: &Prompt,
+    ) -> (&'static str, String, Vec<(&'static str, bool)>) {
+        match prompt {
+            Prompt::CloseTab { id } => {
+                let name = self
+                    .tabs
+                    .iter()
+                    .find(|tab| &tab.id == id)
+                    .map(|tab| tab.title.clone())
+                    .unwrap_or_else(|| "this note".into());
+                (
+                    "Unsaved changes",
+                    format!("Save changes to {name} before closing?"),
+                    vec![("Cancel", false), ("Discard", false), ("Save", true)],
+                )
+            }
+            Prompt::CloseWindow => (
+                "Unsaved changes",
+                "Save your changes before closing the window?".into(),
+                vec![("Cancel", false), ("Discard", false), ("Save", true)],
+            ),
+            Prompt::DeleteFile { id } => {
+                let name = self
+                    .workspace
+                    .files
+                    .iter()
+                    .find(|file| &file.id == id)
+                    .map(|file| file.name.clone())
+                    .unwrap_or_else(|| "this note".into());
+                (
+                    "Move to Trash",
+                    format!("Move {name} to the Trash?"),
+                    vec![("Cancel", false), ("Trash", true)],
+                )
+            }
+            Prompt::DeleteFolder { id } => {
+                let name = self
+                    .workspace
+                    .folders
+                    .iter()
+                    .find(|folder| &folder.id == id)
+                    .map(|folder| folder.name.clone())
+                    .unwrap_or_else(|| "this folder".into());
+                (
+                    "Move to Trash",
+                    format!("Move {name} and its contents to the Trash?"),
+                    vec![("Cancel", false), ("Trash", true)],
+                )
+            }
+            Prompt::TrashDirtyFile { id } => {
+                let name = self
+                    .workspace
+                    .files
+                    .iter()
+                    .find(|file| &file.id == id)
+                    .map(|file| file.name.clone())
+                    .unwrap_or_else(|| "this note".into());
+                (
+                    "Unsaved changes",
+                    format!("Save changes to {name} before moving it to the Trash?"),
+                    vec![("Cancel", false), ("Discard", false), ("Save", true)],
+                )
+            }
+            Prompt::TrashDirtyFolder { id } => {
+                let name = self
+                    .workspace
+                    .folders
+                    .iter()
+                    .find(|folder| &folder.id == id)
+                    .map(|folder| folder.name.clone())
+                    .unwrap_or_else(|| "this folder".into());
+                (
+                    "Unsaved changes",
+                    format!("Save changes in {name} before moving it to the Trash?"),
+                    vec![("Cancel", false), ("Discard", false), ("Save", true)],
+                )
+            }
+            Prompt::SwitchWorkspace { new_dir } => {
+                let name = self
+                    .active_tab()
+                    .map(|tab| tab.title.clone())
+                    .unwrap_or_else(|| "your current note".into());
+                let dest = new_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("the new folder");
+                (
+                    "Switch folder",
+                    format!(
+                        "Copy \u{201c}{name}\u{201d} into \u{201c}{dest}\u{201d} before switching? The original stays in the current folder either way."
+                    ),
+                    vec![("Not now", false), ("Copy note", true)],
+                )
+            }
+        }
+    }
+
     fn answer_prompt(&mut self, choice: &'static str, cx: &mut Context<Self>) {
         let Some(prompt) = self.prompt.take() else {
             return;
         };
         match prompt {
             Prompt::CloseTab { id } => match choice {
-                "Save" => match self.save_tab(&id) {
-                    Ok(title) => {
-                        self.show_toast(format!("Saved {title}"), cx);
-                        self.finish_close_saved(&id);
+                "Save" => {
+                    // Untitled quick notes get a name before the close continues.
+                    if self.tabs.iter().any(|t| t.id == id && t.file_path.is_none()) {
+                        self.begin_save_naming(&id, cx);
+                        self.pending_after_save = Some(PendingAfterSave::CloseTab(id));
+                    } else {
+                        match self.save_tab(&id) {
+                            Ok(title) => {
+                                self.show_toast(format!("Saved {title}"), cx);
+                                self.finish_close_saved(&id);
+                            }
+                            Err(err) => {
+                                self.show_error(err);
+                                self.show_prompt(Prompt::CloseTab { id });
+                            }
+                        }
                     }
-                    Err(err) => {
-                        self.show_error(err);
-                        self.prompt = Some(Prompt::CloseTab { id });
-                    }
-                },
+                }
                 "Discard" => self.discard_tab(&id),
                 _ => {}
             },
             Prompt::CloseWindow => match choice {
-                "Save" => match self.save_all_dirty() {
-                    Ok(()) => self.allow_window_close = true,
-                    Err(err) => {
-                        self.show_error(err);
-                        self.prompt = Some(Prompt::CloseWindow);
+                "Save" => {
+                    if let Some(id) = self.first_unnamed_dirty_tab() {
+                        self.pending_after_save = Some(PendingAfterSave::CloseWindow);
+                        self.begin_save_naming(&id, cx);
+                    } else {
+                        match self.save_all_dirty() {
+                            Ok(()) => self.allow_window_close = true,
+                            Err(err) => {
+                                self.show_error(err);
+                                self.show_prompt(Prompt::CloseWindow);
+                            }
+                        }
                     }
-                },
+                }
                 "Discard" => self.allow_window_close = true,
                 _ => {}
             },
             Prompt::DeleteFile { id } => {
                 if choice == "Trash" {
-                    self.trash_file(&id);
+                    self.trash_file(&id, cx);
                 }
             }
             Prompt::DeleteFolder { id } => {
                 if choice == "Trash" {
-                    self.trash_folder(&id);
+                    self.trash_folder(&id, cx);
                 }
             }
             Prompt::TrashDirtyFile { id } => match trash_action(match choice {
@@ -1412,7 +2511,7 @@ impl LiteMarkApp {
                 _ => TrashChoice::Cancel,
             }) {
                 TrashAction::Abort => {}
-                TrashAction::DiscardThenTrash => self.trash_file(&id),
+                TrashAction::DiscardThenTrash => self.trash_file(&id, cx),
                 TrashAction::SaveThenTrash => {
                     let path = self
                         .workspace
@@ -1427,10 +2526,10 @@ impl LiteMarkApp {
                     let ids = self.dirty_tab_ids_for_path(&path);
                     if let Err(err) = self.save_ids(&ids) {
                         self.show_error(err);
-                        self.prompt = Some(Prompt::TrashDirtyFile { id });
+                        self.show_prompt(Prompt::TrashDirtyFile { id });
                         return;
                     }
-                    self.trash_file(&id);
+                    self.trash_file(&id, cx);
                 }
             },
             Prompt::TrashDirtyFolder { id } => match trash_action(match choice {
@@ -1439,7 +2538,7 @@ impl LiteMarkApp {
                 _ => TrashChoice::Cancel,
             }) {
                 TrashAction::Abort => {}
-                TrashAction::DiscardThenTrash => self.trash_folder(&id),
+                TrashAction::DiscardThenTrash => self.trash_folder(&id, cx),
                 TrashAction::SaveThenTrash => {
                     let prefix = self
                         .workspace
@@ -1454,18 +2553,26 @@ impl LiteMarkApp {
                     let ids = self.dirty_tab_ids_under(&prefix);
                     if let Err(err) = self.save_ids(&ids) {
                         self.show_error(err);
-                        self.prompt = Some(Prompt::TrashDirtyFolder { id });
+                        self.show_prompt(Prompt::TrashDirtyFolder { id });
                         return;
                     }
-                    self.trash_folder(&id);
+                    self.trash_folder(&id, cx);
                 }
+            },
+            Prompt::SwitchWorkspace { new_dir } => match choice {
+                "Copy note" => {
+                    let current = self.migratable_note_path();
+                    self.apply_workspace_switch(new_dir, current);
+                }
+                "Not now" => self.apply_workspace_switch(new_dir, None),
+                _ => {}
             },
         }
     }
 
     fn request_close_window(&mut self) {
         if self.tabs.iter().any(|tab| tab.is_modified) {
-            self.prompt = Some(Prompt::CloseWindow);
+            self.show_prompt(Prompt::CloseWindow);
         } else {
             self.allow_window_close = true;
         }
@@ -1490,7 +2597,7 @@ impl LiteMarkApp {
                     return true;
                 }
                 if this.tabs.iter().any(|tab| tab.is_modified) {
-                    this.prompt = Some(Prompt::CloseWindow);
+                    this.show_prompt(Prompt::CloseWindow);
                     cx.notify();
                     false
                 } else {
@@ -1695,6 +2802,8 @@ impl LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Clicking the editor hands keyboard focus back from the sidebar.
+        self.sidebar_keyboard = false;
         if self.input_blocked() || window.default_prevented() {
             return;
         }
@@ -1707,7 +2816,7 @@ impl LiteMarkApp {
                 if let Some(tab) = self.active_tab_mut() {
                     if !tab.is_read_only() && range.end <= tab.content.len() {
                         let current = &tab.content[range.clone()];
-                        let replacement = checkbox_click_replacement(current);
+                        let replacement = if current == "[ ]" { "[x]" } else { "[ ]" };
                         tab.edit(range, replacement);
                     }
                 }
@@ -1807,9 +2916,7 @@ impl LiteMarkApp {
             }
         }
 
-        let is_table = self
-            .active_tab()
-            .is_some_and(|tab| tab.active_formats.table);
+        let is_table = self.active_tab().is_some_and(|tab| tab.active_formats.table);
         self.open_menu = None;
         self.editor_context_menu = Some(EditorContextMenu {
             position: event.position,
@@ -1843,7 +2950,12 @@ impl LiteMarkApp {
                 tab.marked_range.clone(),
             )
         } else {
-            (String::new(), Arc::new(parse_document("")), 0..0, None)
+            (
+                String::new(),
+                Arc::new(parse_document("")),
+                0..0,
+                None,
+            )
         };
         let font_family = match view_mode {
             ViewMode::Wysiwyg => Theme::FONT_PROSE.into(),
@@ -1969,7 +3081,9 @@ impl EntityInputHandler for LiteMarkApp {
         if self.settings.view_mode == ViewMode::Wysiwyg && range.is_empty() && text != "\n" {
             let cursor = range.start;
             let line_start = home_offset(&content, cursor);
-            let prefix_len = block_prefix_in(&content, line_start);
+            let line_end_pos = line_end(&content, cursor);
+            let line = &content[line_start..line_end_pos];
+            let prefix_len = block_prefix_len(line);
             if prefix_len > 0 && cursor < line_start + prefix_len {
                 let target = line_start + prefix_len;
                 range = target..target;
@@ -2166,10 +3280,7 @@ impl EntityInputHandler for LiteMarkApp {
                 let x1 = cell.shaped.x_for_index(local_end);
                 return Some(Bounds::from_corners(
                     point(cell.text_origin.x + x0, cell.text_origin.y),
-                    point(
-                        cell.text_origin.x + x1.max(x0),
-                        cell.text_origin.y + row.line_height,
-                    ),
+                    point(cell.text_origin.x + x1.max(x0), cell.text_origin.y + row.line_height),
                 ));
             }
         }
@@ -2211,7 +3322,15 @@ impl Render for LiteMarkApp {
             self.field_owns_keys = false;
             self.applied_focus = None;
         }
-        if self.rename_target.is_none() && self.field_focus == TextInput::Rename {
+        if self.rename_target.is_none()
+            && self.save_as_tab.is_none()
+            && self.field_focus == TextInput::Rename
+        {
+            self.field_focus = TextInput::Editor;
+            self.field_owns_keys = false;
+            self.applied_focus = None;
+        }
+        if self.create_draft.is_none() && self.field_focus == TextInput::Create {
             self.field_focus = TextInput::Editor;
             self.field_owns_keys = false;
             self.applied_focus = None;
@@ -2220,12 +3339,22 @@ impl Render for LiteMarkApp {
             self.pending_find_focus = false;
             self.field_focus = TextInput::Find;
         }
-        if self.pending_rename_focus && self.rename_target.is_some() {
+        if self.pending_rename_focus && (self.rename_target.is_some() || self.save_as_tab.is_some())
+        {
             self.pending_rename_focus = false;
             self.field_focus = TextInput::Rename;
         }
+        if self.pending_create_focus && self.create_draft.is_some() {
+            self.pending_create_focus = false;
+            self.field_focus = TextInput::Create;
+        }
+        let modal_keyboard = self.modal_choice_count() > 0;
         let next_focus = if self.open_menu.is_some() {
             FocusSlot::Menu
+        } else if modal_keyboard {
+            FocusSlot::Prompt
+        } else if self.sidebar_keyboard {
+            FocusSlot::Sidebar
         } else {
             FocusSlot::Editor
         };
@@ -2233,6 +3362,16 @@ impl Render for LiteMarkApp {
             if focus_if_changed(self.applied_focus, next_focus) {
                 self.menu_focus_handle.focus(window);
                 self.applied_focus = Some(FocusSlot::Menu);
+            }
+        } else if modal_keyboard {
+            if focus_if_changed(self.applied_focus, FocusSlot::Prompt) {
+                self.prompt_focus_handle.focus(window);
+                self.applied_focus = Some(FocusSlot::Prompt);
+            }
+        } else if self.sidebar_keyboard {
+            if focus_if_changed(self.applied_focus, FocusSlot::Sidebar) {
+                self.sidebar_focus_handle.focus(window);
+                self.applied_focus = Some(FocusSlot::Sidebar);
             }
         } else if let Some(field) = self.line_field_for_focus() {
             // Apply field focus after the editor slot so a clicked Replace
@@ -2290,6 +3429,7 @@ impl Render for LiteMarkApp {
                 let _ = view.update(cx, |this, cx| {
                     let ids: Vec<&str> = this.tabs.iter().map(|tab| tab.id.as_str()).collect();
                     this.active_tab_id = active_after_click(&ids, &id, &this.active_tab_id);
+                    this.sync_selection_to_active_tab();
                     this.refresh_find();
                     cx.notify();
                 });
@@ -2371,6 +3511,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_shortcuts_modal = true;
+                    this.prompt_selected_ix = 0;
                     cx.notify();
                 });
             }
@@ -2411,6 +3552,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_pdf_modal = true;
+                    this.prompt_selected_ix = 0;
                     cx.notify();
                 });
             }
@@ -2430,7 +3572,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_new_folder();
+                    this.handle_new_folder(cx);
                     cx.notify();
                 });
             }
@@ -2534,6 +3676,7 @@ impl Render for LiteMarkApp {
                 let _ = view.update(cx, |this, cx| {
                     this.open_menu = None;
                     this.show_about_modal = true;
+                    this.prompt_selected_ix = 0;
                     cx.notify();
                 });
             }
@@ -2611,6 +3754,7 @@ impl Render for LiteMarkApp {
                 let _ = view.update(cx, |this, cx| {
                     if this.menu_open_submenu_ix != ix {
                         this.menu_open_submenu_ix = ix;
+                        this.submenu_selected_ix = None;
                         cx.notify();
                     }
                 });
@@ -2819,21 +3963,21 @@ impl Render for LiteMarkApp {
             }
         };
 
-        let on_create_file = {
+        let on_begin_create = {
             let view = view.clone();
-            move |folder_id: Option<String>, name: String, cx: &mut App| {
+            move |parent_id: Option<String>, is_folder: bool, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.create_note(folder_id, name);
+                    this.begin_create(parent_id, is_folder, cx);
                     cx.notify();
                 });
             }
         };
 
-        let on_create_folder = {
+        let on_drop_item = {
             let view = view.clone();
-            move |parent_id: Option<String>, name: String, cx: &mut App| {
+            move |target: SidebarTarget, folder_id: Option<String>, copy: bool, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.create_folder(parent_id, name);
+                    this.handle_drop_item(target, folder_id, copy, cx);
                     cx.notify();
                 });
             }
@@ -2874,6 +4018,7 @@ impl Render for LiteMarkApp {
             move |target: SidebarTarget, position: Point<Pixels>, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.sidebar_menu = Some(SidebarMenu { target, position });
+                    this.prompt_selected_ix = 0;
                     cx.notify();
                 });
             }
@@ -2925,10 +4070,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.rename_target = None;
-                    this.field_owns_keys = false;
-                    this.applied_focus = None;
-                    cx.notify();
+                    this.cancel_rename(cx);
                 });
             }
         };
@@ -2936,7 +4078,11 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.commit_rename(cx);
+                    if this.save_as_tab.is_some() {
+                        this.commit_save_naming(None, cx);
+                    } else {
+                        this.commit_rename(None, cx);
+                    }
                     cx.notify();
                 });
             }
@@ -2949,7 +4095,7 @@ impl Render for LiteMarkApp {
                     if let Some(message) = file_dialog_error() {
                         this.show_error(message);
                     } else if let Some(dir) = pick_directory() {
-                        this.workspace = scan_workspace_dir(&dir);
+                        this.prepare_workspace_switch(dir);
                     }
                     cx.notify();
                 });
@@ -3116,155 +4262,169 @@ impl Render for LiteMarkApp {
                 )
             } else {
                 let (point, anchor, width, items) = match open_id {
-                    MenuId::File => (
+                MenuId::File => (
+                    Point::new(px(8.0), px(76.0)),
+                    Corner::TopLeft,
+                    px(220.0),
+                    build_file_menu_items(
+                        active_tab_has_pdf,
+                        // "New note" starts the inline sidebar editor so the
+                        // user names the file, not an auto "Untitled-N" tab.
+                        {
+                            let bc = on_begin_create.clone();
+                            move |cx: &mut App| bc(None, false, cx)
+                        },
+                        on_new_folder.clone(),
+                        on_open.clone(),
+                        on_choose_dir.clone(),
+                        on_save.clone(),
+                        on_save_as.clone(),
+                        on_export_html.clone(),
+                        on_export_md.clone(),
+                        on_export_txt.clone(),
+                        on_view_pdf.clone(),
+                        on_close_active_tab.clone(),
+                    ),
+                ),
+                MenuId::Edit => (
+                    Point::new(px(48.0), px(76.0)),
+                    Corner::TopLeft,
+                    px(200.0),
+                    build_edit_menu_items(
+                        on_undo.clone(),
+                        on_redo.clone(),
+                        on_cut.clone(),
+                        on_copy.clone(),
+                        on_paste.clone(),
+                        on_select_all.clone(),
+                        on_toggle_find.clone(),
+                        on_open_replace.clone(),
+                    ),
+                ),
+                MenuId::View => (
+                    Point::new(px(92.0), px(76.0)),
+                    Corner::TopLeft,
+                    px(220.0),
+                    build_view_menu_items(
+                        self.settings.view_mode,
+                        self.settings.show_line_numbers,
+                        self.settings.word_wrap,
+                        self.show_sidebar,
+                        self.settings.content_alignment,
+                        on_set_view_mode.clone(),
+                        on_toggle_line_numbers.clone(),
+                        on_toggle_word_wrap.clone(),
+                        on_set_content_alignment.clone(),
+                        on_zoom_in.clone(),
+                        on_zoom_out.clone(),
+                        on_reset_zoom.clone(),
+                        on_toggle_sidebar.clone(),
+                        on_toggle_zen.clone(),
+                    ),
+                ),
+                MenuId::Settings => (
+                    Point::new(window.viewport_size().width - px(8.0), px(76.0)),
+                    Corner::TopRight,
+                    px(220.0),
+                    build_settings_menu_items(
+                        self.settings.theme,
+                        self.settings.base_font_size,
+                        on_set_theme.clone(),
+                        on_set_font_size.clone(),
+                        on_open_shortcuts.clone(),
+                        on_open_about.clone(),
+                    ),
+                ),
+                MenuId::Hamburger => {
+                    let file_items = build_file_menu_items(
+                        active_tab_has_pdf,
+                        // "New note" starts the inline sidebar editor, same as
+                        // the File menu.
+                        {
+                            let bc = on_begin_create.clone();
+                            move |cx: &mut App| bc(None, false, cx)
+                        },
+                        on_new_folder.clone(),
+                        on_open.clone(),
+                        on_choose_dir.clone(),
+                        on_save.clone(),
+                        on_save_as.clone(),
+                        on_export_html.clone(),
+                        on_export_md.clone(),
+                        on_export_txt.clone(),
+                        on_view_pdf.clone(),
+                        on_close_active_tab.clone(),
+                    );
+                    let edit_items = build_edit_menu_items(
+                        on_undo.clone(),
+                        on_redo.clone(),
+                        on_cut.clone(),
+                        on_copy.clone(),
+                        on_paste.clone(),
+                        on_select_all.clone(),
+                        on_toggle_find.clone(),
+                        on_open_replace.clone(),
+                    );
+                    let view_items = build_view_menu_items(
+                        self.settings.view_mode,
+                        self.settings.show_line_numbers,
+                        self.settings.word_wrap,
+                        self.show_sidebar,
+                        self.settings.content_alignment,
+                        on_set_view_mode.clone(),
+                        on_toggle_line_numbers.clone(),
+                        on_toggle_word_wrap.clone(),
+                        on_set_content_alignment.clone(),
+                        on_zoom_in.clone(),
+                        on_zoom_out.clone(),
+                        on_reset_zoom.clone(),
+                        on_toggle_sidebar.clone(),
+                        on_toggle_zen.clone(),
+                    );
+                    let items = vec![
+                        MenuItem::submenu("File", None, file_items),
+                        MenuItem::submenu("Edit", None, edit_items),
+                        MenuItem::submenu("View", None, view_items),
+                    ];
+                    (
                         Point::new(px(8.0), px(76.0)),
                         Corner::TopLeft,
-                        px(220.0),
-                        build_file_menu_items(
-                            active_tab_has_pdf,
-                            on_new_tab.clone(),
-                            on_new_folder.clone(),
-                            on_open.clone(),
-                            on_choose_dir.clone(),
-                            on_save.clone(),
-                            on_save_as.clone(),
-                            on_export_html.clone(),
-                            on_export_md.clone(),
-                            on_export_txt.clone(),
-                            on_view_pdf.clone(),
-                            on_close_active_tab.clone(),
+                        px(180.0),
+                        items,
+                    )
+                }
+                MenuId::Overflow => {
+                    let overflow_x = if is_narrow {
+                        (window.viewport_size().width / 2.0 + px(128.0))
+                            .min(window.viewport_size().width - px(8.0))
+                    } else {
+                        (window.viewport_size().width / 2.0 + px(270.0))
+                            .min(window.viewport_size().width - px(8.0))
+                    };
+                    (
+                        Point::new(
+                            overflow_x.min(window.viewport_size().width - px(8.0)),
+                            px(76.0),
                         ),
-                    ),
-                    MenuId::Edit => (
-                        Point::new(px(48.0), px(76.0)),
-                        Corner::TopLeft,
-                        px(200.0),
-                        build_edit_menu_items(
-                            on_undo.clone(),
-                            on_redo.clone(),
-                            on_cut.clone(),
-                            on_copy.clone(),
-                            on_paste.clone(),
-                            on_select_all.clone(),
-                            on_toggle_find.clone(),
-                            on_open_replace.clone(),
-                        ),
-                    ),
-                    MenuId::View => (
-                        Point::new(px(92.0), px(76.0)),
-                        Corner::TopLeft,
-                        px(220.0),
-                        build_view_menu_items(
-                            self.settings.view_mode,
-                            self.settings.show_line_numbers,
-                            self.settings.word_wrap,
-                            self.show_sidebar,
-                            self.settings.content_alignment,
-                            on_set_view_mode.clone(),
-                            on_toggle_line_numbers.clone(),
-                            on_toggle_word_wrap.clone(),
-                            on_set_content_alignment.clone(),
-                            on_zoom_in.clone(),
-                            on_zoom_out.clone(),
-                            on_reset_zoom.clone(),
-                            on_toggle_sidebar.clone(),
-                            on_toggle_zen.clone(),
-                        ),
-                    ),
-                    MenuId::Settings => (
-                        Point::new(window.viewport_size().width - px(8.0), px(76.0)),
                         Corner::TopRight,
-                        px(220.0),
-                        build_settings_menu_items(
-                            self.settings.theme,
-                            self.settings.base_font_size,
-                            on_set_theme.clone(),
-                            on_set_font_size.clone(),
-                            on_open_shortcuts.clone(),
-                            on_open_about.clone(),
-                        ),
-                    ),
-                    MenuId::Hamburger => {
-                        let file_items = build_file_menu_items(
-                            active_tab_has_pdf,
-                            on_new_tab.clone(),
-                            on_new_folder.clone(),
-                            on_open.clone(),
-                            on_choose_dir.clone(),
-                            on_save.clone(),
-                            on_save_as.clone(),
-                            on_export_html.clone(),
-                            on_export_md.clone(),
-                            on_export_txt.clone(),
-                            on_view_pdf.clone(),
-                            on_close_active_tab.clone(),
-                        );
-                        let edit_items = build_edit_menu_items(
-                            on_undo.clone(),
-                            on_redo.clone(),
-                            on_cut.clone(),
-                            on_copy.clone(),
-                            on_paste.clone(),
-                            on_select_all.clone(),
+                        px(210.0),
+                        build_overflow_menu_items(
+                            is_narrow,
+                            on_format.clone(),
+                            on_insert_table.clone(),
                             on_toggle_find.clone(),
-                            on_open_replace.clone(),
-                        );
-                        let view_items = build_view_menu_items(
-                            self.settings.view_mode,
-                            self.settings.show_line_numbers,
-                            self.settings.word_wrap,
-                            self.show_sidebar,
-                            self.settings.content_alignment,
-                            on_set_view_mode.clone(),
-                            on_toggle_line_numbers.clone(),
-                            on_toggle_word_wrap.clone(),
-                            on_set_content_alignment.clone(),
-                            on_zoom_in.clone(),
-                            on_zoom_out.clone(),
-                            on_reset_zoom.clone(),
-                            on_toggle_sidebar.clone(),
-                            on_toggle_zen.clone(),
-                        );
-                        let items = vec![
-                            MenuItem::submenu("File", None, file_items),
-                            MenuItem::submenu("Edit", None, edit_items),
-                            MenuItem::submenu("View", None, view_items),
-                        ];
-                        (
-                            Point::new(px(8.0), px(76.0)),
-                            Corner::TopLeft,
-                            px(180.0),
-                            items,
-                        )
-                    }
-                    MenuId::Overflow => {
-                        let overflow_x = if is_narrow {
-                            (window.viewport_size().width / 2.0 + px(128.0))
-                                .min(window.viewport_size().width - px(8.0))
-                        } else {
-                            (window.viewport_size().width / 2.0 + px(270.0))
-                                .min(window.viewport_size().width - px(8.0))
-                        };
-                        (
-                            Point::new(
-                                overflow_x.min(window.viewport_size().width - px(8.0)),
-                                px(76.0),
-                            ),
-                            Corner::TopRight,
-                            px(210.0),
-                            build_overflow_menu_items(
-                                is_narrow,
-                                on_format.clone(),
-                                on_insert_table.clone(),
-                                on_toggle_find.clone(),
-                                on_close_menu.clone(),
-                            ),
-                        )
-                    }
-                    MenuId::Table => unreachable!(),
-                };
+                            on_close_menu.clone(),
+                        ),
+                    )
+                }
+                MenuId::Table => unreachable!(),
+            };
 
-                Some(
+            // Cache the built items so keyboard navigation (SelectNext /
+            // Confirm) can act on them between renders.
+            self.menu_items_cache = items.clone();
+
+            Some(
                     render_dropdown_menu(
                         MenuProps {
                             id: ("menu-dropdown", open_id as usize).into(),
@@ -3275,13 +4435,14 @@ impl Render for LiteMarkApp {
                             focus_handle: self.menu_focus_handle.clone(),
                             selected_index: self.menu_selected_ix,
                             open_submenu_ix: self.menu_open_submenu_ix,
+                            submenu_selected_index: self.submenu_selected_ix,
                             on_close: on_close_menu.clone(),
                             on_set_submenu: on_set_submenu.clone(),
                         },
                         &theme,
                     )
-                    .into_any_element(),
-                )
+                .into_any_element(),
+            )
             }
         } else {
             None
@@ -3396,6 +4557,52 @@ impl Render for LiteMarkApp {
                 this.handle_new_tab();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &NewNote, _window, cx| {
+                this.begin_create(None, false, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &DeleteNote, _window, cx| {
+                // Only act in a normal window state — never while a menu,
+                // modal or naming editor is open.
+                if this.open_menu.is_some()
+                    || this.modal_choice_count() > 0
+                    || this.rename_target.is_some()
+                    || this.create_draft.is_some()
+                {
+                    return;
+                }
+                // Target whatever is selected in the sidebar (folder or
+                // note); fall back to the active tab's note.
+                let target = this.selected_target.clone().or_else(|| {
+                    this.active_tab()
+                        .and_then(|tab| tab.workspace_file_id.clone())
+                        .map(SidebarTarget::File)
+                });
+                match target {
+                    Some(SidebarTarget::Folder(id)) => {
+                        this.request_trash_folder(id);
+                        cx.notify();
+                    }
+                    Some(SidebarTarget::File(id)) => {
+                        this.request_trash_file(id);
+                        cx.notify();
+                    }
+                    None => {
+                        let Some(tab) = this.active_tab() else {
+                            return;
+                        };
+                        if tab.file_path.is_none() {
+                            this.show_error(
+                                "This note isn't saved yet — press Ctrl+S to name and save it first.",
+                            );
+                        } else {
+                            this.show_error(
+                                "This file isn't in the workspace folder, so it can't be trashed here.",
+                            );
+                        }
+                    }
+                }
+            }))
             .on_action(cx.listener(|this, _: &CloseActiveTab, _window, cx| {
                 let id = this.active_tab_id.clone();
                 this.handle_close_tab(id);
@@ -3485,6 +4692,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &OpenShortcuts, _window, cx| {
                 this.show_shortcuts_modal = true;
+                this.prompt_selected_ix = 0;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenFileMenu, _window, cx| {
@@ -3538,11 +4746,62 @@ impl Render for LiteMarkApp {
                     this.editor_context_menu = None;
                 } else if this.menu_open_submenu_ix.is_some() {
                     this.menu_open_submenu_ix = None;
+                    this.submenu_selected_ix = None;
                 } else {
                     this.open_menu = None;
                     this.menu_selected_ix = None;
+                    this.submenu_selected_ix = None;
                 }
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PromptUp, _window, cx| {
+                let count = this.modal_choice_count();
+                if count > 0 {
+                    this.prompt_selected_ix = (this.prompt_selected_ix + count - 1) % count;
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PromptDown, _window, cx| {
+                let count = this.modal_choice_count();
+                if count > 0 {
+                    this.prompt_selected_ix = (this.prompt_selected_ix + 1) % count;
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PromptConfirm, _window, cx| {
+                if let Some(prompt) = this.prompt.clone() {
+                    let (_, _, choices) = this.prompt_modal_data(&prompt);
+                    if let Some((choice, _)) = choices.get(this.prompt_selected_ix) {
+                        this.answer_prompt(choice, cx);
+                    }
+                } else if this.show_about_modal || this.show_shortcuts_modal {
+                    this.show_about_modal = false;
+                    this.show_shortcuts_modal = false;
+                    cx.notify();
+                } else if this.show_pdf_modal {
+                    // 0 = "Open in Document Viewer", 1 = Close.
+                    if this.prompt_selected_ix == 0 {
+                        if let Some(ref path) =
+                            this.active_tab().and_then(|t| t.file_path.clone())
+                        {
+                            let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+                        }
+                    } else {
+                        this.show_pdf_modal = false;
+                    }
+                    cx.notify();
+                } else if let Some(menu) = this.sidebar_menu.take() {
+                    // 0 = Rename, 1 = Delete.
+                    if this.prompt_selected_ix == 0 {
+                        this.begin_rename(menu.target, cx);
+                    } else {
+                        match menu.target {
+                            SidebarTarget::File(id) => this.request_trash_file(id),
+                            SidebarTarget::Folder(id) => this.request_trash_folder(id),
+                        }
+                    }
+                    cx.notify();
+                }
             }))
             .on_action(cx.listener(|this, _: &PrevMenu, window, cx| {
                 let is_narrow = window.viewport_size().width < px(640.0);
@@ -3585,6 +4844,84 @@ impl Render for LiteMarkApp {
                 this.menu_selected_ix = None;
                 this.menu_open_submenu_ix = None;
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SelectNext, _window, cx| {
+                if this.sidebar_keyboard {
+                    this.sidebar_move_selection(1);
+                } else {
+                    this.menu_move_selection(1);
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SelectPrev, _window, cx| {
+                if this.sidebar_keyboard {
+                    this.sidebar_move_selection(-1);
+                } else {
+                    this.menu_move_selection(-1);
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SelectFirst, _window, cx| {
+                if this.sidebar_keyboard {
+                    if let Some(first) = this.sidebar_visible_targets().first().cloned() {
+                        this.selected_target = Some(first);
+                        cx.notify();
+                    }
+                } else if this.open_menu.is_some() && this.open_menu != Some(MenuId::Table) {
+                    let selectable = this.menu_selectable_ixs();
+                    if let Some(&first) = selectable.first() {
+                        this.menu_selected_ix = Some(first);
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SelectLast, _window, cx| {
+                if this.sidebar_keyboard {
+                    if let Some(last) = this.sidebar_visible_targets().last().cloned() {
+                        this.selected_target = Some(last);
+                        cx.notify();
+                    }
+                } else if this.open_menu.is_some() && this.open_menu != Some(MenuId::Table) {
+                    let selectable = this.menu_selectable_ixs();
+                    if let Some(&last) = selectable.last() {
+                        this.menu_selected_ix = Some(last);
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_action({
+                // Deliberately NOT a cx.listener: the menu path runs item
+                // actions that update this view, which must happen outside
+                // the view update to avoid a re-entrant borrow.
+                let view = view.clone();
+                move |_: &Confirm, window, cx| {
+                    let confirmed = view
+                        .update(cx, |this, cx| {
+                            if this.sidebar_keyboard {
+                                this.sidebar_confirm(cx);
+                                None
+                            } else {
+                                this.menu_take_confirm_action(cx)
+                            }
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some(action) = confirmed {
+                        action(window, cx);
+                    }
+                }
+            })
+            .on_action(cx.listener(|this, _: &SidebarCollapse, _window, cx| {
+                if this.sidebar_keyboard {
+                    this.sidebar_collapse(cx);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SidebarExpand, _window, cx| {
+                if this.sidebar_keyboard {
+                    this.sidebar_expand(cx);
+                    cx.notify();
+                }
             }))
             .on_action(cx.listener(|this, _: &EditorLeft, window, cx| {
                 let mode = this.settings.view_mode;
@@ -3841,6 +5178,12 @@ impl Render for LiteMarkApp {
             .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
                 if this.editor_context_menu.is_some() {
                     this.editor_context_menu = None;
+                } else if this.sidebar_menu.is_some() {
+                    this.sidebar_menu = None;
+                } else if this.rename_target.is_some() || this.save_as_tab.is_some() {
+                    this.cancel_rename(cx);
+                } else if this.create_draft.is_some() {
+                    this.cancel_create(cx);
                 } else if this.prompt.is_some() {
                     this.prompt = None;
                 } else if this.error_message.is_some()
@@ -3940,23 +5283,36 @@ impl Render for LiteMarkApp {
                                 s.child(render_sidebar(
                                     SidebarProps {
                                         workspace: self.workspace.clone(),
-                                        active_file_id: active_tab.workspace_file_id.clone(),
-                                        open_file_ids: self
+                                        selected_file_id: match &self.selected_target {
+                                            Some(SidebarTarget::File(id)) => Some(id.clone()),
+                                            _ => None,
+                                        },
+                                        selected_folder_id: match &self.selected_target {
+                                            Some(SidebarTarget::Folder(id)) => {
+                                                Some(id.clone())
+                                            }
+                                            _ => None,
+                                        },
+                                        focus_handle: self.sidebar_focus_handle.clone(),
+                                        modified_file_ids: self
                                             .tabs
                                             .iter()
+                                            .filter(|t| t.is_modified)
                                             .filter_map(|t| t.workspace_file_id.clone())
                                             .collect(),
                                         search_query: self.search_query.clone(),
-                                        creating_in_folder: None,
+                                        creating: self.create_draft.clone(),
+                                        create_field: self.create_field.clone(),
+                                        dragging: cx.has_active_drag(),
                                         on_select_file: on_select_file.clone(),
-                                        on_create_file: on_create_file.clone(),
-                                        on_create_folder: on_create_folder.clone(),
+                                        on_begin_create: on_begin_create.clone(),
                                         on_delete_file: on_delete_file.clone(),
                                         on_delete_folder: on_delete_folder.clone(),
                                         on_toggle_folder: on_toggle_folder.clone(),
                                         on_choose_dir: on_choose_dir.clone(),
                                         on_close: on_toggle_sidebar.clone(),
                                         on_context_menu: on_sidebar_context.clone(),
+                                        on_drop_item: on_drop_item.clone(),
                                     },
                                     &theme,
                                 ))
@@ -4061,20 +5417,30 @@ impl Render for LiteMarkApp {
             })
             // Modals
             .when(self.show_shortcuts_modal, |s| {
-                s.child(render_shortcuts_modal(on_close_shortcuts.clone(), &theme))
+                s.child(render_shortcuts_modal(
+                    self.prompt_focus_handle.clone(),
+                    on_close_shortcuts.clone(),
+                    &theme,
+                ))
             })
             .when(self.show_pdf_modal, |s| {
                 let title = active_tab.title.clone();
                 s.child(render_pdf_preview_modal(
                     title,
                     pdf_page_count,
+                    self.prompt_selected_ix,
+                    self.prompt_focus_handle.clone(),
                     on_close_pdf.clone(),
                     on_open_external_pdf.clone(),
                     &theme,
                 ))
             })
             .when(self.show_about_modal, |s| {
-                s.child(render_about_modal(on_close_about.clone(), &theme))
+                s.child(render_about_modal(
+                    self.prompt_focus_handle.clone(),
+                    on_close_about.clone(),
+                    &theme,
+                ))
             })
             .when_some(menu_overlay, |s, overlay| s.child(overlay))
             .when_some(self.error_message.clone(), |s, message| {
@@ -4118,87 +5484,13 @@ impl Render for LiteMarkApp {
                 )
             })
             .when_some(self.prompt.clone(), |parent, prompt| {
-                let (title, message, choices): (&'static str, String, Vec<(&'static str, bool)>) =
-                    match &prompt {
-                        Prompt::CloseTab { id } => {
-                            let name = self
-                                .tabs
-                                .iter()
-                                .find(|tab| &tab.id == id)
-                                .map(|tab| tab.title.clone())
-                                .unwrap_or_else(|| "this note".into());
-                            (
-                                "Unsaved changes",
-                                format!("Save changes to {name} before closing?"),
-                                vec![("Cancel", false), ("Discard", false), ("Save", true)],
-                            )
-                        }
-                        Prompt::CloseWindow => (
-                            "Unsaved changes",
-                            "Save your changes before closing the window?".into(),
-                            vec![("Cancel", false), ("Discard", false), ("Save", true)],
-                        ),
-                        Prompt::DeleteFile { id } => {
-                            let name = self
-                                .workspace
-                                .files
-                                .iter()
-                                .find(|file| &file.id == id)
-                                .map(|file| file.name.clone())
-                                .unwrap_or_else(|| "this note".into());
-                            (
-                                "Move to Trash",
-                                format!("Move {name} to the Trash?"),
-                                vec![("Cancel", false), ("Trash", true)],
-                            )
-                        }
-                        Prompt::DeleteFolder { id } => {
-                            let name = self
-                                .workspace
-                                .folders
-                                .iter()
-                                .find(|folder| &folder.id == id)
-                                .map(|folder| folder.name.clone())
-                                .unwrap_or_else(|| "this folder".into());
-                            (
-                                "Move to Trash",
-                                format!("Move {name} and its contents to the Trash?"),
-                                vec![("Cancel", false), ("Trash", true)],
-                            )
-                        }
-                        Prompt::TrashDirtyFile { id } => {
-                            let name = self
-                                .workspace
-                                .files
-                                .iter()
-                                .find(|file| &file.id == id)
-                                .map(|file| file.name.clone())
-                                .unwrap_or_else(|| "this note".into());
-                            (
-                                "Unsaved changes",
-                                format!("Save changes to {name} before moving it to the Trash?"),
-                                vec![("Cancel", false), ("Discard", false), ("Save", true)],
-                            )
-                        }
-                        Prompt::TrashDirtyFolder { id } => {
-                            let name = self
-                                .workspace
-                                .folders
-                                .iter()
-                                .find(|folder| &folder.id == id)
-                                .map(|folder| folder.name.clone())
-                                .unwrap_or_else(|| "this folder".into());
-                            (
-                                "Unsaved changes",
-                                format!("Save changes in {name} before moving it to the Trash?"),
-                                vec![("Cancel", false), ("Discard", false), ("Save", true)],
-                            )
-                        }
-                    };
+                let (title, message, choices) = self.prompt_modal_data(&prompt);
                 parent.child(render_prompt_modal(
                     title,
                     message,
                     choices,
+                    self.prompt_selected_ix,
+                    self.prompt_focus_handle.clone(),
                     on_prompt.clone(),
                     &theme,
                 ))
@@ -4207,6 +5499,8 @@ impl Render for LiteMarkApp {
             .when_some(self.sidebar_menu.clone(), |parent, menu| {
                 parent.child(render_sidebar_context_menu(
                     &menu,
+                    self.prompt_selected_ix,
+                    self.prompt_focus_handle.clone(),
                     on_sidebar_rename.clone(),
                     on_sidebar_delete.clone(),
                     on_sidebar_dismiss.clone(),
@@ -4242,10 +5536,23 @@ impl Render for LiteMarkApp {
                     &theme,
                 ))
             })
-            .when(self.rename_target.is_some(), |parent| {
-                let cancel = on_rename_cancel.clone();
-                let commit = on_rename_commit.clone();
-                parent.child(
+            .when(
+                self.rename_target.is_some() || self.save_as_tab.is_some(),
+                |parent| {
+                    let cancel = on_rename_cancel.clone();
+                    let commit = on_rename_commit.clone();
+                    let backdrop_cancel = cancel.clone();
+                    let is_save = self.save_as_tab.is_some();
+                    let is_folder =
+                        matches!(self.rename_target, Some(SidebarTarget::Folder(_)));
+                    let title = if is_save {
+                        "Save note"
+                    } else if is_folder {
+                        "Rename Folder"
+                    } else {
+                        "Rename Note"
+                    };
+                    parent.child(
                     div()
                         .absolute()
                         .size_full()
@@ -4255,6 +5562,7 @@ impl Render for LiteMarkApp {
                         .items_center()
                         .justify_center()
                         .bg(hsla(0.0, 0.0, 0.0, 0.35))
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| backdrop_cancel(cx))
                         .child(
                             div()
                                 .w(px(360.0))
@@ -4272,7 +5580,7 @@ impl Render for LiteMarkApp {
                                     div()
                                         .text_size(px(14.0))
                                         .font_weight(FontWeight::MEDIUM)
-                                        .child("Rename"),
+                                        .child(title),
                                 )
                                 .child(self.rename_field.clone())
                                 .child(
@@ -4298,12 +5606,13 @@ impl Render for LiteMarkApp {
                                                 .rounded(px(6.0))
                                                 .cursor_pointer()
                                                 .bg(theme.bg_hover)
-                                                .child("Rename")
+                                                .child(if is_save { "Save" } else { "Rename" })
                                                 .on_click(move |_, _, cx| commit(cx)),
                                         ),
                                 ),
                         ),
                 )
-            })
+                },
+            )
     }
 }
