@@ -1,0 +1,8 @@
+bytes=70444
+lines=2001
+wrap_cols=40
+line[0] kind=Heading level=1 source=0..11 display="Section 1"
+segment[1][1] source=36..42 bold=true italic=false underline=false strike=false code=false link=- text="bold 1"
+segment[1][3] source=50..56 bold=false italic=false underline=false strike=false code=false link="https://example.com/1" text="item 1"
+line[3] kind=ListItem ordered=false number=0 task=none indent_cols=2 checkbox=- source=151..162 display="child 1"
+line[1995] kind=Heading level=1 source=70266..70279 display="Section 400"

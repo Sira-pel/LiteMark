@@ -1,0 +1,1 @@
+line[0] kind=TableRow header=true cells=2 source=0..14 display="| Name | Qty |"
