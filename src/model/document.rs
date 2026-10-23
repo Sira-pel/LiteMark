@@ -1699,8 +1699,7 @@ impl DocumentTab {
                     alignments: ref al, ..
                 } = l.kind
                 {
-                    let line_text = self.content.get(l.source.clone()).unwrap_or("");
-                    num_cols = num_cols.max(split_table_cells(line_text).len());
+                    num_cols = num_cols.max(al.len());
                     if alignments.is_empty() {
                         alignments = al.clone();
                     }

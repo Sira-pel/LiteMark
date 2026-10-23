@@ -184,6 +184,7 @@ green_names=(
   nested-lists
   markers-strike
   tables
+  gfm-tables
   fenced-code
   leaf-blocks
   links
