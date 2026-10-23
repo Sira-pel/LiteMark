@@ -3862,6 +3862,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_close_unwrap_does_not_rewrite_closed_or_lazy_list_fences() {
+        // A closed, list-indented fence must keep the old wrap output instead
+        // of unwrapping and turning the following table into a list continuation.
+        let closed =
+            "- item\n\n    ```\n    code\n    ``\n    ```\n| e | f |\n| --- | --- |\n| g | h |";
+        let at = closed.find("    ```").unwrap();
+        assert_eq!(
+            apply_at(closed, at, "codeblock"),
+            "- item\n\n```\n    ```\n```\n    code\n    ``\n    ```\n| e | f |\n| --- | --- |\n| g | h |"
+        );
+        // A lazy list fence with an empty close also stays a wrap; only a
+        // list fence whose first code line is at least column 6 unwraps.
+        let lazy = "- ```\n  code\nbar\n| a | b |\n| --- | --- |\n| c | d |\n";
+        assert_eq!(
+            apply_at(lazy, 0, "codeblock"),
+            "```\n- ```\n```\n  code\nbar\n| a | b |\n| --- | --- |\n| c | d |\n"
+        );
+    }
+
+    #[test]
     fn indented_code_continues_after_column_four_marker() {
         let source = "    ```\n    aaa\n    ```";
         expect_paint(

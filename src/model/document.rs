@@ -1098,9 +1098,24 @@ impl DocumentTab {
             .code_blocks
             .iter()
             .find(|(open_r, close_r)| {
+                let open_line = &self.content[open_r.start..open_r.end];
+                let open_body = open_line.trim_start_matches([' ', '\t']);
+                let list_open = !open_body.starts_with(['`', '~']);
+                let open_indent = open_line.len() - open_body.len();
+                let content = &self.content[open_r.end..close_r.end];
+                let content_line = content.split('\n').next().unwrap_or("");
+                let content_body = content_line.trim_start_matches([' ', '\t']);
+                let content_indent = content_line.len() - content_body.len();
+                // Empty closes unwrap only the deeply indented list-fence shape.
+                // Closed column-4 list fences keep their pre-F3 wrap behavior.
                 range.start >= open_r.start
                     && range.end <= close_r.end
                     && (!close_r.is_empty() || range.start < close_r.end)
+                    && if close_r.is_empty() {
+                        list_open && content_indent >= 6
+                    } else {
+                        list_open || open_indent < 4
+                    }
             })
             .cloned()
         {
