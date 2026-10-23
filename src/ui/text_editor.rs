@@ -213,10 +213,13 @@ pub fn compute_table_column_widths(
 
     let target_table_w = content_width.max(px(1.0));
     let num_cols_f32 = num_cols as f32;
+    // Start every column at an equal share of the editor width
+    let equal_share = target_table_w / num_cols_f32;
     // Sensible min column width is 48px, but shrink as needed to keep table within editor width
-    let min_col_w = (px(48.0)).min(target_table_w / num_cols_f32);
+    let min_col_w = (px(48.0)).min(equal_share);
     let pad_x = px(12.0);
 
+    // Measure natural content width for each column (minimum needed to avoid wrapping)
     let mut natural_w = vec![min_col_w; num_cols];
     for pline in table_lines {
         if let LineKind::TableRow { ref cells, .. } = pline.kind {
@@ -231,78 +234,94 @@ pub fn compute_table_column_widths(
         }
     }
 
-    let total_natural: Pixels = natural_w.iter().copied().fold(px(0.0), |acc, x| acc + x);
+    // Start each column at equal share
+    let mut widths = vec![equal_share; num_cols];
 
-    // If total natural width is <= target_table_w:
-    // Distribute full target_table_w proportional to natural_w so new/mostly-empty tables
-    // start full width, and typing only nudges column borders.
-    if total_natural <= target_table_w {
-        let total_nat_f32 = f32::from(total_natural).max(0.001);
-        let mut widths = Vec::with_capacity(num_cols);
-        let mut allocated = px(0.0);
-        for &w in &natural_w[..num_cols - 1] {
-            let col_w = ((f32::from(w) / total_nat_f32) * target_table_w).max(min_col_w);
-            allocated += col_w;
-            widths.push(col_w);
+    // Identify expanding columns (content doesn't fit in equal share) and donor columns (spare room)
+    // A column's floor is what its content needs (or min_col_w), but at most equal_share
+    // A donor column can only shrink down to natural_w[c].max(min_col_w) without causing its content to wrap.
+    let mut total_wanted = px(0.0);
+    let mut total_spare = px(0.0);
+    for &w in &natural_w {
+        if w > equal_share {
+            total_wanted += w - equal_share;
+        } else {
+            let floor = w.max(min_col_w);
+            total_spare += equal_share - floor;
         }
-        let last_w = (target_table_w - allocated).max(min_col_w);
-        widths.push(last_w);
-        return widths;
     }
 
-    // Otherwise, total_natural > target_table_w.
-    // Water-filling: short columns take their natural width, long ones share the remaining width.
-    let mut assigned: Vec<Option<Pixels>> = vec![None; num_cols];
-    let mut remaining_w = target_table_w;
-    let mut remaining_count = num_cols;
+    if total_wanted > px(0.0) && total_spare > px(0.0) {
+        let extra_to_transfer = total_wanted.min(total_spare);
 
-    loop {
-        if remaining_count == 0 {
-            break;
-        }
-        let fair_share = remaining_w / (remaining_count as f32);
-        let mut newly_locked = 0;
-        for c in 0..num_cols {
-            if assigned[c].is_none() && natural_w[c] <= fair_share {
-                let col_w = natural_w[c].max(min_col_w);
-                assigned[c] = Some(col_w);
-                remaining_w -= col_w;
-                newly_locked += 1;
+        // 1. Take extra_to_transfer evenly from donor columns
+        let mut remaining_reduction = extra_to_transfer;
+        while remaining_reduction > px(0.01) {
+            let active_donors: Vec<usize> = (0..num_cols)
+                .filter(|&c| widths[c] > natural_w[c].max(min_col_w))
+                .collect();
+            if active_donors.is_empty() {
+                break;
             }
+            let fair_reduction = remaining_reduction / (active_donors.len() as f32);
+            let mut reduced_this_round = px(0.0);
+            for &c in &active_donors {
+                let floor = natural_w[c].max(min_col_w);
+                let can_give = widths[c] - floor;
+                let take = fair_reduction.min(can_give).min(remaining_reduction);
+                widths[c] -= take;
+                reduced_this_round += take;
+            }
+            if reduced_this_round <= px(0.001) {
+                break;
+            }
+            remaining_reduction = (remaining_reduction - reduced_this_round).max(px(0.0));
         }
-        if newly_locked == 0 {
-            break;
+
+        // 2. Give extra_to_transfer evenly to expanding columns
+        let mut remaining_addition = extra_to_transfer;
+        while remaining_addition > px(0.01) {
+            let active_expanders: Vec<usize> = (0..num_cols)
+                .filter(|&c| widths[c] < natural_w[c])
+                .collect();
+            if active_expanders.is_empty() {
+                // If all expanders have reached natural_w, any remaining addition is split evenly among all expanders
+                let extra_share = remaining_addition / (num_cols as f32);
+                for w in &mut widths {
+                    *w += extra_share;
+                }
+                break;
+            }
+            let fair_addition = remaining_addition / (active_expanders.len() as f32);
+            let mut added_this_round = px(0.0);
+            for &c in &active_expanders {
+                let needed = natural_w[c] - widths[c];
+                let give = fair_addition.min(needed).min(remaining_addition);
+                widths[c] += give;
+                added_this_round += give;
+            }
+            if added_this_round <= px(0.001) {
+                break;
+            }
+            remaining_addition = (remaining_addition - added_this_round).max(px(0.0));
         }
-        remaining_count -= newly_locked;
     }
 
-    if remaining_count > 0 {
-        let unassigned_cols: Vec<usize> = (0..num_cols).filter(|&c| assigned[c].is_none()).collect();
-        let excess_demands: Vec<f32> = unassigned_cols
-            .iter()
-            .map(|&c| (f32::from(natural_w[c]) - f32::from(min_col_w)).max(0.0))
-            .collect();
-        let total_excess_demand: f32 = excess_demands.iter().sum();
-        let available_excess = (remaining_w - min_col_w * (remaining_count as f32)).max(px(0.0));
+    // Ensure sum matches target_table_w exactly and no column is below min_col_w
+    let sum_first_n_minus_1: Pixels = widths[..num_cols - 1].iter().copied().fold(px(0.0), |acc, x| acc + x);
+    let last_w = (target_table_w - sum_first_n_minus_1).max(min_col_w);
+    widths[num_cols - 1] = last_w;
 
-        let mut allocated = px(0.0);
-        for i in 0..unassigned_cols.len() - 1 {
-            let c = unassigned_cols[i];
-            let extra = if total_excess_demand > 0.001 {
-                (excess_demands[i] / total_excess_demand) * available_excess
-            } else {
-                available_excess / (remaining_count as f32)
-            };
-            let col_w = min_col_w + extra;
-            allocated += col_w;
-            assigned[c] = Some(col_w);
+    // Final safety clamp: if sum exceeds target_table_w due to float precision, trim from largest
+    let total_sum: Pixels = widths.iter().copied().fold(px(0.0), |acc, x| acc + x);
+    if total_sum > target_table_w {
+        let excess = total_sum - target_table_w;
+        if let Some((max_idx, _)) = widths.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()) {
+            widths[max_idx] = (widths[max_idx] - excess).max(min_col_w);
         }
-        let last_c = unassigned_cols[unassigned_cols.len() - 1];
-        let last_w = (remaining_w - allocated).max(min_col_w);
-        assigned[last_c] = Some(last_w);
     }
 
-    assigned.into_iter().map(|w| w.unwrap_or(min_col_w)).collect()
+    widths
 }
 
 pub fn index_for_position(paint: &EditorPaint, position: Point<Pixels>) -> Option<usize> {
@@ -2428,7 +2447,7 @@ mod tests {
         let doc = parse_document(md);
         let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
 
-        let widths = compute_table_column_widths(&table_lines, md, px(800.0), px(8.0));
+        let widths = compute_table_column_widths(&table_lines, md, px(400.0), px(8.0));
         assert_eq!(widths.len(), 4);
 
         // All columns should be at least minimum width (48px)
@@ -2440,9 +2459,9 @@ mod tests {
             );
         }
 
-        // CJK/English column (备注) is longer than 姓名 and 空
+        // CJK/English column (备注) exceeds its 100px share and grows larger than short columns
         assert!(widths[2] > widths[0]);
-        assert!(widths[0] >= widths[3]); // empty cell column is at minimum
+        assert!(widths[0] >= widths[3]); // empty cell column is at minimum or floor
     }
 
     #[test]
@@ -2823,7 +2842,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_table_fills_editor_width_and_typing_nudges_borders() {
+    fn test_short_text_in_one_cell_does_not_move_borders() {
         let md_empty = "| | | |\n|---|---|---|\n| | | |";
         let doc_empty = parse_document(md_empty);
         let table_lines_empty: Vec<&ParsedLine> = doc_empty.lines.iter().collect();
@@ -2832,19 +2851,17 @@ mod tests {
         let widths_empty = compute_table_column_widths(&table_lines_empty, md_empty, target_w, px(8.0));
         assert_eq!(widths_empty.len(), 3);
 
-        let total_empty: Pixels = widths_empty.iter().copied().fold(px(0.0), |acc, w| acc + w);
-        assert!((total_empty - target_w).abs() < px(1.0));
-
-        // Each column in empty table should take an equal share (200px each)
+        // Every column starts at an equal share (200px each)
         for (i, w) in widths_empty.iter().enumerate() {
             assert!(
-                (*w - px(200.0)).abs() < px(2.0),
-                "Empty table col {i} should be ~200px, got {:?}",
+                (*w - px(200.0)).abs() < px(1.0),
+                "Empty table col {i} should be 200px, got {:?}",
                 w
             );
         }
 
-        // Typing in column 0 nudges borders while keeping total table width at 600px
+        // Typing short text ("Alice") in one cell fits within the 200px share,
+        // so it does NOT move any column borders.
         let md_typed = "| Name | | |\n|---|---|---|\n| Alice | | |";
         let doc_typed = parse_document(md_typed);
         let table_lines_typed: Vec<&ParsedLine> = doc_typed.lines.iter().collect();
@@ -2852,13 +2869,83 @@ mod tests {
         let widths_typed = compute_table_column_widths(&table_lines_typed, md_typed, target_w, px(8.0));
         assert_eq!(widths_typed.len(), 3);
 
-        let total_typed: Pixels = widths_typed.iter().copied().fold(px(0.0), |acc, w| acc + w);
-        assert!((total_typed - target_w).abs() < px(1.0));
+        // Columns must still be exactly 200px each
+        for (i, w) in widths_typed.iter().enumerate() {
+            assert!(
+                (*w - px(200.0)).abs() < px(1.0),
+                "Short text in col 0 shouldn't move borders; col {i} should stay 200px, got {:?}",
+                w
+            );
+        }
+    }
 
-        // Column 0 grew, columns 1 and 2 nudged narrower
-        assert!(widths_typed[0] > widths_empty[0], "Column 0 should expand after typing");
-        assert!(widths_typed[1] < widths_empty[1], "Column 1 should nudge narrower");
-        assert!(widths_typed[2] < widths_empty[2], "Column 2 should nudge narrower");
+    #[test]
+    fn test_long_cell_grows_column_and_wraps_at_limit() {
+        // Column 0 has very long text that cannot fit in the 200px share.
+        // Columns 1 and 2 are empty.
+        let long_text = "A".repeat(200);
+        let md = format!("| {long_text} | | |\n|---|---|---|\n| val | | |");
+        let doc = parse_document(&md);
+        let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
+
+        let target_w = px(600.0);
+        let widths = compute_table_column_widths(&table_lines, &md, target_w, px(8.0));
+        assert_eq!(widths.len(), 3);
+
+        // Columns 1 and 2 gave up their spare room down to the minimum (48px)
+        assert!(
+            (widths[1] - px(48.0)).abs() < px(1.0),
+            "Column 1 should shrink to min width (48px), got {:?}",
+            widths[1]
+        );
+        assert!(
+            (widths[2] - px(48.0)).abs() < px(1.0),
+            "Column 2 should shrink to min width (48px), got {:?}",
+            widths[2]
+        );
+
+        // Column 0 grew to take all remaining width (600 - 48 - 48 = 504px),
+        // hitting the limit and staying within the editor width while wrapping.
+        assert!(
+            (widths[0] - px(504.0)).abs() < px(1.0),
+            "Column 0 should grow to 504px, got {:?}",
+            widths[0]
+        );
+
+        let total: Pixels = widths.iter().copied().fold(px(0.0), |acc, w| acc + w);
+        assert!((total - target_w).abs() < px(1.0));
+    }
+
+    #[test]
+    fn test_many_columns_still_fit() {
+        // 30 columns on 600px width
+        let mut header = String::from("|");
+        let mut delim = String::from("|");
+        let mut row = String::from("|");
+        for i in 0..30 {
+            header.push_str(&format!(" c{i} |"));
+            delim.push_str("---|");
+            row.push_str(&format!(" v{i} |"));
+        }
+        let md = format!("{header}\n{delim}\n{row}");
+        let doc = parse_document(&md);
+        let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
+
+        let target_w = px(600.0);
+        let widths = compute_table_column_widths(&table_lines, &md, target_w, px(8.0));
+        assert_eq!(widths.len(), 30);
+
+        // Each column gets equal share (600 / 30 = 20px)
+        for (i, w) in widths.iter().enumerate() {
+            assert!(
+                (*w - px(20.0)).abs() < px(1.0),
+                "Col {i} width should be 20px, got {:?}",
+                w
+            );
+        }
+
+        let total: Pixels = widths.iter().copied().fold(px(0.0), |acc, w| acc + w);
+        assert!((total - target_w).abs() < px(1.0));
     }
 
     #[test]
