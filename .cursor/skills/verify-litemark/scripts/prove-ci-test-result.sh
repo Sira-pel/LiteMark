@@ -75,3 +75,29 @@ echo "test_result_ok=missing"
 grep -E '^(===== test |test_result_ok=|ci_fail=)' "${log}"
 echo "proof=M1 rc=${status} line=test_result_ok=missing"
 echo "log=${log}"
+
+# A real zero-passed summary followed by a decoy line containing the old
+# unanchored substring must still fail closed. Reuse the same check path
+# ci.sh uses, without another cargo run.
+decoy_log="${VERIFY_EVIDENCE_DIR}/ci-test-result-decoy.log"
+cat >"${decoy_log}" <<'EOF'
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+note: decoy test result: ok. 1 passed
+EOF
+set +e
+decoy_out="$("${SCRIPT_DIR}/check-test-result.sh" "${decoy_log}" 2>&1)"
+decoy_rc=$?
+set -e
+if [[ "${decoy_rc}" -eq 0 ]]; then
+  echo "decoy line was accepted as a test pass" >&2
+  printf '%s\n' "${decoy_out}" >&2
+  exit 1
+fi
+if ! printf '%s\n' "${decoy_out}" | grep -Fxq "test_result_ok=missing"; then
+  echo "decoy case missing test_result_ok=missing" >&2
+  printf '%s\n' "${decoy_out}" >&2
+  exit 1
+fi
+echo "proof=M1-decoy rc=${decoy_rc} line=test_result_ok=missing"
+echo "decoy_log=${decoy_log}"
