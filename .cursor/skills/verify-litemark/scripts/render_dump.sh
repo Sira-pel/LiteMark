@@ -49,7 +49,9 @@ refuse_symlink_parent() {
   return 1
 }
 
-input_id="$(stat -c '%d:%i' -- "$1")"
+# Follow symlinks for the input inode: the write path resolves argv1 with
+# readlink -f, so same_inode must compare the target file, not the symlink node.
+input_id="$(stat -L -c '%d:%i' -- "$1")"
 input_lexical="$(realpath -m -s -- "$1")"
 output_lexical="$(realpath -m -s -- "$2")"
 if [[ "${input_lexical}" == "${output_lexical}" ]]; then
@@ -81,6 +83,12 @@ fi
 mkdir -p "$(dirname "$2")"
 input="$(readlink -f "$1")"
 output="$(readlink -f "$2")"
+# Lexical/lstat checks can miss argv1=symlink → argv2=real; refuse using the
+# same resolved paths the dump write will use.
+if [[ "${input}" == "${output}" ]]; then
+  echo "render_refuse=same_as_input path=$2"
+  exit 1
+fi
 timing="${3:-}"
 
 log="${VERIFY_RUN_DIR}/logs/dump-$(basename "$(dirname "${input}")")-$(basename "${input}").log"
