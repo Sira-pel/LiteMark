@@ -220,6 +220,8 @@ pub fn child_directory(
 pub enum FocusSlot {
     Editor,
     Menu,
+    Prompt,
+    Sidebar,
 }
 
 /// Which surface should receive typed text.
@@ -229,6 +231,7 @@ pub enum TextInput {
     Find,
     Replace,
     Rename,
+    Create,
 }
 
 /// Printable keys and editing actions reach the document only while the editor owns input.

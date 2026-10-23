@@ -44,11 +44,12 @@ run_one() {
 fail=0
 run_one build cargo build || fail=1
 run_one test cargo test || fail=1
-# Exit 0 from `cargo test` is not a pass. Require a result line whose
-# passed count is greater than zero. A runner that skips the harness
-# (for example runner = "true") exits 0 with no such line.
-if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' "${LOG_DIR}/test.log"; then
-  echo "test_result_ok=missing"
+# Exit 0 from `cargo test` is not a pass. Require one full anchored
+# cargo summary line whose passed count is greater than zero. A runner
+# that skips the harness (for example runner = "true") exits 0 with no
+# such line, and a decoy substring after a zero-passed summary does not
+# count.
+if ! "${SCRIPT_DIR}/check-test-result.sh" "${LOG_DIR}/test.log"; then
   fail=1
 fi
 run_one clippy cargo clippy --all-targets -- -D warnings || fail=1

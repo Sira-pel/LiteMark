@@ -3,7 +3,11 @@ use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::*;
 
-pub fn render_shortcuts_modal<FClose>(on_close: FClose, theme: &Theme) -> impl IntoElement
+pub fn render_shortcuts_modal<FClose>(
+    focus_handle: FocusHandle,
+    on_close: FClose,
+    theme: &Theme,
+) -> impl IntoElement
 where
     FClose: Fn(&mut App) + 'static + Clone,
 {
@@ -21,6 +25,7 @@ where
         ("Ctrl + O", "Open File (.md, .txt, .pdf)"),
         ("Ctrl + N", "New Document Tab"),
         ("Ctrl + W", "Close Active Tab"),
+        ("Ctrl + Delete", "Delete Current Note"),
         ("Ctrl + F", "Find in Document"),
         ("Ctrl + H", "Find & Replace"),
         ("Ctrl + Shift + M", "Toggle WYSIWYG / Raw Mode"),
@@ -48,6 +53,8 @@ where
 
     div()
         .id("shortcuts-modal-backdrop")
+        .key_context("PromptModal")
+        .track_focus(&focus_handle)
         .absolute()
         .inset_0()
         .bg(rgba(0x00000099))
@@ -176,6 +183,8 @@ where
 pub fn render_pdf_preview_modal<FClose, FOpenExternal>(
     title: String,
     page_count: Option<usize>,
+    selected_ix: usize,
+    focus_handle: FocusHandle,
     on_close: FClose,
     on_open_external: FOpenExternal,
     theme: &Theme,
@@ -189,6 +198,8 @@ where
 
     div()
         .id("pdf-modal-backdrop")
+        .key_context("PromptModal")
+        .track_focus(&focus_handle)
         .absolute()
         .inset_0()
         .bg(rgba(0x00000099))
@@ -266,6 +277,7 @@ where
                                 .gap(px(10.0))
                                 .child({
                                     let oe = ext.clone();
+                                    let is_selected = selected_ix == 0;
                                     div()
                                         .id("pdf-open-ext-btn")
                                         .flex()
@@ -276,7 +288,11 @@ where
                                         .rounded(px(6.0))
                                         .bg(theme.bg_hover)
                                         .border_1()
-                                        .border_color(theme.border_primary)
+                                        .border_color(if is_selected {
+                                            theme.text_hi
+                                        } else {
+                                            theme.border_primary
+                                        })
                                         .cursor_pointer()
                                         .hover(|h| h.bg(theme.bg_active))
                                         .on_click(move |_, _, cx| oe(cx))
@@ -297,12 +313,19 @@ where
                         .border_color(theme.border_subtle)
                         .child({
                             let c = cls.clone();
+                            let is_selected = selected_ix == 1;
                             div()
                                 .id("pdf-modal-close-btn")
                                 .px(px(16.0))
                                 .py(px(6.0))
                                 .rounded(px(6.0))
                                 .bg(theme.row_active)
+                                .border_1()
+                                .border_color(if is_selected {
+                                    theme.text_hi
+                                } else {
+                                    rgba(0x00000000)
+                                })
                                 .text_color(theme.text_strong)
                                 .hover(|h| h.bg(theme.row_hover))
                                 .font_weight(FontWeight::BOLD)
@@ -315,7 +338,11 @@ where
         )
 }
 
-pub fn render_about_modal<FClose>(on_close: FClose, theme: &Theme) -> impl IntoElement
+pub fn render_about_modal<FClose>(
+    focus_handle: FocusHandle,
+    on_close: FClose,
+    theme: &Theme,
+) -> impl IntoElement
 where
     FClose: Fn(&mut App) + 'static + Clone,
 {
@@ -324,6 +351,8 @@ where
 
     div()
         .id("about-modal-backdrop")
+        .key_context("PromptModal")
+        .track_focus(&focus_handle)
         .absolute()
         .inset_0()
         .bg(rgba(0x00000099))
@@ -422,7 +451,7 @@ where
                                 .text_size(px(13.0))
                                 .text_color(theme.text_primary)
                                 .line_height(relative(1.5))
-                                .child("An ultra-fast native Linux Markdown editor built with Rust and GPUI.")
+                                .child("A native Markdown and text editor for Linux.")
                         )
                 )
                 // Footer
@@ -460,6 +489,8 @@ pub fn render_prompt_modal<FChoose>(
     title: impl Into<SharedString>,
     message: impl Into<SharedString>,
     choices: Vec<(&'static str, bool)>,
+    selected_ix: usize,
+    focus_handle: FocusHandle,
     on_choose: FChoose,
     theme: &Theme,
 ) -> impl IntoElement
@@ -470,6 +501,8 @@ where
     let message = message.into();
     div()
         .id("prompt-modal-backdrop")
+        .key_context("PromptModal")
+        .track_focus(&focus_handle)
         .absolute()
         .inset_0()
         .bg(rgba(0x00000099))
@@ -524,8 +557,9 @@ where
                         .bg(theme.bg_modal_header)
                         .border_t_1()
                         .border_color(theme.border_subtle)
-                        .children(choices.into_iter().map(|(label, primary)| {
+                        .children(choices.into_iter().enumerate().map(|(ix, (label, primary))| {
                             let choose = on_choose.clone();
+                            let is_selected = ix == selected_ix;
                             div()
                                 .id(SharedString::from(format!("prompt-{label}")))
                                 .px(px(14.0))
@@ -539,11 +573,20 @@ where
                                 } else {
                                     theme.bg_hover
                                 })
+                                .border_1()
+                                .border_color(if is_selected {
+                                    theme.text_hi
+                                } else {
+                                    rgba(0x00000000)
+                                })
                                 .text_color(if primary {
                                     rgb(0x121212)
+                                } else if is_selected {
+                                    theme.text_hi
                                 } else {
                                     theme.text_primary
                                 })
+                                .when(!is_selected, |s| s.opacity(0.75))
                                 .on_click(move |_, _, cx| choose(label, cx))
                                 .child(label)
                         })),

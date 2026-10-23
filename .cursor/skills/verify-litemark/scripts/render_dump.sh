@@ -18,12 +18,60 @@ if [[ ! -f "$1" ]]; then
   echo "missing input $1" >&2
   exit 1
 fi
+
+# Return success when any existing parent component of the output path is a
+# symlink. Walk the lexical path rather than resolving it, so the refusal
+# names the path the caller supplied. Stop at the first missing component:
+# mkdir -p would create everything below it without following a symlink.
+refuse_symlink_parent() {
+  local out="$1" dir cur part
+  local -a parts=()
+  dir="$(dirname -- "${out}")"
+  case "${dir}" in
+    /*) cur="" ;;
+    *) cur="${PWD}" ;;
+  esac
+  IFS='/' read -r -a parts <<< "${dir#/}"
+  for part in "${parts[@]}"; do
+    [[ -z "${part}" || "${part}" == "." ]] && continue
+    if [[ "${part}" == ".." ]]; then
+      cur="$(dirname -- "${cur}")"
+      continue
+    fi
+    cur="${cur%/}/${part}"
+    if [[ -L "${cur}" ]]; then
+      return 0
+    fi
+    if [[ ! -e "${cur}" ]]; then
+      return 1
+    fi
+  done
+  return 1
+}
+
+# Follow symlinks for the input inode: the write path resolves argv1 with
+# readlink -f, so same_inode must compare the target file, not the symlink node.
+input_id="$(stat -L -c '%d:%i' -- "$1")"
+input_lexical="$(realpath -m -s -- "$1")"
+output_lexical="$(realpath -m -s -- "$2")"
+if [[ "${input_lexical}" == "${output_lexical}" ]]; then
+  echo "render_refuse=same_as_input path=$2"
+  exit 1
+fi
 if [[ -L "$2" ]]; then
   echo "render_refuse=symlink path=$2"
   exit 1
 fi
+if refuse_symlink_parent "$2"; then
+  echo "render_refuse=symlink_parent path=$2"
+  exit 1
+fi
 if [[ -e "$2" ]]; then
   out_id="$(stat -c '%d:%i' -- "$2")"
+  if [[ "${out_id}" == "${input_id}" ]]; then
+    echo "render_refuse=same_inode path=$2"
+    exit 1
+  fi
   while IFS= read -r -d '' oracle; do
     oracle_id="$(stat -c '%d:%i' -- "${oracle}")"
     if [[ "${out_id}" == "${oracle_id}" ]]; then
@@ -35,6 +83,12 @@ fi
 mkdir -p "$(dirname "$2")"
 input="$(readlink -f "$1")"
 output="$(readlink -f "$2")"
+# Lexical/lstat checks can miss argv1=symlink → argv2=real; refuse using the
+# same resolved paths the dump write will use.
+if [[ "${input}" == "${output}" ]]; then
+  echo "render_refuse=same_as_input path=$2"
+  exit 1
+fi
 timing="${3:-}"
 
 log="${VERIFY_RUN_DIR}/logs/dump-$(basename "$(dirname "${input}")")-$(basename "${input}").log"

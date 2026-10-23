@@ -3,7 +3,7 @@ name = "litemark"
 version = "1.0.0"
 edition = "2021"
 authors = ["LiteMark Contributors"]
-description = "Fast, distraction-free markdown & text editor with dedicated notes folder for Ubuntu"
+description = "Native Markdown and text editor for Linux"
 license = "MIT"
 
 [dependencies]
