@@ -2179,10 +2179,11 @@ impl DocumentTab {
             source_end + line_ending_len(&self.content, source_end).saturating_sub(1)
         } else if source_end < self.content.len() {
             let next = source_end + line_ending_len(&self.content, source_end);
-            parsed
+            let next_end = parsed
                 .line_at_offset(next)
                 .map(|line| line.source.end)
-                .unwrap_or_else(|| super::text_ops::line_end(&self.content, next))
+                .unwrap_or_else(|| super::text_ops::line_end(&self.content, next));
+            next_end + line_ending_len(&self.content, next_end).saturating_sub(1)
         } else {
             self.content.len()
         };
@@ -2221,7 +2222,7 @@ impl DocumentTab {
                 && target > vend
                 && target <= line.source.end
             {
-                target = super::text_ops::word_right(&self.content, line.source.end);
+                target = line.source.end;
             }
         }
         self.place(target, extend);
@@ -5336,6 +5337,36 @@ mod tests {
         assert_eq!(doc.content, "# foo");
     }
 
+    /// K2. BASE `1d03313` Ctrl+Shift+Right from the visible end selects the
+    /// hidden closer and stops there; it does not run on into the next word.
+    #[test]
+    fn move_word_right_from_the_visible_end_stops_at_the_closer() {
+        let mut doc = heading_tab("# foo #\nnext");
+        doc.place(5, false);
+        doc.move_word_right(true);
+        assert_eq!(doc.caret.range, 5..7);
+        assert_eq!(doc.selected_text(), " #");
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "# foo\nnext");
+
+        let mut doc = heading_tab("# foo #\n# bar #");
+        doc.place(5, false);
+        for _ in 0..3 {
+            doc.move_word_right(true);
+        }
+        assert_eq!(doc.caret.range, 5..13);
+        assert_eq!(doc.selected_text(), " #\n# bar");
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "# foo #");
+
+        let mut doc = heading_tab("# foo #");
+        doc.place(5, false);
+        doc.move_word_right(true);
+        assert_eq!(doc.caret.range, 5..7);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "# foo");
+    }
+
     fn paint_rows(doc: &mut DocumentTab) -> EditorPaint {
         let parsed = doc.parsed();
         let rows = parsed
@@ -5428,6 +5459,40 @@ mod tests {
         let mut doc = heading_tab("# foo #\r\nnext");
         doc.select_line_down();
         assert_eq!(doc.caret.range, 0..8);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "\nnext");
+    }
+
+    /// K1. BASE `1d03313` Ctrl+Shift+Down on the second press includes the
+    /// CRLF, so Delete leaves the LF behind.
+    #[test]
+    fn second_select_line_down_includes_the_crlf() {
+        let mut doc = heading_tab("alpha\r\nbeta\r\ngamma");
+        doc.select_line_down();
+        doc.select_line_down();
+        assert_eq!(doc.caret.range, 0..12);
+        assert_eq!(doc.selected_text(), "alpha\r\nbeta\r");
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "\ngamma");
+
+        let mut doc = heading_tab("# foo #\r\n# bar #\r\nnext");
+        doc.select_line_down();
+        doc.select_line_down();
+        assert_eq!(doc.caret.range, 0..17);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "\nnext");
+
+        let mut doc = heading_tab("alpha\nbeta\ngamma");
+        doc.select_line_down();
+        doc.select_line_down();
+        assert_eq!(doc.caret.range, 0..10);
+        delete_forward(&mut doc);
+        assert_eq!(doc.content, "\ngamma");
+
+        let mut doc = heading_tab("# foo #\n# bar #\nnext");
+        doc.select_line_down();
+        doc.select_line_down();
+        assert_eq!(doc.caret.range, 0..15);
         delete_forward(&mut doc);
         assert_eq!(doc.content, "\nnext");
     }
