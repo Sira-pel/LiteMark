@@ -89,6 +89,7 @@ pub fn hash_str(s: &str) -> u64 {
     hasher.finish()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn str_display_width(s: &str) -> usize {
     s.chars()
         .map(|c| {
@@ -188,11 +189,19 @@ pub fn wrap_cell_text(
     lines
 }
 
+/// Horizontal padding inside a table cell, on each side. Shared by column
+/// sizing and cell drawing so the gap before and after the text stays equal.
+pub const TABLE_CELL_PAD_X: Pixels = px(12.0);
+
+/// Spare width added to a fitted column so float rounding never makes the
+/// text just miss its own column and wrap.
+const TABLE_FIT_SLACK: Pixels = px(0.5);
+
+/// `measure` returns the real drawn text width of one cell of `line`.
 pub fn compute_table_column_widths(
     table_lines: &[&ParsedLine],
-    content: &str,
     content_width: Pixels,
-    char_width: Pixels,
+    measure: &mut dyn FnMut(&ParsedLine, &Range<usize>) -> Pixels,
 ) -> Vec<Pixels> {
     if table_lines.is_empty() {
         return Vec::new();
@@ -217,16 +226,15 @@ pub fn compute_table_column_widths(
     let equal_share = target_table_w / num_cols_f32;
     // Sensible min column width is 48px, but shrink as needed to keep table within editor width
     let min_col_w = (px(48.0)).min(equal_share);
-    let pad_x = px(12.0);
+    let pad_x = TABLE_CELL_PAD_X;
 
     // Measure natural content width for each column (minimum needed to avoid wrapping)
     let mut natural_w = vec![min_col_w; num_cols];
     for pline in table_lines {
         if let LineKind::TableRow { ref cells, .. } = pline.kind {
             for (col_idx, cell_range) in cells.iter().enumerate().take(num_cols) {
-                let cell_str = content.get(cell_range.clone()).unwrap_or("");
-                let disp_w = str_display_width(cell_str.trim());
-                let needed = (disp_w as f32 * char_width * 0.95 + pad_x * 2.0).max(min_col_w);
+                let text_w = measure(pline, cell_range);
+                let needed = (text_w + pad_x * 2.0 + TABLE_FIT_SLACK).max(min_col_w);
                 if needed > natural_w[col_idx] {
                     natural_w[col_idx] = needed;
                 }
@@ -1063,7 +1071,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     .entry(table_source.clone())
                     .or_insert_with(|| {
                         let table_text = self.content.get(table_source.clone()).unwrap_or("");
-                        let table_hash = hash_str(table_text);
+                        // The measured widths depend on the text and on the fonts used to draw it.
+                        let table_hash = hash_str(&format!(
+                            "{}\u{0}{}\u{0}{}\u{0}{}",
+                            table_text,
+                            self.font_family,
+                            self.mono_font_family,
+                            f32::from(self.font_size).to_bits()
+                        ));
                         if let Some((cached_hash, cached_width, widths)) =
                             table_width_cache.entries.get(table_source)
                         {
@@ -1073,7 +1088,36 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         }
                         let empty_lines = Vec::new();
                         let lines = table_rows.get(table_source).unwrap_or(&empty_lines);
-                        let widths = compute_table_column_widths(lines, &self.content, content_width, char_width);
+                        let mut measure = |pline: &ParsedLine, cell_range: &Range<usize>| -> Pixels {
+                            let (row_fs, _, _, _) =
+                                wysiwyg_line_metrics(&pline.kind, self.font_size);
+                            let raw = self.content.get(cell_range.clone()).unwrap_or("");
+                            let (display, map) = RowOffsetMap::from_hidden(
+                                raw,
+                                cell_range.start,
+                                cell_range.start,
+                                &pline.hidden_ranges,
+                            );
+                            if display.is_empty() {
+                                return px(0.0);
+                            }
+                            let slice = SharedString::from(display.clone());
+                            let runs = wysiwyg_cell_runs(
+                                pline,
+                                display.len(),
+                                slice.len(),
+                                &map,
+                                self.marked.as_ref(),
+                                &base_font,
+                                &mono_font,
+                                self,
+                            );
+                            window
+                                .text_system()
+                                .shape_line(slice, row_fs, &runs, None)
+                                .width
+                        };
+                        let widths = compute_table_column_widths(lines, content_width, &mut measure);
                         table_width_cache.entries.insert(
                             table_source.clone(),
                             (table_hash, content_width, widths.clone()),
@@ -1083,7 +1127,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
 
                 let num_cols = col_widths.len().max(1);
                 let table_w: Pixels = col_widths.iter().copied().fold(px(0.0), |acc, x| acc + x);
-                let pad_x = px(12.0);
+                let pad_x = TABLE_CELL_PAD_X;
 
                 let mut col_x_offsets = Vec::with_capacity(num_cols + 1);
                 let mut cur_col_x = px(0.0);
@@ -2408,13 +2452,29 @@ mod tests {
     use crate::model::text_ops::Caret;
     use gpui::{point, px, size, Bounds, Pixels, ShapedLine};
 
+    /// Proportional stand-in for the text system: narrow glyphs are cheaper than wide ones.
+    fn fake_measure(content: &str) -> impl FnMut(&ParsedLine, &std::ops::Range<usize>) -> Pixels + '_ {
+        let content = content.to_string();
+        move |_line, range| {
+            let text = content.get(range.clone()).unwrap_or("").trim();
+            px(text
+                .chars()
+                .map(|c| match c {
+                    'i' | 'l' | '1' | '.' | ' ' => 4.0,
+                    c if super::str_display_width(&c.to_string()) == 2 => 16.0,
+                    _ => 8.0,
+                })
+                .sum::<f32>())
+        }
+    }
+
     #[test]
     fn test_column_sizing_short_stays_narrow_long_shares_remaining() {
         let md = "| ID | Status | Description |\n| --- | --- | --- |\n| 1 | OK | A very long description text that needs much more space than the short ID or Status columns |";
         let doc = parse_document(md);
         let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
 
-        let widths = compute_table_column_widths(&table_lines, md, px(600.0), px(8.0));
+        let widths = compute_table_column_widths(&table_lines, px(600.0), &mut fake_measure(md));
         assert_eq!(widths.len(), 3);
 
         // ID and Status columns should stay narrow (near minimum column width)
@@ -2447,7 +2507,7 @@ mod tests {
         let doc = parse_document(md);
         let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
 
-        let widths = compute_table_column_widths(&table_lines, md, px(400.0), px(8.0));
+        let widths = compute_table_column_widths(&table_lines, px(400.0), &mut fake_measure(md));
         assert_eq!(widths.len(), 4);
 
         // All columns should be at least minimum width (48px)
@@ -2819,7 +2879,7 @@ mod tests {
         let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
 
         let target_w = px(500.0);
-        let widths = compute_table_column_widths(&table_lines, &md, target_w, px(8.0));
+        let widths = compute_table_column_widths(&table_lines, target_w, &mut fake_measure(&md));
         assert_eq!(widths.len(), 25);
 
         // Sum of widths must not exceed editor width
@@ -2848,7 +2908,7 @@ mod tests {
         let table_lines_empty: Vec<&ParsedLine> = doc_empty.lines.iter().collect();
 
         let target_w = px(600.0);
-        let widths_empty = compute_table_column_widths(&table_lines_empty, md_empty, target_w, px(8.0));
+        let widths_empty = compute_table_column_widths(&table_lines_empty, target_w, &mut fake_measure(md_empty));
         assert_eq!(widths_empty.len(), 3);
 
         // Every column starts at an equal share (200px each)
@@ -2866,7 +2926,7 @@ mod tests {
         let doc_typed = parse_document(md_typed);
         let table_lines_typed: Vec<&ParsedLine> = doc_typed.lines.iter().collect();
 
-        let widths_typed = compute_table_column_widths(&table_lines_typed, md_typed, target_w, px(8.0));
+        let widths_typed = compute_table_column_widths(&table_lines_typed, target_w, &mut fake_measure(md_typed));
         assert_eq!(widths_typed.len(), 3);
 
         // Columns must still be exactly 200px each
@@ -2889,7 +2949,7 @@ mod tests {
         let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
 
         let target_w = px(600.0);
-        let widths = compute_table_column_widths(&table_lines, &md, target_w, px(8.0));
+        let widths = compute_table_column_widths(&table_lines, target_w, &mut fake_measure(&md));
         assert_eq!(widths.len(), 3);
 
         // Columns 1 and 2 gave up their spare room down to the minimum (48px)
@@ -2932,7 +2992,7 @@ mod tests {
         let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
 
         let target_w = px(600.0);
-        let widths = compute_table_column_widths(&table_lines, &md, target_w, px(8.0));
+        let widths = compute_table_column_widths(&table_lines, target_w, &mut fake_measure(&md));
         assert_eq!(widths.len(), 30);
 
         // Each column gets equal share (600 / 30 = 20px)
@@ -2990,5 +3050,36 @@ mod tests {
         let _ = editor_home_visual(&paint, &mut caret, false);
         let _ = editor_end_visual(&paint, &mut caret, false);
         let _ = move_vertical_visual(&paint, "0123456789", &mut caret, 1, false, ViewMode::Wysiwyg);
+    }
+
+    #[test]
+    fn test_fitted_column_has_equal_gap_before_and_after_text() {
+        // Column 1 outgrows its equal share; the others have spare room to donate.
+        let md = "| a | A fairly long cell with some words | c |\n| --- | --- | --- |\n| x | y | z |";
+        let doc = parse_document(md);
+        let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
+        let target_w = px(500.0);
+        let widths = compute_table_column_widths(&table_lines, target_w, &mut fake_measure(md));
+
+        let mut measure = fake_measure(md);
+        let mut widest = px(0.0);
+        for line in &table_lines {
+            if let crate::markdown::LineKind::TableRow { cells, .. } = &line.kind {
+                widest = widest.max(measure(line, &cells[1]));
+            }
+        }
+        let equal_share = target_w / 3.0;
+        assert!(widths[1] > equal_share, "column must have grown past its share");
+
+        let left_gap = super::TABLE_CELL_PAD_X;
+        let right_gap = widths[1] - super::TABLE_CELL_PAD_X - widest;
+        assert!(
+            (f32::from(left_gap) - f32::from(right_gap)).abs() <= 1.0,
+            "left gap {:?} and right gap {:?} must match",
+            left_gap,
+            right_gap
+        );
+        let total: Pixels = widths.iter().copied().fold(px(0.0), |a, b| a + b);
+        assert!(total <= target_w + px(0.01));
     }
 }
