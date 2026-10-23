@@ -2751,6 +2751,23 @@ impl LiteMarkApp {
         self.refresh_find();
     }
 
+    fn editor_table_row_below(&mut self, _cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
+            self.show_error("PDF files are read-only.");
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.table_insert_row_below();
+        }
+        self.refresh_find();
+    }
+
     fn editor_indent(&mut self, _cx: &mut App) {
         if !document_accepts_keystrokes(self.field_focus)
             || self.field_owns_keys
@@ -4962,6 +4979,12 @@ impl Render for LiteMarkApp {
                 let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
+                    if mode == ViewMode::Wysiwyg
+                        && !cell_has_line_in_direction(&p, tab.cursor_offset(), -1)
+                        && tab.table_edge_exit(-1)
+                    {
+                        return;
+                    }
                     if move_vertical_visual(&p, &tab.content, &mut tab.caret, -1, false, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
@@ -4977,6 +5000,12 @@ impl Render for LiteMarkApp {
                 let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
+                    if mode == ViewMode::Wysiwyg
+                        && !cell_has_line_in_direction(&p, tab.cursor_offset(), 1)
+                        && tab.table_edge_exit(1)
+                    {
+                        return;
+                    }
                     if move_vertical_visual(&p, &tab.content, &mut tab.caret, 1, false, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
@@ -5184,6 +5213,11 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorPlainNewline, window, cx| {
                 this.editor_plain_newline(cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorTableRowBelow, window, cx| {
+                this.editor_table_row_below(cx);
                 window.refresh();
                 cx.notify();
             }))

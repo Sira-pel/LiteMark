@@ -368,6 +368,30 @@ pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<Stri
     None
 }
 
+/// True when the caret sits in a wrapped table cell that has another visual
+/// line in the `delta` direction, so Up/Down should move inside the cell.
+pub fn cell_has_line_in_direction(paint: &EditorPaint, cursor: usize, delta: i32) -> bool {
+    for row in &paint.rows {
+        for cell in &row.cells {
+            if cursor < cell.raw_range.start || cursor > cell.raw_range.end {
+                continue;
+            }
+            let sub_ix = cell
+                .lines
+                .iter()
+                .position(|l| cursor >= l.offset_map.line_start && cursor < l.offset_map.line_end)
+                .or_else(|| cell.lines.iter().rposition(|l| cursor >= l.offset_map.line_start))
+                .unwrap_or(0);
+            return if delta > 0 {
+                sub_ix + 1 < cell.lines.len()
+            } else {
+                sub_ix > 0
+            };
+        }
+    }
+    false
+}
+
 pub fn move_vertical_visual(
     paint: &EditorPaint,
     content: &str,

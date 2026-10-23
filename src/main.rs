@@ -164,6 +164,7 @@ fn main() {
                 KeyBinding::new("delete", EditorDelete, Some("Editor")),
                 KeyBinding::new("enter", EditorNewline, Some("Editor")),
                 KeyBinding::new("shift-enter", EditorPlainNewline, Some("Editor")),
+                KeyBinding::new("ctrl-enter", EditorTableRowBelow, Some("Editor")),
                 KeyBinding::new("tab", IndentAction, Some("Editor")),
                 KeyBinding::new("shift-tab", OutdentAction, Some("Editor")),
                 KeyBinding::new("ctrl-up", EditorMoveLineUp, Some("Editor")),
