@@ -448,6 +448,11 @@ impl DocumentTab {
                             let cell_start = pipe_indices[k] + 1;
                             let cell_end = pipe_indices[k + 1];
                             if cursor >= cell_start && cursor <= cell_end {
+                                // Only split when the whole selection sits inside this cell;
+                                // otherwise the start/end slices below would be out of order.
+                                if range.start < cell_start || range.end > cell_end {
+                                    break;
+                                }
                                 let before = &self.content[cell_start..range.start];
                                 let after = &self.content[range.end..cell_end];
                                 if !after.trim().is_empty() {
@@ -719,6 +724,10 @@ impl DocumentTab {
         let lines_str = self.content[start_line..end_line].to_string();
         let mut modified = Vec::new();
         let mut first_line_stripped = 0;
+        // Indent removed from lines at or before the selection end, so the end
+        // shifts only by what was removed in front of it.
+        let mut removed_before_end = 0;
+        let mut line_start_pos = start_line;
         for (i, line) in lines_str.split('\n').enumerate() {
             let stripped = if let Some(s) = line.strip_prefix("  ") {
                 s
@@ -732,10 +741,12 @@ impl DocumentTab {
             if i == 0 {
                 first_line_stripped = line.len() - stripped.len();
             }
+            let removed = line.len() - stripped.len();
+            removed_before_end += removed.min(range.end.saturating_sub(line_start_pos));
+            line_start_pos += line.len() + 1;
             modified.push(stripped.to_string());
         }
         let replacement = modified.join("\n");
-        let removed_total = lines_str.len() - replacement.len();
         self.edit(start_line..end_line, &replacement);
         if range.is_empty() {
             let new_cursor = range
@@ -748,7 +759,8 @@ impl DocumentTab {
                 .start
                 .saturating_sub(first_line_stripped)
                 .max(start_line);
-            let new_end = range.end.saturating_sub(removed_total).max(new_start);
+            let new_end = range.end.saturating_sub(removed_before_end).max(new_start);
+            let new_end = floor_boundary(&self.content, new_end).max(new_start);
             self.caret.range = new_start..new_end;
         }
         self.snap_caret_to_visible_line_end();
@@ -2860,6 +2872,31 @@ mod tests {
     use super::*;
     use crate::ui::{move_vertical_visual, EditorPaint, PaintRow};
     use gpui::{point, px, ShapedLine};
+
+    #[test]
+    fn enter_with_selection_leaving_a_table_cell_does_not_panic() {
+        let source = "| a | b |\n| --- | --- |\n| hello | world |";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), source.to_string(), None, None);
+        let start = source.find("hello").unwrap() + 2;
+        let end = source.find("world").unwrap() + 2;
+        doc.caret.range = start..end;
+        doc.smart_newline(false);
+        assert!(doc.content.starts_with(source));
+    }
+
+    #[test]
+    fn outdent_selection_into_next_indent_keeps_char_boundaries() {
+        let source = "a\n  ✓ b";
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), source.to_string(), None, None);
+        // End one byte into the next line's indent.
+        doc.caret.range = 0..3;
+        doc.outdent();
+        let range = doc.caret.range.clone();
+        assert!(doc.content.is_char_boundary(range.start));
+        assert!(doc.content.is_char_boundary(range.end));
+        assert_eq!(doc.content, "a\n✓ b");
+        assert_eq!(range, 0..2);
+    }
 
     #[test]
     fn test_compute_stats() {
