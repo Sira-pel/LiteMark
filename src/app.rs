@@ -445,7 +445,10 @@ impl LiteMarkApp {
     }
 
     pub fn active_tab_mut(&mut self) -> Option<&mut DocumentTab> {
-        self.tabs.iter_mut().find(|t| t.id == self.active_tab_id)
+        let mode = self.settings.view_mode;
+        let tab = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id)?;
+        tab.set_view_mode(mode);
+        Some(tab)
     }
 
     pub fn handle_new_tab(&mut self) {
@@ -679,6 +682,7 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_mode(&mut self) {
         self.settings.view_mode = self.settings.view_mode.toggle();
+        self.active_tab_mut();
         if self.settings.view_mode == ViewMode::Wysiwyg {
             if let Some(tab) = self.active_tab_mut() {
                 tab.snap_wysiwyg_table_delimiter();
@@ -827,6 +831,7 @@ impl LiteMarkApp {
 
     pub fn handle_set_view_mode(&mut self, mode: ViewMode) {
         self.settings.view_mode = mode;
+        self.active_tab_mut();
         if mode == ViewMode::Wysiwyg {
             if let Some(tab) = self.active_tab_mut() {
                 tab.snap_wysiwyg_table_delimiter();
@@ -4937,9 +4942,10 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorUp, window, cx| {
                 let paint = this.editor_paint.clone();
+                let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
-                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, -1, false) {
+                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, -1, false, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
                     } else {
@@ -4951,9 +4957,10 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorDown, window, cx| {
                 let paint = this.editor_paint.clone();
+                let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
-                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, 1, false) {
+                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, 1, false, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
                     } else {
@@ -4977,9 +4984,10 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorSelectUp, window, cx| {
                 let paint = this.editor_paint.clone();
+                let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
-                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, -1, true) {
+                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, -1, true, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
                     } else {
@@ -4991,9 +4999,10 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorSelectDown, window, cx| {
                 let paint = this.editor_paint.clone();
+                let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
-                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, 1, true) {
+                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, 1, true, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
                     } else {

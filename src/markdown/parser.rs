@@ -159,15 +159,42 @@ struct SourceLine<'a> {
 
 fn source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
     let mut lines = Vec::new();
+    let bytes = markdown.as_bytes();
     let mut start = 0usize;
-    if markdown.is_empty() {
-        return lines;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        // A line ending is LF, a lone CR, or CRLF (CommonMark 0.31.2).
+        if bytes[index] == b'\n' {
+            lines.push(SourceLine {
+                start,
+                end: index + 1,
+                text: &markdown[start..index],
+            });
+            index += 1;
+            start = index;
+        } else if bytes[index] == b'\r' {
+            let end = if index + 1 < bytes.len() && bytes[index + 1] == b'\n' {
+                index + 2
+            } else {
+                index + 1
+            };
+            lines.push(SourceLine {
+                start,
+                end,
+                text: &markdown[start..index],
+            });
+            index = end;
+            start = end;
+        } else {
+            index += 1;
+        }
     }
-    for piece in markdown.split_inclusive('\n') {
-        let end = start + piece.len();
-        let text = piece.strip_suffix('\n').unwrap_or(piece);
-        lines.push(SourceLine { start, end, text });
-        start = end;
+    if start < bytes.len() {
+        lines.push(SourceLine {
+            start,
+            end: bytes.len(),
+            text: &markdown[start..],
+        });
     }
     lines
 }
@@ -230,8 +257,8 @@ pub fn parse_markdown(markdown: &str) -> Vec<Block> {
             continue;
         }
 
-        // Horizontal rule ---, ***, ___
-        if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+        // Horizontal rule: exact `---`, `***`, or `___`, indent 0–3.
+        if exact_thematic_break(line, 0) {
             blocks.push(Block::HorizontalRule {
                 source: line_source,
             });
@@ -561,9 +588,7 @@ pub fn table_column_align(cell: &str) -> TableColumnAlign {
 pub enum LineKind {
     Empty,
     Paragraph,
-    Heading {
-        level: u8,
-    }, // 1..=6
+    Heading { level: u8 }, // 1..=6
     Blockquote,
     ListItem {
         ordered: bool,
@@ -733,9 +758,7 @@ impl RowOffsetMap {
             }
             let overlap_start = d.start.max(disp_range.start);
             let overlap_end = d.end.min(disp_range.end);
-            if overlap_end > overlap_start
-                || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end)
-            {
+            if overlap_end > overlap_start || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end) {
                 let src_start = s.start + (overlap_start - d.start);
                 let src_end = s.start + (overlap_end - d.start);
                 let new_d_start = overlap_start - disp_range.start;
@@ -1002,6 +1025,399 @@ fn parse_inline_syntax(
     }
 
     (raw_hidden, inline_pairs, styled_segments)
+}
+
+struct OpenFence {
+    /// Column-0..3 backtick fence. A shorter run does not close it.
+    strict: bool,
+    len: usize,
+    indent: usize,
+    open_range: std::ops::Range<usize>,
+}
+
+/// Thematic break: the line trims to `---`, `***`, or `___`.
+///
+/// At document level (`parent_col == 0`) only columns 0–3 count. A tab is
+/// column 4, so `\t---` stays a paragraph. This parser has no indented-code
+/// kind, so `    ---\rnext\r` stays text after the bare-CR split. Inside a
+/// list the same 0–3 columns are counted past the item's content column, and
+/// a tab stops at the next multiple of 4, so `- item` followed by `\t---` is
+/// a rule.
+fn exact_thematic_break(line: &str, parent_col: usize) -> bool {
+    let trimmed = line.trim();
+    if !(trimmed == "---" || trimmed == "***" || trimmed == "___") {
+        return false;
+    }
+    let column = leading_column(line);
+    if column <= 3 {
+        return true;
+    }
+    parent_col > 0 && column >= parent_col && column - parent_col <= 3
+}
+
+/// `(bytes, column)` of the first non-space, non-tab. Tabs advance to the next multiple of 4.
+fn split_indent(line: &str) -> (usize, usize) {
+    let bytes = line.as_bytes();
+    let mut column = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' => {
+                column += 1;
+                index += 1;
+            }
+            b'\t' => {
+                column += 4 - (column % 4);
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    (index, column)
+}
+
+fn prefix_through_column(line: &str, min_col: usize) -> usize {
+    let bytes = line.as_bytes();
+    let mut column = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() && column < min_col {
+        match bytes[index] {
+            b' ' => {
+                column += 1;
+                index += 1;
+            }
+            b'\t' => {
+                column += 4 - (column % 4);
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    index
+}
+
+/// Leading spaces only. A tab in the indent is `None` so the caller keeps red's trim rule.
+fn leading_spaces(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() && bytes[index] == b' ' {
+        index += 1;
+    }
+    if index < bytes.len() && bytes[index] == b'\t' {
+        return None;
+    }
+    Some(index)
+}
+
+/// Top-level backtick fence at column 0–3. Tildes are not fences.
+fn strict_backtick_open(line: &str) -> Option<(usize, usize, Option<String>)> {
+    let indent = leading_spaces(line)?;
+    if indent > 3 {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    if indent >= bytes.len() || bytes[indent] != b'`' {
+        return None;
+    }
+    let mut end = indent;
+    while end < bytes.len() && bytes[end] == b'`' {
+        end += 1;
+    }
+    let len = end - indent;
+    if len < 3 {
+        return None;
+    }
+    let rest = &line[end..];
+    if rest.contains('`') {
+        return None;
+    }
+    let info = rest.trim_matches(|ch: char| ch == ' ' || ch == '\t');
+    let info = if info.is_empty() {
+        None
+    } else {
+        Some(info.to_string())
+    };
+    Some((len, indent, info))
+}
+
+/// ` ``` aa ``` ` at column 0–3 is not a fence. Callers must not fall through to red's trim rule.
+fn backtick_info_rejects_fence(line: &str) -> bool {
+    let Some(indent) = leading_spaces(line) else {
+        return false;
+    };
+    if indent > 3 {
+        return false;
+    }
+    let bytes = line.as_bytes();
+    if indent >= bytes.len() || bytes[indent] != b'`' {
+        return false;
+    }
+    let mut end = indent;
+    while end < bytes.len() && bytes[end] == b'`' {
+        end += 1;
+    }
+    end - indent >= 3 && line[end..].contains('`')
+}
+
+fn is_closing_fence(line: &str, marker: u8, min_len: usize, max_indent: usize) -> bool {
+    let (index, column) = split_indent(line);
+    if index >= line.len() || column > max_indent {
+        return false;
+    }
+    let bytes = line.as_bytes();
+    if bytes[index] != marker {
+        return false;
+    }
+    let mut end = index;
+    while end < bytes.len() && bytes[end] == marker {
+        end += 1;
+    }
+    if end - index < min_len {
+        return false;
+    }
+    bytes[end..]
+        .iter()
+        .all(|byte| *byte == b' ' || *byte == b'\t')
+}
+
+/// A fence after a list item or blockquote keeps red's trimmed-``` rule.
+fn in_list_or_quote(lines: &[ParsedLine]) -> bool {
+    let mut saw_blank = false;
+    for line in lines.iter().rev() {
+        match &line.kind {
+            LineKind::Empty => saw_blank = true,
+            LineKind::ListItem { .. } | LineKind::Blockquote => return true,
+            LineKind::Paragraph
+            | LineKind::Heading { .. }
+            | LineKind::CodeFence { .. }
+            | LineKind::CodeLine
+            | LineKind::HorizontalRule
+            | LineKind::TableDelimiter
+            | LineKind::TableRow { .. } => {
+                if saw_blank {
+                    return false;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn atx_heading(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
+    if let Some(found) = atx_heading_within(line, 3) {
+        return Some(found);
+    }
+    // A tab is one byte. Red still treats up to three bytes of indent as a heading.
+    let trimmed = line.trim_start();
+    let indent_len = line.len() - trimmed.len();
+    if indent_len > 3 {
+        return None;
+    }
+    for (level, prefix) in [
+        (6u8, "###### "),
+        (5, "##### "),
+        (4, "#### "),
+        (3, "### "),
+        (2, "## "),
+        (1, "# "),
+    ] {
+        if trimmed.starts_with(prefix) {
+            let start = indent_len + prefix.len();
+            return Some((level, start..line.len()));
+        }
+    }
+    None
+}
+
+/// `max_indent` is a column, with tabs advancing to the next multiple of 4.
+fn atx_heading_within(line: &str, max_indent: usize) -> Option<(u8, std::ops::Range<usize>)> {
+    let bytes = line.as_bytes();
+    let (mut index, column) = split_indent(line);
+    if column > max_indent || index >= bytes.len() {
+        return None;
+    }
+    let mut level = 0u8;
+    while index < bytes.len() && bytes[index] == b'#' {
+        level += 1;
+        if level > 6 {
+            return None;
+        }
+        index += 1;
+    }
+    // A tab is whitespace after the opening hashes (CommonMark example 10).
+    let separator = index < bytes.len() && (bytes[index] == b' ' || bytes[index] == b'\t');
+    if level == 0 || (index < bytes.len() && !separator) {
+        return None;
+    }
+    let mut content_start = index;
+    if index < bytes.len() {
+        content_start = index + 1;
+    }
+    let mut end = bytes.len();
+    while end > content_start && bytes[end - 1] == b' ' {
+        end -= 1;
+    }
+    let hash_end = end;
+    while end > content_start && bytes[end - 1] == b'#' {
+        end -= 1;
+    }
+    // A closing run may consume the whole content (`### ###`). The space that
+    // precedes it can be the opening separator, so `end` is allowed to land on
+    // `content_start` but not before it. A backslash does not escape a space,
+    // so `# foo\ #` still strips the closer. A backslash immediately before
+    // the hash (`### foo \###`) is not a separating space, and the hash stays.
+    let preceded_by_space = end > 0 && bytes[end - 1] == b' ';
+    if end < hash_end && preceded_by_space {
+        if end > content_start {
+            end -= 1;
+            while end > content_start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+                end -= 1;
+            }
+        }
+    } else {
+        end = bytes.len();
+        while end > content_start && bytes[end - 1] == b' ' {
+            end -= 1;
+        }
+    }
+    while content_start < end && (bytes[content_start] == b' ' || bytes[content_start] == b'\t') {
+        content_start += 1;
+    }
+    Some((level, content_start..end))
+}
+
+/// ATX content, with the opening marks and a closing-hash run removed.
+/// `# **foo** #` keeps the inner `**`.
+pub(crate) fn atx_content_range(line: &str) -> Option<std::ops::Range<usize>> {
+    atx_heading(line).map(|(_level, content)| content)
+}
+
+#[allow(clippy::single_range_in_vec_init)]
+fn fence_marker_line(
+    index: usize,
+    source: std::ops::Range<usize>,
+    line: &str,
+    kind: LineKind,
+) -> ParsedLine {
+    let line_start = source.start;
+    let line_end = source.end;
+    let hidden = if line_end > line_start {
+        vec![line_start..line_end]
+    } else {
+        Vec::new()
+    };
+    let (display_text, offset_map) = RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
+    ParsedLine {
+        line_index: index,
+        source,
+        kind,
+        prefix_range: line_start..line_end,
+        hidden_ranges: hidden,
+        inline_pairs: Vec::new(),
+        display_text,
+        offset_map,
+        styled_segments: Vec::new(),
+    }
+}
+
+#[allow(clippy::single_range_in_vec_init)]
+fn code_content_line(
+    index: usize,
+    source: std::ops::Range<usize>,
+    line: &str,
+    strip: usize,
+) -> ParsedLine {
+    let line_start = source.start;
+    let line_end = source.end;
+    if strip == 0 {
+        return ParsedLine {
+            line_index: index,
+            source: source.clone(),
+            kind: LineKind::CodeLine,
+            prefix_range: line_start..line_start,
+            hidden_ranges: Vec::new(),
+            inline_pairs: Vec::new(),
+            display_text: line.to_string(),
+            offset_map: RowOffsetMap::identity(line_start, line_end),
+            styled_segments: vec![StyledSegment {
+                source,
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                code: true,
+                link_url: None,
+            }],
+        };
+    }
+    let content_start = line_start + strip;
+    let hidden = vec![line_start..content_start];
+    let (display_text, offset_map) =
+        RowOffsetMap::from_hidden(line, line_start, content_start, &hidden);
+    let mut styled_segments = Vec::new();
+    if content_start < line_end {
+        styled_segments.push(StyledSegment {
+            source: content_start..line_end,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            code: true,
+            link_url: None,
+        });
+    }
+    ParsedLine {
+        line_index: index,
+        source,
+        kind: LineKind::CodeLine,
+        prefix_range: line_start..content_start,
+        hidden_ranges: hidden,
+        inline_pairs: Vec::new(),
+        display_text,
+        offset_map,
+        styled_segments,
+    }
+}
+
+fn atx_line(
+    index: usize,
+    source: std::ops::Range<usize>,
+    line: &str,
+    level: u8,
+    content: std::ops::Range<usize>,
+) -> ParsedLine {
+    let line_start = source.start;
+    let line_end = source.end;
+    let mut hidden = Vec::new();
+    if content.start > 0 {
+        hidden.push(line_start..line_start + content.start);
+    }
+    if content.end < line.len() {
+        hidden.push(line_start + content.end..line_end);
+    }
+    let (inline_hidden, inline_pairs, styled_segments) = if content.is_empty() {
+        (Vec::new(), Vec::new(), Vec::new())
+    } else {
+        parse_inline_syntax(
+            &line[content.start..content.end],
+            line_start + content.start,
+        )
+    };
+    hidden.extend(inline_hidden);
+    let hidden = merge_ranges(hidden);
+    let (display_text, offset_map) =
+        RowOffsetMap::from_hidden(line, line_start, line_start + content.start, &hidden);
+    ParsedLine {
+        line_index: index,
+        source,
+        kind: LineKind::Heading { level },
+        prefix_range: line_start..line_start + content.start,
+        hidden_ranges: hidden,
+        inline_pairs,
+        display_text,
+        offset_map,
+        styled_segments,
+    }
 }
 
 /// Tab, VT, FF, or space. Pulldown `is_ascii_whitespace_no_nl`.
@@ -1300,27 +1716,27 @@ fn marker_is_empty(line: &str, item: &ListMarker) -> bool {
     item.task.is_none() && rest_is_blank(&line.as_bytes()[item.marker_end..])
 }
 
+/// Red keeps a marker after exactly one tab (`\t- foo`) as a list. Four
+/// spaces, and a space followed by a tab, stay text.
+fn single_tab_marker(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.first() == Some(&b'\t') && bytes.get(1).is_some_and(|byte| *byte != b' ' && *byte != b'\t')
+}
+
 /// A line the block parser records as a heading, rule, fence, quote, or table
 /// rather than as paragraph text. Those lines close a list item.
-fn is_structural_line(line: &str) -> bool {
+///
+/// Headings and thematic breaks use the same classifiers as the line loop.
+/// `parent_col` is the list content column, or 0 at document level.
+fn is_structural_line(line: &str, parent_col: usize) -> bool {
+    if atx_heading(line).is_some() || exact_thematic_break(line, parent_col) {
+        return true;
+    }
     let trimmed = line.trim();
     if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
         return true;
     }
-    if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-        return true;
-    }
     let trimmed_start = line.trim_start();
-    let indent = line.len() - trimmed_start.len();
-    if indent <= 3 {
-        const HEADINGS: [&str; 6] = ["###### ", "##### ", "#### ", "### ", "## ", "# "];
-        if HEADINGS
-            .iter()
-            .any(|prefix| trimmed_start.starts_with(prefix))
-        {
-            return true;
-        }
-    }
     if trimmed_start.starts_with("> ") || trimmed_start == ">" {
         return true;
     }
@@ -1345,7 +1761,7 @@ impl ListWalk {
         if !self.in_paragraph() {
             return false;
         }
-        if is_structural_line(line) {
+        if is_structural_line(line, self.thematic_parent_col(line)) {
             return false;
         }
         let Some(item) = scan_list_marker(line) else {
@@ -1354,7 +1770,7 @@ impl ListWalk {
         let marker_col = leading_column(line);
         let parent_depth = self.open.len().saturating_sub(1);
         let nested = parent_depth > 0;
-        if marker_col > 3 && !nested {
+        if marker_col > 3 && !nested && !single_tab_marker(line) {
             return true;
         }
         let parent_para = self.para.get(parent_depth).copied().unwrap_or(false);
@@ -1397,7 +1813,7 @@ impl ListWalk {
         let item = scan_list_marker(line)?;
         let marker_col = leading_column(line);
         let nested = !self.open.is_empty();
-        if marker_col > 3 && !nested {
+        if marker_col > 3 && !nested && !single_tab_marker(line) {
             return None;
         }
         let empty = marker_is_empty(line, &item);
@@ -1423,6 +1839,18 @@ impl ListWalk {
 
     fn note_paragraph(&mut self) {
         self.set_paragraph(true);
+    }
+
+    /// Content column of the deepest open item this line is indented into.
+    /// Document level is 0, so four leading spaces stay indented text.
+    fn thematic_parent_col(&self, line: &str) -> usize {
+        let column = leading_column(line);
+        self.open
+            .iter()
+            .rev()
+            .copied()
+            .find(|content| column >= *content)
+            .unwrap_or(0)
     }
 }
 
@@ -1465,7 +1893,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }]
     } else {
         let mut v = source_lines(markdown);
-        if markdown.ends_with('\n') {
+        if markdown.ends_with('\n') || markdown.ends_with('\r') {
             let end = markdown.len();
             v.push(SourceLine {
                 start: end,
@@ -1481,8 +1909,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     let mut all_pairs = Vec::new();
     let mut code_blocks = Vec::new();
 
-    let mut in_code_block = false;
-    let mut open_fence_range: Option<std::ops::Range<usize>> = None;
+    let mut open_fence: Option<OpenFence> = None;
 
     // Pre-detect table block ranges and column alignments
     let mut table_ranges: Vec<(usize, usize, std::ops::Range<usize>, Vec<TableColumnAlign>)> =
@@ -1532,91 +1959,93 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         let trimmed_start = line.trim_start();
         let indent_len = line.len() - trimmed_start.len();
 
-        // Check code block fences
-        if trimmed.starts_with("```") {
+        // Fences. Top-level backtick fences follow CommonMark. A fence in a
+        // list item or quote, a tab-indented fence, and a tilde line keep red.
+        if open_fence.is_some() {
             list_walk.note_block(line);
-            let full_with_nl = sline.start..sline.end;
-            if !in_code_block {
-                in_code_block = true;
-                open_fence_range = Some(full_with_nl);
-                let lang = trimmed
-                    .strip_prefix("```")
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-                let hidden = if line_end > line_start {
-                    vec![line_start..line_end]
+            let closes = open_fence.as_ref().is_some_and(|fence| {
+                if fence.strict {
+                    is_closing_fence(line, b'`', fence.len, 3)
                 } else {
-                    Vec::new()
-                };
-                all_hidden.extend(hidden.iter().cloned());
-                let (display_text, offset_map) =
-                    RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
-                lines.push(ParsedLine {
-                    line_index: i,
-                    source: line_source,
-                    kind: LineKind::CodeFence {
-                        language: lang,
-                        opening: true,
-                    },
-                    prefix_range: line_start..line_end,
-                    hidden_ranges: hidden,
-                    inline_pairs: Vec::new(),
-                    display_text,
-                    offset_map,
-                    styled_segments: Vec::new(),
-                });
-            } else {
-                in_code_block = false;
-                if let Some(open_r) = open_fence_range.take() {
-                    code_blocks.push((open_r, full_with_nl));
+                    trimmed.starts_with("```")
                 }
-                let hidden = if line_end > line_start {
-                    vec![line_start..line_end]
-                } else {
-                    Vec::new()
-                };
-                all_hidden.extend(hidden.iter().cloned());
-                let (display_text, offset_map) =
-                    RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
-                lines.push(ParsedLine {
-                    line_index: i,
-                    source: line_source,
-                    kind: LineKind::CodeFence {
+            });
+            if closes {
+                let fence = open_fence.take().expect("fence");
+                code_blocks.push((fence.open_range, sline.start..sline.end));
+                let parsed = fence_marker_line(
+                    i,
+                    line_source,
+                    line,
+                    LineKind::CodeFence {
                         language: None,
                         opening: false,
                     },
-                    prefix_range: line_start..line_end,
-                    hidden_ranges: hidden,
-                    inline_pairs: Vec::new(),
-                    display_text,
-                    offset_map,
-                    styled_segments: Vec::new(),
-                });
+                );
+                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                lines.push(parsed);
+            } else {
+                let strip = open_fence
+                    .as_ref()
+                    .filter(|fence| fence.strict)
+                    .map(|fence| prefix_through_column(line, fence.indent))
+                    .unwrap_or(0);
+                let parsed = code_content_line(i, line_source, line, strip);
+                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+                lines.push(parsed);
             }
             continue;
         }
-
-        if in_code_block {
+        let open_top = if in_list_or_quote(&lines) || backtick_info_rejects_fence(line) {
+            None
+        } else {
+            strict_backtick_open(line)
+        };
+        if let Some((len, indent, language)) = open_top {
             list_walk.note_block(line);
-            lines.push(ParsedLine {
-                line_index: i,
-                source: line_source.clone(),
-                kind: LineKind::CodeLine,
-                prefix_range: line_start..line_start,
-                hidden_ranges: Vec::new(),
-                inline_pairs: Vec::new(),
-                display_text: line.to_string(),
-                offset_map: RowOffsetMap::identity(line_start, line_end),
-                styled_segments: vec![StyledSegment {
-                    source: line_source,
-                    bold: false,
-                    italic: false,
-                    underline: false,
-                    strike: false,
-                    code: true,
-                    link_url: None,
-                }],
+            open_fence = Some(OpenFence {
+                strict: true,
+                len,
+                indent,
+                open_range: sline.start..sline.end,
             });
+            let parsed = fence_marker_line(
+                i,
+                line_source,
+                line,
+                LineKind::CodeFence {
+                    language,
+                    opening: true,
+                },
+            );
+            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+            lines.push(parsed);
+            continue;
+        }
+        let skip_rejected = !in_list_or_quote(&lines) && backtick_info_rejects_fence(line);
+        if trimmed.starts_with("```") && !skip_rejected {
+            list_walk.note_block(line);
+            let lang = trimmed
+                .strip_prefix("```")
+                .map(|info| info.trim().to_string())
+                .filter(|info| !info.is_empty());
+            open_fence = Some(OpenFence {
+                strict: false,
+                len: 3,
+                indent: 0,
+                open_range: sline.start..sline.end,
+            });
+            let parsed = fence_marker_line(
+                i,
+                line_source,
+                line,
+                LineKind::CodeFence {
+                    language: lang,
+                    opening: true,
+                },
+            );
+            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+            lines.push(parsed);
             continue;
         }
 
@@ -1636,8 +2065,9 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
-        // Horizontal Rule
-        if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+        // Horizontal rule: exact `---`, `***`, or `___`, indent 0–3 past the
+        // open list item (document level rejects four spaces and a tab).
+        if exact_thematic_break(line, list_walk.thematic_parent_col(line)) {
             list_walk.note_block(line);
             let hidden = vec![line_start..line_end];
             all_hidden.extend(hidden.iter().cloned());
@@ -1749,30 +2179,20 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             }
         }
 
+        if let Some((level, content)) = atx_heading(line) {
+            list_walk.note_block(line);
+            let parsed = atx_line(i, line_source, line, level, content);
+            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
+            all_pairs.extend(parsed.inline_pairs.iter().cloned());
+            lines.push(parsed);
+            continue;
+        }
+
         // Determine block kind & prefix length
         let mut kind = LineKind::Paragraph;
         let mut prefix_len = 0usize;
 
-        if indent_len <= 3 {
-            for (lvl, pfx) in [
-                (6u8, "###### "),
-                (5, "##### "),
-                (4, "#### "),
-                (3, "### "),
-                (2, "## "),
-                (1, "# "),
-            ] {
-                if trimmed_start.starts_with(pfx) {
-                    kind = LineKind::Heading { level: lvl };
-                    prefix_len = indent_len + pfx.len();
-                    break;
-                }
-            }
-        }
-
-        if prefix_len > 0 {
-            list_walk.note_block(line);
-        } else if let Some(item) = list_walk.take_list(line) {
+        if let Some(item) = list_walk.take_list(line) {
             let checkbox_source = item.task.as_ref().map(|task| {
                 let start = line_start + task.checkbox_at;
                 start..start + 3
@@ -1820,6 +2240,10 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             offset_map,
             styled_segments,
         });
+    }
+
+    if let Some(fence) = open_fence {
+        code_blocks.push((fence.open_range, markdown.len()..markdown.len()));
     }
 
     ParsedDocument {
@@ -1963,34 +2387,14 @@ mod tests {
         let md = "| **Col 1** | Col 2 |\n| :--- | :--- |\n| Val A | ~~Val B~~ |";
         let doc = parse_document(md);
         assert_eq!(doc.lines.len(), 3);
-        assert!(matches!(
-            doc.lines[0].kind,
-            LineKind::TableRow {
-                is_header: true,
-                ..
-            }
-        ));
+        assert!(matches!(doc.lines[0].kind, LineKind::TableRow { is_header: true, .. }));
         assert!(matches!(doc.lines[1].kind, LineKind::TableDelimiter));
-        assert!(matches!(
-            doc.lines[2].kind,
-            LineKind::TableRow {
-                is_header: false,
-                ..
-            }
-        ));
+        assert!(matches!(doc.lines[2].kind, LineKind::TableRow { is_header: false, .. }));
         assert_eq!(doc.lines[0].display_text, "| **Col 1** | Col 2 |");
         // Verify Col 1 is bold (via **), but Col 2 is not forced bold
-        let bold_segs: Vec<_> = doc.lines[0]
-            .styled_segments
-            .iter()
-            .filter(|s| s.bold)
-            .collect();
+        let bold_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| s.bold).collect();
         assert!(!bold_segs.is_empty());
-        let normal_segs: Vec<_> = doc.lines[0]
-            .styled_segments
-            .iter()
-            .filter(|s| !s.bold)
-            .collect();
+        let normal_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| !s.bold).collect();
         assert!(!normal_segs.is_empty());
     }
 
@@ -2038,6 +2442,769 @@ mod tests {
             assert_eq!(md[src_idx..].chars().next(), Some(ch));
             assert_eq!(line.offset_map.source_to_display(src_idx), disp_idx);
         }
+    }
+
+    struct LeafExpect {
+        kind: &'static str,
+        display: &'static str,
+        source: &'static str,
+        marks: &'static str,
+        links: &'static str,
+    }
+
+    fn leaf(kind: &'static str, display: &'static str, source: &'static str) -> LeafExpect {
+        LeafExpect {
+            kind,
+            display,
+            source,
+            marks: "-",
+            links: "-",
+        }
+    }
+
+    fn leaf_marks(
+        kind: &'static str,
+        display: &'static str,
+        source: &'static str,
+        marks: &'static str,
+    ) -> LeafExpect {
+        LeafExpect {
+            kind,
+            display,
+            source,
+            marks,
+            links: "-",
+        }
+    }
+
+    fn leaf_link(
+        kind: &'static str,
+        display: &'static str,
+        source: &'static str,
+        links: &'static str,
+    ) -> LeafExpect {
+        LeafExpect {
+            kind,
+            display,
+            source,
+            marks: "-",
+            links,
+        }
+    }
+
+    fn leaf_kind_token(kind: &LineKind) -> String {
+        match kind {
+            LineKind::Empty => "empty".to_string(),
+            LineKind::Paragraph => "p".to_string(),
+            LineKind::Heading { level } => format!("h{level}"),
+            LineKind::Blockquote => "quote".to_string(),
+            LineKind::ListItem {
+                ordered,
+                number,
+                task,
+                indent_cols,
+                ..
+            } => match (ordered, task) {
+                (false, None) => format!("ul:{indent_cols}"),
+                (true, None) => format!("ol:{number}:{indent_cols}"),
+                (false, Some(false)) => format!("task:{indent_cols}"),
+                (false, Some(true)) => format!("task-x:{indent_cols}"),
+                (true, Some(_)) => format!("ol-task:{number}:{indent_cols}"),
+            },
+            LineKind::CodeFence {
+                language: Some(language),
+                opening: true,
+            } => format!("fence-open:{language}"),
+            LineKind::CodeFence {
+                language: None,
+                opening: true,
+            } => "fence-open".to_string(),
+            LineKind::CodeFence { opening: false, .. } => "fence-close".to_string(),
+            LineKind::CodeLine => "code".to_string(),
+            LineKind::HorizontalRule => "hr".to_string(),
+            LineKind::TableDelimiter => "tdelim".to_string(),
+            LineKind::TableRow { .. } => "row".to_string(),
+        }
+    }
+
+    fn leaf_dump(md: &str) -> Result<String, String> {
+        let doc = parse_document(md);
+        let mut out = String::new();
+        for line in &doc.lines {
+            for (idx, ch) in line.display_text.char_indices() {
+                let src = line.offset_map.display_to_source(idx);
+                if !md.is_char_boundary(src) || !md[src..].starts_with(ch) {
+                    return Err(format!(
+                        "map display {ch:?} at {idx} -> source {src} in {:?}",
+                        line.display_text
+                    ));
+                }
+            }
+            let mut marks = Vec::new();
+            let mut links = Vec::new();
+            for segment in &line.styled_segments {
+                let mut flags = String::new();
+                if segment.bold {
+                    flags.push('B');
+                }
+                if segment.italic {
+                    flags.push('I');
+                }
+                if segment.code {
+                    flags.push('C');
+                }
+                if segment.strike {
+                    flags.push('S');
+                }
+                let text = md.get(segment.source.clone()).unwrap_or("");
+                if !flags.is_empty() && !text.is_empty() {
+                    marks.push(format!("{flags}:{text}"));
+                }
+                if let Some(url) = &segment.link_url {
+                    links.push(url.clone());
+                }
+            }
+            let marks = if marks.is_empty() {
+                "-".to_string()
+            } else {
+                marks.join(",")
+            };
+            let links = if links.is_empty() {
+                "-".to_string()
+            } else {
+                links.join(",")
+            };
+            let source = &md[line.source.clone()];
+            out.push_str(&format!(
+                "{}\tdisplay={:?}\tsource={:?}\tmarks={marks}\tlinks={links}\n",
+                leaf_kind_token(&line.kind),
+                line.display_text,
+                source,
+            ));
+        }
+        Ok(out)
+    }
+
+    fn expect_dump(lines: &[LeafExpect]) -> String {
+        let mut out = String::new();
+        for line in lines {
+            out.push_str(&format!(
+                "{}\tdisplay={:?}\tsource={:?}\tmarks={}\tlinks={}\n",
+                line.kind, line.display, line.source, line.marks, line.links,
+            ));
+        }
+        out
+    }
+
+    #[test]
+    fn unclosed_fence_spans_to_eof() {
+        let md = "```\naaa\n";
+        let doc = parse_document(md);
+        assert_eq!(doc.code_blocks.len(), 1);
+        let (open, close) = &doc.code_blocks[0];
+        assert_eq!(open.start, 0);
+        assert!(open.end > open.start);
+        assert_eq!(close.start, md.len());
+        assert_eq!(close.end, md.len());
+    }
+
+    /// CommonMark 0.31.2 leaf blocks this parser keeps: ATX headings, thematic
+    /// breaks, and top-level backtick fences. Each case compares the whole
+    /// kind, display, source, mark, and link record.
+    #[test]
+    fn leaf_blocks_match_commonmark_examples() {
+        let cases: Vec<(&str, &str, Vec<LeafExpect>)> = leaf_block_cases();
+        let mut failures = Vec::new();
+        for (name, md, expected) in &cases {
+            let want = expect_dump(expected);
+            match leaf_dump(md) {
+                Ok(actual) if actual == want => {}
+                Ok(actual) => {
+                    failures.push(format!("CASE {name}\nexpected:\n{want}actual:\n{actual}"))
+                }
+                Err(err) => failures.push(format!("CASE {name} {err}")),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} leaf-block case(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
+        vec![
+            (
+                "ex43-hr",
+                "***\n---\n___",
+                vec![
+                    leaf("hr", "", "***"),
+                    leaf("hr", "", "---"),
+                    leaf("hr", "", "___"),
+                ],
+            ),
+            ("ex44-not-hr", "+++", vec![leaf("p", "+++", "+++")]),
+            ("ex45-equals-not-hr", "===", vec![leaf("p", "===", "===")]),
+            (
+                "ex46-too-short",
+                "--\n**\n__",
+                vec![
+                    leaf("p", "--", "--"),
+                    leaf("p", "**", "**"),
+                    leaf("p", "__", "__"),
+                ],
+            ),
+            (
+                "ex47-hr-indent",
+                " ***\n  ***\n   ***",
+                vec![
+                    leaf("hr", "", " ***"),
+                    leaf("hr", "", "  ***"),
+                    leaf("hr", "", "   ***"),
+                ],
+            ),
+            (
+                "ex50-hr-long",
+                "_____________________________________",
+                vec![leaf(
+                    "p",
+                    "_____________________________________",
+                    "_____________________________________",
+                )],
+            ),
+            (
+                "ex51-hr-spaced",
+                " - - -",
+                vec![leaf("ul:1", "- -", " - - -")],
+            ),
+            (
+                "ex52-hr-stars",
+                " **  * ** * ** * **",
+                vec![leaf("p", " **  * ** * ** * **", " **  * ** * ** * **")],
+            ),
+            (
+                "ex53-hr-spaced-dashes",
+                "-     -      -      -",
+                vec![leaf("ul:0", "    -      -      -", "-     -      -      -")],
+            ),
+            (
+                "ex54-hr-trailing-space",
+                "- - - -    ",
+                vec![leaf("ul:0", "- - -    ", "- - - -    ")],
+            ),
+            (
+                "ex55-not-hr",
+                "_ _ _ _ a\n\na------\n\n---a---",
+                vec![
+                    leaf("p", "_ _ _ _ a", "_ _ _ _ a"),
+                    leaf("empty", "", ""),
+                    leaf("p", "a------", "a------"),
+                    leaf("empty", "", ""),
+                    leaf("p", "---a---", "---a---"),
+                ],
+            ),
+            (
+                "ex56-mixed-not-hr",
+                " *-*",
+                vec![leaf_marks("p", " -", " *-*", "I:-")],
+            ),
+            (
+                "ex57-hr-between-lists",
+                "- foo\n***\n- bar",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("hr", "", "***"),
+                    leaf("ul:0", "bar", "- bar"),
+                ],
+            ),
+            (
+                "ex58-hr-not-setext",
+                "Foo\n***\nbar",
+                vec![
+                    leaf("p", "Foo", "Foo"),
+                    leaf("hr", "", "***"),
+                    leaf("p", "bar", "bar"),
+                ],
+            ),
+            (
+                "ex60-hr-vs-list",
+                "* Foo\n* * *\n* Bar",
+                vec![
+                    leaf("ul:0", "Foo", "* Foo"),
+                    leaf("ul:0", "* *", "* * *"),
+                    leaf("ul:0", "Bar", "* Bar"),
+                ],
+            ),
+            (
+                "ex62-atx-levels",
+                "# foo\n## foo\n### foo\n#### foo\n##### foo\n###### foo",
+                vec![
+                    leaf("h1", "foo", "# foo"),
+                    leaf("h2", "foo", "## foo"),
+                    leaf("h3", "foo", "### foo"),
+                    leaf("h4", "foo", "#### foo"),
+                    leaf("h5", "foo", "##### foo"),
+                    leaf("h6", "foo", "###### foo"),
+                ],
+            ),
+            (
+                "ex63-seven-hashes",
+                "####### foo",
+                vec![leaf("p", "####### foo", "####### foo")],
+            ),
+            (
+                "audit-seven-hashes",
+                "####### no",
+                vec![leaf("p", "####### no", "####### no")],
+            ),
+            (
+                "ex64-atx-needs-space",
+                "#5 bolt\n\n#hashtag",
+                vec![
+                    leaf("p", "#5 bolt", "#5 bolt"),
+                    leaf("empty", "", ""),
+                    leaf("p", "#hashtag", "#hashtag"),
+                ],
+            ),
+            (
+                "ex65-escaped-atx",
+                "\\## foo",
+                vec![leaf("p", "\\## foo", "\\## foo")],
+            ),
+            (
+                "ex66-atx-inline",
+                "# foo *bar* \\*baz\\*",
+                vec![leaf_marks(
+                    "h1",
+                    "foo bar \\*baz\\*",
+                    "# foo *bar* \\*baz\\*",
+                    "I:bar",
+                )],
+            ),
+            (
+                "ex67-atx-trim",
+                "#                  foo                     ",
+                vec![leaf(
+                    "h1",
+                    "foo",
+                    "#                  foo                     ",
+                )],
+            ),
+            (
+                "ex68-atx-indent",
+                " ### foo\n  ## foo\n   # foo",
+                vec![
+                    leaf("h3", "foo", " ### foo"),
+                    leaf("h2", "foo", "  ## foo"),
+                    leaf("h1", "foo", "   # foo"),
+                ],
+            ),
+            (
+                "ex69-four-spaces-not-atx",
+                "    # foo",
+                vec![leaf("p", "    # foo", "    # foo")],
+            ),
+            (
+                "ex71-closing-hash",
+                "## foo ##\n  ###   bar    ###",
+                vec![
+                    leaf("h2", "foo", "## foo ##"),
+                    leaf("h3", "bar", "  ###   bar    ###"),
+                ],
+            ),
+            (
+                "ex72-closing-hash-run",
+                "# foo ##################################\n##### foo ##",
+                vec![
+                    leaf("h1", "foo", "# foo ##################################"),
+                    leaf("h5", "foo", "##### foo ##"),
+                ],
+            ),
+            (
+                "ex73-closing-hash-spaces",
+                "### foo ###     ",
+                vec![leaf("h3", "foo", "### foo ###     ")],
+            ),
+            (
+                "ex74-hash-not-closer",
+                "### foo ### b",
+                vec![leaf("h3", "foo ### b", "### foo ### b")],
+            ),
+            (
+                "ex75-hash-needs-space",
+                "# foo#",
+                vec![leaf("h1", "foo#", "# foo#")],
+            ),
+            (
+                "ex76-escaped-closer",
+                "### foo \\###\n## foo #\\##\n# foo \\#",
+                vec![
+                    leaf("h3", "foo \\###", "### foo \\###"),
+                    leaf("h2", "foo #\\##", "## foo #\\##"),
+                    leaf("h1", "foo \\#", "# foo \\#"),
+                ],
+            ),
+            (
+                "ex77-four-stars",
+                "****\n## foo\n****",
+                vec![
+                    leaf("p", "****", "****"),
+                    leaf("h2", "foo", "## foo"),
+                    leaf("p", "****", "****"),
+                ],
+            ),
+            (
+                "ex78-atx-interrupts",
+                "Foo bar\n# baz\nBar foo",
+                vec![
+                    leaf("p", "Foo bar", "Foo bar"),
+                    leaf("h1", "baz", "# baz"),
+                    leaf("p", "Bar foo", "Bar foo"),
+                ],
+            ),
+            (
+                "ex79-empty-atx",
+                "## \n#\n### ###",
+                vec![
+                    leaf("h2", "", "## "),
+                    leaf("h1", "", "#"),
+                    leaf("h3", "", "### ###"),
+                ],
+            ),
+            (
+                "ex88-not-setext",
+                "Foo\n= =\n\nFoo\n--- -",
+                vec![
+                    leaf("p", "Foo", "Foo"),
+                    leaf("p", "= =", "= ="),
+                    leaf("empty", "", ""),
+                    leaf("p", "Foo", "Foo"),
+                    leaf("p", "--- -", "--- -"),
+                ],
+            ),
+            (
+                "ex92-quote-then-hr",
+                "> Foo\n---",
+                vec![leaf("quote", "Foo", "> Foo"), leaf("hr", "", "---")],
+            ),
+            (
+                "ex94-list-then-hr",
+                "- Foo\n---",
+                vec![leaf("ul:0", "Foo", "- Foo"), leaf("hr", "", "---")],
+            ),
+            (
+                "ex97-equals-after-blank",
+                "\n====",
+                vec![leaf("empty", "", ""), leaf("p", "====", "====")],
+            ),
+            (
+                "ex98-two-hrs",
+                "---\n---",
+                vec![leaf("hr", "", "---"), leaf("hr", "", "---")],
+            ),
+            (
+                "ex119-backtick-fence",
+                "```\n<\n >\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "<", "<", "C:<"),
+                    leaf_marks("code", " >", " >", "C: >"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex122-tilde-inside-backticks",
+                "```\naaa\n~~~\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "~~~", "~~~", "C:~~~"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex124-fence-len",
+                "````\naaa\n```\n``````",
+                vec![
+                    leaf("fence-open", "", "````"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "```", "```", "C:```"),
+                    leaf("fence-close", "", "``````"),
+                ],
+            ),
+            (
+                "ex126-open-fence",
+                "```",
+                vec![leaf("fence-open", "", "```")],
+            ),
+            (
+                "ex127-unclosed-fence",
+                "`````\n\n```\naaa",
+                vec![
+                    leaf("fence-open", "", "`````"),
+                    leaf("code", "", ""),
+                    leaf_marks("code", "```", "```", "C:```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                ],
+            ),
+            (
+                "ex129-fence-blanks",
+                "```\n\n  \n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf("code", "", ""),
+                    leaf_marks("code", "  ", "  ", "C:  "),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex130-empty-fence",
+                "```\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex131-fence-indent-1",
+                " ```\n aaa\naaa\n```",
+                vec![
+                    leaf("fence-open", "", " ```"),
+                    leaf_marks("code", "aaa", " aaa", "C:aaa"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex132-fence-indent-2",
+                "  ```\naaa\n  aaa\naaa\n  ```",
+                vec![
+                    leaf("fence-open", "", "  ```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "aaa", "  aaa", "C:aaa"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf("fence-close", "", "  ```"),
+                ],
+            ),
+            (
+                "ex133-fence-indent-3",
+                "   ```\n   aaa\n    aaa\n  aaa\n   ```",
+                vec![
+                    leaf("fence-open", "", "   ```"),
+                    leaf_marks("code", "aaa", "   aaa", "C:aaa"),
+                    leaf_marks("code", " aaa", "    aaa", "C: aaa"),
+                    leaf_marks("code", "aaa", "  aaa", "C:aaa"),
+                    leaf("fence-close", "", "   ```"),
+                ],
+            ),
+            (
+                "ex135-closer-indent",
+                "```\naaa\n  ```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf("fence-close", "", "  ```"),
+                ],
+            ),
+            (
+                "ex136-opener-indent-3",
+                "   ```\naaa\n  ```",
+                vec![
+                    leaf("fence-open", "", "   ```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf("fence-close", "", "  ```"),
+                ],
+            ),
+            (
+                "ex137-closer-indent-4",
+                "```\naaa\n    ```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "    ```", "    ```", "C:    ```"),
+                ],
+            ),
+            (
+                "ex138-backtick-in-info",
+                "``` ```\naaa",
+                vec![
+                    leaf_marks("p", " ", "``` ```", "C: "),
+                    leaf("p", "aaa", "aaa"),
+                ],
+            ),
+            (
+                "ex140-fence-interrupts",
+                "foo\n```\nbar\n```\nbaz",
+                vec![
+                    leaf("p", "foo", "foo"),
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "bar", "bar", "C:bar"),
+                    leaf("fence-close", "", "```"),
+                    leaf("p", "baz", "baz"),
+                ],
+            ),
+            (
+                "ex142-fence-info",
+                "```ruby\ndef foo(x)\n  return 3\nend\n```",
+                vec![
+                    leaf("fence-open:ruby", "", "```ruby"),
+                    leaf_marks("code", "def foo(x)", "def foo(x)", "C:def foo(x)"),
+                    leaf_marks("code", "  return 3", "  return 3", "C:  return 3"),
+                    leaf_marks("code", "end", "end", "C:end"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "ex144-info-semicolon",
+                "````;\n````",
+                vec![
+                    leaf("fence-open:;", "", "````;"),
+                    leaf("fence-close", "", "````"),
+                ],
+            ),
+            (
+                "ex145-backtick-info-not-fence",
+                "``` aa ```\nfoo",
+                vec![
+                    leaf_marks("p", " aa ", "``` aa ```", "C: aa "),
+                    leaf("p", "foo", "foo"),
+                ],
+            ),
+            (
+                "ex147-closer-info",
+                "```\n``` aaa\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "``` aaa", "``` aaa", "C:``` aaa"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "bold-closing-hash",
+                "## **foo** ##",
+                vec![leaf_marks("h2", "foo", "## **foo** ##", "B:foo")],
+            ),
+            (
+                "heading-link",
+                "# [Foo](/url)",
+                vec![leaf_link("h1", "Foo", "# [Foo](/url)", "/url")],
+            ),
+            (
+                "nested-list-not-code",
+                "- foo\n    - bar",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("ul:4", "bar", "    - bar"),
+                ],
+            ),
+            (
+                "quote-indent-3",
+                "   > foo",
+                vec![leaf("quote", "foo", "   > foo")],
+            ),
+            (
+                "tab-list-not-code",
+                "\t- foo",
+                vec![leaf("ul:1", "foo", "\t- foo")],
+            ),
+            (
+                "double-tilde-not-fence",
+                "~~Hi~~",
+                vec![leaf_marks("p", "Hi", "~~Hi~~", "S:Hi")],
+            ),
+            (
+                "blank-spaces-not-code",
+                "    ",
+                vec![leaf("empty", "    ", "    ")],
+            ),
+            (
+                "spaced-dashes-after-paragraph",
+                "Foo\n- - -",
+                vec![leaf("p", "Foo", "Foo"), leaf("ul:0", "- -", "- - -")],
+            ),
+            (
+                "four-dashes-after-paragraph-stay-text",
+                "Foo\n ----\nFoo\n   ----      ",
+                vec![
+                    leaf("p", "Foo", "Foo"),
+                    leaf("p", " ----", " ----"),
+                    leaf("p", "Foo", "Foo"),
+                    leaf("p", "   ----      ", "   ----      "),
+                ],
+            ),
+            (
+                "four-dashes-at-top-are-hr",
+                "----",
+                vec![leaf("p", "----", "----")],
+            ),
+            (
+                "table-unchanged",
+                "| a | b |\n| --- | --- |\n| c | d |",
+                vec![
+                    leaf("row", "| a | b |", "| a | b |"),
+                    leaf("tdelim", "", "| --- | --- |"),
+                    leaf("row", "| c | d |", "| c | d |"),
+                ],
+            ),
+            (
+                "fence-tabs",
+                "```\n\tkeep\tme\n```",
+                vec![
+                    leaf("fence-open", "", "```"),
+                    leaf_marks("code", "\tkeep\tme", "\tkeep\tme", "C:\tkeep\tme"),
+                    leaf("fence-close", "", "```"),
+                ],
+            ),
+            (
+                "top-fence-keeps-shorter-backticks-as-code",
+                "`````\naaa\n```\nbar",
+                vec![
+                    leaf("fence-open", "", "`````"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "```", "```", "C:```"),
+                    leaf_marks("code", "bar", "bar", "C:bar"),
+                ],
+            ),
+            (
+                "list-fence-closes-on-three-backticks",
+                "- foo\n````\ncode\n```\nbar",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("fence-open:`", "", "````"),
+                    leaf_marks("code", "code", "code", "C:code"),
+                    leaf("fence-close", "", "```"),
+                    leaf("p", "bar", "bar"),
+                ],
+            ),
+            (
+                "tilde-lines-stay-paragraphs",
+                "~~~\ncode\n~~~",
+                vec![
+                    leaf("p", "~~~", "~~~"),
+                    leaf("p", "code", "code"),
+                    leaf("p", "~~~", "~~~"),
+                ],
+            ),
+            (
+                "quote-blank-then-fence-info-stays-fence",
+                "> foo\n\n    ``` aa ```",
+                vec![
+                    leaf("quote", "foo", "> foo"),
+                    leaf("empty", "", ""),
+                    leaf("fence-open:aa ```", "", "    ``` aa ```"),
+                ],
+            ),
+            (
+                "tab-fence-stays-red",
+                "\t```\ncode",
+                vec![
+                    leaf("fence-open", "", "\t```"),
+                    leaf_marks("code", "code", "code", "C:code"),
+                ],
+            ),
+        ]
     }
 
     fn kind_report(md: &str, kind: &LineKind) -> String {
@@ -2274,31 +3441,30 @@ task_tabs[0] ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[
         );
     }
 
-    /// F3 was Low. Stripping the CR hid it from the caret, so the editor
-    /// keeps it in the line, the same as kit `4e72b711`. A trailing CR is a
-    /// line ending for the marker scan, so `1.\r` is an empty item whose
-    /// display is the CR. `1.\rfoo` stays a paragraph (the CR is not the end).
+    /// A CR LF ending is not part of the line text. The marker scan still
+    /// treats that ending as the end of the marker, so these stay list items
+    /// and the display is the text before the CR.
     #[test]
     fn trailing_cr_stays_in_the_editor_line() {
         assert_eq!(
             observe_line("1.\r\n", 0),
-            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\\r\" strike=- link=- map=ok"
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok"
         );
         assert_eq!(
             observe_line("1)\r\n", 0),
-            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\\r\" strike=- link=- map=ok"
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok"
         );
         assert_eq!(
             observe_line("1. foo\r\n", 0),
-            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\\r\" strike=- link=- map=ok"
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok"
         );
         assert_eq!(
             observe_line("1. [ ]\r\n", 0),
-            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]\\r\" strike=- link=- map=ok"
+            "ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"[ ]\" strike=- link=- map=ok"
         );
         assert_eq!(
             observe_line("1. [ ] \r\n", 0),
-            "ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\\r\" strike=- link=- map=ok"
+            "ListItem ordered=true number=1 task=unchecked indent=0 checkbox=\"[ ]\" display=\"\" strike=- link=- map=ok"
         );
     }
 
@@ -2577,13 +3743,220 @@ para[2] Empty display=\"\" strike=- link=- map=ok"
         assert_eq!(
             observe_doc("crlf", "1. foo\r\n2.\r\n3. bar"),
             "\
-crlf[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\\r\" strike=- link=- map=ok
-crlf[1] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"\\r\" strike=- link=- map=ok
+crlf[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"foo\" strike=- link=- map=ok
+crlf[1] ListItem ordered=true number=2 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok
 crlf[2] ListItem ordered=true number=3 task=none indent=0 checkbox=- display=\"bar\" strike=- link=- map=ok"
         );
         assert_eq!(
-            observe_line("1.\rfoo", 0),
-            "Paragraph display=\"1.\\rfoo\" strike=- link=- map=ok"
+            observe_doc("bare", "1.\rfoo"),
+            "\
+bare[0] ListItem ordered=true number=1 task=none indent=0 checkbox=- display=\"\" strike=- link=- map=ok
+bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
         );
+    }
+
+    /// Exact `---`, `***`, and `___` are rules, including after HTML, which is
+    /// BASE (no HTML-block guard). Every other shape is the paragraph or list
+    /// BASE already parses.
+    #[test]
+    fn extended_rules_inside_html_stay_visible_text() {
+        let outside_src = "Foo\n****\n";
+        let outside = parse_document(outside_src);
+        assert!(matches!(outside.lines[1].kind, LineKind::Paragraph));
+        assert_eq!(outside.lines[1].display_text, "****");
+        assert_eq!(&outside_src[outside.lines[1].source.clone()], "****");
+        let kept = "- item\n<br>\n---\n";
+        let list_rule = parse_document(kept);
+        assert!(matches!(list_rule.lines[2].kind, LineKind::HorizontalRule));
+        assert_eq!(list_rule.lines[2].display_text, "");
+        assert_eq!(&kept[list_rule.lines[2].source.clone()], "---");
+        let indented = "- item\n  <div>\n---\n";
+        let indented_rule = parse_document(indented);
+        assert!(matches!(
+            indented_rule.lines[2].kind,
+            LineKind::HorizontalRule
+        ));
+        assert_eq!(indented_rule.lines[2].display_text, "");
+        assert_eq!(&indented[indented_rule.lines[2].source.clone()], "---");
+        let indented_blank = "- item\n\n  <div>\n---\n";
+        let blank_rule = parse_document(indented_blank);
+        assert!(matches!(blank_rule.lines[3].kind, LineKind::HorizontalRule));
+        assert_eq!(blank_rule.lines[3].display_text, "");
+        assert_eq!(&indented_blank[blank_rule.lines[3].source.clone()], "---");
+        let div_rule = "<div>\n---\n";
+        let div_doc = parse_document(div_rule);
+        assert_eq!(&div_rule[div_doc.lines[1].source.clone()], "---");
+        assert_eq!(div_doc.lines[1].display_text, "");
+        assert!(matches!(div_doc.lines[1].kind, LineKind::HorizontalRule));
+
+        let cases = [
+            ("<pre>\n****\n", 1, "****"),
+            ("<div>\n****\n", 1, "****"),
+            ("<!--\n****\n", 1, "****"),
+            ("<script>\n****\n", 1, "****"),
+            ("<pre>\n____\n", 1, "____"),
+            ("<pre>\n_ _ _\n", 1, "_ _ _"),
+            ("<pre>\n\n****\n", 2, "****"),
+            ("Para\n<pre>\n****\n", 2, "****"),
+            ("<pre>\n   ****\n", 1, "   ****"),
+            ("<pre>\r****\r", 1, "****"),
+        ];
+        for (src, index, display) in cases {
+            let doc = parse_document(src);
+            let line = &doc.lines[index];
+            assert_eq!(&src[line.source.clone()], display, "{src:?}");
+            assert_eq!(line.display_text, display, "{src:?}");
+            assert!(
+                matches!(line.kind, LineKind::Paragraph),
+                "{src:?} kind {:?}",
+                line.kind
+            );
+        }
+
+        let stars = "<pre>\n* * *\n";
+        let star_doc = parse_document(stars);
+        assert_eq!(&stars[star_doc.lines[1].source.clone()], "* * *");
+        assert_eq!(star_doc.lines[1].display_text, "* *");
+        assert!(matches!(
+            star_doc.lines[1].kind,
+            LineKind::ListItem {
+                ordered: false,
+                indent_cols: 0,
+                ..
+            }
+        ));
+        let dashes = "<pre>\n- - -\n";
+        let dash_doc = parse_document(dashes);
+        assert_eq!(&dashes[dash_doc.lines[1].source.clone()], "- - -");
+        assert_eq!(dash_doc.lines[1].display_text, "- -");
+        assert!(matches!(
+            dash_doc.lines[1].kind,
+            LineKind::ListItem {
+                ordered: false,
+                indent_cols: 0,
+                ..
+            }
+        ));
+        let tabs = "<pre>\n*\t*\t*\n";
+        let tab_doc = parse_document(tabs);
+        assert_eq!(&tabs[tab_doc.lines[1].source.clone()], "*\t*\t*");
+        assert_eq!(tab_doc.lines[1].display_text, "*\t*");
+        assert!(matches!(
+            tab_doc.lines[1].kind,
+            LineKind::ListItem {
+                ordered: false,
+                indent_cols: 0,
+                ..
+            }
+        ));
+    }
+
+    /// R6-9. Four spaces before `---` is indented text once a bare CR is a
+    /// line break. This parser has no indented-code block (BASE shows
+    /// `    indented` as a paragraph). Pulldown, which does not split CR,
+    /// returns one code block for the unsplit bytes. The line must not be a
+    /// rule: display keeps `    ---`, then paragraph `next`.
+    #[test]
+    fn four_space_dash_rule_after_bare_cr_stays_text() {
+        let src = "    ---\rnext\r";
+        let doc = parse_document(src);
+        assert!(
+            !matches!(doc.lines[0].kind, LineKind::HorizontalRule),
+            "kind {:?}",
+            doc.lines[0].kind
+        );
+        assert!(matches!(doc.lines[0].kind, LineKind::Paragraph));
+        assert_eq!(doc.lines[0].display_text, "    ---");
+        assert_eq!(&src[doc.lines[0].source.clone()], "    ---");
+        assert!(matches!(doc.lines[1].kind, LineKind::Paragraph));
+        assert_eq!(doc.lines[1].display_text, "next");
+        assert_eq!(&src[doc.lines[1].source.clone()], "next");
+    }
+
+    /// A blank line leaves the item open. Four spaces is two past `- `'s
+    /// content column, so the line is a rule. The same bytes at column 0
+    /// stay a paragraph.
+    #[test]
+    fn four_space_rule_inside_an_open_list_is_a_rule() {
+        let top = "    ---\nnext\n";
+        let top_doc = parse_document(top);
+        assert!(matches!(top_doc.lines[0].kind, LineKind::Paragraph));
+        assert_eq!(top_doc.lines[0].display_text, "    ---");
+
+        let cases = [
+            ("- item\n\n    ---\n", 2),
+            ("1. item\n\n    ---\n", 2),
+            ("10) item\n\n    ---\n", 2),
+            ("- [ ] item\n\n    ---\n", 2),
+            ("1. [ ] item\n\n    ---\n", 2),
+            ("- a\n  - b\n\n    ---\n", 3),
+            ("- a\n  - b\n    <!DOCTYPE html>\n    ---\n", 3),
+        ];
+        for (src, index) in cases {
+            let doc = parse_document(src);
+            assert!(
+                matches!(doc.lines[index].kind, LineKind::HorizontalRule),
+                "{src:?} kind {:?}",
+                doc.lines[index].kind
+            );
+            assert_eq!(doc.lines[index].display_text, "", "{src:?}");
+            assert_eq!(&src[doc.lines[index].source.clone()], "    ---", "{src:?}");
+        }
+    }
+
+    /// K1. A tab inside an open list is a column stop of 4, same as BASE
+    /// `leading_column`. Extra indent past the item content column is 2, so
+    /// the line is a rule. A tab at column 0 stays a paragraph.
+    #[test]
+    fn tab_rule_inside_an_open_list_is_a_rule() {
+        let top = "\t---\n";
+        let top_doc = parse_document(top);
+        assert!(matches!(top_doc.lines[0].kind, LineKind::Paragraph));
+        assert_eq!(top_doc.lines[0].display_text, "\t---");
+        assert_eq!(&top[top_doc.lines[0].source.clone()], "\t---");
+
+        let cases = [
+            ("- item\n\n\t---\n", 2, "\t---"),
+            ("- item\n\t___\n", 1, "\t___"),
+            ("* item\n\t***\n", 1, "\t***"),
+        ];
+        for (src, index, source) in cases {
+            let doc = parse_document(src);
+            assert!(
+                matches!(doc.lines[index].kind, LineKind::HorizontalRule),
+                "{src:?} kind {:?}",
+                doc.lines[index].kind
+            );
+            assert_eq!(doc.lines[index].display_text, "", "{src:?}");
+            assert_eq!(&src[doc.lines[index].source.clone()], source, "{src:?}");
+        }
+    }
+
+    /// BASE `1d03313` display of `# foo #\t` is `foo #\t` (the tab stays, and
+    /// the hash is text). `#\t#` stays a heading whose display is `#`.
+    #[test]
+    fn tab_after_a_closing_hash_stays_in_the_heading_text() {
+        let doc = parse_document("# foo #\t");
+        assert!(matches!(doc.lines[0].kind, LineKind::Heading { level: 1 }));
+        assert_eq!(doc.lines[0].display_text, "foo #\t");
+
+        let kept = parse_document("# foo\t#");
+        assert_eq!(kept.lines[0].display_text, "foo\t#");
+
+        let trailed = parse_document("# foo\t");
+        assert_eq!(trailed.lines[0].display_text, "foo\t");
+
+        let spaces = parse_document("# foo #   ");
+        assert_eq!(spaces.lines[0].display_text, "foo");
+
+        let empty = parse_document("### ###");
+        assert_eq!(empty.lines[0].display_text, "");
+
+        let tab_hash = parse_document("#\t#");
+        assert!(matches!(
+            tab_hash.lines[0].kind,
+            LineKind::Heading { level: 1 }
+        ));
+        assert_eq!(tab_hash.lines[0].display_text, "#");
     }
 }

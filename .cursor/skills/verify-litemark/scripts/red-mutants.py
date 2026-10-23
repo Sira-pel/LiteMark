@@ -48,12 +48,16 @@ MUTANTS: dict[str, dict[str, str]] = {
                     number: item.number,
                     task: item.task.as_ref().map(|task| task.checked),
                     indent_cols: indent_len,
+                    checkbox_source,
+                };
 """,
         "new": """                kind = LineKind::ListItem {
                     ordered: item.ordered,
                     number: item.number,
                     task: item.task.as_ref().map(|task| task.checked),
-                    indent_cols: indent_len + 7,
+                    indent_cols: indent_len + if item.ordered { 0 } else { 7 },
+                    checkbox_source,
+                };
 """,
     },
     "tables-not-a-table": {
@@ -72,11 +76,9 @@ MUTANTS: dict[str, dict[str, str]] = {
     "fenced-code-no-fence": {
         "file": "src/markdown/parser.rs",
         "label": "fence detector also matches line rust",
-        "old": """        // Check code block fences
-        if trimmed.starts_with("```") {
+        "old": """        if trimmed.starts_with("```") && !skip_rejected {
 """,
-        "new": """        // Check code block fences
-        if trimmed.starts_with("```") || trimmed == "rust" {
+        "new": """        if (trimmed.starts_with("```") || trimmed == "rust") && !skip_rejected {
 """,
     },
     "links-plain": {
@@ -111,8 +113,8 @@ MUTANTS: dict[str, dict[str, str]] = {
     "trailing-empty": {
         "file": "src/markdown/parser.rs",
         "label": "trailing newline does not append an empty line",
-        "old": "        if markdown.ends_with('\\n') {\n",
-        "new": "        if false && markdown.ends_with('\\n') {\n",
+        "old": "        if markdown.ends_with('\\n') || markdown.ends_with('\\r') {\n",
+        "new": "        if false && (markdown.ends_with('\\n') || markdown.ends_with('\\r')) {\n",
     },
 }
 

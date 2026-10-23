@@ -185,6 +185,7 @@ green_names=(
   markers-strike
   tables
   fenced-code
+  leaf-blocks
   links
   images
   long-lines

@@ -60,7 +60,7 @@ cargo clippy --all-targets -- -D warnings
 
 `ci.sh` treats `cargo test` exit 0 as a pass only when the log contains `test result: ok. N passed` with N greater than 0. Otherwise it prints `test_result_ok=missing`. It treats the fmt gate as a pass only when the log contains the exact line `fmt_gate=pass`. Otherwise, when the gate exits 0, it prints `fmt_gate_pass=missing`.
 
-The baseline is the tip after the `src/markdown/mod.rs` reorder: `fmt_baseline_files=19` and `fmt_baseline_hunks=201`. `cargo fmt --check` on `main` (`fc681a8`) is 20 files and 202 hunks. The only header on main that the tip does not have is `src/markdown/mod.rs:1`. The tip adds no dirty hunk of its own.
+The kit commit `4e72b711` recorded `fmt_baseline_files=19` and `fmt_baseline_hunks=201` after the `src/markdown/mod.rs` reorder. This branch's `fixtures/fmt-baseline.hunks` is regenerated with `scripts/fmt-hunks.py tokens` when a leaf-block edit moves a header; the file is that token list (`fmt_baseline_hunks=206`). `cargo fmt --check` on `main` (`fc681a8`) is 20 files and 202 hunks. The only header on main that the kit tip does not have is `src/markdown/mod.rs:1`. The kit tip adds no dirty hunk of its own.
 
 `ci.sh` does not install packages. The blob's apt list includes `libxcb1-dev` and `libfreetype6-dev`. This kit does not install those. `ci.sh` still runs build, test, clippy, and the fmt gate when an earlier step fails, then prints `ci_fail=`. GitHub Actions stops the job at the first failing step.
 

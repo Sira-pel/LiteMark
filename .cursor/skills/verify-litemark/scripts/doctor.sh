@@ -54,6 +54,7 @@ green_fixtures=(
   markers-strike
   tables
   fenced-code
+  leaf-blocks
   links
   images
   long-lines
