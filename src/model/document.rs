@@ -2166,6 +2166,34 @@ impl DocumentTab {
         self.place(target, extend);
     }
 
+    pub fn move_end_in_mode(&mut self, extend: bool, mode: ViewMode) {
+        self.pending_formats = ActiveFormats::default();
+        if mode == ViewMode::Raw {
+            self.move_end(extend);
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let parsed = self.parsed();
+        if let Some(pline) = parsed.line_at_offset(cursor) {
+            if let LineKind::TableRow {
+                ref cells,
+                ref raw_cells,
+                ..
+            } = pline.kind
+            {
+                if let Some((_, cell)) = raw_cells
+                    .iter()
+                    .zip(cells.iter())
+                    .find(|(rc, _)| cursor >= rc.start && cursor <= rc.end)
+                {
+                    self.place(cell.end, extend);
+                    return;
+                }
+            }
+        }
+        self.move_end(extend);
+    }
+
     pub fn select_line_up(&mut self) {
         let cursor = self.cursor_offset();
         let current_line_start = super::text_ops::home_offset(&self.content, cursor);

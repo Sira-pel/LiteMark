@@ -3279,13 +3279,20 @@ impl EntityInputHandler for LiteMarkApp {
                 .iter()
                 .find(|c| c.raw_range.start <= range.start && range.start <= c.raw_range.end)
             {
-                let local_start = cell.offset_map.source_to_display(range.start);
-                let local_end = cell.offset_map.source_to_display(range.end);
-                let x0 = cell.shaped.x_for_index(local_start);
-                let x1 = cell.shaped.x_for_index(local_end);
+                let line = cell
+                    .lines
+                    .iter()
+                    .find(|l| {
+                        range.start >= l.offset_map.line_start && range.start <= l.offset_map.line_end
+                    })
+                    .unwrap_or(&cell.lines[0]);
+                let local_start = line.offset_map.source_to_display(range.start);
+                let local_end = line.offset_map.source_to_display(range.end);
+                let x0 = line.shaped.x_for_index(local_start);
+                let x1 = line.shaped.x_for_index(local_end);
                 return Some(Bounds::from_corners(
-                    point(cell.text_origin.x + x0, cell.text_origin.y),
-                    point(cell.text_origin.x + x1.max(x0), cell.text_origin.y + row.line_height),
+                    point(line.text_origin.x + x0, line.text_origin.y),
+                    point(line.text_origin.x + x1.max(x0), line.text_origin.y + line.line_height),
                 ));
             }
         }
@@ -5013,24 +5020,70 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorHome, window, cx| {
+                let paint = this.editor_paint.clone();
                 let mode = this.settings.view_mode;
-                this.editor_move(cx, |tab| tab.move_home_in_mode(false, mode));
+                this.editor_move(cx, |tab| {
+                    if mode == ViewMode::Wysiwyg {
+                        let p = paint.borrow();
+                        if editor_home_visual(&p, &mut tab.caret, false) {
+                            tab.pending_formats = ActiveFormats::default();
+                            tab.refresh_cursor();
+                            return;
+                        }
+                    }
+                    tab.move_home_in_mode(false, mode);
+                });
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorEnd, window, cx| {
-                this.editor_move(cx, |tab| tab.move_end(false));
+                let paint = this.editor_paint.clone();
+                let mode = this.settings.view_mode;
+                this.editor_move(cx, |tab| {
+                    if mode == ViewMode::Wysiwyg {
+                        let p = paint.borrow();
+                        if editor_end_visual(&p, &mut tab.caret, false) {
+                            tab.pending_formats = ActiveFormats::default();
+                            tab.refresh_cursor();
+                            return;
+                        }
+                    }
+                    tab.move_end_in_mode(false, mode);
+                });
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectHome, window, cx| {
+                let paint = this.editor_paint.clone();
                 let mode = this.settings.view_mode;
-                this.editor_move(cx, |tab| tab.move_home_in_mode(true, mode));
+                this.editor_move(cx, |tab| {
+                    if mode == ViewMode::Wysiwyg {
+                        let p = paint.borrow();
+                        if editor_home_visual(&p, &mut tab.caret, true) {
+                            tab.pending_formats = ActiveFormats::default();
+                            tab.refresh_cursor();
+                            return;
+                        }
+                    }
+                    tab.move_home_in_mode(true, mode);
+                });
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectEnd, window, cx| {
-                this.editor_move(cx, |tab| tab.move_end(true));
+                let paint = this.editor_paint.clone();
+                let mode = this.settings.view_mode;
+                this.editor_move(cx, |tab| {
+                    if mode == ViewMode::Wysiwyg {
+                        let p = paint.borrow();
+                        if editor_end_visual(&p, &mut tab.caret, true) {
+                            tab.pending_formats = ActiveFormats::default();
+                            tab.refresh_cursor();
+                            return;
+                        }
+                    }
+                    tab.move_end_in_mode(true, mode);
+                });
                 window.refresh();
                 cx.notify();
             }))
