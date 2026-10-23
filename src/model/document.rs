@@ -4999,6 +4999,7 @@ mod tests {
                 cells: Vec::new(),
             }],
             bounds: None,
+            ..EditorPaint::default()
         };
         doc.caret.move_to(0);
         let hit = move_vertical_visual(
@@ -5457,6 +5458,7 @@ mod tests {
             total_height: px(28.0 * n),
             rows,
             bounds: None,
+            ..EditorPaint::default()
         }
     }
 

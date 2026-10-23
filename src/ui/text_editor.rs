@@ -54,6 +54,11 @@ pub struct PaintRow {
     pub cells: Vec<PaintCell>,
 }
 
+#[derive(Clone, Default)]
+pub struct TableWidthCache {
+    pub entries: std::collections::HashMap<Range<usize>, (u64, Pixels, Vec<Pixels>)>,
+}
+
 #[derive(Clone)]
 pub struct EditorPaint {
     pub wrap_cols: usize,
@@ -61,6 +66,7 @@ pub struct EditorPaint {
     pub total_height: Pixels,
     pub rows: Vec<PaintRow>,
     pub bounds: Option<Bounds<Pixels>>,
+    pub table_width_cache: TableWidthCache,
 }
 
 impl Default for EditorPaint {
@@ -71,8 +77,16 @@ impl Default for EditorPaint {
             total_height: px(0.0),
             rows: Vec::new(),
             bounds: None,
+            table_width_cache: TableWidthCache::default(),
         }
     }
+}
+
+pub fn hash_str(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
 }
 
 pub fn str_display_width(s: &str) -> usize {
@@ -183,12 +197,24 @@ pub fn compute_table_column_widths(
     if table_lines.is_empty() {
         return Vec::new();
     }
-    let num_cols = if let LineKind::TableRow { ref cells, .. } = table_lines[0].kind {
-        cells.len().max(1)
-    } else {
-        1
-    };
-    let min_col_w = px(48.0);
+    let num_cols = table_lines
+        .iter()
+        .find_map(|line| {
+            if let LineKind::TableRow { ref cells, .. } = line.kind {
+                Some(cells.len())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    if num_cols == 0 {
+        return Vec::new();
+    }
+
+    let target_table_w = content_width.max(px(1.0));
+    let num_cols_f32 = num_cols as f32;
+    // Sensible min column width is 48px, but shrink as needed to keep table within editor width
+    let min_col_w = (px(48.0)).min(target_table_w / num_cols_f32);
     let pad_x = px(12.0);
 
     let mut natural_w = vec![min_col_w; num_cols];
@@ -206,18 +232,27 @@ pub fn compute_table_column_widths(
     }
 
     let total_natural: Pixels = natural_w.iter().copied().fold(px(0.0), |acc, x| acc + x);
-    let min_table_w = min_col_w * (num_cols as f32);
-    let target_table_w = content_width.max(min_table_w);
 
+    // If total natural width is <= target_table_w:
+    // Distribute full target_table_w proportional to natural_w so new/mostly-empty tables
+    // start full width, and typing only nudges column borders.
     if total_natural <= target_table_w {
-        let avg_natural = total_natural / (num_cols as f32);
-        let has_distinct_long = natural_w.iter().any(|&w| w > avg_natural * 1.5 && w > min_col_w * 2.5);
-        if !has_distinct_long && total_natural <= content_width {
-            return natural_w;
+        let total_nat_f32 = f32::from(total_natural).max(0.001);
+        let mut widths = Vec::with_capacity(num_cols);
+        let mut allocated = px(0.0);
+        for &w in &natural_w[..num_cols - 1] {
+            let col_w = ((f32::from(w) / total_nat_f32) * target_table_w).max(min_col_w);
+            allocated += col_w;
+            widths.push(col_w);
         }
+        let last_w = (target_table_w - allocated).max(min_col_w);
+        widths.push(last_w);
+        return widths;
     }
 
-    let mut assigned = vec![None; num_cols];
+    // Otherwise, total_natural > target_table_w.
+    // Water-filling: short columns take their natural width, long ones share the remaining width.
+    let mut assigned: Vec<Option<Pixels>> = vec![None; num_cols];
     let mut remaining_w = target_table_w;
     let mut remaining_count = num_cols;
 
@@ -229,8 +264,9 @@ pub fn compute_table_column_widths(
         let mut newly_locked = 0;
         for c in 0..num_cols {
             if assigned[c].is_none() && natural_w[c] <= fair_share {
-                assigned[c] = Some(natural_w[c]);
-                remaining_w -= natural_w[c];
+                let col_w = natural_w[c].max(min_col_w);
+                assigned[c] = Some(col_w);
+                remaining_w -= col_w;
                 newly_locked += 1;
             }
         }
@@ -241,26 +277,29 @@ pub fn compute_table_column_widths(
     }
 
     if remaining_count > 0 {
-        let remaining_natural_sum: Pixels = (0..num_cols)
-            .filter(|&c| assigned[c].is_none())
-            .map(|c| natural_w[c])
-            .fold(px(0.0), |acc, x| acc + x);
-        let remaining_natural_f32 = f32::from(remaining_natural_sum).max(1.0);
+        let unassigned_cols: Vec<usize> = (0..num_cols).filter(|&c| assigned[c].is_none()).collect();
+        let excess_demands: Vec<f32> = unassigned_cols
+            .iter()
+            .map(|&c| (f32::from(natural_w[c]) - f32::from(min_col_w)).max(0.0))
+            .collect();
+        let total_excess_demand: f32 = excess_demands.iter().sum();
+        let available_excess = (remaining_w - min_col_w * (remaining_count as f32)).max(px(0.0));
 
-        let mut unassigned_cols: Vec<usize> = (0..num_cols).filter(|&c| assigned[c].is_none()).collect();
-        let last_unassigned = unassigned_cols.pop();
-
-        let mut allocated_long = px(0.0);
-        for c in unassigned_cols {
-            let share = (f32::from(natural_w[c]) / remaining_natural_f32) * remaining_w;
-            let col_w = share.max(min_col_w);
-            allocated_long += col_w;
+        let mut allocated = px(0.0);
+        for i in 0..unassigned_cols.len() - 1 {
+            let c = unassigned_cols[i];
+            let extra = if total_excess_demand > 0.001 {
+                (excess_demands[i] / total_excess_demand) * available_excess
+            } else {
+                available_excess / (remaining_count as f32)
+            };
+            let col_w = min_col_w + extra;
+            allocated += col_w;
             assigned[c] = Some(col_w);
         }
-        if let Some(c) = last_unassigned {
-            let col_w = (remaining_w - allocated_long).max(min_col_w);
-            assigned[c] = Some(col_w);
-        }
+        let last_c = unassigned_cols[unassigned_cols.len() - 1];
+        let last_w = (remaining_w - allocated).max(min_col_w);
+        assigned[last_c] = Some(last_w);
     }
 
     assigned.into_iter().map(|w| w.unwrap_or(min_col_w)).collect()
@@ -369,20 +408,29 @@ pub fn move_vertical_visual(
                     .rev()
                     .find(|c| c.raw_range.start <= cursor)
             })
-            .unwrap_or(&current_row.cells[0]);
+            .or_else(|| current_row.cells.first())
+            .unwrap();
         let sub_ix = cell
             .lines
             .iter()
             .position(|l| cursor >= l.offset_map.line_start && cursor < l.offset_map.line_end)
             .or_else(|| cell.lines.iter().rposition(|l| cursor >= l.offset_map.line_start))
             .unwrap_or(0);
-        let cur_line = cell.lines.get(sub_ix).unwrap_or(&cell.lines[0]);
-        let clamped = cursor.clamp(cur_line.offset_map.line_start, cur_line.offset_map.line_end);
-        let display_idx = cur_line.offset_map.source_to_display(clamped);
-        let x_in_cell = cur_line.shaped.x_for_index(display_idx);
-        let tx = (cur_line.text_origin.x + x_in_cell)
-            .clamp(cell.box_bounds.left() + px(1.0), (cell.box_bounds.right() - px(1.0)).max(cell.box_bounds.left() + px(1.0)));
-        (tx, Some((cell, sub_ix)))
+        if let Some(cur_line) = cell.lines.get(sub_ix).or_else(|| cell.lines.first()) {
+            let clamped = cursor.clamp(cur_line.offset_map.line_start, cur_line.offset_map.line_end);
+            let display_idx = cur_line.offset_map.source_to_display(clamped);
+            let x_in_cell = cur_line.shaped.x_for_index(display_idx);
+            let tx = (cur_line.text_origin.x + x_in_cell)
+                .clamp(cell.box_bounds.left() + px(1.0), (cell.box_bounds.right() - px(1.0)).max(cell.box_bounds.left() + px(1.0)));
+            (tx, Some((cell, sub_ix)))
+        } else {
+            let clamped = cursor.clamp(cell.inner_range.start, cell.inner_range.end);
+            let display_idx = cell.offset_map.source_to_display(clamped);
+            let x_in_cell = cell.shaped.x_for_index(display_idx);
+            let tx = (cell.text_origin.x + x_in_cell)
+                .clamp(cell.box_bounds.left() + px(1.0), (cell.box_bounds.right() - px(1.0)).max(cell.box_bounds.left() + px(1.0)));
+            (tx, Some((cell, 0)))
+        }
     } else {
         let display_idx = current_row.offset_map.source_to_display(cursor);
         let x_in_row = current_row.shaped.x_for_index(display_idx);
@@ -457,24 +505,33 @@ pub fn move_vertical_visual(
                 target_screen_x >= c.box_bounds.left() && target_screen_x < c.box_bounds.right()
             })
             .unwrap_or_else(|| {
-                if target_screen_x < target_row.cells[0].box_bounds.left() {
-                    &target_row.cells[0]
+                if target_screen_x < target_row.cells.first().map(|c| c.box_bounds.left()).unwrap_or(px(0.0)) {
+                    target_row.cells.first().unwrap()
                 } else {
                     target_row.cells.last().unwrap()
                 }
             });
         let target_line = if delta > 0 {
-            cell.lines.first().unwrap_or(&cell.lines[0])
+            cell.lines.first()
         } else {
-            cell.lines.last().unwrap_or(&cell.lines[0])
+            cell.lines.last()
         };
-        let local_x = (target_screen_x - target_line.text_origin.x).max(px(0.0));
-        let target_display = target_line.shaped.closest_index_for_x(local_x);
-        target_line
-            .offset_map
-            .display_to_source(target_display)
-            .clamp(cell.inner_range.start, cell.inner_range.end)
-            .min(content.len())
+        if let Some(target_line) = target_line {
+            let local_x = (target_screen_x - target_line.text_origin.x).max(px(0.0));
+            let target_display = target_line.shaped.closest_index_for_x(local_x);
+            target_line
+                .offset_map
+                .display_to_source(target_display)
+                .clamp(cell.inner_range.start, cell.inner_range.end)
+                .min(content.len())
+        } else {
+            let local_x = (target_screen_x - cell.text_origin.x).max(px(0.0));
+            let target_display = cell.shaped.closest_index_for_x(local_x);
+            cell.offset_map
+                .display_to_source(target_display)
+                .clamp(cell.inner_range.start, cell.inner_range.end)
+                .min(content.len())
+        }
     } else {
         let local_x = (target_screen_x - target_row.origin.x).max(px(0.0));
         let target_display = target_row.shaped.closest_index_for_x(local_x);
@@ -520,26 +577,39 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
             .iter()
             .find(|c| position.x >= c.box_bounds.left() && position.x < c.box_bounds.right())
             .unwrap_or_else(|| {
-                if position.x < row.cells[0].box_bounds.left() {
-                    &row.cells[0]
+                if position.x < row.cells.first().map(|c| c.box_bounds.left()).unwrap_or(px(0.0)) {
+                    row.cells.first().unwrap()
                 } else {
                     row.cells.last().unwrap()
                 }
             });
-        let sub_ix = if cell.lines.len() > 1 && position.y >= cell.box_bounds.top() {
-            let row_line_h = row.line_height / (cell.lines.len().max(1) as f32);
-            let idx = ((position.y - cell.box_bounds.top()) / row_line_h).floor() as usize;
-            idx.min(cell.lines.len() - 1)
+        let line_opt = if cell.lines.is_empty() {
+            None
         } else {
-            0
+            let per_line_h = cell.lines[0].line_height.max(px(1.0));
+            let sub_ix = if position.y >= cell.box_bounds.top() {
+                let idx = ((position.y - cell.box_bounds.top()) / per_line_h).floor() as usize;
+                idx.min(cell.lines.len() - 1)
+            } else {
+                0
+            };
+            cell.lines.get(sub_ix).or_else(|| cell.lines.first())
         };
-        let line = cell.lines.get(sub_ix).unwrap_or(&cell.lines[0]);
-        let local_x = (position.x - line.text_origin.x).max(px(0.0));
-        let display_idx = line.shaped.closest_index_for_x(local_x);
-        return line
-            .offset_map
-            .display_to_source(display_idx)
-            .clamp(cell.inner_range.start, cell.inner_range.end);
+        if let Some(line) = line_opt {
+            let local_x = (position.x - line.text_origin.x).max(px(0.0));
+            let display_idx = line.shaped.closest_index_for_x(local_x);
+            return line
+                .offset_map
+                .display_to_source(display_idx)
+                .clamp(cell.inner_range.start, cell.inner_range.end);
+        } else {
+            let local_x = (position.x - cell.text_origin.x).max(px(0.0));
+            let display_idx = cell.shaped.closest_index_for_x(local_x);
+            return cell
+                .offset_map
+                .display_to_source(display_idx)
+                .clamp(cell.inner_range.start, cell.inner_range.end);
+        }
     }
     let local_x = position.x - row.origin.x;
     if local_x <= px(0.0) {
@@ -563,9 +633,13 @@ pub fn editor_home_visual(paint: &EditorPaint, caret: &mut Caret, extend: bool) 
                         .position(|l| cursor >= l.offset_map.line_start && cursor < l.offset_map.line_end)
                         .or_else(|| cell.lines.iter().rposition(|l| cursor >= l.offset_map.line_start))
                         .unwrap_or(0);
-                    let line = cell.lines.get(sub_ix).unwrap_or(&cell.lines[0]);
-                    let target = if cursor > line.offset_map.line_start {
-                        line.offset_map.line_start
+                    let line = cell.lines.get(sub_ix).or_else(|| cell.lines.first());
+                    let target = if let Some(line) = line {
+                        if cursor > line.offset_map.line_start {
+                            line.offset_map.line_start
+                        } else {
+                            cell.inner_range.start
+                        }
                     } else {
                         cell.inner_range.start
                     };
@@ -594,9 +668,13 @@ pub fn editor_end_visual(paint: &EditorPaint, caret: &mut Caret, extend: bool) -
                         .position(|l| cursor >= l.offset_map.line_start && cursor < l.offset_map.line_end)
                         .or_else(|| cell.lines.iter().rposition(|l| cursor >= l.offset_map.line_start))
                         .unwrap_or(cell.lines.len().saturating_sub(1));
-                    let line = cell.lines.get(sub_ix).unwrap_or(&cell.lines[0]);
-                    let target = if cursor < line.offset_map.line_end {
-                        line.offset_map.line_end
+                    let line = cell.lines.get(sub_ix).or_else(|| cell.lines.last());
+                    let target = if let Some(line) = line {
+                        if cursor < line.offset_map.line_end {
+                            line.offset_map.line_end
+                        } else {
+                            cell.inner_range.end
+                        }
                     } else {
                         cell.inner_range.end
                     };
@@ -672,6 +750,7 @@ pub struct Prepaint {
     total_height: Pixels,
     wrap_cols: usize,
     x_offset: Pixels,
+    table_width_cache: TableWidthCache,
 }
 
 impl<V: EntityInputHandler> Element for EditorElement<V> {
@@ -902,6 +981,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
 
             let total_height = base_line_height * rows.len() as f32 + px(32.0);
+            let table_width_cache = self.paint.borrow().table_width_cache.clone();
             return Prepaint {
                 rows,
                 numbers,
@@ -914,6 +994,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 total_height,
                 wrap_cols,
                 x_offset,
+                table_width_cache,
             };
         }
 
@@ -926,6 +1007,18 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut cursor = None;
         let base_x = bounds.left() + gutter + x_offset;
         let mut cur_y = bounds.top() + px(16.0);
+        // Single pass to collect all table rows grouped by table_source
+        let mut table_rows: std::collections::HashMap<Range<usize>, Vec<&ParsedLine>> =
+            std::collections::HashMap::new();
+        for line in &self.parsed.lines {
+            if let LineKind::TableRow { ref table_source, .. } = line.kind {
+                table_rows.entry(table_source.clone()).or_default().push(line);
+            }
+        }
+
+        let mut table_width_cache = self.paint.borrow().table_width_cache.clone();
+        table_width_cache.entries.retain(|k, _| table_rows.contains_key(k));
+
         let mut table_col_widths: std::collections::HashMap<Range<usize>, Vec<Pixels>> =
             std::collections::HashMap::new();
 
@@ -950,15 +1043,23 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let col_widths = table_col_widths
                     .entry(table_source.clone())
                     .or_insert_with(|| {
-                        let table_lines: Vec<&ParsedLine> = self
-                            .parsed
-                            .lines
-                            .iter()
-                            .filter(|l| {
-                                matches!(&l.kind, LineKind::TableRow { table_source: ts, .. } if ts == table_source)
-                            })
-                            .collect();
-                        compute_table_column_widths(&table_lines, &self.content, content_width, char_width)
+                        let table_text = self.content.get(table_source.clone()).unwrap_or("");
+                        let table_hash = hash_str(table_text);
+                        if let Some((cached_hash, cached_width, widths)) =
+                            table_width_cache.entries.get(table_source)
+                        {
+                            if *cached_hash == table_hash && *cached_width == content_width {
+                                return widths.clone();
+                            }
+                        }
+                        let empty_lines = Vec::new();
+                        let lines = table_rows.get(table_source).unwrap_or(&empty_lines);
+                        let widths = compute_table_column_widths(lines, &self.content, content_width, char_width);
+                        table_width_cache.entries.insert(
+                            table_source.clone(),
+                            (table_hash, content_width, widths.clone()),
+                        );
+                        widths
                     });
 
                 let num_cols = col_widths.len().max(1);
@@ -1230,27 +1331,29 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                     .rposition(|l| self.selection.start >= l.offset_map.line_start)
                                     .map(|i| &cell_lines[i])
                             })
-                            .unwrap_or(&cell_lines[0]);
+                            .or_else(|| cell_lines.first());
 
-                        let clamped_src = self
-                            .selection
-                            .start
-                            .clamp(target_line.offset_map.line_start, target_line.offset_map.line_end);
-                        let display_idx = target_line.offset_map.source_to_display(clamped_src);
-                        let x = target_line.shaped.x_for_index(display_idx);
-                        let pad = (row_line_height - target_line.shaped.ascent - target_line.shaped.descent)
-                            .max(px(0.0))
-                            / 2.0;
-                        let caret_y = target_line.text_origin.y + pad;
-                        let caret_h =
-                            (target_line.shaped.ascent + target_line.shaped.descent).max(row_font_size);
-                        cursor = Some(fill(
-                            Bounds::new(
-                                point(target_line.text_origin.x + x, caret_y),
-                                size(px(2.0), caret_h),
-                            ),
-                            self.cursor_color,
-                        ));
+                        if let Some(target_line) = target_line {
+                            let clamped_src = self
+                                .selection
+                                .start
+                                .clamp(target_line.offset_map.line_start, target_line.offset_map.line_end);
+                            let display_idx = target_line.offset_map.source_to_display(clamped_src);
+                            let x = target_line.shaped.x_for_index(display_idx);
+                            let pad = (row_line_height - target_line.shaped.ascent - target_line.shaped.descent)
+                                .max(px(0.0))
+                                / 2.0;
+                            let caret_y = target_line.text_origin.y + pad;
+                            let caret_h =
+                                (target_line.shaped.ascent + target_line.shaped.descent).max(row_font_size);
+                            cursor = Some(fill(
+                                Bounds::new(
+                                    point(target_line.text_origin.x + x, caret_y),
+                                    size(px(2.0), caret_h),
+                                ),
+                                self.cursor_color,
+                            ));
+                        }
                     }
 
                     let default_origin = cell_lines.first().map(|l| l.text_origin).unwrap_or(point(prep.cell_x + pad_x, cur_y));
@@ -1640,6 +1743,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             total_height,
             wrap_cols,
             x_offset,
+            table_width_cache,
         }
     }
 
@@ -1713,6 +1817,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             } else {
                 paint.wrap_cols = usize::MAX;
             }
+            paint.table_width_cache = std::mem::take(&mut prepaint.table_width_cache);
         }
         if wrap_changed && self.word_wrap {
             let entity = self.entity.clone();
@@ -2277,7 +2382,7 @@ mod tests {
     use super::{
         compute_table_column_widths, editor_end_visual, editor_home_visual, index_in_rows,
         move_vertical_visual, wrap_cell_text, CellLine, EditorPaint, PaintCell, PaintRow,
-        RowOffsetMap,
+        RowOffsetMap, TableWidthCache,
     };
     use crate::markdown::{parse_document, ParsedLine};
     use crate::model::document::ViewMode;
@@ -2417,6 +2522,7 @@ mod tests {
             total_height: px(84.0),
             rows: vec![row_0, row_1],
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(400.0), px(100.0)))),
+            table_width_cache: TableWidthCache::default(),
         };
 
         let mut caret = Caret::default();
@@ -2506,6 +2612,7 @@ mod tests {
             total_height: px(56.0),
             rows: vec![row],
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)))),
+            table_width_cache: TableWidthCache::default(),
         };
 
         // Click on Line 0 (y = 10px)
@@ -2570,6 +2677,7 @@ mod tests {
             total_height: px(56.0),
             rows: vec![row],
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)))),
+            table_width_cache: TableWidthCache::default(),
         };
 
         let mut caret = Caret::default();
@@ -2592,5 +2700,208 @@ mod tests {
 
         let fits_wrap = wrap_cell_text("Hello world", px(100.0), &shaped);
         assert_eq!(fits_wrap, vec![(0, 11)]);
+    }
+
+    #[test]
+    fn test_click_wrapped_cell_in_taller_row() {
+        // Cell 0 has 4 lines (row height = 112px)
+        let cell0 = PaintCell {
+            raw_range: 0..20,
+            inner_range: 0..20,
+            box_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(112.0))),
+            text_origin: point(px(0.0), px(0.0)),
+            shaped: ShapedLine::default(),
+            offset_map: RowOffsetMap::identity(0, 20),
+            lines: (0..4)
+                .map(|i| CellLine {
+                    text_origin: point(px(0.0), px(28.0) * i as f32),
+                    line_height: px(28.0),
+                    shaped: ShapedLine::default(),
+                    offset_map: RowOffsetMap::identity(i * 5, (i + 1) * 5),
+                })
+                .collect(),
+        };
+
+        // Cell 1 has 2 lines (Line 0: 20..27, Line 1: 28..35)
+        let line0_map = RowOffsetMap::identity(20, 27);
+        let line1_map = RowOffsetMap::identity(28, 35);
+        let cell1 = PaintCell {
+            raw_range: 20..35,
+            inner_range: 20..35,
+            box_bounds: Bounds::new(point(px(100.0), px(0.0)), size(px(100.0), px(112.0))),
+            text_origin: point(px(100.0), px(0.0)),
+            shaped: ShapedLine::default(),
+            offset_map: line0_map.clone(),
+            lines: vec![
+                CellLine {
+                    text_origin: point(px(100.0), px(0.0)),
+                    line_height: px(28.0),
+                    shaped: ShapedLine::default(),
+                    offset_map: line0_map,
+                },
+                CellLine {
+                    text_origin: point(px(100.0), px(28.0)),
+                    line_height: px(28.0),
+                    shaped: ShapedLine::default(),
+                    offset_map: line1_map,
+                },
+            ],
+        };
+
+        let row = PaintRow {
+            line_index: 0,
+            byte_start: 0,
+            byte_end: 35,
+            origin: point(px(0.0), px(0.0)),
+            line_height: px(112.0),
+            shaped: ShapedLine::default(),
+            offset_map: RowOffsetMap::identity(0, 35),
+            checkbox_hit: None,
+            link_hits: Vec::new(),
+            cells: vec![cell0, cell1],
+        };
+
+        let paint = EditorPaint {
+            wrap_cols: 80,
+            line_height: px(28.0),
+            total_height: px(112.0),
+            rows: vec![row],
+            bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(112.0)))),
+            table_width_cache: TableWidthCache::default(),
+        };
+
+        // Click in Cell 1 on Line 1 at y = 35px (Line 0 is 0..28px, Line 1 is 28..56px)
+        let offset = index_in_rows(&paint, point(px(150.0), px(35.0)));
+        assert!(
+            (28..=35).contains(&offset),
+            "Click on line 1 (y=35px) in a 112px tall row should map to Line 1 (28..35), got {offset}"
+        );
+
+        // Click in Cell 1 at y = 80px (empty area below Line 1 in the 112px row)
+        let offset_bottom = index_in_rows(&paint, point(px(150.0), px(80.0)));
+        assert!(
+            (28..=35).contains(&offset_bottom),
+            "Click below line 1 (y=80px) in a 112px row should clamp to Line 1 (28..35), got {offset_bottom}"
+        );
+    }
+
+    #[test]
+    fn test_wide_table_many_columns_shrinks_minimum_and_stays_within_editor() {
+        let mut header = String::from("|");
+        let mut delim = String::from("|");
+        let mut row = String::from("|");
+        for i in 0..25 {
+            header.push_str(&format!(" c{i} |"));
+            delim.push_str("---|");
+            row.push_str(&format!(" val{i} |"));
+        }
+        let md = format!("{header}\n{delim}\n{row}");
+        let doc = parse_document(&md);
+        let table_lines: Vec<&ParsedLine> = doc.lines.iter().collect();
+
+        let target_w = px(500.0);
+        let widths = compute_table_column_widths(&table_lines, &md, target_w, px(8.0));
+        assert_eq!(widths.len(), 25);
+
+        // Sum of widths must not exceed editor width
+        let total: Pixels = widths.iter().copied().fold(px(0.0), |acc, w| acc + w);
+        assert!(
+            (total - target_w).abs() < px(1.0),
+            "Total table width {:?} should match editor width {:?}",
+            total,
+            target_w
+        );
+
+        // Minimum column width was shrunk from 48px to 20px so all 25 columns fit
+        for (i, w) in widths.iter().enumerate() {
+            assert!(
+                *w <= px(30.0),
+                "Column {i} width {:?} should be shrunk to fit within 500px",
+                w
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_table_fills_editor_width_and_typing_nudges_borders() {
+        let md_empty = "| | | |\n|---|---|---|\n| | | |";
+        let doc_empty = parse_document(md_empty);
+        let table_lines_empty: Vec<&ParsedLine> = doc_empty.lines.iter().collect();
+
+        let target_w = px(600.0);
+        let widths_empty = compute_table_column_widths(&table_lines_empty, md_empty, target_w, px(8.0));
+        assert_eq!(widths_empty.len(), 3);
+
+        let total_empty: Pixels = widths_empty.iter().copied().fold(px(0.0), |acc, w| acc + w);
+        assert!((total_empty - target_w).abs() < px(1.0));
+
+        // Each column in empty table should take an equal share (200px each)
+        for (i, w) in widths_empty.iter().enumerate() {
+            assert!(
+                (*w - px(200.0)).abs() < px(2.0),
+                "Empty table col {i} should be ~200px, got {:?}",
+                w
+            );
+        }
+
+        // Typing in column 0 nudges borders while keeping total table width at 600px
+        let md_typed = "| Name | | |\n|---|---|---|\n| Alice | | |";
+        let doc_typed = parse_document(md_typed);
+        let table_lines_typed: Vec<&ParsedLine> = doc_typed.lines.iter().collect();
+
+        let widths_typed = compute_table_column_widths(&table_lines_typed, md_typed, target_w, px(8.0));
+        assert_eq!(widths_typed.len(), 3);
+
+        let total_typed: Pixels = widths_typed.iter().copied().fold(px(0.0), |acc, w| acc + w);
+        assert!((total_typed - target_w).abs() < px(1.0));
+
+        // Column 0 grew, columns 1 and 2 nudged narrower
+        assert!(widths_typed[0] > widths_empty[0], "Column 0 should expand after typing");
+        assert!(widths_typed[1] < widths_empty[1], "Column 1 should nudge narrower");
+        assert!(widths_typed[2] < widths_empty[2], "Column 2 should nudge narrower");
+    }
+
+    #[test]
+    fn test_empty_lines_cell_fallbacks_do_not_panic() {
+        let empty_cell = PaintCell {
+            raw_range: 0..10,
+            inner_range: 0..10,
+            box_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(28.0))),
+            text_origin: point(px(0.0), px(0.0)),
+            shaped: ShapedLine::default(),
+            offset_map: RowOffsetMap::identity(0, 10),
+            lines: Vec::new(),
+        };
+
+        let row = PaintRow {
+            line_index: 0,
+            byte_start: 0,
+            byte_end: 10,
+            origin: point(px(0.0), px(0.0)),
+            line_height: px(28.0),
+            shaped: ShapedLine::default(),
+            offset_map: RowOffsetMap::identity(0, 10),
+            checkbox_hit: None,
+            link_hits: Vec::new(),
+            cells: vec![empty_cell],
+        };
+
+        let paint = EditorPaint {
+            wrap_cols: 80,
+            line_height: px(28.0),
+            total_height: px(28.0),
+            rows: vec![row],
+            bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(28.0)))),
+            table_width_cache: TableWidthCache::default(),
+        };
+
+        let mut caret = Caret::default();
+        caret.move_to(5);
+
+        // None of these should panic on empty cell.lines
+        let _ = index_in_rows(&paint, point(px(10.0), px(10.0)));
+        let _ = editor_home_visual(&paint, &mut caret, false);
+        let _ = editor_end_visual(&paint, &mut caret, false);
+        let _ = move_vertical_visual(&paint, "0123456789", &mut caret, 1, false, ViewMode::Wysiwyg);
     }
 }

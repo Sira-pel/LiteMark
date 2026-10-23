@@ -3279,20 +3279,30 @@ impl EntityInputHandler for LiteMarkApp {
                 .iter()
                 .find(|c| c.raw_range.start <= range.start && range.start <= c.raw_range.end)
             {
-                let line = cell
+                if let Some(line) = cell
                     .lines
                     .iter()
                     .find(|l| {
                         range.start >= l.offset_map.line_start && range.start <= l.offset_map.line_end
                     })
-                    .unwrap_or(&cell.lines[0]);
-                let local_start = line.offset_map.source_to_display(range.start);
-                let local_end = line.offset_map.source_to_display(range.end);
-                let x0 = line.shaped.x_for_index(local_start);
-                let x1 = line.shaped.x_for_index(local_end);
+                    .or_else(|| cell.lines.first())
+                {
+                    let local_start = line.offset_map.source_to_display(range.start);
+                    let local_end = line.offset_map.source_to_display(range.end);
+                    let x0 = line.shaped.x_for_index(local_start);
+                    let x1 = line.shaped.x_for_index(local_end);
+                    return Some(Bounds::from_corners(
+                        point(line.text_origin.x + x0, line.text_origin.y),
+                        point(line.text_origin.x + x1.max(x0), line.text_origin.y + line.line_height),
+                    ));
+                }
+                let local_start = cell.offset_map.source_to_display(range.start);
+                let local_end = cell.offset_map.source_to_display(range.end);
+                let x0 = cell.shaped.x_for_index(local_start);
+                let x1 = cell.shaped.x_for_index(local_end);
                 return Some(Bounds::from_corners(
-                    point(line.text_origin.x + x0, line.text_origin.y),
-                    point(line.text_origin.x + x1.max(x0), line.text_origin.y + line.line_height),
+                    point(cell.text_origin.x + x0, cell.text_origin.y),
+                    point(cell.text_origin.x + x1.max(x0), cell.text_origin.y + row.line_height),
                 ));
             }
         }
