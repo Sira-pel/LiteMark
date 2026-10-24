@@ -9,6 +9,11 @@ const CASES: &str = include_str!(concat!(
     "/.cursor/skills/verify-litemark/fixtures/format-toggle/cases.tsv"
 ));
 
+const EXPECTED_IDS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/.cursor/skills/verify-litemark/fixtures/format-toggle/expected-ids.txt"
+));
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RowKind {
     Ok,
@@ -131,16 +136,25 @@ fn classify(kind: RowKind, hit_expect: bool, hit_main: bool) -> &'static str {
     }
 }
 
+fn expected_ids() -> Vec<&'static str> {
+    EXPECTED_IDS
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
 fn run_cases() -> (usize, usize, usize, usize, usize) {
     // The test harness prints `test <name> ... ` with no newline. A leading
     // line keeps every `case=` line on its own line for the gate script.
     println!("format_toggle_cases_begin");
+    let expected = expected_ids();
     let mut pass = 0usize;
     let mut fail = 0usize;
     let mut xfail = 0usize;
     let mut xpass = 0usize;
     let mut parsed = 0usize;
     let mut seen = BTreeSet::new();
+    let mut ran: Vec<&str> = Vec::new();
 
     for line in CASES.lines() {
         if line.is_empty() || line.starts_with('#') || line.starts_with("id\t") {
@@ -160,6 +174,7 @@ fn run_cases() -> (usize, usize, usize, usize, usize) {
             println!("detail={id} duplicate");
             continue;
         }
+        ran.push(id);
         let source = decode_field(fields[2]);
         let Some(sel) = parse_sel(fields[3]) else {
             fail += 1;
@@ -231,6 +246,16 @@ fn run_cases() -> (usize, usize, usize, usize, usize) {
                 observed.detail
             );
         }
+    }
+
+    if ran != expected {
+        fail += 1;
+        println!("case=id-pin fail");
+        println!(
+            "detail=id-pin ran={} expected={}",
+            ran.len(),
+            expected.len()
+        );
     }
 
     println!("parsed_display_bytes={parsed}");
