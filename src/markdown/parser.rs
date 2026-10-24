@@ -1507,8 +1507,248 @@ fn parse_inline_syntax(
     }
 
     normalize_shared_run_pairs(&mut inline_pairs);
+    synthesize_flanking_pairs(
+        input,
+        base,
+        &mut raw_hidden,
+        &mut inline_pairs,
+        &mut styled_segments,
+    );
+
+    // Backslash escapes: the parser consumes `\X` (X an ASCII punctuation
+    // character) and shows only `X`, so the backslash is hidden in the
+    // WYSIWYG display with the offset map carrying the caret across it.
+    // Backslashes inside code spans stay visible: code content is literal.
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() {
+            let abs = base + i..base + i + 1;
+            let in_code = inline_pairs.iter().any(|p| {
+                p.kind == InlineTagKind::Code
+                    && p.inner.start <= abs.start
+                    && abs.end <= p.inner.end
+            });
+            if !in_code {
+                raw_hidden.push(abs);
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
 
     (raw_hidden, inline_pairs, styled_segments)
+}
+
+/// Unicode punctuation and symbols, which CommonMark counts together for
+/// delimiter flanking. Conservative on purpose: unclassified characters
+/// count as normal text, so a wrong guess only skips a repair, never
+/// corrupts content.
+pub(crate) fn is_punct_or_symbol(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_punctuation();
+    }
+    matches!(c as u32,
+        0x00A1..=0x00A9
+        | 0x00AB..=0x00B1
+        | 0x00B4
+        | 0x00B6..=0x00B8
+        | 0x00BB
+        | 0x00BF
+        | 0x2010..=0x205E
+        | 0x20A0..=0x20CF
+        | 0x2122
+        | 0x2190..=0x2BFF
+        | 0x2E00..=0x2E7F
+        | 0x3001..=0x303F
+        | 0xFE10..=0xFE19
+        | 0xFE30..=0xFE6F
+        | 0xFF01..=0xFF0F
+        | 0xFF1A..=0xFF20
+        | 0xFF3B..=0xFF40
+        | 0xFF5B..=0xFF65
+        | 0x1F000..=0x1FAFF
+    )
+}
+
+/// A character that keeps a delimiter run flanking-valid next to it.
+pub(crate) fn is_ws_or_punct(c: char) -> bool {
+    c.is_whitespace() || is_punct_or_symbol(c)
+}
+
+/// True when the delimiter byte at `pos` is backslash-escaped and therefore
+/// not part of any delimiter run.
+fn is_escaped_delim(input: &str, pos: usize) -> bool {
+    let bytes = input.as_bytes();
+    let mut backslashes = 0usize;
+    let mut p = pos;
+    while p > 0 && bytes[p - 1] == b'\\' {
+        backslashes += 1;
+        p -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+/// Delimiter flanking per CommonMark counts Unicode punctuation and symbols,
+/// so a closing run after punctuation or a symbol and before a letter (and
+/// the mirrored opening run) cannot pair with its opener and the markers
+/// render literally. When the *only* reason a `*`/`**`/`~~` pair fails is
+/// that flanking rule, synthesize the pair for the display: the document
+/// text stays exactly as typed, the markers are hidden, and the styled
+/// segments carry the intended formatting - matching how renderers without
+/// that rule display the same text.
+#[allow(clippy::too_many_lines)]
+fn synthesize_flanking_pairs(
+    input: &str,
+    base: usize,
+    raw_hidden: &mut Vec<std::ops::Range<usize>>,
+    inline_pairs: &mut Vec<InlinePair>,
+    styled_segments: &mut Vec<StyledSegment>,
+) {
+    let bytes = input.as_bytes();
+    let is_delim_byte = |b: u8| b == b'*' || b == b'~' || b == b'`';
+    // Runs of unescaped `*`/`~`, in order.
+    let mut runs: Vec<(usize, usize, u8)> = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if (b == b'*' || b == b'~') && !is_escaped_delim(input, i) {
+            let start = i;
+            while i < bytes.len() && bytes[i] == b && !is_escaped_delim(input, i) {
+                i += 1;
+            }
+            runs.push((start, i, b));
+        } else {
+            i += 1;
+        }
+    }
+    if runs.len() < 2 {
+        return;
+    }
+    let in_code = |pos: usize| {
+        inline_pairs
+            .iter()
+            .any(|p| p.kind == InlineTagKind::Code && p.inner.start <= pos && pos < p.inner.end)
+    };
+    // Flanking helpers over the raw characters.
+    let char_before = |pos: usize| input[..pos].chars().next_back();
+    let char_at = |pos: usize| input[pos..].chars().next();
+    let opener_valid = |o_start: usize, o_end: usize| {
+        // left-flanking: not followed by whitespace, and either not followed
+        // by punctuation or preceded by whitespace/punctuation
+        match char_at(o_end) {
+            None => false,
+            Some(c) if c.is_whitespace() => false,
+            Some(c) if !is_punct_or_symbol(c) => true,
+            Some(_) => {
+                char_before(o_start).is_none_or(|c| c.is_whitespace() || is_punct_or_symbol(c))
+            }
+        }
+    };
+    let closer_valid = |c_start: usize, c_end: usize| {
+        // right-flanking: not preceded by whitespace, and either not preceded
+        // by punctuation or followed by whitespace/punctuation
+        match char_before(c_start) {
+            None => false,
+            Some(c) if c.is_whitespace() => false,
+            Some(c) if !is_punct_or_symbol(c) => true,
+            Some(_) => char_at(c_end).is_none_or(|c| c.is_whitespace() || is_punct_or_symbol(c)),
+        }
+    };
+    let mut synthesized: Vec<(usize, usize, usize, usize)> = Vec::new();
+    for close_idx in 0..runs.len() {
+        let (c_start, c_end, ch) = runs[close_idx];
+        if in_code(c_start) {
+            continue;
+        }
+        if c_end - c_start != 2 && !(ch == b'*' && c_end - c_start == 1) {
+            continue;
+        }
+        if ch == b'~' && c_end - c_start != 2 {
+            continue;
+        }
+        let before_punct = char_before(c_start).is_some_and(is_punct_or_symbol);
+        let after = char_at(c_end);
+        let after_plain = after.is_some_and(|c| !is_ws_or_punct(c));
+        let opener_valid_now = opener_valid(c_start, c_end);
+        // Closer side: the closer hugs punctuation and is followed by text,
+        // so it cannot close; the opener must be valid on its own.
+        if before_punct && after_plain && opener_valid_now {
+            if let Some(&(o_start, o_end, _och)) =
+                runs[..close_idx].iter().rev().find(|&&(os, oe, och)| {
+                    och == ch
+                        && oe < c_start
+                        && oe - os == c_end - c_start
+                        && !in_code(os)
+                        && opener_valid(os, oe)
+                        && !input[oe..c_start].bytes().enumerate().any(|(delta, b)| {
+                            is_delim_byte(b) && !is_escaped_delim(input, oe + delta)
+                        })
+                })
+            {
+                synthesized.push((o_start, o_end, c_start, c_end));
+                continue;
+            }
+        }
+        // Opener side: the opener sits between text and punctuation, so it
+        // cannot open; the closer must be valid on its own.
+        let before_plain = char_before(c_start).is_some_and(|c| !is_ws_or_punct(c));
+        let after_punct = after.is_some_and(is_punct_or_symbol);
+        if before_plain && after_punct {
+            if let Some(&(c2_start, c2_end, _och)) =
+                runs[close_idx + 1..].iter().find(|&&(os, oe, och)| {
+                    och == ch
+                        && os > c_end
+                        && oe - os == c_end - c_start
+                        && !in_code(os)
+                        && closer_valid(os, oe)
+                        && !input[c_end..os].bytes().enumerate().any(|(delta, b)| {
+                            is_delim_byte(b) && !is_escaped_delim(input, c_end + delta)
+                        })
+                })
+            {
+                synthesized.push((c_start, c_end, c2_start, c2_end));
+            }
+        }
+    }
+    for (o_start, o_end, c_start, c_end) in synthesized {
+        let len = c_end - c_start;
+        let kind = if input.as_bytes()[o_start] == b'~' {
+            InlineTagKind::Strike
+        } else if len == 2 {
+            InlineTagKind::Bold
+        } else {
+            InlineTagKind::Italic
+        };
+        let inner = base + o_end..base + c_start;
+        raw_hidden.push(base + o_start..base + o_end);
+        raw_hidden.push(base + c_start..base + c_end);
+        inline_pairs.push(InlinePair {
+            kind,
+            open_delim: base + o_start..base + o_end,
+            inner: inner.clone(),
+            close_delim: base + c_start..base + c_end,
+        });
+        let seg = StyledSegment {
+            source: inner.clone(),
+            bold: kind == InlineTagKind::Bold,
+            italic: kind == InlineTagKind::Italic,
+            underline: false,
+            strike: kind == InlineTagKind::Strike,
+            code: false,
+            link_url: None,
+        };
+        styled_segments.retain(|s| !(s.source.start >= inner.start && s.source.end <= inner.end));
+        for run in [base + o_start..base + o_end, base + c_start..base + c_end] {
+            styled_segments.retain(|s| !(s.source.start >= run.start && s.source.end <= run.end));
+        }
+        let pos = styled_segments
+            .iter()
+            .position(|s| s.source.start > inner.start)
+            .unwrap_or(styled_segments.len());
+        styled_segments.insert(pos, seg);
+    }
 }
 
 /// pulldown reports markers that share one delimiter run (`***x***`,
@@ -3397,16 +3637,18 @@ mod tests {
                 ],
             ),
             (
+                // The WYSIWYG display hides escape backslashes, so the
+                // display shows the escaped characters unescaped.
                 "ex65-escaped-atx",
                 "\\## foo",
-                vec![leaf("p", "\\## foo", "\\## foo")],
+                vec![leaf("p", "## foo", "\\## foo")],
             ),
             (
                 "ex66-atx-inline",
                 "# foo *bar* \\*baz\\*",
                 vec![leaf_marks(
                     "h1",
-                    "foo bar \\*baz\\*",
+                    "foo bar *baz*",
                     "# foo *bar* \\*baz\\*",
                     "I:bar",
                 )],
@@ -3472,9 +3714,9 @@ mod tests {
                 "ex76-escaped-closer",
                 "### foo \\###\n## foo #\\##\n# foo \\#",
                 vec![
-                    leaf("h3", "foo \\###", "### foo \\###"),
-                    leaf("h2", "foo #\\##", "## foo #\\##"),
-                    leaf("h1", "foo \\#", "# foo \\#"),
+                    leaf("h3", "foo ###", "### foo \\###"),
+                    leaf("h2", "foo ###", "## foo #\\##"),
+                    leaf("h1", "foo #", "# foo \\#"),
                 ],
             ),
             (

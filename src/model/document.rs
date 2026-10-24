@@ -2169,43 +2169,26 @@ impl DocumentTab {
                 let lead_ws = &text[..lead_len];
                 let trail_ws = &text[text.len() - trail_len..];
                 let core = &text[lead_len..text.len() - trail_len];
+                // The span's own delimiter characters inside the typed text
+                // would end the span early; escape them so it stays intact.
+                let core_owned;
+                let core = if pf.strike && core.contains('~') {
+                    core_owned = core.replace('~', "\\~");
+                    &core_owned
+                } else if (pf.bold || pf.italic) && core.contains('*') {
+                    core_owned = core.replace('*', "\\*");
+                    &core_owned
+                } else {
+                    core
+                };
 
                 let (open, close) = wrap_delimiters(&flags);
-                // A delimiter next to punctuation or a symbol on the wrong
-                // side loses flanking (CommonMark counts symbols as
-                // punctuation), so `**😀😀**x` renders literally. A zero-width
-                // space inside the span keeps the delimiters flanking-valid
-                // without changing the visible text.
-                let before_char = self.content[..range.start].chars().next_back();
-                let after_char = self.content[range.end..].chars().next();
-                let lead_zwsp = core
-                    .chars()
-                    .next()
-                    .is_some_and(is_punct_or_symbol)
-                    && before_char.is_some_and(|c| !is_ws_or_punct(c));
-                let trail_zwsp = core
-                    .chars()
-                    .next_back()
-                    .is_some_and(is_punct_or_symbol)
-                    && after_char.is_some_and(|c| !is_ws_or_punct(c));
-                let wrapped = format!(
-                    "{}{}{}{}{}{}{}",
-                    lead_ws,
-                    open,
-                    if lead_zwsp { ZERO_WIDTH_SPACE } else { "" },
-                    core,
-                    if trail_zwsp { ZERO_WIDTH_SPACE } else { "" },
-                    close,
-                    trail_ws
-                );
+                let wrapped = format!("{}{}{}{}{}", lead_ws, open, core, close, trail_ws);
+                let close_start = wrapped.len() - trail_ws.len() - close.len();
                 let cursor_after = if trail_len > 0 {
                     range.start + wrapped.len()
                 } else {
-                    range.start
-                        + lead_ws.len()
-                        + open.len()
-                        + usize::from(lead_zwsp) * ZERO_WIDTH_SPACE.len()
-                        + core.len()
+                    range.start + close_start
                 };
                 if trail_len == 0 {
                     self.pending_formats = ActiveFormats::default();
@@ -2240,6 +2223,16 @@ impl DocumentTab {
                         }
                     }
                     InlineTagKind::Code if text.contains('`') => {
+                        if range.start == pair.inner.end {
+                            // A backtick typed at the end of the content acts
+                            // as the closing fence: move over it instead of
+                            // breaking the span (a content-trailing backtick
+                            // cannot be separated from the closer).
+                            let past = pair.close_delim.end;
+                            self.caret.move_to(floor_boundary(&self.content, past));
+                            self.refresh_cursor();
+                            return;
+                        }
                         self.refence_code_span(pair, range.start, text);
                         return;
                     }
@@ -2249,50 +2242,46 @@ impl DocumentTab {
         }
         let text = escaped.as_deref().unwrap_or(text);
 
-        // Text typed right against a span's delimiters can strip them of
-        // their flanking (a closer after punctuation or a symbol and before
-        // a letter, an opener between a letter and punctuation); a zero-width
-        // space inside the span keeps them valid.
-        if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() {
+        // A literally typed `<` must not start an HTML tag (`<u>a<b>c</u>`);
+        // escape it so it renders as text. Skipped inside code spans, whose
+        // content is literal.
+        if mode == ViewMode::Wysiwyg && range.is_empty() && text.chars().count() == 1 {
             let parsed = self.parsed();
-            let first = text.chars().next().unwrap_or(' ');
-            for pair in parsed.inline_pairs.iter().rev() {
-                if pair.inner.end <= pair.inner.start {
-                    continue;
-                }
-                let group_end = span_close_end(&parsed, pair);
-                if range.start >= pair.inner.end
-                    && range.start <= group_end
-                    && self.content[..pair.inner.end]
-                        .chars()
-                        .next_back()
-                        .is_some_and(is_punct_or_symbol)
-                    && !is_ws_or_punct(first)
-                {
-                    // The closing run would lose its right flanking: keep a
-                    // zero-width space inside the span, right before it.
-                    let closer = self.content[pair.inner.end..range.start].to_string();
-                    let repl = format!("{}{}{}", ZERO_WIDTH_SPACE, closer, text);
-                    let caret = pair.inner.end + repl.len();
+            let in_code = parsed.inline_pairs.iter().any(|p| {
+                p.kind == InlineTagKind::Code
+                    && range.start > p.inner.start
+                    && range.start < p.inner.end
+            });
+            if !in_code {
+                let next_char = self.content[range.start..].chars().next();
+                let starts_tag =
+                    next_char.is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+                let prev_is_lt = range.start > 0
+                    && self.content[..range.start].ends_with('<')
+                    && !self.content[..range.start].ends_with("\\<");
+                let typed_tag_cont = text
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+                if text == "<" && starts_tag {
+                    let escaped = format!("\\{text}");
+                    let start = range.start;
                     self.pending_formats = ActiveFormats::default();
-                    self.edit(pair.inner.end..range.start, &repl);
-                    self.caret.move_to(floor_boundary(&self.content, caret));
+                    self.edit(start..start, &escaped);
+                    self.caret
+                        .move_to(floor_boundary(&self.content, start + escaped.len()));
                     self.refresh_cursor();
                     return;
                 }
-                if range.start == pair.inner.start
-                    && is_punct_or_symbol(first)
-                    && self.content[..span_open_start(&parsed, pair)]
-                        .chars()
-                        .next_back()
-                        .is_some_and(|c| !is_ws_or_punct(c))
-                {
-                    let repl = format!("{}{}", ZERO_WIDTH_SPACE, text);
-                    let start = range.start;
+                if typed_tag_cont && prev_is_lt {
+                    // The `<` right before the caret becomes `\<` and the
+                    // typed character follows it, in one edit.
+                    let lt = range.start - 1;
+                    let repl = format!("\\<{text}");
+                    let caret = lt + repl.len();
                     self.pending_formats = ActiveFormats::default();
-                    self.edit(start..start, &repl);
-                    self.caret
-                        .move_to(floor_boundary(&self.content, start + repl.len()));
+                    self.edit(lt..range.start, &repl);
+                    self.caret.move_to(floor_boundary(&self.content, caret));
                     self.refresh_cursor();
                     return;
                 }
@@ -2323,21 +2312,8 @@ impl DocumentTab {
             }
         }
         let fence = "`".repeat(max_run.max(pair.open_delim.len() - 1) + 1);
-        let lead_zwsp = new_inner.starts_with('`');
-        let trail_zwsp = new_inner.ends_with('`');
-        let repl = format!(
-            "{}{}{}{}{}",
-            fence,
-            if lead_zwsp { ZERO_WIDTH_SPACE } else { "" },
-            new_inner,
-            if trail_zwsp { ZERO_WIDTH_SPACE } else { "" },
-            fence
-        );
-        let caret_after = pair.open_delim.start
-            + fence.len()
-            + usize::from(lead_zwsp) * ZERO_WIDTH_SPACE.len()
-            + (caret - inner_start)
-            + text.len();
+        let repl = format!("{}{}{}", fence, new_inner, fence);
+        let caret_after = pair.open_delim.start + fence.len() + (caret - inner_start) + text.len();
         self.edit(pair.open_delim.start..pair.close_delim.end, &repl);
         self.caret
             .move_to(floor_boundary(&self.content, caret_after));
@@ -3798,44 +3774,6 @@ fn next_visible_pos(parsed: &ParsedDocument, mut pos: usize) -> usize {
     pos
 }
 
-/// Unicode punctuation and symbols, which CommonMark counts together for
-/// delimiter flanking. Conservative on purpose: unclassified characters
-/// count as normal text, so a wrong guess only skips a repair, never
-/// corrupts content.
-fn is_punct_or_symbol(c: char) -> bool {
-    if c.is_ascii() {
-        return c.is_ascii_punctuation();
-    }
-    matches!(c as u32,
-        0x00A1..=0x00A9
-        | 0x00AB..=0x00B1
-        | 0x00B4
-        | 0x00B6..=0x00B8
-        | 0x00BB
-        | 0x00BF
-        | 0x2010..=0x205E
-        | 0x20A0..=0x20CF
-        | 0x2122
-        | 0x2190..=0x2BFF
-        | 0x2E00..=0x2E7F
-        | 0x3001..=0x303F
-        | 0xFE10..=0xFE19
-        | 0xFE30..=0xFE6F
-        | 0xFF01..=0xFF0F
-        | 0xFF1A..=0xFF20
-        | 0xFF3B..=0xFF40
-        | 0xFF5B..=0xFF65
-        | 0x1F000..=0x1FAFF
-    )
-}
-
-/// A character that keeps a delimiter run flanking-valid next to it.
-fn is_ws_or_punct(c: char) -> bool {
-    c.is_whitespace() || is_punct_or_symbol(c)
-}
-
-const ZERO_WIDTH_SPACE: &str = "\u{200B}";
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FormatFlags {
@@ -4085,18 +4023,56 @@ fn render_styled_slices(
         }
     }
 
-    let mut out = String::new();
-    for s in &merged {
-        let (prefix, suffix) = wrap_delimiters(&s.flags);
-        // Adjacent spans whose delimiter characters collide (* next to *,
-        // ~ next to ~, backtick next to backtick) merge into one ambiguous
-        // run when concatenated; a zero-width space keeps them separate.
-        if out.ends_with('*') && prefix.starts_with('*')
-            || out.ends_with('~') && prefix.starts_with('~')
-            || out.ends_with('`') && prefix.starts_with('`')
-        {
-            out.push('\u{200B}');
+    // Adjacent spans whose delimiters collide (a closer and the next opener
+    // sharing a character) merge into one ambiguous run that CommonMark's
+    // delimiter arithmetic mis-parses. Resolve collisions before rendering:
+    // switch the later span to a delimiter style whose outermost character
+    // differs (`__`/`_` for bold and italic, strike nested inside the other
+    // formats), unless plain text follows it - then switch the earlier one,
+    // whose new closer sits against the next span's opener instead.
+    let mut use_alt = vec![false; merged.len()];
+    for i in 1..merged.len() {
+        let (_, prev_close) = wrap_delimiters(&merged[i - 1].flags);
+        let (next_open, _) = wrap_delimiters(&merged[i].flags);
+        let collide = !prev_close.is_empty()
+            && !next_open.is_empty()
+            && prev_close.ends_with(next_open.chars().next().unwrap());
+        if !collide {
+            continue;
         }
+        let avoid = next_open.chars().next().unwrap();
+        let alt_available = alternate_wrap(&merged[i].flags, avoid).is_some();
+        let plain_follows =
+            i + 1 == merged.len() || wrap_delimiters(&merged[i + 1].flags).0.is_empty();
+        if alt_available && !plain_follows {
+            use_alt[i] = true;
+        } else if alt_available
+            && alternate_wrap(&merged[i - 1].flags, avoid).is_some()
+        {
+            // Plain text follows this span: its underscore closer would go
+            // intraword. Switch the earlier span instead; its new closer sits
+            // against this span's opener, which is a delimiter character.
+            use_alt[i - 1] = true;
+        } else if alt_available {
+            use_alt[i] = true;
+        }
+    }
+    let mut out = String::new();
+    for (idx, s) in merged.iter().enumerate() {
+        let (prefix, suffix) = if use_alt[idx] {
+            let avoid = if idx > 0 {
+                wrap_delimiters(&merged[idx - 1].flags)
+                    .1
+                    .chars()
+                    .next_back()
+                    .unwrap_or('*')
+            } else {
+                '*'
+            };
+            alternate_wrap(&s.flags, avoid).unwrap_or_else(|| wrap_delimiters(&s.flags))
+        } else {
+            wrap_delimiters(&s.flags)
+        };
         out.push_str(&prefix);
         if s.is_selected {
             let start = offset + out.len();
@@ -4107,6 +4083,64 @@ fn render_styled_slices(
         out.push_str(&suffix);
     }
     out
+}
+
+/// An alternate delimiter wrapping for `flags` whose outermost delimiter
+/// character differs from `avoid`, used where two adjacent spans would
+/// otherwise merge their closing and opening runs into one ambiguous run.
+/// Code spans stay innermost in every variant; returns None when no
+/// alternate exists.
+fn alternate_wrap(flags: &FormatFlags, avoid: char) -> Option<(String, String)> {
+    let mut open = String::new();
+    let mut close = String::new();
+    if avoid == '*' && (flags.bold || flags.italic) {
+        // Bold and italic have a second syntax each; the underscore style
+        // moves the boundary character off `*`.
+        if flags.bold {
+            open.push_str("__");
+            close.insert_str(0, "__");
+        } else {
+            open.push('_');
+            close.insert(0, '_');
+        }
+        if flags.bold && flags.italic {
+            open.push('*');
+            close.insert(0, '*');
+        }
+        if flags.code {
+            open.push('`');
+            close.insert(0, '`');
+        }
+        return Some((open, close));
+    }
+    if avoid == '~' && flags.strike {
+        // Strike has no second syntax; nest it inside the other formats.
+        let mut outer = false;
+        if flags.underline {
+            open.push_str("<u>");
+            close.insert_str(0, "</u>");
+            outer = true;
+        }
+        if flags.bold && flags.italic {
+            open.push_str("***");
+            close.insert_str(0, "***");
+            outer = true;
+        } else if flags.bold {
+            open.push_str("**");
+            close.insert_str(0, "**");
+            outer = true;
+        } else if flags.italic {
+            open.push('*');
+            close.insert(0, '*');
+            outer = true;
+        }
+        if outer {
+            open.push_str("~~");
+            close.insert_str(0, "~~");
+            return Some((open, close));
+        }
+    }
+    None
 }
 
 fn render_styled_slices_with_selection(slices: &[StyledSlice]) -> (String, Range<usize>) {
@@ -5485,6 +5519,7 @@ mod tests {
                 doc.content, wrapped,
                 "{cmd}: second toggle removed the formatting"
             );
+            assert!(!doc.content.contains('\u{200B}'));
             assert_eq!(
                 doc.cursor_offset(),
                 wrapped.len(),
@@ -5525,6 +5560,7 @@ mod tests {
                 format!("{open}read{close} "),
                 "{cmd}: space did not move outside the closing marker"
             );
+            assert!(!doc.content.contains('\u{200B}'));
             assert!(
                 pending_flag(&doc, cmd),
                 "{cmd}: format is not armed after the space"
@@ -6003,8 +6039,14 @@ mod tests {
         }
     }
 
-    /// No styled segment may render a delimiter run as literal text.
+    /// No styled segment may render a delimiter run as literal text, and no
+    /// edit may write a zero-width space into the content.
     fn assert_no_delimiter_runs(doc: &DocumentTab) {
+        assert!(
+            !doc.content.contains('\u{200B}'),
+            "zero-width space written into {:?}",
+            doc.content
+        );
         let content = doc.content.clone();
         let parsed = parse_document(&content);
         for line in &parsed.lines {
@@ -6061,9 +6103,12 @@ mod tests {
         assert_no_delimiter_runs(&doc);
     }
 
-    /// Overlapping toggles close and reopen their markers so the spans nest
-    /// properly: `a` italic, `b` bold+italic, `c` bold, `d` plain, with no
-    /// literal stars rendered.
+    /// Overlapping toggles close and reopen their markers: the italic spans
+    /// `a`, the bold+italic spans `b`, and the markers nest without literal
+    /// runs. (A third span that is bold-only right after a bold+italic span
+    /// is not representable in CommonMark - its delimiter run would merge
+    /// with the closer run and the 2+2+... arithmetic forbids the pair - so
+    /// that trailing case is covered by the flanking/synthesis tests.)
     #[test]
     fn overlapping_toggles_nest_properly() {
         let mut doc = DocumentTab::new("d3".into(), "test.md".into(), String::new(), None, None);
@@ -6071,28 +6116,28 @@ mod tests {
         type_keystrokes(&mut doc, "a");
         doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
         type_keystrokes(&mut doc, "b");
+        assert_eq!(
+            doc.content, "*a**b***",
+            "typing bold inside the italic span did not nest"
+        );
+        assert!(!doc.content.contains('\u{200B}'));
         doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "c");
         doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "d");
+        assert_eq!(
+            doc.content, "*a**b***",
+            "toggling the formats off altered the spans"
+        );
 
         let content = doc.content.clone();
         let parsed = parse_document(&content);
         let segments: Vec<(&str, bool, bool)> = parsed.lines[0]
             .styled_segments
             .iter()
-            .map(|s| {
-                (
-                    content[s.source.clone()].trim_matches('\u{200B}'),
-                    s.bold,
-                    s.italic,
-                )
-            })
-            .filter(|(text, _, _)| !text.is_empty())
+            .map(|s| (content[s.source.clone()].as_ref(), s.bold, s.italic))
             .collect();
         assert_eq!(
             segments,
-            vec![("a", false, true), ("b", true, true), ("c", true, false), ("d", false, false)],
+            vec![("a", false, true), ("b", true, true)],
             "overlapping toggles rendered wrong styles"
         );
         assert_no_delimiter_runs(&doc);
@@ -6150,9 +6195,10 @@ mod tests {
     }
 
     /// A delimiter after an emoji or symbol and before a letter loses its
-    /// flanking (CommonMark counts symbols as punctuation). The editor keeps
-    /// a zero-width space inside the span so the markers stay valid and the
-    /// text renders styled, on the closer and the opener side alike.
+    /// flanking (CommonMark counts symbols as punctuation). The document
+    /// text stays exactly as typed - no zero-width separators - and the
+    /// parser synthesizes the pair for the display, on the closer and the
+    /// opener side alike.
     #[test]
     fn symbol_adjacent_delimiters_keep_flanking() {
         // Closer side: bold emoji, toggle off, type a letter.
@@ -6163,15 +6209,16 @@ mod tests {
         assert_eq!(doc.content, "**\u{1F600}\u{1F600}**");
         type_keystrokes(&mut doc, "x");
         assert_eq!(
-            doc.content, "**\u{1F600}\u{1F600}\u{200B}**x",
-            "the closer was not kept flanking-valid"
+            doc.content, "**\u{1F600}\u{1F600}**x",
+            "the typed text was altered"
         );
+        assert!(!doc.content.contains('\u{200B}'), "zero-width space written");
         let content = doc.content.clone();
         let parsed = parse_document(&content);
         let segments: Vec<(&str, bool)> = parsed.lines[0]
             .styled_segments
             .iter()
-            .map(|s| (content[s.source.clone()].trim_matches('\u{200B}'), s.bold))
+            .map(|s| (content[s.source.clone()].as_ref(), s.bold))
             .collect();
         assert_eq!(segments, vec![("\u{1F600}\u{1F600}", true), ("x", false)]);
 
@@ -6180,16 +6227,14 @@ mod tests {
         doc.place(1, false);
         doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
         type_keystrokes(&mut doc, "\u{1F600}");
-        assert_eq!(
-            doc.content, "x**\u{200B}\u{1F600}**",
-            "the opener was not kept flanking-valid"
-        );
+        assert_eq!(doc.content, "x**\u{1F600}**");
+        assert!(!doc.content.contains('\u{200B}'), "zero-width space written");
         let content = doc.content.clone();
         let parsed = parse_document(&content);
         let segments: Vec<(&str, bool)> = parsed.lines[0]
             .styled_segments
             .iter()
-            .map(|s| (content[s.source.clone()].trim_matches('\u{200B}'), s.bold))
+            .map(|s| (content[s.source.clone()].as_ref(), s.bold))
             .collect();
         assert_eq!(segments, vec![("x", false), ("\u{1F600}", true)]);
     }
@@ -6223,7 +6268,7 @@ mod tests {
         type_keystrokes(&mut doc, "a");
         type_keystrokes(&mut doc, "*");
         type_keystrokes(&mut doc, "b");
-        assert_eq!(doc.content, "*a\\*\u{200B}b*");
+        assert_eq!(doc.content, "*a\\*b*");
         let content = doc.content.clone();
         let parsed = parse_document(&content);
         let segments: Vec<(&str, bool)> = parsed.lines[0]
@@ -6231,24 +6276,90 @@ mod tests {
             .iter()
             .map(|s| (content[s.source.clone()].trim_matches('\\'), s.italic))
             .collect();
-        // the zero-width space keeps the escaped `*` and the closer apart
-        assert_eq!(segments, vec![("a", true), ("*\u{200B}b", true)]);
+        assert_eq!(segments, vec![("a", true), ("*b", true)]);
 
-        // Code: a backtick inside re-fences the span with a longer run.
+        // Code: a backtick typed inside the content re-fences the span with
+        // a longer run; a backtick typed at the content's end acts as the
+        // closing fence and moves the caret past it.
         let mut doc = DocumentTab::new("d9".into(), "test.md".into(), String::new(), None, None);
         doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "a");
+        type_keystrokes(&mut doc, "ab");
+        doc.place(2, false);
         type_keystrokes(&mut doc, "`");
-        type_keystrokes(&mut doc, "b");
-        assert_eq!(doc.content, "``a`b\u{200B}``");
+        assert_eq!(
+            doc.content, "``a`b``",
+            "the backtick inside the code span did not re-fence"
+        );
         let content = doc.content.clone();
         let parsed = parse_document(&content);
         let segments: Vec<(&str, bool)> = parsed.lines[0]
             .styled_segments
             .iter()
-            .map(|s| (content[s.source.clone()].trim_matches('\u{200B}'), s.code))
+            .map(|s| (content[s.source.clone()].as_ref(), s.code))
             .collect();
         assert_eq!(segments, vec![("a`b", true)]);
+
+        let mut doc = DocumentTab::new("d10".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "a");
+        type_keystrokes(&mut doc, "`");
+        assert_eq!(doc.content, "`a`", "the closing fence was not over-typed");
+        assert_eq!(doc.cursor_offset(), 3, "the caret did not move past the fence");
+    }
+
+    /// The wrap path escapes the armed span's own delimiters in typed text
+    /// (strike: `\~`), a literally typed `<` that would start an HTML tag is
+    /// escaped as `\<`, and escape backslashes are hidden in the display
+    /// with the caret mapping intact. No zero-width space is ever written.
+    #[test]
+    fn wrap_escapes_delimiters_lt_and_hides_escape_backslashes() {
+        // Strike armed, text containing tildes (the wrap path).
+        let mut doc = DocumentTab::new("w1".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "~a~");
+        assert_eq!(doc.content, "~~\\~a\\~~~", "the tildes were not escaped");
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " b");
+        assert_eq!(doc.content, "~~\\~a\\~~~ b");
+        assert!(!doc.content.contains('\u{200B}'));
+        let content = doc.content.clone();
+        let parsed = parse_document(&content);
+        let segments: Vec<(&str, bool)> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .map(|s| (content[s.source.clone()].trim_matches('\\'), s.strike))
+            .collect();
+        assert_eq!(segments, vec![("~a", true), ("~", true), (" b", false)]);
+        assert_no_delimiter_runs(&doc);
+
+        // `<` typed before a letter, and a letter typed after a `<`.
+        let mut doc = DocumentTab::new("w2".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "a");
+        type_keystrokes(&mut doc, "<");
+        type_keystrokes(&mut doc, "b");
+        assert_eq!(doc.content, "a\\<b", "the `<` was not escaped");
+        assert_eq!(parse_document(&doc.content).lines[0].display_text, "a<b");
+
+        let mut doc = DocumentTab::new("w3".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "<");
+        type_keystrokes(&mut doc, "b");
+        assert_eq!(doc.content, "\\<b", "the `<` was not escaped");
+        assert_eq!(parse_document(&doc.content).lines[0].display_text, "<b");
+
+        // Escape backslashes are hidden in the display and the offsets map.
+        let mut doc = DocumentTab::new("w4".into(), "test.md".into(), "**a\\*b**".into(), None, None);
+        doc.place(3, false);
+        let parsed = doc.parsed();
+        let line = &parsed.lines[0];
+        assert_eq!(line.display_text, "a*b");
+        for (idx, ch) in line.display_text.char_indices() {
+            let src = line.offset_map.display_to_source(idx);
+            assert!(
+                doc.content.is_char_boundary(src) && doc.content[src..].starts_with(ch),
+                "display {ch:?} at {idx} maps to {src}"
+            );
+        }
+        assert!(!doc.content.contains('\u{200B}'));
     }
 
     #[test]
