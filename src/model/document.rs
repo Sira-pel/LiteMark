@@ -1207,7 +1207,10 @@ impl DocumentTab {
                     return;
                 }
 
-                // Expand to word only if cursor is touching/inside an alphanumeric word on the same line
+                // Expand to the whole word only when the caret is strictly
+                // inside one (a letter on both sides), like Word. At the end
+                // of a word just typed there is nothing to wrap: fall through
+                // and arm the format for the letters typed next.
                 let line_s = home_offset(&self.content, cursor);
                 let line_e = parsed
                     .line_at_offset(cursor)
@@ -1215,16 +1218,16 @@ impl DocumentTab {
                     .unwrap_or_else(|| line_end(&self.content, cursor));
                 let w_start = word_start.max(line_s);
                 let w_end = word_end.min(line_e);
-                let touching_word = (cursor > w_start
+                let touching_word = cursor > w_start
+                    && cursor < w_end
                     && self.content[..cursor]
                         .chars()
                         .next_back()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_'))
-                    || (cursor < w_end
-                        && self.content[cursor..]
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.is_alphanumeric() || c == '_'));
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    && self.content[cursor..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_');
                 if touching_word && w_start < w_end {
                     let extent = super::text_ops::word_extent(&self.content, cursor);
                     if self.content[extent.clone()]
@@ -4880,6 +4883,42 @@ mod tests {
             );
             assert!(styled_flag(&mut doc, cmd));
         }
+    }
+
+    /// Ctrl+B with no selection wraps the current word only when the caret
+    /// is strictly inside it (letters on both sides). At the end of a word
+    /// just typed the format is armed for the letters typed next instead, so
+    /// `un{Ctrl+B}believ{Ctrl+B}able` saves as `un**believ**able`.
+    #[test]
+    fn toggle_at_word_end_arms_instead_of_wrapping_the_word() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "un");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "un", "Ctrl+B wrapped the word the caret ends");
+        assert!(
+            doc.pending_formats.bold,
+            "bold is not armed at the word end"
+        );
+
+        type_keystrokes(&mut doc, "believ");
+        assert_eq!(doc.content, "un**believ**");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "un**believ**");
+        type_keystrokes(&mut doc, "able");
+        assert_eq!(doc.content, "un**believ**able");
+
+        // A caret strictly inside a word still wraps the whole word
+        let mut doc = DocumentTab::new("t2".into(), "test.md".into(), "Hello".into(), None, None);
+        doc.place(3, false);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "**Hello**");
+
+        // A caret at the start of a word arms the format without wrapping
+        let mut doc = DocumentTab::new("t3".into(), "test.md".into(), " world".into(), None, None);
+        doc.place(1, false);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, " world");
+        assert!(doc.pending_formats.bold);
     }
 
     #[test]
