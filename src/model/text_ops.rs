@@ -73,7 +73,7 @@ fn absorb_into_span_group(previous: &mut DiffEdit, edit: &DiffEdit) -> bool {
         return false;
     }
     let end = previous.start + previous.inserted.len();
-    if edit.start <= previous.start || edit.start > end || edit.start + edit.deleted.len() > end {
+    if edit.start < previous.start || edit.start > end || edit.start + edit.deleted.len() > end {
         return false;
     }
     let offset = edit.start - previous.start;
