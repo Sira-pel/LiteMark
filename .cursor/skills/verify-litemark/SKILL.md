@@ -44,6 +44,7 @@ Until `main` has a workflow, the kit's CI contract is:
 ```bash
 cargo build
 cargo test
+.cursor/skills/verify-litemark/scripts/format-toggle-gate.sh
 cargo clippy --all-targets -- -D warnings
 .cursor/skills/verify-litemark/scripts/fmt-gate.sh
 ```
@@ -60,9 +61,13 @@ cargo clippy --all-targets -- -D warnings
 
 `ci.sh` treats `cargo test` exit 0 as a pass only when the log contains `test result: ok. N passed` with N greater than 0. Otherwise it prints `test_result_ok=missing`. It treats the fmt gate as a pass only when the log contains the exact line `fmt_gate=pass`. Otherwise, when the gate exits 0, it prints `fmt_gate_pass=missing`.
 
+`scripts/format-toggle-gate.sh` runs the ignored test `format_toggle_cases` (`cargo test --bin litemark format_toggle_cases -- --ignored`). The test reads `fixtures/format-toggle/cases.tsv` and drives `DocumentTab` in WYSIWYG: `apply_format_in_mode`, `insert_text_in_mode`, `smart_newline`, `move_left_in_mode`, `move_right_in_mode`, and `undo`, then `parse_document`. Stdout is one `case=<id> pass|fail|xfail|xpass` line per row, then `pass=N fail=N xfail=N xpass=N`. The script exits non-zero when `fail` or `xpass` is non-zero. A `known_fail_main` row that still matches the recorded `main_bytes` and `main_caret` is `xfail`, so plain `cargo test` (no `--ignored`) stays green on main. `ci.sh` runs this gate after the test-result check.
+
+Job `verify-kit` in `.github/workflows/ci.yml` runs that same script on `pull_request` types `opened`, `synchronize`, and `reopened`. It installs the same apt packages as the `test` job. The `test` job is unchanged.
+
 The kit commit `4e72b711` recorded `fmt_baseline_files=19` and `fmt_baseline_hunks=201` after the `src/markdown/mod.rs` reorder. This branch's `fixtures/fmt-baseline.hunks` is regenerated with `scripts/fmt-hunks.py tokens` when a leaf-block edit moves a header; the file is that token list (`fmt_baseline_hunks=206`). `cargo fmt --check` on `main` (`fc681a8`) is 20 files and 202 hunks. The only header on main that the kit tip does not have is `src/markdown/mod.rs:1`. The kit tip adds no dirty hunk of its own.
 
-`ci.sh` does not install packages. The blob's apt list includes `libxcb1-dev` and `libfreetype6-dev`. This kit does not install those. `ci.sh` still runs build, test, clippy, and the fmt gate when an earlier step fails, then prints `ci_fail=`. GitHub Actions stops the job at the first failing step.
+`ci.sh` does not install packages. The blob's apt list includes `libxcb1-dev` and `libfreetype6-dev`. This kit does not install those. `ci.sh` still runs build, test, the format-toggle gate, clippy, and the fmt gate when an earlier step fails, then prints `ci_fail=`. GitHub Actions stops the job at the first failing step.
 
 ```bash
 source .cursor/skills/verify-litemark/scripts/env.sh
@@ -138,8 +143,9 @@ Harness name: **control-litemark**.
 # Renderer mutant per red fixture. Each must make that red check exit non-zero.
 .cursor/skills/verify-litemark/scripts/prove-red-mutants.sh
 
-# CI contract, including the bounded fmt gate.
+# CI contract, including the format-toggle gate and the bounded fmt gate.
 .cursor/skills/verify-litemark/scripts/ci.sh
+.cursor/skills/verify-litemark/scripts/format-toggle-gate.sh
 
 # Fmt reds: new file, absorption, collision, shift.
 .cursor/skills/verify-litemark/scripts/prove-fmt-red.sh
@@ -223,7 +229,8 @@ Rules:
 | `scripts/env.sh` | `RUN_ID` (charset `[A-Za-z0-9._-]` and no `..`), run dir, stable toolchain, wrap columns. Default `LITEMARK_BIN` comes from `cargo metadata` `target_directory` |
 | `scripts/launch.sh` | `cargo build`; `READY` is `target_directory/debug/litemark`, which follows `CARGO_TARGET_DIR`. Does not start the GUI |
 | `scripts/doctor.sh` | Read-only harness health. Rejects an executable that is not the built `litemark` binary |
-| `scripts/ci.sh` | CI contract: `cargo build`, `cargo test` (requires `test result: ok. N passed`, N > 0), `cargo clippy --all-targets -- -D warnings`, `fmt-gate.sh` (requires `fmt_gate=pass`). Does not apt-install `libxcb1-dev` or `libfreetype6-dev`. Runs every step; Actions stops at the first failure. |
+| `scripts/ci.sh` | CI contract: `cargo build`, `cargo test` (requires `test result: ok. N passed`, N > 0), `format-toggle-gate.sh`, `cargo clippy --all-targets -- -D warnings`, `fmt-gate.sh` (requires `fmt_gate=pass`). Does not apt-install `libxcb1-dev` or `libfreetype6-dev`. Runs every step; Actions stops at the first failure. |
+| `scripts/format-toggle-gate.sh` | Ignored test `format_toggle_cases` over `fixtures/format-toggle/cases.tsv`. Prints `case=<id> pass\|fail\|xfail\|xpass`, then totals. Non-zero on `fail` or `xpass`. `known_fail_main` that still matches main is `xfail`. |
 | `scripts/fmt-gate.sh` | `cargo fmt --check -- --config-path` the kit `rustfmt.toml`, against `path:line:sha256` hunk bodies. Unmatched baseline tokens print `fmt_baseline_stale=<n>` and fail |
 | `scripts/fmt-hunks.py` | Parse hunks and decide `fmt_new_file`, `fmt_new_hunk`, `fmt_hunk_body`, `fmt_baseline_stale` |
 | `scripts/generate-large-doc.py` | Expand `large-doc/seed.txt`, assert `sha256_self=ok` and `input.sha256` |

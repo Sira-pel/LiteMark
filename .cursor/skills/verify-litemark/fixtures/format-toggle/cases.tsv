@@ -1,0 +1,47 @@
+# columns: id, family, source, sel, actions, expect, caret, status, main_bytes, main_caret, note
+# escapes: \\ \n \t. status ok locks main. known_fail_main locks the target; main_bytes is what main emits.
+id	family	source	sel	actions	expect	caret	status	main_bytes	main_caret	note
+m3-unbold-first	m3-phrase	**see docs now**	2..5	bold	see **docs now**	0..3	known_fail_main	****see** docs now**	4..7	Target unbolds only see. Main rewraps see, so the word stays bold.
+m3-unbold-middle	m3-phrase	**see docs now**	6..10	bold	**see** docs **now**	8..12	known_fail_main	**see **docs** now**	8..12	Target unbolds only docs. Main and head both leave the whole phrase bold.
+m3-unbold-last	m3-phrase	**see docs now**	11..14	bold	**see docs** now	13..16	known_fail_main	**see docs **now****	13..16	Target closes bold before now. Main keeps now bold. Head leaves the markers raw.
+m3-unbold-emoji	m3-phrase	**x 😀 y**	9..10	bold	**x 😀** y	11..12	known_fail_main	**x 😀 **y****	11..12	Same last-word edge as m3-unbold-last, with a 4-byte emoji in the phrase.
+nf1-space	nf1-bold-link	**[Hello](https://e.com)**	8..8	space	**[Hello ](https://e.com)**	9..9	ok	-	-	Space at the end of the bold link text stays inside the link. Main bytes.
+nf1-space-x	nf1-bold-link	**[Hello](https://e.com)**	8..8	space,type:x	**[Hello x](https://e.com)**	10..10	ok	-	-	The letter after that space stays inside the link and keeps the URL. Main bytes.
+nf1-direct-x	nf1-bold-link	**[Hello](https://e.com)**	8..8	type:x	**[Hellox](https://e.com)**	9..9	ok	-	-	A letter with no space first keeps the URL on both trees.
+f1-link-bold	f1-link-word	**[Hello](https://e.com)**	3..8	bold	[Hello](https://e.com)	1..6	known_fail_main	**[**Hello**](https://e.com)**	5..10	Target drops bold and keeps the URL. Main keeps bold and the URL. Head drops the URL.
+f1-link-italic	f1-link-word	see **[Hello](https://e.com)** now	7..12	italic	see **[*Hello*](https://e.com)** now	8..13	ok	-	-	Italic on the link text keeps bold and the URL. Main bytes.
+f1-bi-bold	f1-bold-italic	***Hello***	3..8	bold	*Hello*	1..6	ok	-	-	Whole-word bold off leaves italic. Both trees.
+f1-bi-italic	f1-bold-italic	***Hello***	3..8	italic	**Hello**	2..7	ok	-	-	Whole-word italic off leaves bold. Both trees.
+m4-image	m4-image	**an ![pic](p.png) end**	19..22	bold	**an ![pic](p.png)** end	21..24	known_fail_main	**an ![pic](p.png) **end****	21..24	Target unbolds end and keeps the image. Main keeps the image but not the unbold. Head deletes the image.
+m4-br	m4-html	**a<br>b c**	9..10	italic	**a<br>b *c***	10..11	ok	-	-	Italic on c keeps <br> and bold. Main bytes.
+m4-escape	m4-escape	**a\\*b c**	7..8	italic	**a\\*b *c***	8..9	ok	-	-	Italic on c keeps the backslash escape. Main bytes.
+m4-link	m4-link	**see [docs](https://e.com) now**	28..31	bold	**see [docs](https://e.com)** now	30..33	known_fail_main	**see [docs](https://e.com) **now****	30..33	Target unbolds now and keeps the link. Main keeps the link but not the unbold. Head deletes the link.
+m4-u	m4-underline	**see <u>docs</u> now**	18..21	bold	**see <u>docs</u>** now	20..23	known_fail_main	**see <u>docs</u> **now****	20..23	Target unbolds now and keeps the underline on docs. Main keeps the tag but not the unbold. Head shows raw markers.
+nf6-u-middle	nf6-underline	***H<u>ell</u>o***	7..10	bold	***H**<u>ell</u>**o***	9..12	known_fail_main	***H<u>**ell**</u>o***	9..12	Target drops bold on ell only and keeps italic and underline. Main keeps bold. Head drops the underline.
+nf4-he	nf4-code	**`Hello`**	3..5	bold	`He`**`llo`**	1..3	known_fail_main	**`**He**llo`**	5..7	Target splits the code span: He is code, llo is bold code. Both trees leave asterisks in the code text.
+nf4-ell	nf4-code	**`Hello`**	4..7	bold	**`H`**`ell`**`o`**	8..11	known_fail_main	**`H**ell**o`**	6..9	Target splits the code span: ell is code, H and o are bold code. Both trees leave asterisks in the code text.
+nf5-glued	nf5-bold-italic	x***Hello***	5..8	bold	x***H****ell****o***	9..12	known_fail_main	x***H**ell**o***	7..10	Target keeps H and o bold+italic and ell italic, using asterisks so the glued x does not break the span. Main shows raw stars. Head shows underscores and drops italic.
+nf5-bare	nf5-bold-italic	***Hello***	4..7	bold	_**H**ell**o**_	6..9	known_fail_main	***H**ell**o***	6..9	Target is underscore emphasis around the split word, display Hello, ell italic only. Head already saves this. Main shows raw stars.
+nf5-spaced	nf5-bold-italic	x ***Hello***	6..9	bold	x _**H**ell**o**_	8..11	known_fail_main	x ***H**ell**o***	8..11	A space before the span lets underscore emphasis open. Head already saves this. Main shows raw stars.
+f2-partial	f2-partial	***Hello***	3..5	bold	*He**llo***	1..3	known_fail_main	*****He**llo***	5..7	Partial unbold of He leaves He italic and llo bold+italic, caret on He. Head saves this. Main leaves He bold.
+f2-partial-type	f2-partial	***Hello***	3..5	bold,type:X	*X**llo***	2..2	known_fail_main	*****X**llo***	6..6	X replaces He and stays italic. Head saves this. Main leaves X bold.
+f2-plain-partial	f2-partial	**Hello**	2..4	bold	He**llo**	0..2	known_fail_main	****He**llo**	4..6	Partial unbold of a bold word. Head saves He**llo**. Main shows raw stars.
+f2-plain-type	f2-partial	**Hello**	2..4	bold,type:X	X**llo**	1..1	known_fail_main	****X**llo**	5..5	X replaces the unbolded He. Head saves X**llo**. Main shows raw stars.
+nf2-italic	nf2-selection	**Hello** world	4..12	italic	**He*llo*** *wo*rld	5..15	known_fail_main	**He*llo** wo*rld	5..13	Target adds italic to llo (still bold) and to wo, with no raw markers. The caret covers llo through wo. Both trees leak markers.
+nf2-type	nf2-selection	**Hello** world	4..12	italic,type:X	**He**Xrld	7..7	known_fail_main	**He*X*rld	6..6	X replaces the selected llo wo and leaves He bold. Both trees leave raw markers.
+nf3-left-bold-x	nf3-offset0	**Hello**	2..2	left,bold,type:x	xHello	1..1	ok	-	-	Left to offset 0, Ctrl+B, then x. Main unwraps the word and types a plain x.
+f3-start	f3-link-caret	[Hello](https://e.com)	1..1	link	Hello	0..0	ok	-	-	Collapsed link toggle at the start of the word removes the link and leaves a caret. Main bytes.
+f3-middle	f3-link-caret	[Hello](https://e.com)	3..3	link	Hello	2..2	ok	-	-	Collapsed link toggle in the middle of the word removes the link and leaves a caret. Main bytes.
+f3-middle-type	f3-link-caret	[Hello](https://e.com)	3..3	link,type:X	HeXllo	3..3	ok	-	-	The letter after a middle unlink inserts into the word. Main bytes.
+f3-end	f3-link-caret	[Hello](https://e.com)	6..6	link	Hello	5..5	ok	-	-	Collapsed link toggle at the end of the word removes the link and leaves a caret. Main bytes.
+m5-italic	m5-multiline	**Hello**\nworld	4..13	italic	**He*llo***\n*wor*ld	4..17	ok	-	-	Italic across the line break. Bytes have the intended flags. The caret is main's source range over that selection. Head's caret covers only the second line.
+m5-type	m5-multiline	**Hello**\nworld	4..13	italic,type:X	**He**Xld	7..7	known_fail_main	**HeXld	5..5	X should replace llo and wor and leave He bold, with no raw markers. Main's caret eats the markers. Head's caret leaves llo and drops the line break.
+f4-enter	f4-enter	**first half**	7..7	enter	**first**\n **half**	13..13	known_fail_main	**first\n half**	8..8	Enter inside the bold phrase closes and reopens bold on each line. Head saves this. Main splits the markers.
+f4-shift-enter	f4-enter	**first half**	7..7	shift-enter	**first**\n **half**	13..13	known_fail_main	**first\n half**	8..8	Shift+Enter should use the same repair as Enter. Both trees split the markers.
+f4-table-enter	f4-enter	| h |\n| --- |\n| **first half** |	24..24	enter	| h |\n| --- |\n| **first** |\n| **half** |	32..32	known_fail_main	| h |\n| --- |\n| **first |\n| half** |  |	28..28	Enter in the bold cell should keep bold on first and on half. Both trees split the markers. Table display_text keeps the raw line; hidden ranges cover the asterisks.
+f5-nested-enter	f5-nested-enter	**foo *bar* baz**	9..9	enter	**foo *ba***\n***r* baz**	16..16	known_fail_main	**foo *ba\nr* baz**	10..10	Enter inside nested italic closes and reopens bold and italic. Both trees tear the inner span, and the byte strings differ.
+m1-space	m1-nested-space	**foo *bar***	10..10	space	**foo *bar*** 	14..14	known_fail_main	**foo *bar ***	11..11	The space belongs after both closers so foo stays bold and bar stays bold+italic. A space before the closers is raw. Both trees insert it before a closer.
+m1-space-x	m1-nested-space	**foo *bar***	10..10	space,type:x	**foo *bar x***	12..12	ok	-	-	The letter after the space is inside both spans. Main bytes.
+m2-undo	m2-undo-caret	**first half**	7..7	enter,undo	**first half**	7..7	ok	-	-	Undo of Enter restores the phrase and puts the caret back at the split. Main bytes.
+f6-motion-undo	f6-undo		0..0	type:h,type:e,type:l,left,right,type:l,type:o,undo		0..0	ok	-	-	Left and right return to the same place, so one undo clears hello. Main bytes.
+f6-nomotion-undo	f6-undo		0..0	type:h,type:e,type:l,type:l,type:o,undo		0..0	ok	-	-	Undo of hello with no motion clears the note on both trees.

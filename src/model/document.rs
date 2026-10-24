@@ -6669,3 +6669,6 @@ mod tests {
         assert_eq!(doc.selection_range().start, a);
     }
 }
+
+#[cfg(test)]
+mod format_toggle_gate;
