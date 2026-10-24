@@ -1773,6 +1773,34 @@ fn synthesize_flanking_pairs(
                     rebuilt.push(s);
                 }
             }
+            // Marker runs are hidden: cut them out of every segment before
+            // merging, so leftover closer ticks are not glued onto the text
+            // that follows (` ``a```b`c` ` must keep `b` separate from `` ` ``).
+            for run in [
+                base + o_start..base + o_end,
+                base + closer_start..base + c_end,
+            ] {
+                let mut next = Vec::new();
+                for s in std::mem::take(&mut rebuilt) {
+                    if s.source.start < run.end && s.source.end > run.start {
+                        if s.source.start < run.start {
+                            next.push(StyledSegment {
+                                source: s.source.start..run.start,
+                                ..s.clone()
+                            });
+                        }
+                        if s.source.end > run.end {
+                            next.push(StyledSegment {
+                                source: run.end..s.source.end,
+                                ..s
+                            });
+                        }
+                    } else {
+                        next.push(s);
+                    }
+                }
+                rebuilt = next;
+            }
             rebuilt.sort_by_key(|s| s.source.start);
             let mut i = 0;
             while i + 1 < rebuilt.len() {
@@ -1791,13 +1819,6 @@ fn synthesize_flanking_pairs(
                 }
             }
             *styled_segments = rebuilt;
-            for run in [
-                base + o_start..base + o_end,
-                base + closer_start..base + c_end,
-            ] {
-                styled_segments
-                    .retain(|s| !(s.source.start >= run.start && s.source.end <= run.end));
-            }
             if !inner_covered {
                 let mut seg = StyledSegment {
                     source: inner.clone(),
