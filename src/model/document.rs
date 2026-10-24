@@ -348,12 +348,168 @@ impl DocumentTab {
             && self.content.as_bytes().get(cursor - 1) == Some(&b'\r')
     }
 
+    /// The table whose block contains `pos`, with its body rows in order.
+    fn table_at(&mut self, pos: usize) -> Option<TableInfo> {
+        let parsed = self.parsed();
+        let mut info: Option<TableInfo> = None;
+        for line in &parsed.lines {
+            if let LineKind::TableRow {
+                ref cells,
+                is_header,
+                ref table_source,
+                ..
+            } = line.kind
+            {
+                if pos < table_source.start || pos > table_source.end {
+                    continue;
+                }
+                let info = info.get_or_insert_with(|| TableInfo {
+                    source: table_source.clone(),
+                    rows: Vec::new(),
+                    delimiter_end: None,
+                });
+                info.rows.push(TableRowInfo {
+                    source: line.source.clone(),
+                    cells: cells.clone(),
+                    is_header,
+                });
+            }
+        }
+        let info = info.as_mut()?;
+        for line in &parsed.lines {
+            if matches!(line.kind, LineKind::TableDelimiter)
+                && line.source.start >= info.source.start
+                && line.source.end <= info.source.end
+            {
+                info.delimiter_end = Some(line.source.end);
+            }
+        }
+        info.rows.sort_by_key(|r| r.source.start);
+        info.clone().into()
+    }
+
+    /// Replace `remove_start..remove_end` (an optional trailing empty row,
+    /// otherwise empty at the table end) and put the caret on a paragraph line
+    /// below the table, with exactly one blank line between them. One undo step.
+    fn apply_table_exit(&mut self, remove_start: usize, remove_end: usize) {
+        let rest = &self.content[remove_end..];
+        let (insert_at, insert_text, caret_rel) = blank_gap_after_table(rest);
+        let end = remove_end + insert_at;
+        let replacement = format!("{}{}", &self.content[remove_end..end], insert_text);
+        if remove_start != end || !replacement.is_empty() {
+            self.edit(remove_start..end, &replacement);
+        }
+        let target = floor_boundary(&self.content, remove_start + caret_rel);
+        self.caret.move_to(target);
+        self.refresh_cursor();
+    }
+
+    /// Ctrl+Enter: add an empty row below the current row and put the caret in
+    /// the same column. Returns false outside a table.
+    pub fn table_insert_row_below(&mut self) -> bool {
+        if self.is_read_only() {
+            return false;
+        }
+        let cursor = self.selection_range().end;
+        let Some(table) = self.table_at(cursor) else {
+            return false;
+        };
+        let Some(row_pos) = table
+            .rows
+            .iter()
+            .position(|r| cursor >= r.source.start && cursor <= r.source.end)
+        else {
+            // On the delimiter row: add the first body row
+            let at = table.delimiter_end.unwrap_or(table.source.end);
+            let cols = table.rows.first().map(|r| r.cells.len()).unwrap_or(2).max(2);
+            let row = format!("\n|{}", "  |".repeat(cols));
+            self.edit(at..at, &row);
+            self.caret.move_to(floor_boundary(&self.content, at + 3));
+            self.refresh_cursor();
+            return true;
+        };
+        let row = &table.rows[row_pos];
+        let col = row
+            .cells
+            .iter()
+            .position(|c| cursor >= c.start.saturating_sub(1) && cursor <= c.end + 1)
+            .unwrap_or_else(|| row.cells.iter().rposition(|c| c.start <= cursor).unwrap_or(0));
+        let cols = row.cells.len().max(2);
+        let at = if row.is_header {
+            table.delimiter_end.unwrap_or(row.source.end)
+        } else {
+            row.source.end
+        };
+        let new_row = format!("\n|{}", "  |".repeat(cols));
+        self.edit(at..at, &new_row);
+        let target = at + 3 + 3 * col.min(cols - 1);
+        self.caret.move_to(floor_boundary(&self.content, target));
+        self.refresh_cursor();
+        true
+    }
+
+    /// Up on the first row or Down on the last row of a table leaves the table.
+    /// Returns false when the caret is not on that edge row.
+    pub fn table_edge_exit(&mut self, delta: i32) -> bool {
+        if self.is_read_only() {
+            return false;
+        }
+        let cursor = self.cursor_offset();
+        let Some(table) = self.table_at(cursor) else {
+            return false;
+        };
+        let Some(row_pos) = table
+            .rows
+            .iter()
+            .position(|r| cursor >= r.source.start && cursor <= r.source.end)
+        else {
+            return false;
+        };
+        if delta < 0 {
+            if row_pos != 0 {
+                return false;
+            }
+            let start = table.source.start;
+            if start == 0 {
+                self.edit(0..0, "\n\n");
+                self.caret.move_to(0);
+            } else {
+                let ending = line_ending_len_before(&self.content, start);
+                self.caret
+                    .move_to(floor_boundary(&self.content, start - ending.max(1)));
+            }
+            self.pending_formats = ActiveFormats::default();
+            self.refresh_cursor();
+            true
+        } else {
+            if row_pos + 1 != table.rows.len() {
+                return false;
+            }
+            let end = table.source.end;
+            let ending = line_ending_len(&self.content, end);
+            if end + ending >= self.content.len() {
+                // The table ends the note: make room below it
+                self.apply_table_exit(end, end);
+            } else {
+                self.caret.move_to(end + ending);
+                self.refresh_cursor();
+            }
+            self.pending_formats = ActiveFormats::default();
+            true
+        }
+    }
+
     pub fn smart_newline(&mut self, is_shift: bool) {
         if self.is_read_only() {
             return;
         }
         let range = self.selection_range();
         if is_shift {
+            // Shift+Enter in a table cell leaves the table without touching it.
+            if let Some(table) = self.table_at(range.start) {
+                self.apply_table_exit(table.source.end, table.source.end);
+                return;
+            }
             if let Some(at) = self.heading_newline_at(&range) {
                 self.edit(at..at, "\n");
                 return;
@@ -418,21 +574,38 @@ impl DocumentTab {
                 }
 
                 if is_empty_row {
-                    // Empty row: remove this empty row, keeping header, and exit table to a new line below
+                    let table = self.table_at(cursor);
+                    let row_pos = table
+                        .as_ref()
+                        .and_then(|t| t.rows.iter().position(|r| r.source.start == pline.source.start));
+                    if let (Some(table), Some(row_pos)) = (table, row_pos) {
+                        if row_pos + 1 < table.rows.len() {
+                            // Not the last row: move to the same column in the next row
+                            let col = table.rows[row_pos]
+                                .cells
+                                .iter()
+                                .position(|c| cursor >= c.start.saturating_sub(1) && cursor <= c.end + 1)
+                                .unwrap_or(0);
+                            let next = &table.rows[row_pos + 1];
+                            let target = next
+                                .cells
+                                .get(col)
+                                .or(next.cells.last())
+                                .map(|c| c.start)
+                                .unwrap_or(next.source.start);
+                            self.caret.move_to(floor_boundary(&self.content, target));
+                            self.refresh_cursor();
+                            return;
+                        }
+                    }
+                    // Last empty row: remove it, keeping the header, and exit below the table
                     let remove_start =
                         if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' {
                             line_start - 1
                         } else {
                             line_start
                         };
-                    let remove_end = line_end_pos;
-                    let has_newline_after = remove_end < self.content.len()
-                        && self.content.as_bytes()[remove_end] == b'\n';
-                    let replacement = if has_newline_after { "" } else { "\n" };
-                    self.edit(remove_start..remove_end, replacement);
-                    let target = (remove_start + 1).min(self.content.len());
-                    self.caret.move_to(floor_boundary(&self.content, target));
-                    self.refresh_cursor();
+                    self.apply_table_exit(remove_start, line_end_pos);
                     return;
                 } else {
                     // Non-empty row: check if cursor is inside a cell with content to split
@@ -814,52 +987,46 @@ impl DocumentTab {
             let mut range = self.selection_range();
             let parsed = self.parsed();
 
-            // Check if the cursor or selection is inside or wrapping an existing InlinePair of `tag_kind`
-            if let Some(pair) = parsed
-                .inline_pairs
-                .iter()
-                .rev()
-                .find(|p| {
-                    p.kind == tag_kind
-                        && ((range.start >= p.open_delim.start && range.end <= p.close_delim.end)
-                            || (range.start <= p.open_delim.start
-                                && range.end >= p.close_delim.end))
-                })
-                .cloned()
-            {
-                let inner_text = self.content[pair.inner.clone()].to_string();
-                let edit_range = pair.open_delim.start..pair.close_delim.end;
-                // If the inner text is just the default unmodified placeholder and the user immediately toggled off,
-                // remove the placeholder too so pressing Ctrl+B twice on an empty spot leaves it empty!
-                if inner_text == placeholder && range == pair.inner {
-                    let pos = pair.open_delim.start;
-                    self.edit(edit_range, "");
-                    self.caret.move_to(pos);
-                    self.pending_formats = ActiveFormats::default();
-                    self.refresh_cursor();
-                    return;
-                }
-                let new_start = pair.open_delim.start;
-                let new_end = new_start + inner_text.len();
-                self.edit(edit_range, &inner_text);
-                if range.is_empty() {
+            // If selection is empty, check if cursor is on/inside a word or enclosed by raw delimiters
+            if range.is_empty() {
+                let cursor = range.start;
+
+                // Check if cursor is inside an existing InlinePair of `tag_kind`
+                if let Some(pair) = parsed
+                    .inline_pairs
+                    .iter()
+                    .rev()
+                    .find(|p| {
+                        p.kind == tag_kind
+                            && range.start >= p.open_delim.start
+                            && range.end <= p.close_delim.end
+                    })
+                    .cloned()
+                {
+                    let inner_text = self.content[pair.inner.clone()].to_string();
+                    let edit_range = pair.open_delim.start..pair.close_delim.end;
+                    // If the inner text is just the default unmodified placeholder and the user immediately toggled off,
+                    // remove the placeholder too so pressing Ctrl+B twice on an empty spot leaves it empty!
+                    if inner_text == placeholder && range == pair.inner {
+                        let pos = pair.open_delim.start;
+                        self.edit(edit_range, "");
+                        self.caret.move_to(pos);
+                        self.pending_formats = ActiveFormats::default();
+                        self.refresh_cursor();
+                        return;
+                    }
+                    let new_start = pair.open_delim.start;
+                    self.edit(edit_range, &inner_text);
                     let rel = range
                         .start
                         .saturating_sub(pair.inner.start)
                         .min(inner_text.len());
                     self.caret.move_to(new_start + rel);
-                } else {
-                    self.caret.range = new_start..new_end;
-                    self.caret.reversed = false;
+                    self.pending_formats = ActiveFormats::default();
+                    self.refresh_cursor();
+                    return;
                 }
-                self.pending_formats = ActiveFormats::default();
-                self.refresh_cursor();
-                return;
-            }
 
-            // If selection is empty, check if cursor is on/inside a word or enclosed by raw delimiters
-            if range.is_empty() {
-                let cursor = range.start;
                 // Check empty delimiters right around cursor, e.g. `**|**`
                 if outer_is_delimited(&self.content, cursor, cursor, prefix, suffix) {
                     let edit_range = (cursor - prefix.len())..(cursor + suffix.len());
@@ -916,9 +1083,7 @@ impl DocumentTab {
                 }
             }
 
-            let selected = self.content[range.clone()].to_string();
-
-            if selected.is_empty() {
+            if range.is_empty() {
                 // In WYSIWYG mode, toggling bold/italic/underline/strike/code at an empty cursor toggles pending_formats!
                 if mode == ViewMode::Wysiwyg && tag_kind != InlineTagKind::Link {
                     match tag_kind {
@@ -956,53 +1121,227 @@ impl DocumentTab {
                 return;
             }
 
-            // Non-empty text: trim whitespace to place delimiters tightly around text
-            let lead_len = selected.len() - selected.trim_start().len();
-            let trail_len = selected.len() - selected.trim_end().len();
+            // Non-empty selection: collect parts across table cells or lines separately
+            let orig_sel = range.clone();
+            struct InlinePartInfo {
+                range: Range<usize>,
+                has_format: bool,
+                edit_range: Range<usize>,
+                unwrapped_text: String,
+                wrapped_text: String,
+            }
 
-            if lead_len + trail_len < selected.len() {
-                let leading = &selected[..lead_len];
-                let core = &selected[lead_len..selected.len() - trail_len];
-                let trailing = &selected[selected.len() - trail_len..];
+            let mut candidate_ranges: Vec<Range<usize>> = Vec::new();
 
-                let core_wrapped = is_delimited(core, prefix, suffix);
-                let core_start = range.start + lead_len;
-                let core_end = range.end - trail_len;
-                let outer_wrapped =
-                    outer_is_delimited(&self.content, core_start, core_end, prefix, suffix);
-
-                if core_wrapped {
-                    let unwrapped = &core[prefix.len()..core.len() - suffix.len()];
-                    let replacement = format!("{}{}{}", leading, unwrapped, trailing);
-                    let new_start = range.start + lead_len;
-                    let new_end = new_start + unwrapped.len();
-                    self.edit(range, &replacement);
-                    self.caret.range = new_start..new_end;
-                    self.caret.reversed = false;
-                    self.refresh_cursor();
-                    return;
-                } else if outer_wrapped {
-                    let edit_range = (core_start - prefix.len())..(core_end + suffix.len());
-                    let core_owned = core.to_string();
-                    let new_start = core_start - prefix.len();
-                    let new_end = new_start + core_owned.len();
-                    self.edit(edit_range, &core_owned);
-                    self.caret.range = new_start..new_end;
-                    self.caret.reversed = false;
-                    self.refresh_cursor();
-                    return;
-                } else {
-                    let replacement =
-                        format!("{}{}{}{}{}", leading, prefix, core, suffix, trailing);
-                    let inner_start = range.start + lead_len + prefix.len();
-                    let inner_end = inner_start + core.len();
-                    self.edit(range, &replacement);
-                    self.caret.range = inner_start..inner_end;
-                    self.caret.reversed = false;
-                    self.refresh_cursor();
-                    return;
+            for pline in &parsed.lines {
+                let line_start = range.start.max(pline.source.start);
+                let line_end = range.end.min(pline.source.end);
+                if line_start >= line_end {
+                    continue;
+                }
+                match &pline.kind {
+                    LineKind::TableDelimiter
+                    | LineKind::CodeFence { .. }
+                    | LineKind::HorizontalRule => {
+                        continue;
+                    }
+                    LineKind::TableRow {
+                        cells, raw_cells, ..
+                    } => {
+                        let cell_ranges = if raw_cells.is_empty() {
+                            cells
+                        } else {
+                            raw_cells
+                        };
+                        for c_range in cell_ranges {
+                            let c_start = range.start.max(c_range.start);
+                            let c_end = range.end.min(c_range.end);
+                            if c_start >= c_end {
+                                continue;
+                            }
+                            let slice = &self.content[c_start..c_end];
+                            let trimmed = slice.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            let lead = slice.len() - slice.trim_start().len();
+                            let trail = slice.len() - slice.trim_end().len();
+                            let part_start = c_start + lead;
+                            let part_end = c_end - trail;
+                            candidate_ranges.push(part_start..part_end);
+                        }
+                    }
+                    _ => {
+                        let content_start = pline.prefix_range.end.max(pline.source.start);
+                        let l_start = range.start.max(content_start);
+                        let l_end = range.end.min(pline.source.end);
+                        if l_start >= l_end {
+                            continue;
+                        }
+                        let slice = &self.content[l_start..l_end];
+                        let trimmed = slice.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let lead = slice.len() - slice.trim_start().len();
+                        let trail = slice.len() - slice.trim_end().len();
+                        let part_start = l_start + lead;
+                        let part_end = l_end - trail;
+                        candidate_ranges.push(part_start..part_end);
+                    }
                 }
             }
+
+            if candidate_ranges.is_empty() {
+                return;
+            }
+
+            let mut parts: Vec<InlinePartInfo> = Vec::with_capacity(candidate_ranges.len());
+
+            for p_range in candidate_ranges {
+                let p_start = p_range.start;
+                let p_end = p_range.end;
+                let part_text = &self.content[p_start..p_end];
+
+                let (has_format, edit_range, unwrapped_text) = if tag_kind == InlineTagKind::Link {
+                    if let Some(inner) = is_single_link(part_text) {
+                        (true, p_start..p_end, inner.to_string())
+                    } else if let Some(pair) = parsed.inline_pairs.iter().find(|p| {
+                        p.kind == InlineTagKind::Link
+                            && (p.inner == (p_start..p_end)
+                                || (p.open_delim.start == p_start && p.close_delim.end == p_end))
+                    }) {
+                        (
+                            true,
+                            pair.open_delim.start..pair.close_delim.end,
+                            self.content[pair.inner.clone()].to_string(),
+                        )
+                    } else if let Some((outer_range, inner)) =
+                        unwrap_outer_link(&self.content, p_start, p_end)
+                    {
+                        (true, outer_range, inner)
+                    } else {
+                        (false, p_start..p_end, String::new())
+                    }
+                } else {
+                    if is_delimited(part_text, prefix, suffix) {
+                        let unwrapped = &part_text[prefix.len()..part_text.len() - suffix.len()];
+                        (true, p_start..p_end, unwrapped.to_string())
+                    } else if let Some(pair) = parsed.inline_pairs.iter().find(|p| {
+                        p.kind == tag_kind
+                            && (p.inner == (p_start..p_end)
+                                || (p.open_delim.start == p_start && p.close_delim.end == p_end))
+                    }) {
+                        (
+                            true,
+                            pair.open_delim.start..pair.close_delim.end,
+                            self.content[pair.inner.clone()].to_string(),
+                        )
+                    } else if outer_is_delimited(&self.content, p_start, p_end, prefix, suffix) {
+                        let edit_range = (p_start - prefix.len())..(p_end + suffix.len());
+                        (true, edit_range, part_text.to_string())
+                    } else {
+                        (false, p_start..p_end, String::new())
+                    }
+                };
+
+                let wrapped_text = format!("{}{}{}", prefix, part_text, suffix);
+                parts.push(InlinePartInfo {
+                    range: p_range,
+                    has_format,
+                    edit_range,
+                    unwrapped_text,
+                    wrapped_text,
+                });
+            }
+
+            let every_part_has_format = parts.iter().all(|p| p.has_format);
+            let edits: Vec<(Range<usize>, String)> = if every_part_has_format {
+                parts
+                    .iter()
+                    .map(|p| (p.edit_range.clone(), p.unwrapped_text.clone()))
+                    .collect()
+            } else {
+                parts
+                    .iter()
+                    .filter(|p| !p.has_format)
+                    .map(|p| (p.edit_range.clone(), p.wrapped_text.clone()))
+                    .collect()
+            };
+
+            if edits.is_empty() {
+                return;
+            }
+
+            let min_start = edits.first().unwrap().0.start;
+            let max_end = edits.last().unwrap().0.end;
+            let span_range = min_start..max_end;
+
+            let mut replacement = String::with_capacity(
+                max_end - min_start + edits.len() * (prefix.len() + suffix.len()),
+            );
+            let mut cursor = min_start;
+            for (r, repl) in &edits {
+                if r.start > cursor {
+                    replacement.push_str(&self.content[cursor..r.start]);
+                }
+                replacement.push_str(repl);
+                cursor = r.end;
+            }
+            if max_end > cursor {
+                replacement.push_str(&self.content[cursor..max_end]);
+            }
+
+            self.edit(span_range, &replacement);
+
+            if parts.len() == 1
+                && (orig_sel == (parts[0].range.start..parts[0].range.end)
+                    || orig_sel == (parts[0].edit_range.start..parts[0].edit_range.end))
+            {
+                if every_part_has_format {
+                    let unwrapped_len = edits[0].1.len();
+                    self.caret.range = min_start..min_start + unwrapped_len;
+                } else {
+                    let inner_start = min_start + prefix.len();
+                    let inner_end = inner_start + (parts[0].range.end - parts[0].range.start);
+                    self.caret.range = inner_start..inner_end;
+                }
+                self.caret.reversed = false;
+            } else {
+                let map_offset = |offset: usize| -> usize {
+                    if offset <= min_start {
+                        return offset;
+                    }
+                    let mut mapped = min_start;
+                    let mut orig_cursor = min_start;
+                    for (r, repl) in &edits {
+                        if offset <= r.start {
+                            mapped += offset - orig_cursor;
+                            return mapped;
+                        }
+                        mapped += r.start - orig_cursor;
+                        if offset <= r.end {
+                            mapped += repl.len();
+                            return mapped;
+                        }
+                        mapped += repl.len();
+                        orig_cursor = r.end;
+                    }
+                    if offset > orig_cursor {
+                        mapped += offset - orig_cursor;
+                    }
+                    mapped
+                };
+                let new_start = map_offset(orig_sel.start);
+                let new_end = map_offset(orig_sel.end);
+                let new_start = floor_boundary(&self.content, new_start);
+                let new_end = floor_boundary(&self.content, new_end).max(new_start);
+                self.caret.range = new_start..new_end;
+                self.caret.reversed = false;
+            }
+            self.pending_formats = ActiveFormats::default();
+            self.refresh_cursor();
+            return;
         }
 
         if cmd == "table" {
@@ -1112,11 +1451,28 @@ impl DocumentTab {
                 abs += 1;
             }
         }
-        let all_match = split_lines
+
+        let parsed = self.parsed();
+        let is_table_line = |at: usize| -> bool {
+            parsed.line_at_offset(at).is_some_and(|l| {
+                matches!(l.kind, LineKind::TableRow { .. } | LineKind::TableDelimiter)
+            })
+        };
+
+        let non_table_indices: Vec<usize> = (0..split_lines.len())
+            .filter(|&i| !is_table_line(line_at[i]))
+            .collect();
+
+        if non_table_indices.is_empty() {
+            // All selected lines are table lines: skip so the table never breaks!
+            return;
+        }
+
+        let all_match = non_table_indices
             .iter()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty() || split_lines.len() == 1)
-            .all(|(idx, _line)| {
+            .copied()
+            .filter(|&idx| !split_lines[idx].trim().is_empty() || non_table_indices.len() == 1)
+            .all(|idx| {
                 let at = line_at[idx];
                 if target == BlockFormatTarget::TaskList {
                     accepted_list_marker(&self.content, at).is_some_and(|item| item.task.is_some())
@@ -1131,6 +1487,14 @@ impl DocumentTab {
         let mut total_delta: isize = 0;
 
         for (idx, line) in split_lines.iter().enumerate() {
+            if is_table_line(line_at[idx]) {
+                transformed.push(line.to_string());
+                continue;
+            }
+            if line.trim().is_empty() && split_lines.len() > 1 {
+                transformed.push(line.to_string());
+                continue;
+            }
             let (indent, _existing, prefix_end) =
                 parse_line_block_prefix(&self.content, line_at[idx]);
             let leading_spaces = if matches!(target, BlockFormatTarget::Heading(_)) {
@@ -1224,11 +1588,11 @@ impl DocumentTab {
                     ""
                 };
             let replacement = format!("{}{}", inner, trailing_nl);
+            let unwrapped_len = inner.len();
             self.edit(open_fence.start..full_end, &replacement);
-            self.caret.move_to(floor_boundary(
-                &self.content,
-                open_fence.start + inner.len(),
-            ));
+            self.caret.range = floor_boundary(&self.content, open_fence.start)
+                ..floor_boundary(&self.content, open_fence.start + unwrapped_len);
+            self.caret.reversed = false;
             self.refresh_cursor();
             return;
         }
@@ -1246,7 +1610,17 @@ impl DocumentTab {
             return;
         }
 
+        let is_table_line = |at: usize| -> bool {
+            parsed.line_at_offset(at).is_some_and(|l| {
+                matches!(l.kind, LineKind::TableRow { .. } | LineKind::TableDelimiter)
+            })
+        };
+
         if selected.is_empty() {
+            if is_table_line(range.start) {
+                // Inside a table: skip so table never breaks!
+                return;
+            }
             let line_s = home_offset(&self.content, range.start);
             let line_e = line_end(&self.content, range.start);
             let line_text = self.content[line_s..line_e].to_string();
@@ -1262,13 +1636,64 @@ impl DocumentTab {
             }
             self.refresh_cursor();
         } else {
-            let wrapped = format!("```\n{}\n```", selected);
-            let inner_start = range.start + 4;
-            let inner_end = inner_start + selected.len();
-            self.edit(range, &wrapped);
-            self.caret.range = inner_start..inner_end;
-            self.caret.reversed = false;
-            self.refresh_cursor();
+            let start_line = home_offset(&self.content, range.start);
+            let end_line = line_end(&self.content, range.end);
+            let lines_owned = self.content[start_line..end_line].to_string();
+            let split_lines: Vec<&str> = lines_owned.split('\n').collect();
+
+            let mut line_at = Vec::with_capacity(split_lines.len());
+            let mut abs = start_line;
+            for (idx, line) in split_lines.iter().enumerate() {
+                line_at.push(abs);
+                abs += line.len();
+                if idx + 1 < split_lines.len() {
+                    abs += 1;
+                }
+            }
+
+            let non_table_count = (0..split_lines.len())
+                .filter(|&i| !is_table_line(line_at[i]))
+                .count();
+            if non_table_count == 0 {
+                // All selected lines are table lines: skip so table never breaks!
+                return;
+            }
+
+            let has_table_lines = non_table_count < split_lines.len();
+            if !has_table_lines {
+                // Pure non-table selection: wrap the selection directly
+                let wrapped = format!("```\n{}\n```", selected);
+                let inner_start = range.start + 4;
+                let inner_end = inner_start + selected.len();
+                self.edit(range, &wrapped);
+                self.caret.range = inner_start..inner_end;
+                self.caret.reversed = false;
+                self.refresh_cursor();
+            } else {
+                // Mixed selection: wrap non-table chunks, keep table lines intact
+                let mut transformed = Vec::new();
+                let mut chunk: Vec<&str> = Vec::new();
+                for (i, line) in split_lines.iter().enumerate() {
+                    if is_table_line(line_at[i]) {
+                        if !chunk.is_empty() {
+                            transformed.push(format!("```\n{}\n```", chunk.join("\n")));
+                            chunk.clear();
+                        }
+                        transformed.push(line.to_string());
+                    } else {
+                        chunk.push(line);
+                    }
+                }
+                if !chunk.is_empty() {
+                    transformed.push(format!("```\n{}\n```", chunk.join("\n")));
+                }
+                let replacement = transformed.join("\n");
+                let new_len = replacement.len();
+                self.edit(start_line..end_line, &replacement);
+                self.caret.range = start_line..(start_line + new_len);
+                self.caret.reversed = false;
+                self.refresh_cursor();
+            }
         }
     }
 
@@ -2032,10 +2457,10 @@ impl DocumentTab {
             });
         let next_idx = if backwards {
             if cur_idx == 0 {
-                all_cells.len() - 1
-            } else {
-                cur_idx - 1
+                // First cell: stay put instead of wrapping to the last cell
+                return true;
             }
+            cur_idx - 1
         } else {
             if cur_idx + 1 == all_cells.len() {
                 let new_row = format!("\n|{}", "  |".repeat(num_cols));
@@ -2164,6 +2589,34 @@ impl DocumentTab {
                 .map_or(nl, |l| visible_line_end(l, self.view_mode))
         };
         self.place(target, extend);
+    }
+
+    pub fn move_end_in_mode(&mut self, extend: bool, mode: ViewMode) {
+        self.pending_formats = ActiveFormats::default();
+        if mode == ViewMode::Raw {
+            self.move_end(extend);
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let parsed = self.parsed();
+        if let Some(pline) = parsed.line_at_offset(cursor) {
+            if let LineKind::TableRow {
+                ref cells,
+                ref raw_cells,
+                ..
+            } = pline.kind
+            {
+                if let Some((_, cell)) = raw_cells
+                    .iter()
+                    .zip(cells.iter())
+                    .find(|(rc, _)| cursor >= rc.start && cursor <= rc.end)
+                {
+                    self.place(cell.end, extend);
+                    return;
+                }
+            }
+        }
+        self.move_end(extend);
     }
 
     pub fn select_line_up(&mut self) {
@@ -2473,7 +2926,10 @@ impl DocumentTab {
     }
 
     fn place_after_history(&mut self, caret: usize) {
-        let caret = floor_boundary(&self.content, snap_off_ending_interior(&self.content, caret));
+        let caret = floor_boundary(
+            &self.content,
+            snap_off_ending_interior(&self.content, caret),
+        );
         self.caret.move_to(caret);
         self.caret.clamp(&self.content);
         self.marked_range = None;
@@ -2767,6 +3223,45 @@ fn floor_boundary(content: &str, offset: usize) -> usize {
     }
 }
 
+#[derive(Clone)]
+struct TableRowInfo {
+    source: Range<usize>,
+    cells: Vec<Range<usize>>,
+    is_header: bool,
+}
+
+#[derive(Clone)]
+struct TableInfo {
+    source: Range<usize>,
+    rows: Vec<TableRowInfo>,
+    delimiter_end: Option<usize>,
+}
+
+/// Given the text after a table's end, return where to insert what so a blank
+/// line separates the table from the caret line, and where the caret goes
+/// (all offsets relative to the start of `rest`, caret in the edited text).
+/// An existing blank line is reused.
+fn blank_gap_after_table(rest: &str) -> (usize, &'static str, usize) {
+    if rest.is_empty() {
+        return (0, "\n\n", 2);
+    }
+    let ne = line_ending_len(rest, 0);
+    if ne == 0 {
+        return (0, "\n\n", 2);
+    }
+    let after = &rest[ne..];
+    if after.is_empty() {
+        return (ne, "\n", ne + 1);
+    }
+    let l2_end = line_end(after, 0);
+    if after[..l2_end].trim().is_empty() {
+        let end_len = line_ending_len(after, l2_end);
+        (0, "", ne + l2_end + end_len)
+    } else {
+        (ne, "\n", ne + 1)
+    }
+}
+
 fn is_delimited(text: &str, prefix: &str, suffix: &str) -> bool {
     if text.len() < prefix.len() + suffix.len() {
         return false;
@@ -2778,6 +3273,8 @@ fn is_delimited(text: &str, prefix: &str, suffix: &str) -> bool {
         let triple = text.starts_with("***") && text.ends_with("***") && text.len() >= 6;
         let single = !text.starts_with("**") && !text.ends_with("**");
         triple || single
+    } else if prefix == "`" {
+        !text.starts_with("```") && !text.ends_with("```")
     } else {
         true
     }
@@ -2801,9 +3298,50 @@ fn outer_is_delimited(content: &str, start: usize, end: usize, prefix: &str, suf
         let triple = extra_before && triple_before && extra_after && triple_after;
         let single = !extra_before && !extra_after;
         triple || single
+    } else if prefix == "`" {
+        let extra_before = start > 1 && content.as_bytes().get(start - 2) == Some(&b'`');
+        let extra_after = content.as_bytes().get(end + 1) == Some(&b'`');
+        !extra_before && !extra_after
     } else {
         true
     }
+}
+
+fn is_single_link(text: &str) -> Option<&str> {
+    if !text.starts_with('[') || !text.ends_with(')') || text.starts_with("[^") {
+        return None;
+    }
+    let close_bracket = text.find("](")?;
+    let inner = &text[1..close_bracket];
+    if inner.contains('[') || inner.contains(']') {
+        return None;
+    }
+    let url_part = &text[close_bracket + 2..text.len() - 1];
+    if url_part.contains(')') {
+        return None;
+    }
+    Some(inner)
+}
+
+fn unwrap_outer_link(content: &str, start: usize, end: usize) -> Option<(Range<usize>, String)> {
+    if start == 0 || end > content.len() || start > end {
+        return None;
+    }
+    if !content.is_char_boundary(start) || !content.is_char_boundary(end) {
+        return None;
+    }
+    if !content[..start].ends_with('[') || !content[end..].starts_with("](") {
+        return None;
+    }
+    let rest = &content[end + 2..];
+    let close_idx = rest.find(')')?;
+    let url = &rest[..close_idx];
+    if url.contains('\n') || url.contains('(') || url.contains(']') {
+        return None;
+    }
+    let edit_start = start - 1;
+    let edit_end = end + 2 + close_idx + 1;
+    Some((edit_start..edit_end, content[start..end].to_string()))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -3685,12 +4223,12 @@ mod tests {
 
         // Press Enter on the new empty row -> removes it and exits table to a newline after table
         doc.smart_newline(false);
-        assert_eq!(doc.content, format!("{}\n", table));
-        assert_eq!(doc.cursor_offset(), table.len() + 1);
+        assert_eq!(doc.content, format!("{}\n\n", table));
+        assert_eq!(doc.cursor_offset(), table.len() + 2);
 
         // Pressing Enter again outside table does not add a row to the table
         doc.smart_newline(false);
-        assert_eq!(doc.content, format!("{}\n\n", table));
+        assert_eq!(doc.content, format!("{}\n\n\n", table));
     }
 
     #[test]
@@ -3702,7 +4240,7 @@ mod tests {
 
         doc.smart_newline(false);
         // Exiting the only empty row keeps the header and only removes the empty row!
-        assert_eq!(doc.content, "| Col 1 | Col 2 |\n| :--- | :--- |\n");
+        assert_eq!(doc.content, "| Col 1 | Col 2 |\n| :--- | :--- |\n\n");
         assert_eq!(doc.cursor_offset(), doc.content.len());
     }
 
@@ -4092,7 +4630,11 @@ mod tests {
         doc.place(0, false);
         doc.move_end(false);
         assert_eq!(doc.cursor_offset(), 3, "End stops before CRLF");
-        doc.insert_text_in_mode(doc.cursor_offset()..doc.cursor_offset(), "X", ViewMode::Wysiwyg);
+        doc.insert_text_in_mode(
+            doc.cursor_offset()..doc.cursor_offset(),
+            "X",
+            ViewMode::Wysiwyg,
+        );
         assert_eq!(doc.content, "FooX\r\nbar\r\nbaz");
 
         let mut doc = DocumentTab::new("s".into(), "carets.md".into(), crlf.into(), None, None);
@@ -4121,7 +4663,8 @@ mod tests {
         assert_eq!(doc.cursor_offset(), 7, "End stops before the next bare CR");
         doc.move_up(false);
         assert_eq!(
-            doc.cursor_offset(), 3,
+            doc.cursor_offset(),
+            3,
             "Up crosses a bare CR and keeps the end column"
         );
 
@@ -4130,7 +4673,11 @@ mod tests {
         for _ in 0..4 {
             doc.move_left_in_mode(false, ViewMode::Wysiwyg);
         }
-        assert_ne!(doc.cursor_offset(), 9, "Left must not sit between CR and LF");
+        assert_ne!(
+            doc.cursor_offset(),
+            9,
+            "Left must not sit between CR and LF"
+        );
         let at = doc.cursor_offset();
         doc.insert_text_in_mode(at..at, "X", ViewMode::Wysiwyg);
         assert!(
@@ -4971,6 +5518,7 @@ mod tests {
                 cells: Vec::new(),
             }],
             bounds: None,
+            ..EditorPaint::default()
         };
         doc.caret.move_to(0);
         let hit = move_vertical_visual(
@@ -5429,6 +5977,7 @@ mod tests {
             total_height: px(28.0 * n),
             rows,
             bounds: None,
+            ..EditorPaint::default()
         }
     }
 
@@ -5613,5 +6162,510 @@ mod tests {
         doc.insert_text_in_mode(range, "X", ViewMode::Wysiwyg);
         assert_eq!(doc.content, "# fooX ");
         assert_eq!(doc.caret.range, 6..6);
+    }
+
+    #[test]
+    fn test_format_commands_table_select_all_and_toggle() {
+        let original_table = "| Header 1 | Header 2 |\n| :--- | :--- |\n| Cell 1 | Cell 2 |";
+
+        let inline_commands = [
+            (
+                "bold",
+                "| **Header 1** | **Header 2** |\n| :--- | :--- |\n| **Cell 1** | **Cell 2** |",
+            ),
+            (
+                "italic",
+                "| *Header 1* | *Header 2* |\n| :--- | :--- |\n| *Cell 1* | *Cell 2* |",
+            ),
+            (
+                "underline",
+                "| <u>Header 1</u> | <u>Header 2</u> |\n| :--- | :--- |\n| <u>Cell 1</u> | <u>Cell 2</u> |",
+            ),
+            (
+                "strike",
+                "| ~~Header 1~~ | ~~Header 2~~ |\n| :--- | :--- |\n| ~~Cell 1~~ | ~~Cell 2~~ |",
+            ),
+            (
+                "code",
+                "| `Header 1` | `Header 2` |\n| :--- | :--- |\n| `Cell 1` | `Cell 2` |",
+            ),
+            (
+                "link",
+                "| [Header 1](https://) | [Header 2](https://) |\n| :--- | :--- |\n| [Cell 1](https://) | [Cell 2](https://) |",
+            ),
+        ];
+
+        for (cmd, expected_formatted) in inline_commands {
+            // Test Raw mode
+            let mut doc = DocumentTab::new(
+                "tab".into(),
+                "test.md".into(),
+                original_table.into(),
+                None,
+                None,
+            );
+            doc.select_all();
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(
+                doc.content, expected_formatted,
+                "Inline format '{}' failed on table in Raw mode",
+                cmd
+            );
+
+            // Toggle off by applying again
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(
+                doc.content, original_table,
+                "Inline format '{}' toggle-off failed on table in Raw mode",
+                cmd
+            );
+
+            // Verify one undo step restores original
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(doc.content, expected_formatted);
+            assert!(doc.undo(), "Undo failed for '{}'", cmd);
+            assert_eq!(
+                doc.content, original_table,
+                "Single undo step failed for '{}'",
+                cmd
+            );
+
+            // Test WYSIWYG mode
+            let mut doc_wysiwyg = DocumentTab::new(
+                "tab".into(),
+                "test.md".into(),
+                original_table.into(),
+                None,
+                None,
+            );
+            doc_wysiwyg.select_all();
+            doc_wysiwyg.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc_wysiwyg.content, expected_formatted,
+                "Inline format '{}' failed on table in Wysiwyg mode",
+                cmd
+            );
+
+            doc_wysiwyg.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc_wysiwyg.content, original_table,
+                "Inline format '{}' toggle-off failed on table in Wysiwyg mode",
+                cmd
+            );
+        }
+
+        let line_commands = [
+            "h1",
+            "h2",
+            "h3",
+            "ul",
+            "ol",
+            "checklist",
+            "quote",
+            "codeblock",
+        ];
+
+        for cmd in line_commands {
+            let mut doc = DocumentTab::new(
+                "tab".into(),
+                "test.md".into(),
+                original_table.into(),
+                None,
+                None,
+            );
+            doc.select_all();
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(
+                doc.content, original_table,
+                "Line format '{}' should skip table rows and preserve table",
+                cmd
+            );
+
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(
+                doc.content, original_table,
+                "Line format '{}' second apply should keep table intact",
+                cmd
+            );
+
+            // Also in WYSIWYG mode
+            let mut doc_wysiwyg = DocumentTab::new(
+                "tab".into(),
+                "test.md".into(),
+                original_table.into(),
+                None,
+                None,
+            );
+            doc_wysiwyg.select_all();
+            doc_wysiwyg.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc_wysiwyg.content, original_table,
+                "Line format '{}' in Wysiwyg should skip table rows",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_commands_plain_lines_select_all_and_toggle() {
+        let original_plain = "First line\nSecond line\nThird line";
+
+        let inline_commands = [
+            ("bold", "**First line**\n**Second line**\n**Third line**"),
+            ("italic", "*First line*\n*Second line*\n*Third line*"),
+            (
+                "underline",
+                "<u>First line</u>\n<u>Second line</u>\n<u>Third line</u>",
+            ),
+            ("strike", "~~First line~~\n~~Second line~~\n~~Third line~~"),
+            ("code", "`First line`\n`Second line`\n`Third line`"),
+            (
+                "link",
+                "[First line](https://)\n[Second line](https://)\n[Third line](https://)",
+            ),
+        ];
+
+        for (cmd, expected_formatted) in inline_commands {
+            let mut doc = DocumentTab::new(
+                "tab".into(),
+                "test.md".into(),
+                original_plain.into(),
+                None,
+                None,
+            );
+            doc.select_all();
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(
+                doc.content, expected_formatted,
+                "Inline format '{}' failed across plain lines",
+                cmd
+            );
+
+            // Toggle off
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(
+                doc.content, original_plain,
+                "Inline format '{}' toggle-off failed across plain lines",
+                cmd
+            );
+
+            // Undo as one step
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(doc.content, expected_formatted);
+            assert!(doc.undo(), "Undo failed for '{}'", cmd);
+            assert_eq!(
+                doc.content, original_plain,
+                "Single undo step failed for '{}' across plain lines",
+                cmd
+            );
+        }
+
+        let line_commands = [
+            ("h1", "# First line\n# Second line\n# Third line"),
+            ("h2", "## First line\n## Second line\n## Third line"),
+            ("h3", "### First line\n### Second line\n### Third line"),
+            ("ul", "- First line\n- Second line\n- Third line"),
+            ("ol", "1. First line\n2. Second line\n3. Third line"),
+            (
+                "checklist",
+                "- [ ] First line\n- [ ] Second line\n- [ ] Third line",
+            ),
+            ("quote", "> First line\n> Second line\n> Third line"),
+            ("codeblock", "```\nFirst line\nSecond line\nThird line\n```"),
+        ];
+
+        for (cmd, expected_formatted) in line_commands {
+            let mut doc = DocumentTab::new(
+                "tab".into(),
+                "test.md".into(),
+                original_plain.into(),
+                None,
+                None,
+            );
+            doc.select_all();
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(
+                doc.content, expected_formatted,
+                "Line format '{}' failed across plain lines",
+                cmd
+            );
+
+            // Toggle off
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(
+                doc.content, original_plain,
+                "Line format '{}' toggle-off failed across plain lines",
+                cmd
+            );
+
+            // Undo
+            doc.apply_format_in_mode(cmd, ViewMode::Raw);
+            assert_eq!(doc.content, expected_formatted);
+            assert!(doc.undo(), "Undo failed for '{}'", cmd);
+            assert_eq!(
+                doc.content, original_plain,
+                "Undo failed for '{}' across plain lines",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_commands_mixed_plain_lines_and_table() {
+        let mixed =
+            "Before table\n\n| Col 1 | Col 2 |\n| :--- | :--- |\n| Val 1 | Val 2 |\n\nAfter table";
+
+        // Applying h1 affects lines before and after table, but skips the table rows
+        let mut doc = DocumentTab::new("tab".into(), "test.md".into(), mixed.into(), None, None);
+        doc.select_all();
+        doc.apply_format("h1");
+        let expected_h1 = "# Before table\n\n| Col 1 | Col 2 |\n| :--- | :--- |\n| Val 1 | Val 2 |\n\n# After table";
+        assert_eq!(doc.content, expected_h1);
+
+        // Toggle off restores
+        doc.apply_format("h1");
+        assert_eq!(doc.content, mixed);
+
+        // Applying bold formats plain lines and table cells individually
+        let mut doc_bold =
+            DocumentTab::new("tab".into(), "test.md".into(), mixed.into(), None, None);
+        doc_bold.select_all();
+        doc_bold.apply_format("bold");
+        let expected_bold = "**Before table**\n\n| **Col 1** | **Col 2** |\n| :--- | :--- |\n| **Val 1** | **Val 2** |\n\n**After table**";
+        assert_eq!(doc_bold.content, expected_bold);
+
+        // Toggle off restores
+        doc_bold.apply_format("bold");
+        assert_eq!(doc_bold.content, mixed);
+    }
+
+    #[test]
+    fn test_inline_format_partial_selection_across_cells() {
+        let doc_text = "| Alpha Beta | Gamma Delta |\n| :--- | :--- |";
+        let mut doc = DocumentTab::new("tab".into(), "test.md".into(), doc_text.into(), None, None);
+
+        // Select from "Beta" to "Gamma"
+        let start = doc_text.find("Beta").unwrap();
+        let end = doc_text.find("Delta").unwrap();
+        doc.caret.range = start..end;
+        doc.apply_format("bold");
+        assert_eq!(
+            doc.content,
+            "| Alpha **Beta** | **Gamma** Delta |\n| :--- | :--- |"
+        );
+
+        // Toggle off
+        doc.apply_format("bold");
+        assert_eq!(doc.content, doc_text);
+    }
+
+    #[test]
+    fn test_unwrap_outer_link_safety() {
+        // Valid link
+        let text = "before [inner](https://example.com) after";
+        let inner_start = text.find("inner").unwrap();
+        let inner_end = inner_start + "inner".len();
+        assert_eq!(
+            unwrap_outer_link(text, inner_start, inner_end),
+            Some((
+                text.find('[').unwrap()..(text.find(')').unwrap() + 1),
+                "inner".to_string()
+            ))
+        );
+
+        // Missing closing parenthesis must return None without panicking
+        let unclosed = "before [inner](https://example.com after";
+        let u_start = unclosed.find("inner").unwrap();
+        let u_end = u_start + "inner".len();
+        assert_eq!(unwrap_outer_link(unclosed, u_start, u_end), None);
+
+        // Out of bounds / invalid bounds must return None without panicking
+        assert_eq!(unwrap_outer_link(text, 0, text.len()), None);
+        assert_eq!(unwrap_outer_link(text, 100, 200), None);
+        assert_eq!(unwrap_outer_link("", 0, 0), None);
+    }
+
+    fn table_doc(text: &str) -> DocumentTab {
+        DocumentTab::new("t".into(), "test.md".into(), text.into(), None, None)
+    }
+
+    const TBL: &str = "| A | B |\n| --- | --- |\n| a1 | b1 |\n| a2 | b2 |";
+
+    fn line_kind_at(doc: &DocumentTab, needle: &str) -> LineKind {
+        let at = doc.content.find(needle).unwrap();
+        crate::markdown::parse_document(&doc.content)
+            .line_at_offset(at)
+            .unwrap()
+            .kind
+            .clone()
+    }
+
+    #[test]
+    fn table_exit_leaves_blank_line_and_next_text_is_a_paragraph() {
+        let mut doc = table_doc(TBL);
+        doc.place(TBL.len(), false);
+        doc.smart_newline(false); // adds a row
+        doc.smart_newline(false); // exits
+        assert_eq!(doc.content, format!("{TBL}\n\n"));
+        assert_eq!(doc.cursor_offset(), doc.content.len());
+        let at = doc.cursor_offset();
+        doc.insert_text_in_mode(at..at, "hello", ViewMode::Wysiwyg);
+        assert!(matches!(line_kind_at(&doc, "hello"), LineKind::Paragraph));
+        assert!(matches!(
+            line_kind_at(&doc, "b2"),
+            LineKind::TableRow { .. }
+        ));
+    }
+
+    #[test]
+    fn table_exit_reuses_an_existing_blank_line() {
+        let text = format!("{TBL}\n|  |  |\n\nafter");
+        let mut doc = table_doc(&text);
+        doc.place(text.find("|  |").unwrap() + 1, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, format!("{TBL}\n\nafter"));
+        assert_eq!(doc.cursor_offset(), TBL.len() + 2);
+        // A directly adjacent paragraph gets a blank line inserted
+        let text = format!("{TBL}\n|  |  |\n# after");
+        let mut doc = table_doc(&text);
+        doc.place(text.find("|  |").unwrap() + 1, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, format!("{TBL}\n\n# after"));
+        assert_eq!(doc.cursor_offset(), TBL.len() + 2);
+        // one undo step
+        assert!(doc.undo());
+        assert_eq!(doc.content, text);
+    }
+
+    #[test]
+    fn enter_on_empty_middle_row_moves_to_same_column_next_row() {
+        let text = "| A | B |\n| --- | --- |\n|  |  |\n| x | y |";
+        let mut doc = table_doc(text);
+        // caret in the second (empty) cell of the empty row
+        let row = text.find("|  |  |").unwrap();
+        doc.place(row + 4, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, text);
+        assert_eq!(doc.cursor_offset(), text.find("y |").unwrap());
+        // first column
+        doc.place(row + 1, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, text);
+        assert_eq!(doc.cursor_offset(), text.find("x |").unwrap());
+    }
+
+    #[test]
+    fn shift_enter_leaves_the_table_without_changing_it() {
+        for pos in [0usize, TBL.find("a1").unwrap() + 1, TBL.find("b2").unwrap() + 2] {
+            let mut doc = table_doc(TBL);
+            doc.place(pos, false);
+            doc.smart_newline(true);
+            assert_eq!(doc.content, format!("{TBL}\n\n"));
+            assert_eq!(doc.cursor_offset(), doc.content.len());
+        }
+        // existing text below keeps one blank line
+        let text = format!("{TBL}\n# next");
+        let mut doc = table_doc(&text);
+        doc.place(text.find("a1").unwrap(), false);
+        doc.smart_newline(true);
+        assert_eq!(doc.content, format!("{TBL}\n\n# next"));
+        // outside tables Shift+Enter is a plain newline
+        let mut doc = table_doc("hello world");
+        doc.place(5, false);
+        doc.smart_newline(true);
+        assert_eq!(doc.content, "hello\n world");
+    }
+
+    #[test]
+    fn ctrl_enter_adds_a_row_below_in_the_same_column() {
+        let mut doc = table_doc(TBL);
+        let pos = TBL.find("b1").unwrap() + 1;
+        doc.place(pos, false);
+        assert!(doc.table_insert_row_below());
+        let expected = "| A | B |\n| --- | --- |\n| a1 | b1 |\n|  |  |\n| a2 | b2 |";
+        assert_eq!(doc.content, expected);
+        assert_eq!(doc.cursor_offset(), expected.find("|  |  |").unwrap() + 5);
+        // header row inserts below the delimiter
+        let mut doc = table_doc(TBL);
+        doc.place(2, false);
+        assert!(doc.table_insert_row_below());
+        assert!(doc.content.starts_with("| A | B |\n| --- | --- |\n|  |  |\n| a1"));
+        assert_eq!(doc.cursor_offset(), doc.content.find("|  |  |").unwrap() + 1 + 2 - 1);
+        // outside a table nothing happens
+        let mut doc = table_doc("plain");
+        assert!(!doc.table_insert_row_below());
+        assert_eq!(doc.content, "plain");
+    }
+
+    #[test]
+    fn up_and_down_leave_the_table_from_its_edge_rows() {
+        // Down from the last row of a table that ends the note
+        let mut doc = table_doc(TBL);
+        doc.place(TBL.len() - 2, false);
+        assert!(doc.table_edge_exit(1));
+        assert_eq!(doc.content, format!("{TBL}\n\n"));
+        assert_eq!(doc.cursor_offset(), doc.content.len());
+        // Up from the first row of a table that starts the note
+        let mut doc = table_doc(TBL);
+        doc.place(3, false);
+        assert!(doc.table_edge_exit(-1));
+        assert_eq!(doc.content, format!("\n\n{TBL}"));
+        assert_eq!(doc.cursor_offset(), 0);
+        // With a line above and below the caret just moves there
+        let text = format!("above\n\n{TBL}\n\nbelow");
+        let mut doc = table_doc(&text);
+        doc.place(text.find("A |").unwrap(), false);
+        assert!(doc.table_edge_exit(-1));
+        assert_eq!(doc.cursor_offset(), "above\n".len());
+        doc.place(text.find("b2").unwrap(), false);
+        assert!(doc.table_edge_exit(1));
+        assert_eq!(doc.cursor_offset(), text.find("below").unwrap() - 1);
+        // Middle rows are not edges
+        doc.place(text.find("a1").unwrap(), false);
+        assert!(!doc.table_edge_exit(1));
+        assert!(!doc.table_edge_exit(-1));
+    }
+
+    #[test]
+    fn left_and_right_jump_between_cells_not_pipes() {
+        let mut doc = table_doc(TBL);
+        let a1 = TBL.find("a1").unwrap();
+        let b1 = TBL.find("b1").unwrap();
+        // Left at the start of B1 goes to the end of A1
+        doc.place(b1, false);
+        doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), a1 + 2);
+        // Right at the end of A1 goes to the start of B1
+        doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), b1);
+        // End of a row goes to the next row's first cell, start goes to previous row's last
+        doc.place(b1 + 2, false);
+        doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), TBL.find("a2").unwrap());
+        doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), b1 + 2);
+        // Walking right through the first body row never stops next to a pipe
+        doc.place(a1, false);
+        for _ in 0..4 {
+            doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+            let c = doc.cursor_offset();
+            assert_ne!(doc.content.as_bytes()[c], b'|', "caret before a pipe at {c}");
+            assert_ne!(doc.content.as_bytes()[c - 1], b'|', "caret after a pipe at {c}");
+        }
+    }
+
+    #[test]
+    fn shift_tab_in_the_first_cell_stays_put() {
+        let mut doc = table_doc(TBL);
+        let a = TBL.find('A').unwrap();
+        doc.place(a, false);
+        assert!(doc.tab_table_cell(true));
+        assert_eq!(doc.cursor_offset(), a);
+        assert_eq!(doc.content, TBL);
+        // elsewhere it still goes back one cell
+        let b = TBL.find('B').unwrap();
+        doc.place(b, false);
+        assert!(doc.tab_table_cell(true));
+        assert_eq!(doc.selection_range().start, a);
     }
 }

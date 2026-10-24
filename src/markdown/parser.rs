@@ -1600,7 +1600,42 @@ fn is_closing_fence(line: &str, marker: u8, min_len: usize, max_indent: usize) -
 }
 
 /// A fence after a list item or blockquote keeps red's trimmed-``` rule.
-fn in_list_or_quote(lines: &[ParsedLine]) -> bool {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum InListOrQuoteTracker {
+    #[default]
+    None,
+    AfterListOrQuote,
+    AfterListOrQuoteOther,
+    AfterListOrQuoteBlank,
+    AfterListOrQuoteBlankOther,
+}
+
+impl InListOrQuoteTracker {
+    #[inline]
+    pub(crate) fn is_in_list_or_quote(self) -> bool {
+        self != Self::None
+    }
+
+    #[inline]
+    pub(crate) fn push(&mut self, kind: &LineKind) {
+        *self = match (&*self, kind) {
+            (_, LineKind::ListItem { .. } | LineKind::Blockquote) => Self::AfterListOrQuote,
+            (Self::AfterListOrQuote, LineKind::Empty) => Self::AfterListOrQuoteBlank,
+            (Self::AfterListOrQuoteOther, LineKind::Empty) => Self::None,
+            (Self::AfterListOrQuoteBlank, LineKind::Empty) => Self::AfterListOrQuoteBlank,
+            (Self::AfterListOrQuoteBlankOther, LineKind::Empty) => Self::None,
+            (Self::None, LineKind::Empty) => Self::None,
+            (Self::AfterListOrQuote, _) => Self::AfterListOrQuoteOther,
+            (Self::AfterListOrQuoteOther, _) => Self::AfterListOrQuoteOther,
+            (Self::AfterListOrQuoteBlank, _) => Self::AfterListOrQuoteBlankOther,
+            (Self::AfterListOrQuoteBlankOther, _) => Self::AfterListOrQuoteBlankOther,
+            (Self::None, _) => Self::None,
+        };
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn in_list_or_quote(lines: &[ParsedLine]) -> bool {
     let mut saw_blank = false;
     for line in lines.iter().rev() {
         match &line.kind {
@@ -2324,6 +2359,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     };
 
     let mut lines = Vec::with_capacity(raw_lines.len());
+    let mut list_quote_tracker = InListOrQuoteTracker::default();
     let mut all_hidden = Vec::new();
     let mut all_pairs = Vec::new();
     let mut code_blocks = Vec::new();
@@ -2332,6 +2368,14 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     let mut table: Option<DetectedTable> = None;
 
     let mut list_walk = ListWalk::default();
+
+    macro_rules! push_line {
+        ($line:expr) => {{
+            let p = $line;
+            list_quote_tracker.push(&p.kind);
+            lines.push(p);
+        }};
+    }
     for (i, sline) in raw_lines.iter().enumerate() {
         let line = sline.text;
         let line_start = sline.start;
@@ -2365,7 +2409,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     },
                 );
                 all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-                lines.push(parsed);
+                push_line!(parsed);
             } else {
                 let strip = open_fence
                     .as_ref()
@@ -2374,11 +2418,11 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     .unwrap_or(0);
                 let parsed = code_content_line(i, line_source, line, strip);
                 all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-                lines.push(parsed);
+                push_line!(parsed);
             }
             continue;
         }
-        let open_top = if in_list_or_quote(&lines) || backtick_info_rejects_fence(line) {
+        let open_top = if list_quote_tracker.is_in_list_or_quote() || backtick_info_rejects_fence(line) {
             None
         } else {
             strict_backtick_open(line)
@@ -2401,10 +2445,10 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 },
             );
             all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-            lines.push(parsed);
+            push_line!(parsed);
             continue;
         }
-        let skip_rejected = !in_list_or_quote(&lines) && backtick_info_rejects_fence(line);
+        let skip_rejected = !list_quote_tracker.is_in_list_or_quote() && backtick_info_rejects_fence(line);
         if trimmed.starts_with("```") && !skip_rejected {
             list_walk.note_block(line);
             let lang = trimmed
@@ -2427,13 +2471,13 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 },
             );
             all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-            lines.push(parsed);
+            push_line!(parsed);
             continue;
         }
 
         if trimmed.is_empty() {
             list_walk.note_blank();
-            lines.push(ParsedLine {
+            push_line!(ParsedLine {
                 line_index: i,
                 source: line_source.clone(),
                 kind: LineKind::Empty,
@@ -2455,7 +2499,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             all_hidden.extend(hidden.iter().cloned());
             let (display_text, offset_map) =
                 RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
-            lines.push(ParsedLine {
+            push_line!(ParsedLine {
                 line_index: i,
                 source: line_source,
                 kind: LineKind::HorizontalRule,
@@ -2491,7 +2535,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 all_hidden.extend(hidden.iter().cloned());
                 let (display_text, offset_map) =
                     RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
-                lines.push(ParsedLine {
+                push_line!(ParsedLine {
                     line_index: i,
                     source: line_source,
                     kind: LineKind::TableDelimiter,
@@ -2547,7 +2591,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 let merged_hidden = merge_ranges(row_hidden);
                 all_hidden.extend(merged_hidden.iter().cloned());
                 all_pairs.extend(row_pairs.iter().cloned());
-                lines.push(ParsedLine {
+                push_line!(ParsedLine {
                     line_index: i,
                     source: line_source.clone(),
                     kind: LineKind::TableRow {
@@ -2573,7 +2617,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             let parsed = atx_line(i, line_source, line, level, content);
             all_hidden.extend(parsed.hidden_ranges.iter().cloned());
             all_pairs.extend(parsed.inline_pairs.iter().cloned());
-            lines.push(parsed);
+            push_line!(parsed);
             continue;
         }
 
@@ -2618,7 +2662,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         let (display_text, offset_map) =
             RowOffsetMap::from_hidden(line, line_start, body_base, &merged_hidden);
 
-        lines.push(ParsedLine {
+        push_line!(ParsedLine {
             line_index: i,
             source: line_source,
             kind,
@@ -2646,6 +2690,92 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_in_list_or_quote_tracker_exhaustive() {
+        let sample_kinds = [
+            LineKind::Paragraph,
+            LineKind::Empty,
+            LineKind::ListItem {
+                ordered: false,
+                number: 1,
+                task: None,
+                indent_cols: 0,
+                checkbox_source: None,
+            },
+            LineKind::Blockquote,
+            LineKind::TableRow {
+                is_header: false,
+                cells: Vec::new(),
+                raw_cells: Vec::new(),
+                alignments: Vec::new(),
+                table_source: 0..0,
+            },
+        ];
+
+        fn check_all(
+            kinds: &[LineKind],
+            seq: &mut Vec<ParsedLine>,
+            tracker: InListOrQuoteTracker,
+            depth: usize,
+        ) {
+            assert_eq!(
+                tracker.is_in_list_or_quote(),
+                in_list_or_quote(seq),
+                "Mismatch for sequence: {:?}",
+                seq.iter().map(|l| match &l.kind {
+                    LineKind::Empty => "E",
+                    LineKind::ListItem { .. } => "L",
+                    LineKind::Blockquote => "B",
+                    _ => "O",
+                }).collect::<Vec<_>>()
+            );
+            if depth >= 8 {
+                return;
+            }
+            for kind in kinds {
+                let mut next_tracker = tracker;
+                next_tracker.push(kind);
+                seq.push(ParsedLine {
+                    line_index: depth,
+                    source: 0..0,
+                    kind: kind.clone(),
+                    prefix_range: 0..0,
+                    hidden_ranges: Vec::new(),
+                    inline_pairs: Vec::new(),
+                    display_text: String::new(),
+                    offset_map: RowOffsetMap::identity(0, 0),
+                    styled_segments: Vec::new(),
+                });
+                check_all(kinds, seq, next_tracker, depth + 1);
+                seq.pop();
+            }
+        }
+
+        let mut seq = Vec::new();
+        check_all(&sample_kinds, &mut seq, InListOrQuoteTracker::default(), 0);
+    }
+
+    #[test]
+    fn test_20000_row_table_parse_fast() {
+        use std::fmt::Write;
+        let mut md = String::with_capacity(20002 * 20);
+        md.push_str("| col1 | col2 |\n| --- | --- |\n");
+        for i in 0..20000 {
+            let _ = writeln!(md, "| cell_{i}_1 | cell_{i}_2 |");
+        }
+
+        let start = std::time::Instant::now();
+        let doc = parse_document(&md);
+        let elapsed = start.elapsed();
+
+        assert_eq!(doc.lines.len(), 20003);
+        let max_allowed_ms = if cfg!(debug_assertions) { 1000 } else { 100 };
+        assert!(
+            elapsed.as_millis() < max_allowed_ms,
+            "Parsing 20,000 table rows took too long: {elapsed:?}"
+        );
+    }
 
     #[test]
     fn test_headings_and_hr() {

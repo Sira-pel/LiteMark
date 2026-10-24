@@ -88,6 +88,7 @@ actions!(
         EditorDelete,
         EditorNewline,
         EditorPlainNewline,
+        EditorTableRowBelow,
         EditorMoveLineUp,
         EditorMoveLineDown,
         EditorSelectLineUp,

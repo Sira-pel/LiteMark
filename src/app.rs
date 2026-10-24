@@ -2347,10 +2347,7 @@ impl LiteMarkApp {
     /// Open a prompt and preselect its default choice so Enter confirms it.
     fn show_prompt(&mut self, prompt: Prompt) {
         let (_, _, choices) = self.prompt_modal_data(&prompt);
-        self.prompt_selected_ix = choices
-            .iter()
-            .position(|(_, default)| *default)
-            .unwrap_or(0);
+        self.prompt_selected_ix = default_prompt_choice_index(&choices);
         self.prompt = Some(prompt);
     }
 
@@ -2573,6 +2570,7 @@ impl LiteMarkApp {
                 _ => {}
             },
         }
+        cx.notify();
     }
 
     fn request_close_window(&mut self) {
@@ -2747,6 +2745,23 @@ impl LiteMarkApp {
         }
         if let Some(tab) = self.active_tab_mut() {
             tab.smart_newline(true);
+        }
+        self.refresh_find();
+    }
+
+    fn editor_table_row_below(&mut self, _cx: &mut App) {
+        if !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+            || self.input_blocked()
+        {
+            return;
+        }
+        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
+            self.show_error("PDF files are read-only.");
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.table_insert_row_below();
         }
         self.refresh_find();
     }
@@ -3279,6 +3294,23 @@ impl EntityInputHandler for LiteMarkApp {
                 .iter()
                 .find(|c| c.raw_range.start <= range.start && range.start <= c.raw_range.end)
             {
+                if let Some(line) = cell
+                    .lines
+                    .iter()
+                    .find(|l| {
+                        range.start >= l.offset_map.line_start && range.start <= l.offset_map.line_end
+                    })
+                    .or_else(|| cell.lines.first())
+                {
+                    let local_start = line.offset_map.source_to_display(range.start);
+                    let local_end = line.offset_map.source_to_display(range.end);
+                    let x0 = line.shaped.x_for_index(local_start);
+                    let x1 = line.shaped.x_for_index(local_end);
+                    return Some(Bounds::from_corners(
+                        point(line.text_origin.x + x0, line.text_origin.y),
+                        point(line.text_origin.x + x1.max(x0), line.text_origin.y + line.line_height),
+                    ));
+                }
                 let local_start = cell.offset_map.source_to_display(range.start);
                 let local_end = cell.offset_map.source_to_display(range.end);
                 let x0 = cell.shaped.x_for_index(local_start);
@@ -4762,14 +4794,16 @@ impl Render for LiteMarkApp {
             .on_action(cx.listener(|this, _: &PromptUp, _window, cx| {
                 let count = this.modal_choice_count();
                 if count > 0 {
-                    this.prompt_selected_ix = (this.prompt_selected_ix + count - 1) % count;
+                    this.prompt_selected_ix =
+                        step_prompt_selection(this.prompt_selected_ix, count, true);
                     cx.notify();
                 }
             }))
             .on_action(cx.listener(|this, _: &PromptDown, _window, cx| {
                 let count = this.modal_choice_count();
                 if count > 0 {
-                    this.prompt_selected_ix = (this.prompt_selected_ix + 1) % count;
+                    this.prompt_selected_ix =
+                        step_prompt_selection(this.prompt_selected_ix, count, false);
                     cx.notify();
                 }
             }))
@@ -4779,6 +4813,7 @@ impl Render for LiteMarkApp {
                     if let Some((choice, _)) = choices.get(this.prompt_selected_ix) {
                         this.answer_prompt(choice, cx);
                     }
+                    cx.notify();
                 } else if this.show_about_modal || this.show_shortcuts_modal {
                     this.show_about_modal = false;
                     this.show_shortcuts_modal = false;
@@ -4945,6 +4980,12 @@ impl Render for LiteMarkApp {
                 let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
+                    if mode == ViewMode::Wysiwyg
+                        && !cell_has_line_in_direction(&p, tab.cursor_offset(), -1)
+                        && tab.table_edge_exit(-1)
+                    {
+                        return;
+                    }
                     if move_vertical_visual(&p, &tab.content, &mut tab.caret, -1, false, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
@@ -4960,6 +5001,12 @@ impl Render for LiteMarkApp {
                 let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
+                    if mode == ViewMode::Wysiwyg
+                        && !cell_has_line_in_direction(&p, tab.cursor_offset(), 1)
+                        && tab.table_edge_exit(1)
+                    {
+                        return;
+                    }
                     if move_vertical_visual(&p, &tab.content, &mut tab.caret, 1, false, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
@@ -5013,24 +5060,70 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorHome, window, cx| {
+                let paint = this.editor_paint.clone();
                 let mode = this.settings.view_mode;
-                this.editor_move(cx, |tab| tab.move_home_in_mode(false, mode));
+                this.editor_move(cx, |tab| {
+                    if mode == ViewMode::Wysiwyg {
+                        let p = paint.borrow();
+                        if editor_home_visual(&p, &mut tab.caret, false) {
+                            tab.pending_formats = ActiveFormats::default();
+                            tab.refresh_cursor();
+                            return;
+                        }
+                    }
+                    tab.move_home_in_mode(false, mode);
+                });
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorEnd, window, cx| {
-                this.editor_move(cx, |tab| tab.move_end(false));
+                let paint = this.editor_paint.clone();
+                let mode = this.settings.view_mode;
+                this.editor_move(cx, |tab| {
+                    if mode == ViewMode::Wysiwyg {
+                        let p = paint.borrow();
+                        if editor_end_visual(&p, &mut tab.caret, false) {
+                            tab.pending_formats = ActiveFormats::default();
+                            tab.refresh_cursor();
+                            return;
+                        }
+                    }
+                    tab.move_end_in_mode(false, mode);
+                });
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectHome, window, cx| {
+                let paint = this.editor_paint.clone();
                 let mode = this.settings.view_mode;
-                this.editor_move(cx, |tab| tab.move_home_in_mode(true, mode));
+                this.editor_move(cx, |tab| {
+                    if mode == ViewMode::Wysiwyg {
+                        let p = paint.borrow();
+                        if editor_home_visual(&p, &mut tab.caret, true) {
+                            tab.pending_formats = ActiveFormats::default();
+                            tab.refresh_cursor();
+                            return;
+                        }
+                    }
+                    tab.move_home_in_mode(true, mode);
+                });
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectEnd, window, cx| {
-                this.editor_move(cx, |tab| tab.move_end(true));
+                let paint = this.editor_paint.clone();
+                let mode = this.settings.view_mode;
+                this.editor_move(cx, |tab| {
+                    if mode == ViewMode::Wysiwyg {
+                        let p = paint.borrow();
+                        if editor_end_visual(&p, &mut tab.caret, true) {
+                            tab.pending_formats = ActiveFormats::default();
+                            tab.refresh_cursor();
+                            return;
+                        }
+                    }
+                    tab.move_end_in_mode(true, mode);
+                });
                 window.refresh();
                 cx.notify();
             }))
@@ -5121,6 +5214,11 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorPlainNewline, window, cx| {
                 this.editor_plain_newline(cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EditorTableRowBelow, window, cx| {
+                this.editor_table_row_below(cx);
                 window.refresh();
                 cx.notify();
             }))
