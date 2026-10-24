@@ -1617,17 +1617,38 @@ fn synthesize_flanking_pairs(
             .any(|p| p.kind == InlineTagKind::Code && p.inner.start <= pos && pos < p.inner.end)
     }
     // A run consumed as the opener or closer of a parsed pair is not
-    // eligible for re-pairing.
-    fn consumed(inline_pairs: &[InlinePair], pos: usize) -> bool {
-        inline_pairs
-            .iter()
-            .any(|p| p.open_delim.start == pos || p.close_delim.start == pos)
+    // eligible for re-pairing. `run` is absolute (`base + start..base + end`)
+    // so it can be compared with `inline_pairs`. Every byte of the run must
+    // sit inside an open or close delim: a `***` split into `**` + `*` is
+    // covered, but an extra leftover backtick in ``a``` is not.
+    fn consumed(inline_pairs: &[InlinePair], run: std::ops::Range<usize>) -> bool {
+        if run.start >= run.end {
+            return false;
+        }
+        let mut pos = run.start;
+        while pos < run.end {
+            let cover = inline_pairs.iter().find_map(|p| {
+                if p.open_delim.start <= pos && pos < p.open_delim.end {
+                    Some(p.open_delim.end)
+                } else if p.close_delim.start <= pos && pos < p.close_delim.end {
+                    Some(p.close_delim.end)
+                } else {
+                    None
+                }
+            });
+            match cover {
+                Some(end) => pos = end.max(pos + 1),
+                None => return false,
+            }
+        }
+        true
     }
     let mut used = vec![false; runs.len()];
     for open_idx in 0..runs.len() {
+        let abs_open = base + runs[open_idx].0..base + runs[open_idx].1;
         if used[open_idx]
-            || in_code(inline_pairs, runs[open_idx].0)
-            || consumed(inline_pairs, runs[open_idx].0)
+            || in_code(inline_pairs, abs_open.start)
+            || consumed(inline_pairs, abs_open)
         {
             continue;
         }
@@ -1641,9 +1662,10 @@ fn synthesize_flanking_pairs(
             continue;
         }
         for close_idx in open_idx + 1..runs.len() {
+            let abs_close = base + runs[close_idx].0..base + runs[close_idx].1;
             if used[close_idx]
-                || in_code(inline_pairs, runs[close_idx].0)
-                || consumed(inline_pairs, runs[close_idx].0)
+                || in_code(inline_pairs, abs_close.start)
+                || consumed(inline_pairs, abs_close)
             {
                 continue;
             }
@@ -1668,10 +1690,11 @@ fn synthesize_flanking_pairs(
             }
             // Relaxed flanking: only the whitespace conditions apply. The
             // punctuation conditions and the odd-match rule are exactly what
-            // rejected these runs in the first place.
-            if input[c_start..]
+            // rejected these runs in the first place. The closer cannot be
+            // preceded by whitespace (`input[c_start..]` is the delimiter).
+            if input[..c_start]
                 .chars()
-                .next()
+                .next_back()
                 .is_some_and(char::is_whitespace)
             {
                 continue;
@@ -1710,19 +1733,19 @@ fn synthesize_flanking_pairs(
                 inner: inner.clone(),
                 close_delim: base + closer_start..base + c_end,
             });
-            let seg = StyledSegment {
-                source: inner.clone(),
-                bold: kind == InlineTagKind::Bold,
-                italic: kind == InlineTagKind::Italic,
-                underline: false,
-                strike: kind == InlineTagKind::Strike,
-                code: kind == InlineTagKind::Code,
-                link_url: None,
+            let or_kind = |s: &mut StyledSegment| match kind {
+                InlineTagKind::Bold => s.bold = true,
+                InlineTagKind::Italic => s.italic = true,
+                InlineTagKind::Underline => s.underline = true,
+                InlineTagKind::Strike => s.strike = true,
+                InlineTagKind::Code => s.code = true,
+                InlineTagKind::Link => {}
             };
-            // The region was literal text: trim the old segments to the
-            // parts outside the synthesized span (the remainder is hidden by
-            // the marker runs below).
+            // Keep segments already inside the new span (nested bold, underline,
+            // links) and OR the synthesized style onto each. Only fill a gap
+            // when the inner range had no segments at all.
             let mut rebuilt: Vec<StyledSegment> = Vec::new();
+            let mut inner_covered = false;
             for s in styled_segments.drain(..) {
                 if s.source.start < inner.end && s.source.end > inner.start {
                     if s.source.start < inner.start {
@@ -1730,6 +1753,15 @@ fn synthesize_flanking_pairs(
                             source: s.source.start..inner.start,
                             ..s.clone()
                         });
+                    }
+                    let mid_start = s.source.start.max(inner.start);
+                    let mid_end = s.source.end.min(inner.end);
+                    if mid_end > mid_start {
+                        let mut mid = s.clone();
+                        mid.source = mid_start..mid_end;
+                        or_kind(&mut mid);
+                        rebuilt.push(mid);
+                        inner_covered = true;
                     }
                     if s.source.end > inner.end {
                         rebuilt.push(StyledSegment {
@@ -1741,9 +1773,24 @@ fn synthesize_flanking_pairs(
                     rebuilt.push(s);
                 }
             }
+            rebuilt.sort_by_key(|s| s.source.start);
+            let mut i = 0;
+            while i + 1 < rebuilt.len() {
+                let same = rebuilt[i].source.end == rebuilt[i + 1].source.start
+                    && rebuilt[i].bold == rebuilt[i + 1].bold
+                    && rebuilt[i].italic == rebuilt[i + 1].italic
+                    && rebuilt[i].underline == rebuilt[i + 1].underline
+                    && rebuilt[i].strike == rebuilt[i + 1].strike
+                    && rebuilt[i].code == rebuilt[i + 1].code
+                    && rebuilt[i].link_url == rebuilt[i + 1].link_url;
+                if same {
+                    rebuilt[i].source.end = rebuilt[i + 1].source.end;
+                    rebuilt.remove(i + 1);
+                } else {
+                    i += 1;
+                }
+            }
             *styled_segments = rebuilt;
-            styled_segments
-                .retain(|s| !(s.source.start >= inner.start && s.source.end <= inner.end));
             for run in [
                 base + o_start..base + o_end,
                 base + closer_start..base + c_end,
@@ -1751,11 +1798,23 @@ fn synthesize_flanking_pairs(
                 styled_segments
                     .retain(|s| !(s.source.start >= run.start && s.source.end <= run.end));
             }
-            let pos = styled_segments
-                .iter()
-                .position(|s| s.source.start > inner.start)
-                .unwrap_or(styled_segments.len());
-            styled_segments.insert(pos, seg);
+            if !inner_covered {
+                let mut seg = StyledSegment {
+                    source: inner.clone(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    strike: false,
+                    code: false,
+                    link_url: None,
+                };
+                or_kind(&mut seg);
+                let pos = styled_segments
+                    .iter()
+                    .position(|s| s.source.start > inner.start)
+                    .unwrap_or(styled_segments.len());
+                styled_segments.insert(pos, seg);
+            }
             break;
         }
     }
@@ -6231,5 +6290,147 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             vec![2],
             "tail-vtab"
         );
+    }
+
+    fn wrap_snippet_contexts(inner: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("line1", inner.to_string()),
+            ("line2", format!("x\n{inner}")),
+            ("list", format!("- {inner}")),
+            ("heading", format!("# {inner}")),
+            ("quote", format!("> {inner}")),
+            (
+                "table",
+                format!("| {inner} | z |\n| --- | --- |"),
+            ),
+        ]
+    }
+
+    fn word_style(
+        md: &str,
+        word: &str,
+    ) -> (bool, bool, bool, bool, bool) {
+        let start = md.find(word).unwrap_or_else(|| panic!("{word:?} not in {md:?}"));
+        let end = start + word.len();
+        let doc = parse_document(md);
+        let segs: Vec<_> = doc
+            .lines
+            .iter()
+            .flat_map(|line| line.styled_segments.iter())
+            .filter(|s| s.source.start < end && s.source.end > start)
+            .collect();
+        assert!(
+            !segs.is_empty(),
+            "word {word:?} missing in {md:?} segs={:?}",
+            doc.lines
+                .iter()
+                .flat_map(|line| line.styled_segments.iter())
+                .map(|s| md.get(s.source.clone()).unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+        let s = segs[0];
+        (s.bold, s.italic, s.underline, s.strike, s.code)
+    }
+
+    fn display_of(md: &str, line: usize) -> String {
+        parse_document(md).lines[line].display_text.clone()
+    }
+
+    /// Already-parsed pairs must not be re-synthesized when `base > 0`.
+    /// Line 2, list items, headings, quotes, and table cells all use a
+    /// non-zero base; without adding it, outer underline is overwritten.
+    #[test]
+    fn synthesize_does_not_clobber_parsed_pairs_when_base_is_nonzero() {
+        for (label, md) in wrap_snippet_contexts("<u>**hello**</u>") {
+            assert_eq!(
+                word_style(&md, "hello"),
+                (true, false, true, false, false),
+                "{label}: underline+bold lost in {md:?}"
+            );
+        }
+        for (label, md) in wrap_snippet_contexts("<u>*hi*</u>") {
+            assert_eq!(
+                word_style(&md, "hi"),
+                (false, true, true, false, false),
+                "{label}: underline+italic lost in {md:?}"
+            );
+        }
+        // The exact quote and table repros from the bug report.
+        assert_eq!(
+            word_style("> <u>*hi*</u> x", "hi"),
+            (false, true, true, false, false),
+            "quote repro dropped underline"
+        );
+        assert_eq!(
+            word_style("| <u>**a**</u> | b |\n| --- | --- |", "a"),
+            (true, false, true, false, false),
+            "table-cell repro dropped underline"
+        );
+    }
+
+    /// A closer preceded by a space is not right-flanking; the pair must
+    /// stay literal instead of italicizing the preceding word.
+    #[test]
+    fn synthesize_skips_closer_preceded_by_whitespace() {
+        for (label, md) in wrap_snippet_contexts("x*foo *bar") {
+            let (bold, italic, underline, strike, code) = word_style(&md, "foo");
+            assert!(
+                !bold && !italic && !underline && !strike && !code,
+                "{label}: foo was styled in {md:?}"
+            );
+            let doc = parse_document(&md);
+            let line = doc
+                .lines
+                .iter()
+                .find(|l| l.display_text.contains("foo"))
+                .unwrap_or(&doc.lines[0]);
+            assert!(
+                line.display_text.contains('*'),
+                "{label}: asterisks were hidden in {:?} of {md:?}",
+                line.display_text
+            );
+        }
+        assert_eq!(display_of("x*foo *bar", 0), "x*foo *bar");
+        assert_eq!(display_of("x\nx*foo *bar", 1), "x*foo *bar");
+    }
+
+    /// Synthesizing an outer pair must OR the new style onto nested
+    /// segments instead of replacing them with a single un-nested span.
+    #[test]
+    fn synthesize_ors_style_onto_nested_segments() {
+        for (label, md) in wrap_snippet_contexts("x*a **b** c*y") {
+            assert_eq!(
+                word_style(&md, "a"),
+                (false, true, false, false, false),
+                "{label}: a lost italic in {md:?}"
+            );
+            assert_eq!(
+                word_style(&md, "b"),
+                (true, true, false, false, false),
+                "{label}: b is not bold+italic in {md:?}"
+            );
+            assert_eq!(
+                word_style(&md, "c"),
+                (false, true, false, false, false),
+                "{label}: c lost italic in {md:?}"
+            );
+            let doc = parse_document(&md);
+            if label != "table" {
+                let line = doc
+                    .lines
+                    .iter()
+                    .find(|l| {
+                        l.styled_segments
+                            .iter()
+                            .any(|s| md.get(s.source.clone()) == Some("b"))
+                    })
+                    .unwrap_or(&doc.lines[0]);
+                assert!(
+                    !line.display_text.contains('*'),
+                    "{label}: raw markers in {:?} of {md:?}",
+                    line.display_text
+                );
+            }
+        }
     }
 }
