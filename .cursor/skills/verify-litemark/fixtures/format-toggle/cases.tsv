@@ -40,8 +40,7 @@ f4-enter	f4-enter	**first half**	7..7	enter	**first**\n **half**	13..13	known_fa
 f4-shift-enter	f4-enter	**first half**	7..7	shift-enter	**first**\n **half**	13..13	known_fail_main	**first\n half**	8..8	Shift+Enter should use the same repair as Enter. Both trees split the markers.
 f4-table-enter	f4-enter	| h |\n| --- |\n| **first half** |	24..24	enter	| h |\n| --- |\n| **first** |\n| **half** |	32..32	known_fail_main	| h |\n| --- |\n| **first |\n| half** |  |	28..28	Enter in the bold cell should keep bold on first and on half. Both trees split the markers. Table display_text keeps the raw line; hidden ranges cover the asterisks.
 f5-nested-enter	f5-nested-enter	**foo *bar* baz**	9..9	enter	**foo *ba***\n***r* baz**	16..16	known_fail_main	**foo *ba\nr* baz**	10..10	Enter inside nested italic closes and reopens bold and italic. Both trees tear the inner span, and the byte strings differ.
-m1-space	m1-nested-space	**foo *bar***	10..10	space	**foo *bar ***	11..11	ok	-	-	Main bytes: the space stays inside the open bold and italic closers.
-m1-space-x	m1-nested-space	**foo *bar***	10..10	space,type:x	**foo *bar x***	12..12	ok	-	-	The letter after the space is inside both spans. Main bytes.
+m1-space-x	m1-nested-space	**foo *bar***	10..10	space,type:x	**foo *bar x***	12..12	ok	-	-	Trailing space is tested only by the letter that follows it. Main bytes: foo stays bold and bar x stays bold and italic.
 m2-undo	m2-undo-caret	**first half**	7..7	enter,undo	**first half**	7..7	ok	-	-	Undo of Enter restores the phrase and puts the caret back at the split. Main bytes.
 f6-motion-undo	f6-undo		0..0	type:h,type:e,type:l,left,right,type:l,type:o,undo		0..0	ok	-	-	Left and right return to the same place, so one undo clears hello. Main bytes.
 f6-nomotion-undo	f6-undo		0..0	type:h,type:e,type:l,type:l,type:o,undo		0..0	ok	-	-	Undo of hello with no motion clears the note on both trees.

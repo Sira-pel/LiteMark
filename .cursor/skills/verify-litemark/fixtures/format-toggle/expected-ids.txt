@@ -37,7 +37,6 @@ f4-enter
 f4-shift-enter
 f4-table-enter
 f5-nested-enter
-m1-space
 m1-space-x
 m2-undo
 f6-motion-undo

@@ -4,9 +4,13 @@
 # The case set is fixtures/format-toggle/expected-ids.txt. The script
 # exits non-zero when cases.tsv does not have exactly those ids, when
 # the cargo log does not have exactly one whole line
-# `case=<id> pass|fail|xfail|xpass` per id, or when any result is fail
-# or xpass. known_fail_main rows that still match main_bytes are xfail.
+# `case=<id> pass|fail|xfail|xpass` per id, when the result count is
+# below MIN_CASES, or when any result is fail or xpass.
+# known_fail_main rows that still match main_bytes are xfail.
+# Lower MIN_CASES only when a case is removed on purpose.
 set -euo pipefail
+
+MIN_CASES=43
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env.sh
@@ -107,6 +111,7 @@ while IFS= read -r line; do
     if [[ -n "${result_word[${id}]+x}" ]]; then
       echo "format_toggle_gate=duplicate_result id=${id}"
       duplicate=1
+      continue
     fi
     if [[ -z "${expected_set[${id}]+x}" ]]; then
       unlisted+=("${id}")
@@ -132,6 +137,10 @@ done
 
 printf 'pass=%s fail=%s xfail=%s xpass=%s\n' "${pass}" "${fail}" "${xfail}" "${xpass}"
 
+if [[ "${result_lines}" -lt "${MIN_CASES}" ]]; then
+  printf 'count_below_min count=%s min=%s\n' "${result_lines}" "${MIN_CASES}"
+  exit 1
+fi
 if [[ "${#absent[@]}" -ne 0 || "${#unlisted[@]}" -ne 0 || "${duplicate}" -ne 0 || "${result_lines}" -ne "${#expected[@]}" ]]; then
   printf 'format_toggle_gate=result_mismatch absent=%s unlisted=%s lines=%s expected=%s cargo_exit=%s log=%s\n' \
     "$(IFS=,; echo "${absent[*]-}")" \
