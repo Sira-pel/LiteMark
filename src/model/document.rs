@@ -6138,6 +6138,31 @@ mod tests {
             flags_for_word(&doc.content, "cc"),
             (true, true, false, false)
         );
+
+        // Underline tags do not depend on spaces; the leftover words stay
+        // underlined while the flanking-sensitive markers move off the gap.
+        let mut doc = DocumentTab::new(
+            "e1c".into(),
+            "test.md".into(),
+            "<u>**aa bb cc**</u>".into(),
+            None,
+            None,
+        );
+        select_once(&mut doc, "aa");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (false, false, true, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, false, true, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, false, true, false)
+        );
     }
 
     /// Removing bold or italic from the middle or end of a bold+italic span
