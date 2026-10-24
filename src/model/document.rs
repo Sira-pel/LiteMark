@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::markdown::{
     accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlinePair,
-    InlineTagKind, LineKind, ParsedDocument, ParsedLine, TableColumnAlign,
+    InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment, TableColumnAlign,
 };
 
 use super::text_ops::{
@@ -1120,97 +1120,8 @@ impl DocumentTab {
             if range.is_empty() {
                 let cursor = range.start;
 
-                // Check if cursor is inside an existing InlinePair of `tag_kind`
-                if let Some(pair) = parsed
-                    .inline_pairs
-                    .iter()
-                    .rev()
-                    .find(|p| {
-                        p.kind == tag_kind
-                            && range.start >= p.open_delim.start
-                            && range.end <= p.close_delim.end
-                    })
-                    .cloned()
-                {
-                    let inner_text = self.content[pair.inner.clone()].to_string();
-                    let edit_range = pair.open_delim.start..pair.close_delim.end;
-                    // If the inner text is just the default unmodified placeholder and the user immediately toggled off,
-                    // remove the placeholder too so pressing Ctrl+B twice on an empty spot leaves it empty!
-                    if inner_text == placeholder && range == pair.inner {
-                        let pos = pair.open_delim.start;
-                        self.edit(edit_range, "");
-                        self.caret.move_to(pos);
-                        self.pending_formats = ActiveFormats::default();
-                        self.refresh_cursor();
-                        return;
-                    }
-                    if mode == ViewMode::Wysiwyg {
-                        // Word-style exit: the span stays formatted and the
-                        // caret moves past the whole closing run so further
-                        // typing is plain in the toggled format. Other
-                        // formats stacked around the caret stay armed for
-                        // the next letter, and a second press of the same
-                        // toggle then disarms them.
-                        let mut pending = pending_formats_at(&parsed, range.start);
-                        match tag_kind {
-                            InlineTagKind::Bold => pending.bold = false,
-                            InlineTagKind::Italic => pending.italic = false,
-                            InlineTagKind::Underline => pending.underline = false,
-                            InlineTagKind::Strike => pending.strike = false,
-                            InlineTagKind::Code => pending.code = false,
-                            InlineTagKind::Link => {}
-                        }
-                        if range.start > pair.open_delim.start {
-                            let group_end = span_close_end(&parsed, &pair);
-                            self.caret.move_to(floor_boundary(&self.content, group_end));
-                        }
-                        self.pending_formats = pending;
-                        self.refresh_cursor();
-                        return;
-                    }
-                    let new_start = pair.open_delim.start;
-                    self.edit(edit_range, &inner_text);
-                    let rel = range
-                        .start
-                        .saturating_sub(pair.inner.start)
-                        .min(inner_text.len());
-                    self.caret.move_to(new_start + rel);
-                    self.pending_formats = ActiveFormats::default();
-                    self.refresh_cursor();
-                    return;
-                }
-
-                // Check empty delimiters right around cursor, e.g. `**|**`
-                if outer_is_delimited(&self.content, cursor, cursor, prefix, suffix) {
-                    let edit_range = (cursor - prefix.len())..(cursor + suffix.len());
-                    let pos = cursor - prefix.len();
-                    self.edit(edit_range, "");
-                    self.caret.move_to(pos);
-                    self.pending_formats = ActiveFormats::default();
-                    self.refresh_cursor();
-                    return;
-                }
-
                 let word_start = super::text_ops::word_left(&self.content, cursor);
                 let word_end = super::text_ops::word_right(&self.content, cursor);
-
-                if outer_is_delimited(&self.content, word_start, word_end, prefix, suffix) {
-                    let core = self.content[word_start..word_end].to_string();
-                    let edit_range = (word_start - prefix.len())..(word_end + suffix.len());
-                    let new_start = word_start - prefix.len();
-                    let new_end = new_start + core.len();
-                    self.edit(edit_range, &core);
-                    self.caret.range = new_start..new_end;
-                    self.caret.reversed = false;
-                    self.pending_formats = ActiveFormats::default();
-                    self.refresh_cursor();
-                    return;
-                }
-
-                // Expand to the whole word only when the caret is strictly
-                // inside one (a letter on both sides), like Word. At the end
-                // of a word just typed there is nothing to wrap: fall through
-                // and arm the format for the letters typed next.
                 let line_s = home_offset(&self.content, cursor);
                 let line_e = parsed
                     .line_at_offset(cursor)
@@ -1235,6 +1146,92 @@ impl DocumentTab {
                         .any(|c| c.is_alphanumeric() || c == '_')
                     {
                         range = extent;
+                    }
+                }
+
+                if range.is_empty() {
+                    // Check if cursor is strictly inside an existing InlinePair of `tag_kind`
+                    if let Some(pair) = parsed
+                        .inline_pairs
+                        .iter()
+                        .rev()
+                        .find(|p| {
+                            p.kind == tag_kind
+                                && range.start > p.open_delim.start
+                                && range.end < span_close_end(&parsed, p)
+                        })
+                        .cloned()
+                    {
+                        let inner_text = self.content[pair.inner.clone()].to_string();
+                        let edit_range = pair.open_delim.start..pair.close_delim.end;
+                        // If the inner text is just the default unmodified placeholder and the user immediately toggled off,
+                        // remove the placeholder too so pressing Ctrl+B twice on an empty spot leaves it empty!
+                        if inner_text == placeholder && range == pair.inner {
+                            let pos = pair.open_delim.start;
+                            self.edit(edit_range, "");
+                            self.caret.move_to(pos);
+                            self.pending_formats = ActiveFormats::default();
+                            self.refresh_cursor();
+                            return;
+                        }
+                        if mode == ViewMode::Wysiwyg {
+                            // Word-style exit: the span stays formatted and the
+                            // caret moves past the whole closing run so further
+                            // typing is plain in the toggled format. Other
+                            // formats stacked around the caret stay armed for
+                            // the next letter, and a second press of the same
+                            // toggle then disarms them.
+                            let mut pending = pending_formats_at(&parsed, range.start);
+                            match tag_kind {
+                                InlineTagKind::Bold => pending.bold = false,
+                                InlineTagKind::Italic => pending.italic = false,
+                                InlineTagKind::Underline => pending.underline = false,
+                                InlineTagKind::Strike => pending.strike = false,
+                                InlineTagKind::Code => pending.code = false,
+                                InlineTagKind::Link => {}
+                            }
+                            if range.start > pair.open_delim.start {
+                                let group_end = span_close_end(&parsed, &pair);
+                                self.caret.move_to(floor_boundary(&self.content, group_end));
+                            }
+                            self.pending_formats = pending;
+                            self.refresh_cursor();
+                            return;
+                        }
+                        let new_start = pair.open_delim.start;
+                        self.edit(edit_range, &inner_text);
+                        let rel = range
+                            .start
+                            .saturating_sub(pair.inner.start)
+                            .min(inner_text.len());
+                        self.caret.move_to(new_start + rel);
+                        self.pending_formats = ActiveFormats::default();
+                        self.refresh_cursor();
+                        return;
+                    }
+
+                    // Check empty delimiters right around cursor, e.g. `**|**`
+                    if outer_is_delimited(&self.content, cursor, cursor, prefix, suffix) {
+                        let edit_range = (cursor - prefix.len())..(cursor + suffix.len());
+                        let pos = cursor - prefix.len();
+                        self.edit(edit_range, "");
+                        self.caret.move_to(pos);
+                        self.pending_formats = ActiveFormats::default();
+                        self.refresh_cursor();
+                        return;
+                    }
+
+                    if outer_is_delimited(&self.content, word_start, word_end, prefix, suffix) {
+                        let core = self.content[word_start..word_end].to_string();
+                        let edit_range = (word_start - prefix.len())..(word_end + suffix.len());
+                        let new_start = word_start - prefix.len();
+                        let new_end = new_start + core.len();
+                        self.edit(edit_range, &core);
+                        self.caret.range = new_start..new_end;
+                        self.caret.reversed = false;
+                        self.pending_formats = ActiveFormats::default();
+                        self.refresh_cursor();
+                        return;
                     }
                 }
             }
@@ -1278,6 +1275,11 @@ impl DocumentTab {
             }
 
             // Non-empty selection: collect parts across table cells or lines separately
+            let orig_cursor = if self.caret.range.is_empty() {
+                Some(self.caret.range.start)
+            } else {
+                None
+            };
             let orig_sel = range.clone();
             struct InlinePartInfo {
                 range: Range<usize>,
@@ -1355,6 +1357,246 @@ impl DocumentTab {
                 return;
             }
 
+            if tag_kind != InlineTagKind::Link {
+                let global_all_have_format = !candidate_ranges.is_empty()
+                    && candidate_ranges.iter().all(|p_range| {
+                        let pline = match parsed.line_at_offset(p_range.start) {
+                            Some(l) => l,
+                            None => return false,
+                        };
+                        let overlapping_segs: Vec<&StyledSegment> = pline
+                            .styled_segments
+                            .iter()
+                            .filter(|s| s.source.start < p_range.end && s.source.end > p_range.start)
+                            .collect();
+                        !overlapping_segs.is_empty()
+                            && overlapping_segs.iter().all(|s| match tag_kind {
+                                InlineTagKind::Bold => s.bold,
+                                InlineTagKind::Italic => s.italic,
+                                InlineTagKind::Underline => s.underline,
+                                InlineTagKind::Strike => s.strike,
+                                InlineTagKind::Code => s.code,
+                                InlineTagKind::Link => false,
+                            })
+                    });
+                let should_turn_on = !global_all_have_format;
+
+                let mut candidate_results = Vec::new();
+
+                for p_range in &candidate_ranges {
+                    let p_start = p_range.start;
+                    let p_end = p_range.end;
+                    let pline = match parsed.line_at_offset(p_start) {
+                        Some(l) => l,
+                        None => continue,
+                    };
+
+                    let mut group_pairs: Vec<&InlinePair> = pline
+                        .inline_pairs
+                        .iter()
+                        .filter(|p| {
+                            p.kind != InlineTagKind::Link
+                                && p.open_delim.start < p_end
+                                && span_close_end(&parsed, p) > p_start
+                        })
+                        .collect();
+
+                    let mut expanded = true;
+                    while expanded {
+                        expanded = false;
+                        for p in &pline.inline_pairs {
+                            if p.kind == InlineTagKind::Link
+                                || group_pairs.iter().any(|g| std::ptr::eq(*g, p))
+                            {
+                                continue;
+                            }
+                            let touches = group_pairs.iter().any(|g| {
+                                p.open_delim.start < span_close_end(&parsed, g)
+                                    && span_close_end(&parsed, p) > g.open_delim.start
+                            });
+                            if touches {
+                                group_pairs.push(p);
+                                expanded = true;
+                            }
+                        }
+                    }
+
+                    let (replace_start, replace_end) = if group_pairs.is_empty() {
+                        (p_start, p_end)
+                    } else {
+                        let r_start = group_pairs
+                            .iter()
+                            .map(|p| p.open_delim.start)
+                            .min()
+                            .unwrap()
+                            .min(p_start);
+                        let r_end = group_pairs
+                            .iter()
+                            .map(|p| span_close_end(&parsed, p))
+                            .max()
+                            .unwrap()
+                            .max(p_end);
+                        (r_start, r_end)
+                    };
+
+                    let mut raw_slices: Vec<(Range<usize>, FormatFlags, bool)> = Vec::new();
+                    if group_pairs.is_empty() {
+                        let mut flags = FormatFlags::default();
+                        match tag_kind {
+                            InlineTagKind::Bold => flags.bold = should_turn_on,
+                            InlineTagKind::Italic => flags.italic = should_turn_on,
+                            InlineTagKind::Underline => flags.underline = should_turn_on,
+                            InlineTagKind::Strike => flags.strike = should_turn_on,
+                            InlineTagKind::Code => flags.code = should_turn_on,
+                            InlineTagKind::Link => {}
+                        }
+                        raw_slices.push((p_start..p_end, flags, true));
+                    } else {
+                        let mut segs_in_range: Vec<&StyledSegment> = pline
+                            .styled_segments
+                            .iter()
+                            .filter(|s| s.source.start < replace_end && s.source.end > replace_start)
+                            .collect();
+                        segs_in_range.sort_by_key(|s| s.source.start);
+
+                        for seg in segs_in_range {
+                            let seg_start = seg.source.start.max(replace_start);
+                            let seg_end = seg.source.end.min(replace_end);
+                            if seg_start >= seg_end {
+                                continue;
+                            }
+
+                            let orig_flags = FormatFlags {
+                                bold: seg.bold,
+                                italic: seg.italic,
+                                underline: seg.underline,
+                                strike: seg.strike,
+                                code: seg.code,
+                            };
+
+                            if seg_start < p_start {
+                                let part_end = seg_end.min(p_start);
+                                raw_slices.push((seg_start..part_end, orig_flags, false));
+                            }
+                            let overlap_start = seg_start.max(p_start);
+                            let overlap_end = seg_end.min(p_end);
+                            if overlap_start < overlap_end {
+                                let mut toggled_flags = orig_flags;
+                                match tag_kind {
+                                    InlineTagKind::Bold => toggled_flags.bold = should_turn_on,
+                                    InlineTagKind::Italic => toggled_flags.italic = should_turn_on,
+                                    InlineTagKind::Underline => toggled_flags.underline = should_turn_on,
+                                    InlineTagKind::Strike => toggled_flags.strike = should_turn_on,
+                                    InlineTagKind::Code => toggled_flags.code = should_turn_on,
+                                    InlineTagKind::Link => {}
+                                }
+                                raw_slices.push((overlap_start..overlap_end, toggled_flags, true));
+                            }
+                            if seg_end > p_end {
+                                let part_start = seg_start.max(p_end);
+                                raw_slices.push((part_start..seg_end, orig_flags, false));
+                            }
+                        }
+                    }
+
+                    let slices: Vec<StyledSlice> = raw_slices
+                        .iter()
+                        .map(|(r, flags, is_sel)| StyledSlice {
+                            text: self.content[r.clone()].to_string(),
+                            flags: *flags,
+                            is_selected: *is_sel,
+                        })
+                        .collect();
+
+                    let (rendered_str, sel_in_rendered) = render_styled_slices_with_selection(&slices);
+                    candidate_results.push((replace_start..replace_end, rendered_str, sel_in_rendered, p_start));
+                }
+
+                if candidate_ranges.len() == 1 && !candidate_results.is_empty() {
+                    let (rep_range, rendered_str, sel_in_rendered, p_start) = candidate_results.remove(0);
+                    self.edit(rep_range.clone(), &rendered_str);
+
+                    if let Some(cur) = orig_cursor {
+                        let cursor_in_sel = cur.saturating_sub(p_start);
+                        let target_pos = rep_range.start + sel_in_rendered.start + cursor_in_sel.min(sel_in_rendered.len());
+                        self.caret.move_to(floor_boundary(&self.content, target_pos));
+                    } else {
+                        let new_start = rep_range.start + sel_in_rendered.start;
+                        let new_end = rep_range.start + sel_in_rendered.end;
+                        self.caret.range = new_start..new_end;
+                        self.caret.reversed = false;
+                    }
+                    self.pending_formats = ActiveFormats::default();
+                    self.refresh_cursor();
+                    return;
+                }
+
+                let edits: Vec<(Range<usize>, String)> = candidate_results
+                    .into_iter()
+                    .filter(|(r, repl, _, _)| self.content[r.clone()] != *repl)
+                    .map(|(r, repl, _, _)| (r, repl))
+                    .collect();
+
+                if edits.is_empty() {
+                    return;
+                }
+
+                let min_start = edits.first().unwrap().0.start;
+                let max_end = edits.last().unwrap().0.end;
+                let span_range = min_start..max_end;
+
+                let mut replacement = String::with_capacity(
+                    max_end - min_start + edits.len() * (prefix.len() + suffix.len()),
+                );
+                let mut cursor = min_start;
+                for (r, repl) in &edits {
+                    if r.start > cursor {
+                        replacement.push_str(&self.content[cursor..r.start]);
+                    }
+                    replacement.push_str(repl);
+                    cursor = r.end;
+                }
+                if max_end > cursor {
+                    replacement.push_str(&self.content[cursor..max_end]);
+                }
+
+                self.edit(span_range, &replacement);
+
+                let map_offset = |offset: usize| -> usize {
+                    if offset <= min_start {
+                        return offset;
+                    }
+                    let mut mapped = min_start;
+                    let mut orig_cursor = min_start;
+                    for (r, repl) in &edits {
+                        if offset <= r.start {
+                            mapped += offset - orig_cursor;
+                            return mapped;
+                        }
+                        mapped += r.start - orig_cursor;
+                        if offset <= r.end {
+                            mapped += repl.len();
+                            return mapped;
+                        }
+                        mapped += repl.len();
+                        orig_cursor = r.end;
+                    }
+                    if offset > orig_cursor {
+                        mapped += offset - orig_cursor;
+                    }
+                    mapped
+                };
+                let new_start = map_offset(orig_sel.start);
+                let new_end = map_offset(orig_sel.end);
+                let new_start = floor_boundary(&self.content, new_start);
+                let new_end = floor_boundary(&self.content, new_end);
+                self.caret.range = new_start..new_end;
+                self.caret.reversed = false;
+                self.pending_formats = ActiveFormats::default();
+                self.refresh_cursor();
+                return;
+            }
+
             let mut parts: Vec<InlinePartInfo> = Vec::with_capacity(candidate_ranges.len());
 
             for p_range in candidate_ranges {
@@ -1386,77 +1628,7 @@ impl DocumentTab {
                         (false, p_start..p_end, String::new(), None)
                     }
                 } else {
-                    if is_delimited(part_text, prefix, suffix) {
-                        let unwrapped = &part_text[prefix.len()..part_text.len() - suffix.len()];
-                        (true, p_start..p_end, unwrapped.to_string(), None)
-                    } else if let Some(pair) = parsed.inline_pairs.iter().find(|p| {
-                        p.kind == tag_kind
-                            && (p.inner == (p_start..p_end)
-                                || (p.open_delim.start == p_start && p.close_delim.end == p_end))
-                    }) {
-                        (
-                            true,
-                            pair.open_delim.start..pair.close_delim.end,
-                            self.content[pair.inner.clone()].to_string(),
-                            None,
-                        )
-                    } else if outer_is_delimited(&self.content, p_start, p_end, prefix, suffix) {
-                        let edit_range = (p_start - prefix.len())..(p_end + suffix.len());
-                        (true, edit_range, part_text.to_string(), None)
-                    } else if let Some(pair) = parsed.inline_pairs.iter().find(|p| {
-                        p.kind == tag_kind && p_start >= p.inner.start && p_end <= p.inner.end
-                    }) {
-                        // The selection sits inside a larger span: split the
-                        // span so only the selection loses the format.
-                        // Stacked markers sharing the content range keep
-                        // wrapping every part.
-                        let group: Vec<InlinePair> = parsed
-                            .inline_pairs
-                            .iter()
-                            .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
-                            .cloned()
-                            .collect();
-                        let open_start = group
-                            .iter()
-                            .map(|p| p.open_delim.start)
-                            .min()
-                            .unwrap_or(pair.open_delim.start);
-                        let close_end = span_close_end(&parsed, pair);
-                        let open_run = self.content[open_start..pair.inner.start].to_string();
-                        let close_run = self.content[pair.inner.end..close_end].to_string();
-                        let inner = &self.content[pair.inner.clone()];
-                        let a = &inner[..p_start - pair.inner.start];
-                        let c = &inner[p_end - pair.inner.start..];
-                        let mut repl = String::new();
-                        if !a.is_empty() {
-                            repl.push_str(&open_run);
-                            repl.push_str(a);
-                            repl.push_str(&close_run);
-                        }
-                        let left_len = repl.len();
-                        // The selection keeps every stacked format except the
-                        // one being toggled off.
-                        let mut others: Vec<&InlinePair> =
-                            group.iter().filter(|p| p.kind != tag_kind).collect();
-                        others.sort_by_key(|p| p.open_delim.start);
-                        for q in &others {
-                            repl.push_str(&self.content[q.open_delim.clone()]);
-                        }
-                        repl.push_str(part_text);
-                        for q in others.iter().rev() {
-                            repl.push_str(&self.content[q.close_delim.clone()]);
-                        }
-                        let split_inner = (open_start + left_len)
-                            ..(open_start + left_len + repl.len() - left_len);
-                        if !c.is_empty() {
-                            repl.push_str(&open_run);
-                            repl.push_str(c);
-                            repl.push_str(&close_run);
-                        }
-                        (true, open_start..close_end, repl, Some(split_inner))
-                    } else {
-                        (false, p_start..p_end, String::new(), None)
-                    }
+                    (false, p_start..p_end, String::new(), None)
                 };
 
                 let wrapped_text = format!("{}{}{}", prefix, part_text, suffix);
@@ -1936,7 +2108,11 @@ impl DocumentTab {
                 .find(|p| {
                     matches!(
                         p.kind,
-                        InlineTagKind::Bold | InlineTagKind::Italic | InlineTagKind::Strike
+                        InlineTagKind::Bold
+                            | InlineTagKind::Italic
+                            | InlineTagKind::Strike
+                            | InlineTagKind::Underline
+                            | InlineTagKind::Code
                     ) && range.start == p.inner.end
                 })
                 .cloned();
@@ -1965,16 +2141,11 @@ impl DocumentTab {
             let pf = self.pending_formats;
             if self.has_pending_inline_formats() {
                 let parsed = self.parsed();
-                // The armed formats match a span whose whole closing run,
-                // with the trailing space outside it, sits right before the
-                // caret: pull the space back inside and extend that span
-                // instead of opening a second one, so `**read** ` plus
-                // typing `me` keeps `**read me**`.
-                if let Some((run_range, closer_run)) =
-                    extendable_span_run(&self.content, &parsed, &pf, range.start)
+                // The armed formats extend a span ending right at the caret
+                // (with or without a trailing space) or continue a subset of its formats.
+                if let Some((run_range, repl, caret)) =
+                    extend_or_splice_span(&self.content, &parsed, &pf, range.start, text)
                 {
-                    let repl = format!(" {}{}", text, closer_run);
-                    let caret = run_range.start + 1 + text.len();
                     self.pending_formats = ActiveFormats::default();
                     self.edit(run_range, &repl);
                     self.caret.move_to(floor_boundary(&self.content, caret));
@@ -1983,28 +2154,14 @@ impl DocumentTab {
                 }
             }
             if pf.bold || pf.italic || pf.underline || pf.strike || pf.code {
-                let mut open = String::new();
-                let mut close = String::new();
-                if pf.bold {
-                    open.push_str("**");
-                    close.insert_str(0, "**");
-                }
-                if pf.italic {
-                    open.push('*');
-                    close.insert(0, '*');
-                }
-                if pf.underline {
-                    open.push_str("<u>");
-                    close.insert_str(0, "</u>");
-                }
-                if pf.strike {
-                    open.push_str("~~");
-                    close.insert_str(0, "~~");
-                }
-                if pf.code {
-                    open.push('`');
-                    close.insert(0, '`');
-                }
+                let flags = FormatFlags {
+                    bold: pf.bold,
+                    italic: pf.italic,
+                    underline: pf.underline,
+                    strike: pf.strike,
+                    code: pf.code,
+                };
+                let (open, close) = wrap_delimiters(&flags);
                 let wrapped = format!("{}{}{}", open, text, close);
                 let cursor_after = range.start + open.len() + text.len();
                 self.pending_formats = ActiveFormats::default();
@@ -3418,38 +3575,305 @@ fn span_close_end(parsed: &ParsedDocument, pair: &InlinePair) -> usize {
         .unwrap_or(pair.close_delim.end)
 }
 
-/// Whether the armed inline formats are exactly the formats of `group`.
-fn armed_kinds_match_group(pf: &ActiveFormats, group: &[&InlinePair]) -> bool {
-    let group_kind = |kind: InlineTagKind| group.iter().any(|p| p.kind == kind);
-    pf.bold == group_kind(InlineTagKind::Bold)
-        && pf.italic == group_kind(InlineTagKind::Italic)
-        && pf.underline == group_kind(InlineTagKind::Underline)
-        && pf.strike == group_kind(InlineTagKind::Strike)
-        && pf.code == group_kind(InlineTagKind::Code)
+fn opener_for_kind(kind: InlineTagKind) -> &'static str {
+    match kind {
+        InlineTagKind::Bold => "**",
+        InlineTagKind::Italic => "*",
+        InlineTagKind::Underline => "<u>",
+        InlineTagKind::Strike => "~~",
+        InlineTagKind::Code => "`",
+        InlineTagKind::Link => "",
+    }
 }
 
-/// The range to replace when typed text extends a span whose closing run and
-/// trailing space sit right before `caret`: the closing run plus the space,
-/// and the closing run itself. The armed formats must exactly match the
-/// span's stacked group.
-fn extendable_span_run(
+fn closer_for_kind(kind: InlineTagKind) -> &'static str {
+    match kind {
+        InlineTagKind::Bold => "**",
+        InlineTagKind::Italic => "*",
+        InlineTagKind::Underline => "</u>",
+        InlineTagKind::Strike => "~~",
+        InlineTagKind::Code => "`",
+        InlineTagKind::Link => "",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FormatFlags {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub code: bool,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyledSlice {
+    pub text: String,
+    pub flags: FormatFlags,
+    pub is_selected: bool,
+}
+
+fn wrap_delimiters(flags: &FormatFlags) -> (String, String) {
+    let mut open = String::new();
+    let mut close = String::new();
+    if flags.bold && flags.italic {
+        open.push_str("***");
+        close.insert_str(0, "***");
+    } else if flags.bold {
+        open.push_str("**");
+        close.insert_str(0, "**");
+    } else if flags.italic {
+        open.push('*');
+        close.insert(0, '*');
+    }
+    if flags.strike {
+        open.push_str("~~");
+        close.insert_str(0, "~~");
+    }
+    if flags.underline {
+        open.push_str("<u>");
+        close.insert_str(0, "</u>");
+    }
+    if flags.code {
+        open.push('`');
+        close.insert(0, '`');
+    }
+    (open, close)
+}
+
+fn render_styled_slices(
+    slices: &[StyledSlice],
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+) -> String {
+    let mut merged: Vec<StyledSlice> = Vec::new();
+    for s in slices {
+        if s.text.is_empty() {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if last.flags == s.flags && last.is_selected == s.is_selected {
+                last.text.push_str(&s.text);
+                continue;
+            }
+        }
+        merged.push(s.clone());
+    }
+
+    if merged.is_empty() {
+        return String::new();
+    }
+    if merged.len() == 1 {
+        let s = &merged[0];
+        let (prefix, suffix) = wrap_delimiters(&s.flags);
+        if s.is_selected {
+            let start = offset + prefix.len();
+            let end = start + s.text.len();
+            *sel_range = Some(start..end);
+        }
+        return format!("{}{}{}", prefix, s.text, suffix);
+    }
+
+    let all_underline = merged.iter().all(|s| s.flags.underline);
+    let all_strike = merged.iter().all(|s| s.flags.strike);
+    let all_code = merged.iter().all(|s| s.flags.code);
+    let all_bold = merged.iter().all(|s| s.flags.bold);
+    let all_italic = merged.iter().all(|s| s.flags.italic);
+
+    if all_underline {
+        let inner: Vec<StyledSlice> = merged
+            .iter()
+            .map(|s| {
+                let mut f = s.flags;
+                f.underline = false;
+                StyledSlice {
+                    text: s.text.clone(),
+                    flags: f,
+                    is_selected: s.is_selected,
+                }
+            })
+            .collect();
+        let inner_str = render_styled_slices(&inner, sel_range, offset + 3);
+        return format!("<u>{}</u>", inner_str);
+    }
+
+    if all_strike {
+        let inner: Vec<StyledSlice> = merged
+            .iter()
+            .map(|s| {
+                let mut f = s.flags;
+                f.strike = false;
+                StyledSlice {
+                    text: s.text.clone(),
+                    flags: f,
+                    is_selected: s.is_selected,
+                }
+            })
+            .collect();
+        let inner_str = render_styled_slices(&inner, sel_range, offset + 2);
+        return format!("~~{}~~", inner_str);
+    }
+
+    if all_code {
+        let inner: Vec<StyledSlice> = merged
+            .iter()
+            .map(|s| {
+                let mut f = s.flags;
+                f.code = false;
+                StyledSlice {
+                    text: s.text.clone(),
+                    flags: f,
+                    is_selected: s.is_selected,
+                }
+            })
+            .collect();
+        let inner_str = render_styled_slices(&inner, sel_range, offset + 1);
+        return format!("`{}`", inner_str);
+    }
+
+    if all_bold && all_italic {
+        let inner: Vec<StyledSlice> = merged
+            .iter()
+            .map(|s| {
+                let mut f = s.flags;
+                f.bold = false;
+                f.italic = false;
+                StyledSlice {
+                    text: s.text.clone(),
+                    flags: f,
+                    is_selected: s.is_selected,
+                }
+            })
+            .collect();
+        let inner_str = render_styled_slices(&inner, sel_range, offset + 3);
+        return format!("***{}***", inner_str);
+    }
+
+    if all_italic {
+        let is_middle = merged.len() == 3
+            && merged[0].flags.bold
+            && !merged[1].flags.bold
+            && merged[2].flags.bold;
+        if is_middle {
+            let mut out = String::from("_");
+            for s in &merged {
+                let prefix = if s.flags.bold { "**" } else { "" };
+                let suffix = if s.flags.bold { "**" } else { "" };
+                out.push_str(prefix);
+                if s.is_selected {
+                    let start = offset + out.len();
+                    let end = start + s.text.len();
+                    *sel_range = Some(start..end);
+                }
+                out.push_str(&s.text);
+                out.push_str(suffix);
+            }
+            out.push('_');
+            return out;
+        }
+
+        let inner: Vec<StyledSlice> = merged
+            .iter()
+            .map(|s| {
+                let mut f = s.flags;
+                f.italic = false;
+                StyledSlice {
+                    text: s.text.clone(),
+                    flags: f,
+                    is_selected: s.is_selected,
+                }
+            })
+            .collect();
+        let inner_str = render_styled_slices(&inner, sel_range, offset + 1);
+        return format!("*{}*", inner_str);
+    }
+
+    if all_bold {
+        let is_middle = merged.len() == 3
+            && merged[0].flags.italic
+            && !merged[1].flags.italic
+            && merged[2].flags.italic;
+        if is_middle {
+            let mut out = String::new();
+            for s in &merged {
+                let (prefix, suffix) = if s.flags.italic {
+                    ("_**", "**_")
+                } else {
+                    ("**", "**")
+                };
+                out.push_str(prefix);
+                if s.is_selected {
+                    let start = offset + out.len();
+                    let end = start + s.text.len();
+                    *sel_range = Some(start..end);
+                }
+                out.push_str(&s.text);
+                out.push_str(suffix);
+            }
+            return out;
+        }
+
+        let inner: Vec<StyledSlice> = merged
+            .iter()
+            .map(|s| {
+                let mut f = s.flags;
+                f.bold = false;
+                StyledSlice {
+                    text: s.text.clone(),
+                    flags: f,
+                    is_selected: s.is_selected,
+                }
+            })
+            .collect();
+        let inner_str = render_styled_slices(&inner, sel_range, offset + 2);
+        return format!("**{}**", inner_str);
+    }
+
+    let mut out = String::new();
+    for s in &merged {
+        let (prefix, suffix) = wrap_delimiters(&s.flags);
+        out.push_str(&prefix);
+        if s.is_selected {
+            let start = offset + out.len();
+            let end = start + s.text.len();
+            *sel_range = Some(start..end);
+        }
+        out.push_str(&s.text);
+        out.push_str(&suffix);
+    }
+    out
+}
+
+fn render_styled_slices_with_selection(slices: &[StyledSlice]) -> (String, Range<usize>) {
+    let mut sel = None;
+    let res = render_styled_slices(slices, &mut sel, 0);
+    let range = sel.unwrap_or(0..res.len());
+    (res, range)
+}
+
+/// The range to replace when typed text extends a span or splices closed formats:
+/// if a space sits right before `caret`, the space is pulled back in; if armed formats
+/// only continue a subset of the stacked formats, the closed formats close before `text`
+/// and the continued formats close after `text`.
+fn extend_or_splice_span(
     content: &str,
     parsed: &ParsedDocument,
     pending: &ActiveFormats,
     caret: usize,
-) -> Option<(Range<usize>, String)> {
-    if caret == 0 || content.as_bytes().get(caret - 1) != Some(&b' ') {
+    text: &str,
+) -> Option<(Range<usize>, String, usize)> {
+    if caret == 0 {
         return None;
     }
+    let has_space = content.as_bytes().get(caret - 1) == Some(&b' ');
+    let closer_end = if has_space { caret - 1 } else { caret };
     let anchor = parsed
         .inline_pairs
         .iter()
         .rev()
         .find(|p| {
-            matches!(
-                p.kind,
-                InlineTagKind::Bold | InlineTagKind::Italic | InlineTagKind::Strike
-            ) && span_close_end(parsed, p) + 1 == caret
+            p.kind != InlineTagKind::Link && span_close_end(parsed, p) == closer_end
         })
         .cloned()?;
     let group: Vec<InlinePair> = parsed
@@ -3458,13 +3882,104 @@ fn extendable_span_run(
         .filter(|p| p.kind != InlineTagKind::Link && p.inner == anchor.inner)
         .cloned()
         .collect();
-    let refs: Vec<&InlinePair> = group.iter().collect();
-    if !armed_kinds_match_group(pending, &refs) {
+    if group.is_empty() {
         return None;
     }
+
+    let is_armed = |k: InlineTagKind| match k {
+        InlineTagKind::Bold => pending.bold,
+        InlineTagKind::Italic => pending.italic,
+        InlineTagKind::Underline => pending.underline,
+        InlineTagKind::Strike => pending.strike,
+        InlineTagKind::Code => pending.code,
+        InlineTagKind::Link => false,
+    };
+
+    let has_any_armed =
+        pending.bold || pending.italic || pending.underline || pending.strike || pending.code;
+    if !has_any_armed {
+        return None;
+    }
+    let all_armed_in_group = [
+        InlineTagKind::Bold,
+        InlineTagKind::Italic,
+        InlineTagKind::Underline,
+        InlineTagKind::Strike,
+        InlineTagKind::Code,
+    ]
+    .iter()
+    .all(|&k| !is_armed(k) || group.iter().any(|p| p.kind == k));
+    if !all_armed_in_group {
+        return None;
+    }
+
+    let mut closed = Vec::new();
+    let mut continued = Vec::new();
+    let mut sorted_group = group;
+    sorted_group.sort_by_key(|p| (p.open_delim.start, std::cmp::Reverse(p.close_delim.end)));
+    for p in &sorted_group {
+        if is_armed(p.kind) {
+            continued.push(p.kind);
+        } else {
+            closed.push(p.kind);
+        }
+    }
+    if continued.is_empty() {
+        return None;
+    }
+
+    let is_asterisk = |k: InlineTagKind| matches!(k, InlineTagKind::Bold | InlineTagKind::Italic);
+    let all_asterisk = sorted_group.iter().all(|p| is_asterisk(p.kind));
+
+    let first_closed_idx = sorted_group.iter().position(|p| !is_armed(p.kind));
+    let needs_reopen = !all_asterisk
+        && first_closed_idx.is_some_and(|idx| {
+            sorted_group[idx + 1..].iter().any(|p| is_armed(p.kind))
+        });
+
+    let mut prefix_close = String::new();
+    let mut reopen_open = String::new();
+
+    if needs_reopen {
+        let f_idx = first_closed_idx.unwrap();
+        // Inner continued formats opened after f_idx must close before outer closed formats close
+        for p in sorted_group[f_idx + 1..].iter().rev() {
+            if is_armed(p.kind) {
+                prefix_close.push_str(closer_for_kind(p.kind));
+            }
+        }
+        // Then all closed formats close
+        for p in sorted_group.iter().rev() {
+            if !is_armed(p.kind) {
+                prefix_close.push_str(closer_for_kind(p.kind));
+            }
+        }
+        // Then inner continued formats reopen
+        for p in &sorted_group[f_idx + 1..] {
+            if is_armed(p.kind) {
+                reopen_open.push_str(opener_for_kind(p.kind));
+            }
+        }
+    } else {
+        for &k in &closed {
+            prefix_close.push_str(closer_for_kind(k));
+        }
+    }
+
+    let mut cont_close = String::new();
+    for &k in continued.iter().rev() {
+        cont_close.push_str(closer_for_kind(k));
+    }
+
+    let space_str = if has_space { " " } else { "" };
+    let repl = format!(
+        "{}{}{}{}{}",
+        prefix_close, reopen_open, space_str, text, cont_close
+    );
     let run_start = anchor.inner.end;
-    let run_end = span_close_end(parsed, &anchor);
-    Some((run_start..caret, content[run_start..run_end].to_string()))
+    let new_caret =
+        run_start + prefix_close.len() + reopen_open.len() + space_str.len() + text.len();
+    Some((run_start..caret, repl, new_caret))
 }
 
 /// Inline formats that stay armed at `cursor`, from every marker pair around
@@ -3626,23 +4141,6 @@ fn blank_gap_after_table(rest: &str) -> (usize, &'static str, usize) {
     }
 }
 
-fn is_delimited(text: &str, prefix: &str, suffix: &str) -> bool {
-    if text.len() < prefix.len() + suffix.len() {
-        return false;
-    }
-    if !text.starts_with(prefix) || !text.ends_with(suffix) {
-        return false;
-    }
-    if prefix == "*" {
-        let triple = text.starts_with("***") && text.ends_with("***") && text.len() >= 6;
-        let single = !text.starts_with("**") && !text.ends_with("**");
-        triple || single
-    } else if prefix == "`" {
-        !text.starts_with("```") && !text.ends_with("```")
-    } else {
-        true
-    }
-}
 
 fn outer_is_delimited(content: &str, start: usize, end: usize, prefix: &str, suffix: &str) -> bool {
     if start > content.len() || end > content.len() || start > end {
@@ -7442,5 +7940,250 @@ mod tests {
         doc.place(b, false);
         assert!(doc.tab_table_cell(true));
         assert_eq!(doc.selection_range().start, a);
+    }
+
+    #[test]
+    fn test_inline_format_stacked_combos_table_driven() {
+        let combos: Vec<(&[&str], &str)> = vec![
+            // 2-format combos (6)
+            (&["bold", "italic"], "***Hello***"),
+            (&["bold", "underline"], "**<u>Hello</u>**"),
+            (&["bold", "strike"], "**~~Hello~~**"),
+            (&["italic", "underline"], "*<u>Hello</u>*"),
+            (&["italic", "strike"], "*~~Hello~~*"),
+            (&["strike", "underline"], "~~<u>Hello</u>~~"),
+            // 3-format combos (4)
+            (&["bold", "italic", "underline"], "***<u>Hello</u>***"),
+            (&["bold", "italic", "strike"], "***~~Hello~~***"),
+            (&["bold", "strike", "underline"], "**~~<u>Hello</u>~~**"),
+            (&["italic", "strike", "underline"], "*~~<u>Hello</u>~~*"),
+        ];
+
+        let positions = ["whole", "start", "middle", "end", "caret"];
+
+        for (combo_formats, initial_md) in &combos {
+            for &cmd in *combo_formats {
+                for &pos in &positions {
+                    let mut doc = DocumentTab::new(
+                        "tab".into(),
+                        "test.md".into(),
+                        initial_md.to_string(),
+                        None,
+                        None,
+                    );
+
+                    let word_start = doc.content.find("Hello").unwrap();
+                    match pos {
+                        "whole" => {
+                            doc.caret.range = word_start..(word_start + 5);
+                        }
+                        "start" => {
+                            doc.caret.range = word_start..(word_start + 2);
+                        }
+                        "middle" => {
+                            doc.caret.range = (word_start + 1)..(word_start + 4);
+                        }
+                        "end" => {
+                            doc.caret.range = (word_start + 2)..(word_start + 5);
+                        }
+                        "caret" => {
+                            doc.place(word_start + 2, false);
+                        }
+                        _ => unreachable!(),
+                    }
+
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+
+                    let parsed = doc.parsed();
+                    let line = parsed.lines.first().expect("Line not found");
+
+                    // 1. No leaked markers in display text
+                    assert_eq!(
+                        line.display_text, "Hello",
+                        "Display text leaked markers for combo {:?}, format {}, pos {}. Content was: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+
+                    // 2. Clean delimiters: no **** or <u><u> or ~~~~
+                    assert!(
+                        !doc.content.contains("****"),
+                        "Content contains **** for combo {:?}, format {}, pos {}: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+                    assert!(
+                        !doc.content.contains("<u><u>"),
+                        "Content contains <u><u> for combo {:?}, format {}, pos {}: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+                    assert!(
+                        !doc.content.contains("</u></u>"),
+                        "Content contains </u></u> for combo {:?}, format {}, pos {}: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+                    assert!(
+                        !doc.content.contains("~~~~"),
+                        "Content contains ~~~~ for combo {:?}, format {}, pos {}: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+
+                    // 3. Verify format state of each letter in "Hello"
+                    for i in 0..5 {
+                        let should_have_toggled = match pos {
+                            "whole" | "caret" => false,
+                            "start" => i >= 2,
+                            "middle" => i == 0 || i == 4,
+                            "end" => i < 2,
+                            _ => unreachable!(),
+                        };
+
+                        let src_offset = line.offset_map.display_to_source(i);
+                        let seg = line
+                            .styled_segments
+                            .iter()
+                            .find(|s| s.source.start <= src_offset && src_offset < s.source.end)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "No styled segment covering char index {} at source offset {} for combo {:?}, format {}, pos {}. Content: {}",
+                                    i, src_offset, combo_formats, cmd, pos, doc.content
+                                )
+                            });
+
+                        let has_cmd = match cmd {
+                            "bold" => seg.bold,
+                            "italic" => seg.italic,
+                            "underline" => seg.underline,
+                            "strike" => seg.strike,
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(
+                            has_cmd, should_have_toggled,
+                            "Format {} on char index {} expected {} but was {} for combo {:?}, pos {}. Content: {}",
+                            cmd, i, should_have_toggled, has_cmd, combo_formats, pos, doc.content
+                        );
+
+                        // All other formats in combo_formats must remain true
+                        for &other_cmd in *combo_formats {
+                            if other_cmd == cmd {
+                                continue;
+                            }
+                            let has_other = match other_cmd {
+                                "bold" => seg.bold,
+                                "italic" => seg.italic,
+                                "underline" => seg.underline,
+                                "strike" => seg.strike,
+                                _ => unreachable!(),
+                            };
+                            assert!(
+                                has_other,
+                                "Other format {} on char index {} lost for combo {:?}, toggled {}, pos {}. Content: {}",
+                                other_cmd, i, combo_formats, cmd, pos, doc.content
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_wysiwyg_typing_format_splice_inner_outer_plain() {
+        // Arm bold + italic, type "now", turn off italic, type "ok", turn off bold, type " plain"
+        let mut doc = DocumentTab::new("t1".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now");
+        assert_eq!(doc.content, "***now***");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "ok");
+        assert_eq!(doc.content, "***now*ok**");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " plain");
+        assert_eq!(doc.content, "***now*ok** plain");
+        let parsed = doc.parsed();
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "nowok plain");
+
+        // Arm bold + italic, type "now", turn off bold (outer), type "ok", turn off italic, type " plain"
+        let mut doc = DocumentTab::new("t2".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "ok");
+        assert_eq!(doc.content, "***now**ok*");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " plain");
+        assert_eq!(doc.content, "***now**ok* plain");
+        let parsed = doc.parsed();
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "nowok plain");
+
+        // Arm bold + underline, type "now", turn off underline (inner), type "ok", turn off bold, type " plain"
+        let mut doc = DocumentTab::new("t3".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now");
+        assert_eq!(doc.content, "**<u>now</u>**");
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "ok");
+        assert_eq!(doc.content, "**<u>now</u>ok**");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " plain");
+        assert_eq!(doc.content, "**<u>now</u>ok** plain");
+        let parsed = doc.parsed();
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "nowok plain");
+
+        // Arm bold + underline, type "now", turn off bold (outer), type "ok", turn off underline, type " plain"
+        let mut doc = DocumentTab::new("t4".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "ok");
+        assert_eq!(doc.content, "**<u>now</u>**<u>ok</u>");
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " plain");
+        assert_eq!(doc.content, "**<u>now</u>**<u>ok</u> plain");
+        let parsed = doc.parsed();
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "nowok plain");
+    }
+
+    #[test]
+    fn test_wysiwyg_typing_req5_consecutive_italic_toggle() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "a ");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "b");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "c");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " d");
+        assert_eq!(doc.content, "a *bc* d");
+        let line = doc.parsed().lines.first().unwrap().clone();
+        assert_eq!(line.display_text, "a bc d");
+    }
+
+    #[test]
+    fn test_wysiwyg_typing_req6_underline_and_code_trailing_space() {
+        let mut doc = DocumentTab::new("u".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "hello ");
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "world");
+        assert_eq!(doc.content, "<u>hello</u> world");
+        let line = doc.parsed().lines.first().unwrap().clone();
+        assert_eq!(line.display_text, "hello world");
+
+        let mut doc = DocumentTab::new("c".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "hello ");
+        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "world");
+        assert_eq!(doc.content, "`hello` world");
+        let line = doc.parsed().lines.first().unwrap().clone();
+        assert_eq!(line.display_text, "hello world");
     }
 }
