@@ -1438,9 +1438,23 @@ impl DocumentTab {
                             .max(p_end);
                         (r_start, r_end)
                     };
+                    let (replace_start, replace_end) = expand_replace_to_matching_neighbors(
+                        &self.content,
+                        &parsed,
+                        pline,
+                        p_start,
+                        p_end,
+                        replace_start,
+                        replace_end,
+                        tag_kind,
+                        should_turn_on,
+                    );
 
                     let mut raw_slices: Vec<(Range<usize>, FormatFlags, bool)> = Vec::new();
-                    if group_pairs.is_empty() {
+                    let simple_wrap = group_pairs.is_empty()
+                        && replace_start == p_start
+                        && replace_end == p_end;
+                    if simple_wrap {
                         let mut flags = FormatFlags::default();
                         match tag_kind {
                             InlineTagKind::Bold => flags.bold = should_turn_on,
@@ -3732,6 +3746,160 @@ fn parse_line_block_prefix(
     (indent, None, indent)
 }
 
+/// True when `from..to` is only whitespace and delimiter markup, so a
+/// neighboring span with matching flags can merge across that gap.
+fn gap_is_ws_and_markers(content: &str, hidden: &[Range<usize>], from: usize, to: usize) -> bool {
+    if to < from {
+        return false;
+    }
+    let mut i = from;
+    while i < to {
+        if content[i..].starts_with('\n') {
+            return false;
+        }
+        if let Some(h) = hidden.iter().find(|r| i >= r.start && i < r.end) {
+            if !is_delimiter_markup(&content[h.start..h.end]) {
+                return false;
+            }
+            i = h.end;
+            continue;
+        }
+        let Some(ch) = content[i..].chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() && ch != '\n' {
+            i += ch.len_utf8();
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn is_delimiter_markup(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty()
+        && (t.chars().all(|c| matches!(c, '*' | '_' | '~' | '`'))
+            || t.eq_ignore_ascii_case("<u>")
+            || t.eq_ignore_ascii_case("</u>"))
+}
+
+fn covering_span(
+    parsed: &ParsedDocument,
+    pline: &ParsedLine,
+    seg: &StyledSegment,
+) -> (usize, usize) {
+    let overlapping: Vec<&InlinePair> = pline
+        .inline_pairs
+        .iter()
+        .filter(|p| {
+            p.kind != InlineTagKind::Link
+                && p.inner.start <= seg.source.start
+                && p.inner.end >= seg.source.end
+        })
+        .collect();
+    if overlapping.is_empty() {
+        return (seg.source.start, seg.source.end);
+    }
+    let open = overlapping
+        .iter()
+        .map(|p| span_open_start(parsed, p))
+        .min()
+        .unwrap_or(seg.source.start);
+    let close = overlapping
+        .iter()
+        .map(|p| span_close_end(parsed, p))
+        .max()
+        .unwrap_or(seg.source.end);
+    (open, close)
+}
+
+/// When turning a format on, extend the rewrite so a neighboring span that
+/// already has the same flags is merged instead of emitting `**aa**** bb**`.
+fn expand_replace_to_matching_neighbors(
+    content: &str,
+    parsed: &ParsedDocument,
+    pline: &ParsedLine,
+    p_start: usize,
+    p_end: usize,
+    mut replace_start: usize,
+    mut replace_end: usize,
+    tag_kind: InlineTagKind,
+    should_turn_on: bool,
+) -> (usize, usize) {
+    if !should_turn_on {
+        return (replace_start, replace_end);
+    }
+    let overlapping: Vec<&StyledSegment> = pline
+        .styled_segments
+        .iter()
+        .filter(|s| s.source.start < p_end && s.source.end > p_start)
+        .collect();
+    if overlapping
+        .windows(2)
+        .any(|w| segment_flags(w[0]) != segment_flags(w[1]))
+    {
+        return (replace_start, replace_end);
+    }
+    let mut target = overlapping
+        .first()
+        .map(|s| segment_flags(s))
+        .unwrap_or_default();
+    match tag_kind {
+        InlineTagKind::Bold => target.bold = true,
+        InlineTagKind::Italic => target.italic = true,
+        InlineTagKind::Underline => target.underline = true,
+        InlineTagKind::Strike => target.strike = true,
+        InlineTagKind::Code => target.code = true,
+        InlineTagKind::Link => return (replace_start, replace_end),
+    }
+    if !target.any_set() {
+        return (replace_start, replace_end);
+    }
+
+    let mut left_front = p_start;
+    let mut right_front = p_end;
+    loop {
+        let mut changed = false;
+        for seg in &pline.styled_segments {
+            if segment_flags(seg) != target {
+                continue;
+            }
+            if seg.source.end <= left_front
+                && gap_is_ws_and_markers(content, &pline.hidden_ranges, seg.source.end, left_front)
+            {
+                let (open, close) = covering_span(parsed, pline, seg);
+                if open < replace_start || close > replace_end || seg.source.start < left_front {
+                    replace_start = replace_start.min(open);
+                    replace_end = replace_end.max(close);
+                    left_front = left_front.min(seg.source.start);
+                    changed = true;
+                }
+            }
+            if seg.source.start >= right_front
+                && gap_is_ws_and_markers(
+                    content,
+                    &pline.hidden_ranges,
+                    right_front,
+                    seg.source.start,
+                )
+            {
+                let (open, close) = covering_span(parsed, pline, seg);
+                if close > replace_end || open < replace_start || seg.source.end > right_front {
+                    replace_start = replace_start.min(open);
+                    replace_end = replace_end.max(close);
+                    right_front = right_front.max(seg.source.end);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (replace_start, replace_end)
+}
+
 /// The end of the whole closing-marker run of the stacked group `pair`
 /// belongs to (the non-link pairs sharing its content range), so inserted
 /// spaces and exits clear every stacked closer (`***`, `~~**`).
@@ -3776,6 +3944,46 @@ pub struct FormatFlags {
     pub code: bool,
 }
 
+impl FormatFlags {
+    fn any_set(self) -> bool {
+        self.bold || self.italic || self.underline || self.strike || self.code
+    }
+
+    /// Bold, italic, and strike markers cannot open or close next to a space.
+    fn flanking_sensitive(self) -> bool {
+        self.bold || self.italic || self.strike
+    }
+
+    /// Flags that may stay on a space peeled out of a flanking-sensitive span.
+    /// Underline tags do not depend on spaces, so the space can remain inside
+    /// `<u>` while sitting outside `*` / `**` / `~~`.
+    fn glue(self) -> Self {
+        Self {
+            underline: self.underline,
+            ..Self::default()
+        }
+    }
+}
+
+fn segment_flags(seg: &StyledSegment) -> FormatFlags {
+    FormatFlags {
+        bold: seg.bold,
+        italic: seg.italic,
+        underline: seg.underline,
+        strike: seg.strike,
+        code: seg.code,
+    }
+}
+
+/// One piece of text going through `render_styled_slices`, with the selected
+/// byte range (if any) tracked independently of the wrap so adjacent pieces
+/// with the same flags can merge into one span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkSlice {
+    text: String,
+    flags: FormatFlags,
+    sel: Option<Range<usize>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyledSlice {
@@ -3812,24 +4020,172 @@ fn wrap_delimiters(flags: &FormatFlags) -> (String, String) {
     (open, close)
 }
 
-fn render_styled_slices(
-    slices: &[StyledSlice],
-    sel_range: &mut Option<Range<usize>>,
-    offset: usize,
-) -> String {
-    let mut merged: Vec<StyledSlice> = Vec::new();
+fn append_work_slice(dest: &mut WorkSlice, src: &WorkSlice) {
+    let at = dest.text.len();
+    dest.text.push_str(&src.text);
+    if let Some(sel) = &src.sel {
+        dest.sel = Some(match &dest.sel {
+            Some(prev) => prev.start..(at + sel.end),
+            None => (at + sel.start)..(at + sel.end),
+        });
+    }
+}
+
+fn merge_work_slices(slices: &[WorkSlice]) -> Vec<WorkSlice> {
+    let mut merged: Vec<WorkSlice> = Vec::new();
     for s in slices {
         if s.text.is_empty() {
             continue;
         }
         if let Some(last) = merged.last_mut() {
-            if last.flags == s.flags && last.is_selected == s.is_selected {
-                last.text.push_str(&s.text);
+            if last.flags == s.flags {
+                append_work_slice(last, s);
                 continue;
             }
         }
         merged.push(s.clone());
     }
+    merged
+}
+
+fn sel_overlap(sel: &Option<Range<usize>>, start: usize, end: usize) -> Option<Range<usize>> {
+    let sel = sel.as_ref()?;
+    let a = sel.start.max(start).min(end);
+    let b = sel.end.max(start).min(end);
+    if b > a {
+        Some((a - start)..(b - start))
+    } else {
+        None
+    }
+}
+
+/// Pull leading/trailing spaces out of flanking-sensitive spans so a split
+/// at a word edge cannot write `aa** bb` or `***aa **bb`. Underline stays
+/// on the peeled space so `<u>` can still wrap the whole phrase.
+fn peel_flanking_whitespace(slices: Vec<WorkSlice>) -> Vec<WorkSlice> {
+    if slices.len() <= 1 {
+        return slices;
+    }
+    let mut out = Vec::new();
+    for s in slices {
+        if !s.flags.flanking_sensitive() || s.text.chars().all(char::is_whitespace) {
+            out.push(s);
+            continue;
+        }
+        let lead = s.text.len() - s.text.trim_start().len();
+        let trail = s.text.len() - s.text.trim_end().len();
+        if lead == 0 && trail == 0 {
+            out.push(s);
+            continue;
+        }
+        let glue = s.flags.glue();
+        let core_end = s.text.len() - trail;
+        if lead > 0 {
+            out.push(WorkSlice {
+                text: s.text[..lead].to_string(),
+                flags: glue,
+                sel: sel_overlap(&s.sel, 0, lead),
+            });
+        }
+        if core_end > lead {
+            out.push(WorkSlice {
+                text: s.text[lead..core_end].to_string(),
+                flags: s.flags,
+                sel: sel_overlap(&s.sel, lead, core_end),
+            });
+        }
+        if trail > 0 {
+            out.push(WorkSlice {
+                text: s.text[core_end..].to_string(),
+                flags: glue,
+                sel: sel_overlap(&s.sel, core_end, s.text.len()),
+            });
+        }
+    }
+    merge_work_slices(&out)
+}
+
+/// `[bold "aa"] [plain " "] [bold "bb"]` becomes one span so turning a
+/// format back on at a neighbor merges instead of writing `**aa**** bb**`.
+fn coalesce_ws_between_matching(mut slices: Vec<WorkSlice>) -> Vec<WorkSlice> {
+    let mut i = 0;
+    while i + 2 < slices.len() {
+        let mid_ws =
+            !slices[i + 1].text.is_empty() && slices[i + 1].text.chars().all(char::is_whitespace);
+        let flags_match = slices[i].flags == slices[i + 2].flags && slices[i].flags.any_set();
+        let mid_ok =
+            slices[i + 1].flags == FormatFlags::default() || slices[i + 1].flags == slices[i].flags;
+        if mid_ws && flags_match && mid_ok {
+            let mid = slices[i + 1].clone();
+            let right = slices[i + 2].clone();
+            append_work_slice(&mut slices[i], &mid);
+            append_work_slice(&mut slices[i], &right);
+            slices.remove(i + 2);
+            slices.remove(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+    slices
+}
+
+fn map_work_flags(
+    slices: &[WorkSlice],
+    mut f: impl FnMut(FormatFlags) -> FormatFlags,
+) -> Vec<WorkSlice> {
+    slices
+        .iter()
+        .map(|s| WorkSlice {
+            text: s.text.clone(),
+            flags: f(s.flags),
+            sel: s.sel.clone(),
+        })
+        .collect()
+}
+
+fn mark_work_sel(sel_range: &mut Option<Range<usize>>, at: usize, s: &WorkSlice) {
+    if let Some(sel) = &s.sel {
+        *sel_range = Some((at + sel.start)..(at + sel.end));
+    }
+}
+
+fn wrap_work_slice(
+    s: &WorkSlice,
+    prefix: &str,
+    suffix: &str,
+    offset: usize,
+    sel_range: &mut Option<Range<usize>>,
+) -> String {
+    mark_work_sel(sel_range, offset + prefix.len(), s);
+    format!("{}{}{}", prefix, s.text, suffix)
+}
+
+fn render_styled_slices(
+    slices: &[StyledSlice],
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+) -> String {
+    let work: Vec<WorkSlice> = slices
+        .iter()
+        .map(|s| WorkSlice {
+            text: s.text.clone(),
+            flags: s.flags,
+            sel: if s.is_selected {
+                Some(0..s.text.len())
+            } else {
+                None
+            },
+        })
+        .collect();
+    render_work_slices(&work, sel_range, offset)
+}
+
+fn render_work_slices(
+    slices: &[WorkSlice],
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+) -> String {
+    let merged = coalesce_ws_between_matching(peel_flanking_whitespace(merge_work_slices(slices)));
 
     if merged.is_empty() {
         return String::new();
@@ -3837,12 +4193,7 @@ fn render_styled_slices(
     if merged.len() == 1 {
         let s = &merged[0];
         let (prefix, suffix) = wrap_delimiters(&s.flags);
-        if s.is_selected {
-            let start = offset + prefix.len();
-            let end = start + s.text.len();
-            *sel_range = Some(start..end);
-        }
-        return format!("{}{}{}", prefix, s.text, suffix);
+        return wrap_work_slice(s, &prefix, &suffix, offset, sel_range);
     }
 
     let all_underline = merged.iter().all(|s| s.flags.underline);
@@ -3852,136 +4203,48 @@ fn render_styled_slices(
     let all_italic = merged.iter().all(|s| s.flags.italic);
 
     if all_underline {
-        let inner: Vec<StyledSlice> = merged
-            .iter()
-            .map(|s| {
-                let mut f = s.flags;
-                f.underline = false;
-                StyledSlice {
-                    text: s.text.clone(),
-                    flags: f,
-                    is_selected: s.is_selected,
-                }
-            })
-            .collect();
-        let inner_str = render_styled_slices(&inner, sel_range, offset + 3);
+        let inner = map_work_flags(&merged, |mut f| {
+            f.underline = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 3);
         return format!("<u>{}</u>", inner_str);
     }
 
     if all_strike {
-        let inner: Vec<StyledSlice> = merged
-            .iter()
-            .map(|s| {
-                let mut f = s.flags;
-                f.strike = false;
-                StyledSlice {
-                    text: s.text.clone(),
-                    flags: f,
-                    is_selected: s.is_selected,
-                }
-            })
-            .collect();
-        let inner_str = render_styled_slices(&inner, sel_range, offset + 2);
+        let inner = map_work_flags(&merged, |mut f| {
+            f.strike = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 2);
         return format!("~~{}~~", inner_str);
     }
 
     if all_bold && all_italic {
-        let inner: Vec<StyledSlice> = merged
-            .iter()
-            .map(|s| {
-                let mut f = s.flags;
-                f.bold = false;
-                f.italic = false;
-                StyledSlice {
-                    text: s.text.clone(),
-                    flags: f,
-                    is_selected: s.is_selected,
-                }
-            })
-            .collect();
-        let inner_str = render_styled_slices(&inner, sel_range, offset + 3);
+        let inner = map_work_flags(&merged, |mut f| {
+            f.bold = false;
+            f.italic = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 3);
         return format!("***{}***", inner_str);
     }
 
     if all_italic {
-        let is_middle = merged.len() == 3
-            && !merged.iter().any(|s| s.flags.strike || s.flags.underline || s.flags.code)
-            && merged[0].flags.bold
-            && !merged[1].flags.bold
-            && merged[2].flags.bold;
-        if is_middle {
-            let mut out = String::from("_");
-            for s in &merged {
-                let prefix = if s.flags.bold { "**" } else { "" };
-                let suffix = if s.flags.bold { "**" } else { "" };
-                out.push_str(prefix);
-                if s.is_selected {
-                    let start = offset + out.len();
-                    let end = start + s.text.len();
-                    *sel_range = Some(start..end);
-                }
-                out.push_str(&s.text);
-                out.push_str(suffix);
-            }
-            out.push('_');
-            return out;
-        }
-
-        let inner: Vec<StyledSlice> = merged
-            .iter()
-            .map(|s| {
-                let mut f = s.flags;
-                f.italic = false;
-                StyledSlice {
-                    text: s.text.clone(),
-                    flags: f,
-                    is_selected: s.is_selected,
-                }
-            })
-            .collect();
-        let inner_str = render_styled_slices(&inner, sel_range, offset + 1);
+        let inner = map_work_flags(&merged, |mut f| {
+            f.italic = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 1);
         return format!("*{}*", inner_str);
     }
 
     if all_bold {
-        let is_middle = merged.len() == 3
-            && !merged.iter().any(|s| s.flags.strike || s.flags.underline || s.flags.code)
-            && merged[0].flags.italic
-            && !merged[1].flags.italic
-            && merged[2].flags.italic;
-        if is_middle {
-            let mut out = String::new();
-            for s in &merged {
-                let (prefix, suffix) = if s.flags.italic {
-                    ("_**", "**_")
-                } else {
-                    ("**", "**")
-                };
-                out.push_str(prefix);
-                if s.is_selected {
-                    let start = offset + out.len();
-                    let end = start + s.text.len();
-                    *sel_range = Some(start..end);
-                }
-                out.push_str(&s.text);
-                out.push_str(suffix);
-            }
-            return out;
-        }
-
-        let inner: Vec<StyledSlice> = merged
-            .iter()
-            .map(|s| {
-                let mut f = s.flags;
-                f.bold = false;
-                StyledSlice {
-                    text: s.text.clone(),
-                    flags: f,
-                    is_selected: s.is_selected,
-                }
-            })
-            .collect();
-        let inner_str = render_styled_slices(&inner, sel_range, offset + 2);
+        let inner = map_work_flags(&merged, |mut f| {
+            f.bold = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 2);
         return format!("**{}**", inner_str);
     }
 
@@ -3998,19 +4261,11 @@ fn render_styled_slices(
                 && s.flags.strike == merged[0].flags.strike
         });
         if non_code_equal {
-            let inner: Vec<StyledSlice> = merged
-                .iter()
-                .map(|s| {
-                    let mut f = s.flags;
-                    f.code = false;
-                    StyledSlice {
-                        text: s.text.clone(),
-                        flags: f,
-                        is_selected: s.is_selected,
-                    }
-                })
-                .collect();
-            let inner_str = render_styled_slices(&inner, sel_range, offset + 1);
+            let inner = map_work_flags(&merged, |mut f| {
+                f.code = false;
+                f
+            });
+            let inner_str = render_work_slices(&inner, sel_range, offset + 1);
             return format!("`{}`", inner_str);
         }
     }
@@ -4038,9 +4293,7 @@ fn render_styled_slices(
             i + 1 == merged.len() || wrap_delimiters(&merged[i + 1].flags).0.is_empty();
         if alt_available && !plain_follows {
             use_alt[i] = true;
-        } else if alt_available
-            && alternate_wrap(&merged[i - 1].flags, avoid).is_some()
-        {
+        } else if alt_available && alternate_wrap(&merged[i - 1].flags, avoid).is_some() {
             // Plain text follows this span: its underscore closer would go
             // intraword. Switch the earlier span instead; its new closer sits
             // against this span's opener, which is a delimiter character.
@@ -4065,12 +4318,8 @@ fn render_styled_slices(
         } else {
             wrap_delimiters(&s.flags)
         };
+        mark_work_sel(sel_range, offset + out.len() + prefix.len(), s);
         out.push_str(&prefix);
-        if s.is_selected {
-            let start = offset + out.len();
-            let end = start + s.text.len();
-            *sel_range = Some(start..end);
-        }
         out.push_str(&s.text);
         out.push_str(&suffix);
     }
@@ -5687,6 +5936,261 @@ mod tests {
                 "{cmd}: unformatting the middle left stray markers"
             );
         }
+    }
+
+    fn flags_for_word(content: &str, word: &str) -> (bool, bool, bool, bool) {
+        let parsed = parse_document(content);
+        let segs: Vec<_> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .filter(|s| {
+                let text = &content[s.source.clone()];
+                text == word || text.split_whitespace().any(|w| w == word)
+            })
+            .collect();
+        assert!(
+            !segs.is_empty(),
+            "word {word:?} missing in {content:?} segs={:?}",
+            parsed.lines[0]
+                .styled_segments
+                .iter()
+                .map(|s| &content[s.source.clone()])
+                .collect::<Vec<_>>()
+        );
+        let s = segs[0];
+        (s.bold, s.italic, s.underline, s.strike)
+    }
+
+    fn assert_clean_display(content: &str, expected: &str) {
+        assert!(
+            !content.contains('\u{200B}'),
+            "zero-width space in {content:?}"
+        );
+        assert!(
+            !content.contains("****"),
+            "adjacent bold runs in {content:?}"
+        );
+        let parsed = parse_document(content);
+        assert_eq!(
+            parsed.lines[0].display_text, expected,
+            "raw markers in display of {content:?}"
+        );
+        for ch in ['*', '~', '_'] {
+            assert!(
+                !parsed.lines[0].display_text.contains(ch),
+                "literal {ch:?} in display {:?} of {content:?}",
+                parsed.lines[0].display_text
+            );
+        }
+    }
+
+    fn select_once(doc: &mut DocumentTab, word: &str) {
+        let start = doc.content.find(word).expect(word);
+        doc.caret.range = start..(start + word.len());
+    }
+
+    /// Unformatting a word whose selection ends on the space before the next
+    /// word must move that space outside the leftover markers. Re-applying
+    /// the format must merge back into the neighbor instead of `**aa**** bb**`.
+    #[test]
+    fn unformat_before_space_moves_space_outside_markers() {
+        for (cmd, wrapped) in [
+            ("bold", "**aa bb cc**"),
+            ("italic", "*aa bb cc*"),
+            ("strike", "~~aa bb cc~~"),
+        ] {
+            let mut doc = DocumentTab::new(
+                "e1".into(),
+                "test.md".into(),
+                wrapped.to_string(),
+                None,
+                None,
+            );
+            select_once(&mut doc, "aa");
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_clean_display(&doc.content, "aa bb cc");
+            let aa = flags_for_word(&doc.content, "aa");
+            let bb = flags_for_word(&doc.content, "bb");
+            let cc = flags_for_word(&doc.content, "cc");
+            assert_eq!(
+                aa,
+                (false, false, false, false),
+                "{cmd} left aa styled in {}",
+                doc.content
+            );
+            let expect = match cmd {
+                "bold" => (true, false, false, false),
+                "italic" => (false, true, false, false),
+                "strike" => (false, false, false, true),
+                _ => unreachable!(),
+            };
+            assert_eq!(bb, expect, "{cmd} dropped bb in {}", doc.content);
+            assert_eq!(cc, expect, "{cmd} dropped cc in {}", doc.content);
+            assert!(
+                !doc.content.contains("aa** ")
+                    && !doc.content.contains("aa* ")
+                    && !doc.content.contains("aa~~ "),
+                "{cmd}: space stayed inside the leftover opener: {}",
+                doc.content
+            );
+
+            // Turning the format back on merges with the neighboring span.
+            select_once(&mut doc, "aa");
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_clean_display(&doc.content, "aa bb cc");
+            assert_eq!(
+                flags_for_word(&doc.content, "aa"),
+                expect,
+                "{cmd} re-apply: {}",
+                doc.content
+            );
+            assert_eq!(
+                flags_for_word(&doc.content, "bb"),
+                expect,
+                "{cmd} re-apply: {}",
+                doc.content
+            );
+            assert!(
+                !doc.content.contains("****") && !doc.content.contains("~~~~"),
+                "{cmd} re-apply stacked markers: {}",
+                doc.content
+            );
+        }
+
+        // Same flanking split when italic is already on (bold+italic span).
+        let mut doc = DocumentTab::new(
+            "e1b".into(),
+            "test.md".into(),
+            "***aa bb cc***".into(),
+            None,
+            None,
+        );
+        select_once(&mut doc, "aa");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (false, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, true, false, false)
+        );
+    }
+
+    /// Removing bold or italic from the middle or end of a bold+italic span
+    /// must not write `***aa **bb cc*` runs that merge and stop pairing.
+    #[test]
+    fn stacked_unformat_at_word_edge_does_not_merge_stars() {
+        // End: drop italic from "bb cc"
+        let mut doc = DocumentTab::new(
+            "e2".into(),
+            "test.md".into(),
+            "***aa bb cc***".into(),
+            None,
+            None,
+        );
+        doc.caret.range = 6..11; // "bb cc"
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, false, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, false, false, false)
+        );
+        assert!(
+            !doc.content.contains("***aa **") && !doc.content.contains("**aa ***"),
+            "end unformat merged delimiter runs: {}",
+            doc.content
+        );
+
+        // End: drop bold from "bb cc"
+        let mut doc = DocumentTab::new(
+            "e2b".into(),
+            "test.md".into(),
+            "***aa bb cc***".into(),
+            None,
+            None,
+        );
+        doc.caret.range = 6..11;
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (false, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (false, true, false, false)
+        );
+
+        // Middle: drop italic from "bb"
+        let mut doc = DocumentTab::new(
+            "e2c".into(),
+            "test.md".into(),
+            "***aa bb cc***".into(),
+            None,
+            None,
+        );
+        select_once(&mut doc, "bb");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, false, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, true, false, false)
+        );
+        assert!(
+            !doc.content.contains("_**aa **_") && !doc.content.contains("**aa **_"),
+            "middle italic unformat wrote colliding markers: {}",
+            doc.content
+        );
+
+        // Same middle split with underline also on.
+        let mut doc = DocumentTab::new(
+            "e2d".into(),
+            "test.md".into(),
+            "<u>***aa bb cc***</u>".into(),
+            None,
+            None,
+        );
+        select_once(&mut doc, "bb");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (true, true, true, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, false, true, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, true, true, false)
+        );
     }
 
     /// Stacked bold+italic typing (`***`, from Ctrl+B then Ctrl+I) must keep
