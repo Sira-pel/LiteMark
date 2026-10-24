@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlineTagKind,
-    LineKind, ParsedDocument, ParsedLine, TableColumnAlign,
+    accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlinePair,
+    InlineTagKind, LineKind, ParsedDocument, ParsedLine, TableColumnAlign,
 };
 
 use super::text_ops::{
@@ -499,6 +499,125 @@ impl DocumentTab {
         }
     }
 
+    /// Enter with the caret inside an inline formatting span: close the span
+    /// before the newline and reopen it after `line_ins` on the new line, so
+    /// no markers straddle the break. A caret at the end of the span closes
+    /// it and keeps the formats armed so the next letter reopens them on the
+    /// new line. `line_ins` is the line-prefix text the caller would insert
+    /// at the caret (for example `"\n> "` inside a blockquote).
+    fn split_inline_span_newline(&mut self, range: &Range<usize>, line_ins: &str) -> bool {
+        if !range.is_empty() {
+            return false;
+        }
+        let cursor = range.start;
+        let parsed = self.parsed();
+        let Some(anchor) = parsed
+            .inline_pairs
+            .iter()
+            .rev()
+            .find(|p| {
+                p.kind != InlineTagKind::Link && cursor >= p.inner.start && cursor <= p.inner.end
+            })
+            .cloned()
+        else {
+            return false;
+        };
+        // Every format spanning the caret with the same content range is one
+        // nesting level (e.g. `***x***` is bold and italic around `x`).
+        let mut group: Vec<InlinePair> = parsed
+            .inline_pairs
+            .iter()
+            .filter(|p| {
+                p.kind != InlineTagKind::Link
+                    && p.inner == anchor.inner
+                    && cursor >= p.inner.start
+                    && cursor <= p.inner.end
+            })
+            .cloned()
+            .collect();
+        group.sort_by_key(|p| p.open_delim.start);
+
+        if cursor == anchor.inner.end {
+            // End of the span: leave it, keeping the formats armed for the
+            // new line.
+            let pending = pending_formats_at(&parsed, cursor);
+            let at = group
+                .iter()
+                .map(|p| p.close_delim.end)
+                .max()
+                .unwrap_or(anchor.close_delim.end);
+            self.edit(at..at, line_ins);
+            self.pending_formats = pending;
+            self.caret
+                .move_to(floor_boundary(&self.content, at + line_ins.len()));
+            self.refresh_cursor();
+            return true;
+        }
+
+        let openers = group
+            .iter()
+            .map(|p| self.content[p.open_delim.clone()].to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        let closers_rev = group
+            .iter()
+            .rev()
+            .map(|p| self.content[p.close_delim.clone()].to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        let before = self.content[anchor.inner.start..cursor].to_string();
+        let after = self.content[cursor..anchor.inner.end].to_string();
+        // Whitespace cannot sit against a marker (the opener may not follow
+        // whitespace and the closer may not precede it), so a trailing run of
+        // `before` leaves the closed half and a leading run of `after` stays
+        // outside the reopened one.
+        let before_core_len = before.trim_end().len();
+        let before_tail = &before[before_core_len..];
+        let after_head_len = after.len() - after.trim_start().len();
+        let after_head = &after[..after_head_len];
+        let after_core = &after[after_head_len..];
+        let mut repl = String::new();
+        if before_core_len > 0 {
+            let core = &before[..before_core_len];
+            repl.push_str(&openers);
+            repl.push_str(core);
+            repl.push_str(&closers_rev);
+        }
+        repl.push_str(before_tail);
+        repl.push_str(line_ins);
+        if !after_core.is_empty() {
+            repl.push_str(after_head);
+            repl.push_str(&openers);
+            repl.push_str(after_core);
+            repl.push_str(&closers_rev);
+        } else {
+            repl.push_str(after_head);
+        }
+        let start = group
+            .iter()
+            .map(|p| p.open_delim.start)
+            .min()
+            .unwrap_or(anchor.open_delim.start);
+        let repl_start = start;
+        let caret = if after_core.is_empty() {
+            repl_start + repl.len()
+        } else {
+            repl_start + repl.len() - after_core.len() - closers_rev.len()
+        };
+        self.edit(
+            repl_start
+                ..group
+                    .iter()
+                    .map(|p| p.close_delim.end)
+                    .max()
+                    .unwrap_or(anchor.close_delim.end),
+            &repl,
+        );
+        self.caret.move_to(floor_boundary(&self.content, caret));
+        self.refresh_cursor();
+        true
+    }
+
     pub fn smart_newline(&mut self, is_shift: bool) {
         if self.is_read_only() {
             return;
@@ -728,7 +847,11 @@ impl DocumentTab {
                 }
             } else {
                 let kept = &line[..item.indent_bytes];
-                self.edit(range, &item.continuation(kept));
+                let cont = item.continuation(kept);
+                if self.split_inline_span_newline(&range, &cont) {
+                    return;
+                }
+                self.edit(range, &cont);
             }
             return;
         }
@@ -746,6 +869,9 @@ impl DocumentTab {
                 }
             } else {
                 let ins = format!("\n{}> ", indent);
+                if self.split_inline_span_newline(&range, &ins) {
+                    return;
+                }
                 self.edit(range, &ins);
             }
             return;
@@ -757,6 +883,9 @@ impl DocumentTab {
                 .iter()
                 .any(|p| trimmed_start.starts_with(p));
         if is_heading {
+            if self.split_inline_span_newline(&range, "\n") {
+                return;
+            }
             self.edit(range, "\n");
             return;
         }
@@ -764,11 +893,17 @@ impl DocumentTab {
         // 6. Indented code/text: maintain indentation
         if !indent.is_empty() && !trimmed_start.is_empty() {
             let ins = format!("\n{}", indent);
+            if self.split_inline_span_newline(&range, &ins) {
+                return;
+            }
             self.edit(range, &ins);
             return;
         }
 
         // 7. Default newline
+        if self.split_inline_span_newline(&range, "\n") {
+            return;
+        }
         self.edit(range, "\n");
     }
 
@@ -1015,6 +1150,19 @@ impl DocumentTab {
                         self.refresh_cursor();
                         return;
                     }
+                    if mode == ViewMode::Wysiwyg {
+                        // Word-style exit: the span stays formatted and the
+                        // caret moves past the closing marker so further
+                        // typing is plain. At the left boundary the caret
+                        // already types plain text before the opener.
+                        if range.start > pair.open_delim.start {
+                            self.caret
+                                .move_to(floor_boundary(&self.content, pair.close_delim.end));
+                        }
+                        self.pending_formats = ActiveFormats::default();
+                        self.refresh_cursor();
+                        return;
+                    }
                     let new_start = pair.open_delim.start;
                     self.edit(edit_range, &inner_text);
                     let rel = range
@@ -1129,6 +1277,9 @@ impl DocumentTab {
                 edit_range: Range<usize>,
                 unwrapped_text: String,
                 wrapped_text: String,
+                /// For a partial unformat, the new range of the selection's
+                /// text after the surrounding span was split.
+                split_inner: Option<Range<usize>>,
             }
 
             let mut candidate_ranges: Vec<Range<usize>> = Vec::new();
@@ -1203,9 +1354,11 @@ impl DocumentTab {
                 let p_end = p_range.end;
                 let part_text = &self.content[p_start..p_end];
 
-                let (has_format, edit_range, unwrapped_text) = if tag_kind == InlineTagKind::Link {
+                let (has_format, edit_range, unwrapped_text, split_inner) = if tag_kind
+                    == InlineTagKind::Link
+                {
                     if let Some(inner) = is_single_link(part_text) {
-                        (true, p_start..p_end, inner.to_string())
+                        (true, p_start..p_end, inner.to_string(), None)
                     } else if let Some(pair) = parsed.inline_pairs.iter().find(|p| {
                         p.kind == InlineTagKind::Link
                             && (p.inner == (p_start..p_end)
@@ -1215,18 +1368,19 @@ impl DocumentTab {
                             true,
                             pair.open_delim.start..pair.close_delim.end,
                             self.content[pair.inner.clone()].to_string(),
+                            None,
                         )
                     } else if let Some((outer_range, inner)) =
                         unwrap_outer_link(&self.content, p_start, p_end)
                     {
-                        (true, outer_range, inner)
+                        (true, outer_range, inner, None)
                     } else {
-                        (false, p_start..p_end, String::new())
+                        (false, p_start..p_end, String::new(), None)
                     }
                 } else {
                     if is_delimited(part_text, prefix, suffix) {
                         let unwrapped = &part_text[prefix.len()..part_text.len() - suffix.len()];
-                        (true, p_start..p_end, unwrapped.to_string())
+                        (true, p_start..p_end, unwrapped.to_string(), None)
                     } else if let Some(pair) = parsed.inline_pairs.iter().find(|p| {
                         p.kind == tag_kind
                             && (p.inner == (p_start..p_end)
@@ -1236,12 +1390,38 @@ impl DocumentTab {
                             true,
                             pair.open_delim.start..pair.close_delim.end,
                             self.content[pair.inner.clone()].to_string(),
+                            None,
                         )
                     } else if outer_is_delimited(&self.content, p_start, p_end, prefix, suffix) {
                         let edit_range = (p_start - prefix.len())..(p_end + suffix.len());
-                        (true, edit_range, part_text.to_string())
+                        (true, edit_range, part_text.to_string(), None)
+                    } else if let Some(pair) = parsed.inline_pairs.iter().find(|p| {
+                        p.kind == tag_kind && p_start >= p.inner.start && p_end <= p.inner.end
+                    }) {
+                        // The selection sits inside a larger span: split the
+                        // span so only the selection loses the format.
+                        let inner = &self.content[pair.inner.clone()];
+                        let a = &inner[..p_start - pair.inner.start];
+                        let c = &inner[p_end - pair.inner.start..];
+                        let mut repl = String::new();
+                        if !a.is_empty() {
+                            repl.push_str(prefix);
+                            repl.push_str(a);
+                            repl.push_str(suffix);
+                        }
+                        let left_len = repl.len();
+                        repl.push_str(part_text);
+                        if !c.is_empty() {
+                            repl.push_str(prefix);
+                            repl.push_str(c);
+                            repl.push_str(suffix);
+                        }
+                        let edit_range = pair.open_delim.start..pair.close_delim.end;
+                        let split_inner = (edit_range.start + left_len)
+                            ..(edit_range.start + left_len + part_text.len());
+                        (true, edit_range, repl, Some(split_inner))
                     } else {
-                        (false, p_start..p_end, String::new())
+                        (false, p_start..p_end, String::new(), None)
                     }
                 };
 
@@ -1252,6 +1432,7 @@ impl DocumentTab {
                     edit_range,
                     unwrapped_text,
                     wrapped_text,
+                    split_inner,
                 });
             }
 
@@ -1298,7 +1479,9 @@ impl DocumentTab {
                 && (orig_sel == (parts[0].range.start..parts[0].range.end)
                     || orig_sel == (parts[0].edit_range.start..parts[0].edit_range.end))
             {
-                if every_part_has_format {
+                if let Some(split) = parts[0].split_inner.clone() {
+                    self.caret.range = split;
+                } else if every_part_has_format {
                     let unwrapped_len = edits[0].1.len();
                     self.caret.range = min_start..min_start + unwrapped_len;
                 } else {
@@ -1706,8 +1889,62 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
+        if mode == ViewMode::Wysiwyg && range.is_empty() && text == " " {
+            let parsed = self.parsed();
+            // A Markdown closer cannot sit right after whitespace, so a space
+            // typed at the end of a `*`/`**`/`~~` span goes after the closing
+            // marker; the span's formats stay armed for what is typed next.
+            let pair = parsed
+                .inline_pairs
+                .iter()
+                .rev()
+                .find(|p| {
+                    matches!(
+                        p.kind,
+                        InlineTagKind::Bold | InlineTagKind::Italic | InlineTagKind::Strike
+                    ) && range.start == p.inner.end
+                })
+                .cloned();
+            if let Some(pair) = pair {
+                let pending = pending_formats_at(&parsed, range.start);
+                let at = floor_boundary(&self.content, pair.close_delim.end);
+                self.edit(at..at, " ");
+                self.pending_formats = pending;
+                self.caret.move_to(floor_boundary(&self.content, at + 1));
+                self.refresh_cursor();
+                return;
+            }
+        }
         if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() && text != "\n" {
             let pf = self.pending_formats;
+            // A single `*`/`**`/`~~` format is armed and the caret stands
+            // right after a span's closer with the trailing space outside it:
+            // pull the space back inside and extend that span instead of
+            // opening a second one, so `**read** ` + typing `me` keeps
+            // `**read me**`.
+            if let Some((kind, closer)) = single_armed_emphasis(&pf) {
+                let parsed = self.parsed();
+                let pair = parsed
+                    .inline_pairs
+                    .iter()
+                    .rev()
+                    .find(|p| p.kind == kind && p.close_delim.end + 1 == range.start)
+                    .cloned();
+                if let Some(pair) = pair {
+                    let space_at_caret =
+                        self.content.as_bytes().get(range.start - 1) == Some(&b' ');
+                    if space_at_caret {
+                        let edit_range = pair.close_delim.start..range.start;
+                        let repl = format!(" {}{}", text, closer);
+                        let caret = pair.close_delim.start + 1 + text.len();
+                        self.pending_formats = ActiveFormats::default();
+                        self.edit(edit_range, &repl);
+                        self.caret.move_to(floor_boundary(&self.content, caret));
+                        self.refresh_cursor();
+                        return;
+                    }
+                }
+            }
             if pf.bold || pf.italic || pf.underline || pf.strike || pf.code {
                 let mut open = String::new();
                 let mut close = String::new();
@@ -3123,6 +3360,40 @@ fn parse_line_block_prefix(
     (indent, None, indent)
 }
 
+/// The one armed `*`/`**`/`~~` inline format, when exactly one is armed and
+/// no other inline format is with it.
+fn single_armed_emphasis(pf: &ActiveFormats) -> Option<(InlineTagKind, &'static str)> {
+    if pf.bold && !pf.italic && !pf.strike && !pf.underline && !pf.code {
+        Some((InlineTagKind::Bold, "**"))
+    } else if pf.italic && !pf.bold && !pf.strike && !pf.underline && !pf.code {
+        Some((InlineTagKind::Italic, "*"))
+    } else if pf.strike && !pf.bold && !pf.italic && !pf.underline && !pf.code {
+        Some((InlineTagKind::Strike, "~~"))
+    } else {
+        None
+    }
+}
+
+/// Inline formats that stay armed at `cursor`, from every marker pair around
+/// it. Used to keep typing inside an edited span and to carry formats across
+/// a line break.
+fn pending_formats_at(parsed: &ParsedDocument, cursor: usize) -> ActiveFormats {
+    let mut fmt = ActiveFormats::default();
+    for pair in &parsed.inline_pairs {
+        if cursor >= pair.open_delim.start && cursor <= pair.close_delim.end {
+            match pair.kind {
+                InlineTagKind::Bold => fmt.bold = true,
+                InlineTagKind::Italic => fmt.italic = true,
+                InlineTagKind::Underline => fmt.underline = true,
+                InlineTagKind::Strike => fmt.strike = true,
+                InlineTagKind::Code => fmt.code = true,
+                InlineTagKind::Link => {}
+            }
+        }
+    }
+    fmt
+}
+
 fn compute_active_formats(
     parsed: &ParsedDocument,
     cursor: usize,
@@ -4143,6 +4414,236 @@ mod tests {
         doc2.insert_text_in_mode(range, "hello", ViewMode::Wysiwyg);
         assert_eq!(doc2.content, "<u>hello</u>");
         assert!(!doc2.pending_formats.underline);
+    }
+
+    /// Type `text` one character at a time at the current caret, as the
+    /// editor does for real keystrokes.
+    fn type_keystrokes(doc: &mut DocumentTab, text: &str) {
+        for ch in text.chars() {
+            let range = doc.selection_range();
+            doc.insert_text_in_mode(range, &ch.to_string(), ViewMode::Wysiwyg);
+        }
+    }
+
+    fn pending_flag(doc: &DocumentTab, cmd: &str) -> bool {
+        match cmd {
+            "bold" => doc.pending_formats.bold,
+            "italic" => doc.pending_formats.italic,
+            "strike" => doc.pending_formats.strike,
+            _ => false,
+        }
+    }
+
+    fn styled_flag(doc: &mut DocumentTab, cmd: &str) -> bool {
+        let kind = match cmd {
+            "bold" => InlineTagKind::Bold,
+            "italic" => InlineTagKind::Italic,
+            "strike" => InlineTagKind::Strike,
+            _ => InlineTagKind::Link,
+        };
+        doc.parsed().inline_pairs.iter().any(|p| p.kind == kind)
+    }
+
+    /// Ctrl+B/I/U/Shift+S/` with no selection, type a word, then toggle the
+    /// same format off: the span must stay formatted and the caret must move
+    /// past the closing marker so the following words are plain.
+    #[test]
+    fn toggle_off_after_typing_keeps_the_span_and_exits_it() {
+        for (cmd, prefix, suffix) in [
+            ("bold", "**", "**"),
+            ("italic", "*", "*"),
+            ("underline", "<u>", "</u>"),
+            ("strike", "~~", "~~"),
+            ("code", "`", "`"),
+        ] {
+            let mut doc =
+                DocumentTab::new("b".into(), "test.md".into(), "This is ".into(), None, None);
+            doc.place(8, false);
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "very");
+            let wrapped = format!("This is {prefix}very{suffix}");
+            assert_eq!(doc.content, wrapped, "{cmd}: typing did not wrap");
+
+            // Second toggle: exit the span, do not unwrap it
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc.content, wrapped,
+                "{cmd}: second toggle removed the formatting"
+            );
+            assert_eq!(
+                doc.cursor_offset(),
+                wrapped.len(),
+                "{cmd}: caret did not move past the closing marker"
+            );
+            assert!(
+                !doc.has_pending_inline_formats(),
+                "{cmd}: pending formats stayed armed after leaving the span"
+            );
+
+            // Further typing is plain
+            type_keystrokes(&mut doc, " important");
+            assert_eq!(
+                doc.content,
+                format!("This is {prefix}very{suffix} important"),
+                "{cmd}: text after leaving the span is not plain"
+            );
+        }
+    }
+
+    /// A space typed at the end of a `*`/`**`/`~~` span must not land right
+    /// before the closer (a closer cannot follow whitespace in Markdown). It
+    /// goes after the closing marker; the next letter pulls it back inside
+    /// and extends the span, while stopping after the space keeps it outside.
+    #[test]
+    fn space_at_span_end_types_outside_the_closer() {
+        for (cmd, open, close) in [
+            ("bold", "**", "**"),
+            ("italic", "*", "*"),
+            ("strike", "~~", "~~"),
+        ] {
+            let mut doc = DocumentTab::new("s".into(), "test.md".into(), String::new(), None, None);
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "read");
+            type_keystrokes(&mut doc, " ");
+            assert_eq!(
+                doc.content,
+                format!("{open}read{close} "),
+                "{cmd}: space did not move outside the closing marker"
+            );
+            assert!(
+                pending_flag(&doc, cmd),
+                "{cmd}: format is not armed after the space"
+            );
+            let parsed = doc.parsed();
+            let line = parsed.line_at_offset(0).unwrap();
+            assert_eq!(
+                line.display_text, "read ",
+                "{cmd}: raw markers leaked into the display"
+            );
+
+            // The next letter extends the original span, keeping one span
+            type_keystrokes(&mut doc, "me");
+            assert_eq!(
+                doc.content,
+                format!("{open}read me{close}"),
+                "{cmd}: continued typing did not extend the span"
+            );
+            assert!(
+                styled_flag(&mut doc, cmd),
+                "{cmd}: continued typing is not rendered formatted"
+            );
+        }
+    }
+
+    /// Enter with the caret inside a bold span closes it before the newline
+    /// and reopens it on the new line; at the end of the span it leaves the
+    /// format armed so the next line continues bold.
+    #[test]
+    fn enter_inside_bold_span_closes_and_reopens_it() {
+        let mut doc = DocumentTab::new("e".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        let range = doc.selection_range();
+        doc.insert_text_in_mode(range, "first half", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "**first half**");
+
+        // Caret between "first" and " half": split the span around the break
+        doc.place(7, false);
+        doc.smart_newline(false);
+        assert_eq!(
+            doc.content, "**first**\n **half**",
+            "Enter did not close and reopen the bold span"
+        );
+        assert_eq!(
+            doc.cursor_offset(),
+            13,
+            "caret is not at the start of the reopened span"
+        );
+        assert!(
+            doc.active_formats.bold,
+            "the reopened span is not bold at the caret"
+        );
+
+        // Typing at the end of the reopened span stays bold
+        doc.place(doc.content.len() - 2, false);
+        type_keystrokes(&mut doc, "!");
+        assert_eq!(doc.content, "**first**\n **half!**");
+
+        // Caret at the end of the span: close it, keep bold armed, the next
+        // letter reopens it on the new line
+        let mut doc2 = DocumentTab::new("e2".into(), "test.md".into(), String::new(), None, None);
+        doc2.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        let range = doc2.selection_range();
+        doc2.insert_text_in_mode(range, "first half", ViewMode::Wysiwyg);
+        doc2.smart_newline(false);
+        assert_eq!(doc2.content, "**first half**\n");
+        assert!(doc2.pending_formats.bold);
+        type_keystrokes(&mut doc2, "second");
+        assert_eq!(doc2.content, "**first half**\n**second**");
+    }
+
+    /// Trailing spaces of an ATX heading stay in the WYSIWYG display and the
+    /// caret mapping, so typing a space at the end of a heading does not
+    /// vanish until the next letter.
+    #[test]
+    fn heading_trailing_space_stays_in_display_and_caret() {
+        let mut doc = DocumentTab::new("h".into(), "test.md".into(), "# my".into(), None, None);
+        doc.place(4, false);
+        type_keystrokes(&mut doc, " ");
+        assert_eq!(doc.content, "# my ");
+        let parsed = doc.parsed();
+        let line = parsed.line_at_offset(0).unwrap();
+        assert_eq!(line.display_text, "my ", "trailing space left the display");
+        assert_eq!(doc.cursor_offset(), 5, "caret fell back before the space");
+
+        type_keystrokes(&mut doc, "note");
+        assert_eq!(doc.content, "# my note");
+    }
+
+    /// Unformatting part of a larger span splits it cleanly instead of
+    /// leaving stray markers; for underline it must not nest a second <u>.
+    #[test]
+    fn partial_unformat_splits_the_span() {
+        for (cmd, open, close) in [
+            ("bold", "**", "**"),
+            ("italic", "*", "*"),
+            ("underline", "<u>", "</u>"),
+            ("strike", "~~", "~~"),
+            ("code", "`", "`"),
+        ] {
+            let wrapped = format!("{open}Hello{close}");
+
+            // Start of the span: "He" becomes plain, "llo" stays formatted
+            let mut doc =
+                DocumentTab::new("p".into(), "test.md".into(), wrapped.clone(), None, None);
+            doc.caret.range = open.len()..open.len() + 2;
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc.content,
+                format!("He{open}llo{close}"),
+                "{cmd}: unformatting the start left stray markers"
+            );
+
+            // End of the span: "llo" becomes plain, "He" stays formatted
+            let mut doc =
+                DocumentTab::new("p".into(), "test.md".into(), wrapped.clone(), None, None);
+            doc.caret.range = open.len() + 2..open.len() + 5;
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc.content,
+                format!("{open}He{close}llo"),
+                "{cmd}: unformatting the end left stray markers"
+            );
+
+            // Middle of the span: "ell" becomes plain, both halves formatted
+            let mut doc = DocumentTab::new("p".into(), "test.md".into(), wrapped, None, None);
+            doc.caret.range = open.len() + 1..open.len() + 4;
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc.content,
+                format!("{open}H{close}ell{open}o{close}"),
+                "{cmd}: unformatting the middle left stray markers"
+            );
+        }
     }
 
     #[test]
@@ -6145,10 +6646,9 @@ mod tests {
         assert_eq!(doc.content, "X\nnext");
     }
 
-    /// 7ad1cff paints `# foo ` as `foo` and its visible end is offset 5. Typing
-    /// X there yields `# fooX `. BASE has no redo snap and types `# foo X`.
-    /// Removing the snap call in `redo` leaves the caret on the trailing space
-    /// and the bytes become `# foo X`.
+    /// 7ad1cff paints `# foo ` as `foo` and its visible end is offset 5. The
+    /// trailing space is part of the visible heading now, so the snap target
+    /// is offset 6 and typing X there appends after it.
     #[test]
     fn redo_after_raw_closer_delete_types_at_the_visible_end() {
         let mut doc = heading_tab("# foo #");
@@ -6160,8 +6660,8 @@ mod tests {
         assert!(doc.redo());
         let range = doc.selection_range();
         doc.insert_text_in_mode(range, "X", ViewMode::Wysiwyg);
-        assert_eq!(doc.content, "# fooX ");
-        assert_eq!(doc.caret.range, 6..6);
+        assert_eq!(doc.content, "# foo X");
+        assert_eq!(doc.caret.range, 7..7);
     }
 
     #[test]
@@ -6669,3 +7169,4 @@ mod tests {
         assert_eq!(doc.selection_range().start, a);
     }
 }
+

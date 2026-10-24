@@ -1746,6 +1746,21 @@ pub(crate) fn atx_content_range(line: &str) -> Option<std::ops::Range<usize>> {
     atx_heading(line).map(|(_level, content)| content)
 }
 
+/// ATX content range for the WYSIWYG display: like `atx_content_range`, but
+/// when the heading has no closing-hash run its trailing spaces stay in the
+/// content, so typing at the end of a heading keeps them visible. A tail that
+/// contains a non-space byte is a closing-hash run and stays hidden.
+pub(crate) fn atx_display_content_range(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
+    atx_heading(line).map(|(level, content)| {
+        let tail_is_space = line[content.end..].bytes().all(|b| b == b' ' || b == b'\t');
+        if tail_is_space {
+            (level, content.start..line.len())
+        } else {
+            (level, content)
+        }
+    })
+}
+
 #[allow(clippy::single_range_in_vec_init)]
 fn fence_marker_line(
     index: usize,
@@ -2612,7 +2627,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             }
         }
 
-        if let Some((level, content)) = atx_heading(line) {
+        if let Some((level, content)) = atx_display_content_range(line) {
             list_walk.note_block(line);
             let parsed = atx_line(i, line_source, line, level, content);
             all_hidden.extend(parsed.hidden_ranges.iter().cloned());
@@ -3303,11 +3318,14 @@ mod tests {
                 )],
             ),
             (
+                // CommonMark 0.31.2 ex67 trims the trailing run, but the
+                // WYSIWYG display keeps it so typing spaces at the end of a
+                // heading does not swallow them until the next letter.
                 "ex67-atx-trim",
                 "#                  foo                     ",
                 vec![leaf(
                     "h1",
-                    "foo",
+                    "foo                     ",
                     "#                  foo                     ",
                 )],
             ),
