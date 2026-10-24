@@ -2570,7 +2570,6 @@ impl LiteMarkApp {
                 _ => {}
             },
         }
-        self.sidebar_keyboard = false;
         cx.notify();
     }
 
@@ -5294,7 +5293,6 @@ impl Render for LiteMarkApp {
                     this.cancel_create(cx);
                 } else if this.prompt.is_some() {
                     this.prompt = None;
-                    this.sidebar_keyboard = false;
                 } else if this.error_message.is_some()
                     && this.open_menu.is_none()
                     && !this.show_about_modal
