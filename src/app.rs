@@ -2347,10 +2347,7 @@ impl LiteMarkApp {
     /// Open a prompt and preselect its default choice so Enter confirms it.
     fn show_prompt(&mut self, prompt: Prompt) {
         let (_, _, choices) = self.prompt_modal_data(&prompt);
-        self.prompt_selected_ix = choices
-            .iter()
-            .position(|(_, default)| *default)
-            .unwrap_or(0);
+        self.prompt_selected_ix = default_prompt_choice_index(&choices);
         self.prompt = Some(prompt);
     }
 
@@ -2573,6 +2570,8 @@ impl LiteMarkApp {
                 _ => {}
             },
         }
+        self.sidebar_keyboard = false;
+        cx.notify();
     }
 
     fn request_close_window(&mut self) {
@@ -4796,14 +4795,16 @@ impl Render for LiteMarkApp {
             .on_action(cx.listener(|this, _: &PromptUp, _window, cx| {
                 let count = this.modal_choice_count();
                 if count > 0 {
-                    this.prompt_selected_ix = (this.prompt_selected_ix + count - 1) % count;
+                    this.prompt_selected_ix =
+                        step_prompt_selection(this.prompt_selected_ix, count, true);
                     cx.notify();
                 }
             }))
             .on_action(cx.listener(|this, _: &PromptDown, _window, cx| {
                 let count = this.modal_choice_count();
                 if count > 0 {
-                    this.prompt_selected_ix = (this.prompt_selected_ix + 1) % count;
+                    this.prompt_selected_ix =
+                        step_prompt_selection(this.prompt_selected_ix, count, false);
                     cx.notify();
                 }
             }))
@@ -4813,6 +4814,7 @@ impl Render for LiteMarkApp {
                     if let Some((choice, _)) = choices.get(this.prompt_selected_ix) {
                         this.answer_prompt(choice, cx);
                     }
+                    cx.notify();
                 } else if this.show_about_modal || this.show_shortcuts_modal {
                     this.show_about_modal = false;
                     this.show_shortcuts_modal = false;
@@ -5292,6 +5294,7 @@ impl Render for LiteMarkApp {
                     this.cancel_create(cx);
                 } else if this.prompt.is_some() {
                     this.prompt = None;
+                    this.sidebar_keyboard = false;
                 } else if this.error_message.is_some()
                     && this.open_menu.is_none()
                     && !this.show_about_modal

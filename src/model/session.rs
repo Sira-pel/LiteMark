@@ -117,6 +117,23 @@ pub fn trash_action(choice: TrashChoice) -> TrashAction {
     }
 }
 
+/// Step the selected modal choice forwards or backwards with wrapping.
+pub fn step_prompt_selection(current: usize, count: usize, step_back: bool) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    if step_back {
+        (current + count - 1) % count
+    } else {
+        (current + 1) % count
+    }
+}
+
+/// Index of the default choice for a prompt modal, or 0 if none is marked default.
+pub fn default_prompt_choice_index(choices: &[(&'static str, bool)]) -> usize {
+    choices.iter().position(|(_, default)| *default).unwrap_or(0)
+}
+
 /// Clicking a tab id activates that tab, including a newly created untitled tab.
 pub fn active_after_click(tab_ids: &[&str], clicked: &str, current: &str) -> String {
     if tab_ids.contains(&clicked) {
@@ -473,5 +490,42 @@ mod tests {
             tab_index_for_path(&with_pdf, Path::new("/notes/scan.pdf")),
             Some(1)
         );
+    }
+
+    #[test]
+    fn delete_prompt_arrow_navigation_and_cancel_selection() {
+        let choices: Vec<(&'static str, bool)> = vec![("Cancel", false), ("Trash", true)];
+        let count = choices.len();
+
+        // Modal opens with default selected ("Trash" at index 1).
+        let initial_ix = default_prompt_choice_index(&choices);
+        assert_eq!(initial_ix, 1);
+        assert_eq!(choices[initial_ix].0, "Trash");
+
+        // Pressing Left arrow (step_back: true) moves to "Cancel" at index 0.
+        let after_left = step_prompt_selection(initial_ix, count, true);
+        assert_eq!(after_left, 0);
+        assert_eq!(choices[after_left].0, "Cancel");
+
+        // Pressing Left again wraps back to "Trash" at index 1.
+        let wrap_left = step_prompt_selection(after_left, count, true);
+        assert_eq!(wrap_left, 1);
+        assert_eq!(choices[wrap_left].0, "Trash");
+
+        // Pressing Right from "Cancel" (0) moves to "Trash" (1).
+        let after_right = step_prompt_selection(0, count, false);
+        assert_eq!(after_right, 1);
+        assert_eq!(choices[after_right].0, "Trash");
+
+        // Pressing Right from "Trash" (1) wraps to "Cancel" (0).
+        let wrap_right = step_prompt_selection(1, count, false);
+        assert_eq!(wrap_right, 0);
+        assert_eq!(choices[wrap_right].0, "Cancel");
+    }
+
+    #[test]
+    fn prompt_selection_with_zero_count_does_not_panic() {
+        assert_eq!(step_prompt_selection(0, 0, true), 0);
+        assert_eq!(step_prompt_selection(0, 0, false), 0);
     }
 }
