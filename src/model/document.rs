@@ -3810,20 +3810,33 @@ fn render_styled_slices(
     }
 
     if all_code {
-        let inner: Vec<StyledSlice> = merged
-            .iter()
-            .map(|s| {
-                let mut f = s.flags;
-                f.code = false;
-                StyledSlice {
-                    text: s.text.clone(),
-                    flags: f,
-                    is_selected: s.is_selected,
-                }
-            })
-            .collect();
-        let inner_str = render_styled_slices(&inner, sel_range, offset + 1);
-        return format!("`{}`", inner_str);
+        // A code span's content is literal, so it must never contain other
+        // delimiters. Keep one backtick span only when the non-code flags are
+        // identical across the slices (they then differ only by selection);
+        // otherwise close and reopen the code span around every non-code
+        // change, keeping the backticks adjacent to the text.
+        let non_code_equal = merged.iter().all(|s| {
+            s.flags.bold == merged[0].flags.bold
+                && s.flags.italic == merged[0].flags.italic
+                && s.flags.underline == merged[0].flags.underline
+                && s.flags.strike == merged[0].flags.strike
+        });
+        if non_code_equal {
+            let inner: Vec<StyledSlice> = merged
+                .iter()
+                .map(|s| {
+                    let mut f = s.flags;
+                    f.code = false;
+                    StyledSlice {
+                        text: s.text.clone(),
+                        flags: f,
+                        is_selected: s.is_selected,
+                    }
+                })
+                .collect();
+            let inner_str = render_styled_slices(&inner, sel_range, offset + 1);
+            return format!("`{}`", inner_str);
+        }
     }
 
     let mut out = String::new();
@@ -5428,6 +5441,166 @@ mod tests {
         doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
         assert_eq!(doc.content, " world");
         assert!(doc.pending_formats.bold);
+    }
+
+    /// Inline code is always the innermost format with its backticks adjacent
+    /// to the text, and no other delimiters are ever emitted inside a code
+    /// span: when a non-code format turns off mid-typing, the code span
+    /// closes, the format closes, and the code span reopens
+    /// (`**`hi`**`yo`). Covers every pair and triple containing code.
+    #[test]
+    fn code_stays_innermost_when_a_non_code_format_toggles_off() {
+        // (armed formats, format toggled off mid-typing, expected content,
+        //  flags of "hi", flags of "yo" as (bold, italic, underline, strike, code))
+        type CodeCombo = (
+            &'static [&'static str],
+            &'static str,
+            &'static str,
+            (bool, bool, bool, bool, bool),
+            (bool, bool, bool, bool, bool),
+        );
+        let combos: &[CodeCombo] = &[
+            (
+                &["bold", "code"],
+                "bold",
+                "**`hi`**`yo`",
+                (true, false, false, false, true),
+                (false, false, false, false, true),
+            ),
+            (
+                &["italic", "code"],
+                "italic",
+                "*`hi`*`yo`",
+                (false, true, false, false, true),
+                (false, false, false, false, true),
+            ),
+            (
+                &["underline", "code"],
+                "underline",
+                "<u>`hi`</u>`yo`",
+                (false, false, true, false, true),
+                (false, false, false, false, true),
+            ),
+            (
+                &["strike", "code"],
+                "strike",
+                "~~`hi`~~`yo`",
+                (false, false, false, true, true),
+                (false, false, false, false, true),
+            ),
+            (
+                &["bold", "italic", "code"],
+                "bold",
+                "***`hi`**`yo`*",
+                (true, true, false, false, true),
+                (false, true, false, false, true),
+            ),
+            (
+                &["bold", "underline", "code"],
+                "bold",
+                "<u>**`hi`**`yo`</u>",
+                (true, false, true, false, true),
+                (false, false, true, false, true),
+            ),
+            (
+                &["bold", "strike", "code"],
+                "bold",
+                "~~**`hi`**`yo`~~",
+                (true, false, false, true, true),
+                (false, false, false, true, true),
+            ),
+            (
+                &["italic", "underline", "code"],
+                "italic",
+                "<u>*`hi`*`yo`</u>",
+                (false, true, true, false, true),
+                (false, false, true, false, true),
+            ),
+            (
+                &["italic", "strike", "code"],
+                "italic",
+                "~~*`hi`*`yo`~~",
+                (false, true, false, true, true),
+                (false, false, false, true, true),
+            ),
+            (
+                &["underline", "strike", "code"],
+                "underline",
+                "~~<u>`hi`</u>`yo`~~",
+                (false, false, true, true, true),
+                (false, false, false, true, true),
+            ),
+        ];
+
+        for (formats, toggle_off, expected, hi_flags, yo_flags) in combos {
+            let mut doc = DocumentTab::new("c".into(), "test.md".into(), String::new(), None, None);
+            type_keystrokes(&mut doc, "x ");
+            for format in *formats {
+                doc.apply_format_in_mode(format, ViewMode::Wysiwyg);
+            }
+            type_keystrokes(&mut doc, "hi");
+            let mut flags = FormatFlags::default();
+            for format in *formats {
+                match *format {
+                    "bold" => flags.bold = true,
+                    "italic" => flags.italic = true,
+                    "underline" => flags.underline = true,
+                    "strike" => flags.strike = true,
+                    "code" => flags.code = true,
+                    _ => {}
+                }
+            }
+            let (open, close) = wrap_delimiters(&flags);
+            let wrapped = format!("x {}hi{}", open, close);
+            assert_eq!(
+                doc.content, wrapped,
+                "{formats:?}: typing did not wrap with the code span innermost"
+            );
+
+            doc.apply_format_in_mode(toggle_off, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "yo");
+            assert_eq!(
+                doc.content,
+                format!("x {expected}"),
+                "{formats:?}: toggling off {toggle_off} misplaced the delimiters"
+            );
+
+            // The saved Markdown renders as styled text, never as literal
+            // markers inside a code span.
+            let parsed = parse_document(&doc.content);
+            let segments: Vec<(&str, bool, bool, bool, bool, bool)> = parsed.lines[0]
+                .styled_segments
+                .iter()
+                .map(|s| {
+                    (
+                        &doc.content[s.source.clone()],
+                        s.bold,
+                        s.italic,
+                        s.underline,
+                        s.strike,
+                        s.code,
+                    )
+                })
+                .collect();
+            let hi = segments
+                .iter()
+                .find(|(text, ..)| *text == "hi")
+                .unwrap_or_else(|| panic!("{formats:?}: no segment for hi in {segments:?}"));
+            let yo = segments
+                .iter()
+                .find(|(text, ..)| *text == "yo")
+                .unwrap_or_else(|| panic!("{formats:?}: no segment for yo in {segments:?}"));
+            assert_eq!(
+                (hi.1, hi.2, hi.3, hi.4, hi.5),
+                *hi_flags,
+                "{formats:?}: wrong styles on hi"
+            );
+            assert_eq!(
+                (yo.1, yo.2, yo.3, yo.4, yo.5),
+                *yo_flags,
+                "{formats:?}: wrong styles on yo"
+            );
+        }
     }
 
     #[test]
