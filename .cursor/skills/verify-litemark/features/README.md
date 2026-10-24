@@ -42,5 +42,6 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 - [Markdown render](./markdown-render.md) — headings, emphasis, nested lists, tables, fenced code, links, images, wrapping, and a large document timed through `parse_document` and `visual_rows`.
 - [Open a file](./open-file.md) — File → Open…, Ctrl+O, or a path argument.
 - [Find and replace](./find-replace.md) — Edit → Find, Ctrl+F, and the Replace / All bar.
+- [Format toggle](./format-toggle.md) — WYSIWYG bold, italic, link, Enter, and undo, checked by `scripts/format-toggle-gate.sh` against `fixtures/format-toggle/cases.tsv`.
 - [Notes sidebar](./notes-sidebar.md) — View → Sidebar and Ctrl+\\.
 - [Theme](./theme.md) — settings gear, then Dark, Light, or System.

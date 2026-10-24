@@ -10347,3 +10347,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod format_toggle_gate;
