@@ -1443,7 +1443,38 @@ fn parse_inline_syntax(
         }
     }
 
+    normalize_shared_run_pairs(&mut inline_pairs);
+
     (raw_hidden, inline_pairs, styled_segments)
+}
+
+/// pulldown reports markers that share one delimiter run (`***x***`,
+/// `**~~x~~**`) with overlapping event ranges, so the outer pair's `inner`
+/// claims the inner pair's markers as its content. When a pair's inner is
+/// exactly another pair wrapped in its delimiters, adopt the nested inner as
+/// the real content range, so caret mapping, exits, and splits see the actual
+/// text. Display and hidden ranges are unaffected.
+fn normalize_shared_run_pairs(inline_pairs: &mut [InlinePair]) {
+    loop {
+        let mut changed = false;
+        for i in 0..inline_pairs.len() {
+            let inner = inline_pairs[i].inner.clone();
+            let nested = (0..inline_pairs.len()).find(|&j| {
+                j != i
+                    && inline_pairs[j].open_delim.start == inner.start
+                    && inline_pairs[j].close_delim.end == inner.end
+                    && inline_pairs[j].inner.start > inner.start
+                    && inline_pairs[j].inner.end < inner.end
+            });
+            if let Some(j) = nested {
+                inline_pairs[i].inner = inline_pairs[j].inner.clone();
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 struct OpenFence {
