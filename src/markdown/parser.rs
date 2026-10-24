@@ -1258,6 +1258,68 @@ fn merge_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<
     merged
 }
 
+pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut modified = None;
+
+    let is_delim = |b: u8| b == b'*' || b == b'~' || b == b'_' || b == b'`';
+
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'~' || bytes[i] == b'*' || bytes[i] == b'_' {
+            let delim_byte = bytes[i];
+            let start = i;
+            while i < len && bytes[i] == delim_byte {
+                i += 1;
+            }
+            let end = i;
+
+            // Check opening delimiter preceded by alphanumeric and followed by code backtick (e.g. `a**`hi`**` or `a*`hi`*`)
+            if start > 0 && end < len {
+                let prev_ch = input[..start].chars().next_back().unwrap();
+                let next_b = bytes[end];
+                if prev_ch.is_alphanumeric() && next_b == b'`' {
+                    let prev_len = prev_ch.len_utf8();
+                    let buf = modified.get_or_insert_with(|| input.as_bytes().to_vec());
+                    for b in &mut buf[start - prev_len..start] {
+                        *b = b'.';
+                    }
+                }
+            }
+
+            // Check closing delimiter preceded by inner delimiter and followed by alphanumeric (e.g. `hi*~~y` or `hi`**y`)
+            if start > 0 && end < len {
+                let prev_b = bytes[start - 1];
+                if is_delim(prev_b) {
+                    let mut p = start;
+                    while p > 0 && is_delim(bytes[p - 1]) {
+                        p -= 1;
+                    }
+                    if p > 0 {
+                        let prev_ch = input[..p].chars().next_back().unwrap();
+                        let next_ch = input[end..].chars().next().unwrap();
+                        if prev_ch.is_alphanumeric() && next_ch.is_alphanumeric() {
+                            let ch_len = next_ch.len_utf8();
+                            let buf = modified.get_or_insert_with(|| input.as_bytes().to_vec());
+                            for b in &mut buf[end..end + ch_len] {
+                                *b = b'.';
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    match modified {
+        Some(buf) => std::borrow::Cow::Owned(String::from_utf8(buf).unwrap()),
+        None => std::borrow::Cow::Borrowed(input),
+    }
+}
+
 fn parse_inline_syntax(
     input: &str,
     base: usize,
@@ -1270,9 +1332,10 @@ fn parse_inline_syntax(
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
+    let prepared = prepare_for_pulldown(input);
     let mut options = pulldown_cmark::Options::empty();
     options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
-    let parser = pulldown_cmark::Parser::new_ext(input, options).into_offset_iter();
+    let parser = pulldown_cmark::Parser::new_ext(&prepared, options).into_offset_iter();
 
     let mut raw_hidden = Vec::new();
     let mut inline_pairs = Vec::new();

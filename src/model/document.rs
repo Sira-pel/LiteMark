@@ -3615,6 +3615,10 @@ fn wrap_delimiters(flags: &FormatFlags) -> (String, String) {
         open.push_str("<u>");
         close.push_str("</u>");
     }
+    if flags.strike {
+        open.push_str("~~");
+        close.insert_str(0, "~~");
+    }
     if flags.bold && flags.italic {
         open.push_str("***");
         close.insert_str(0, "***");
@@ -3624,10 +3628,6 @@ fn wrap_delimiters(flags: &FormatFlags) -> (String, String) {
     } else if flags.italic {
         open.push('*');
         close.insert(0, '*');
-    }
-    if flags.strike {
-        open.push_str("~~");
-        close.insert_str(0, "~~");
     }
     if flags.code {
         open.push('`');
@@ -3690,6 +3690,23 @@ fn render_styled_slices(
             .collect();
         let inner_str = render_styled_slices(&inner, sel_range, offset + 3);
         return format!("<u>{}</u>", inner_str);
+    }
+
+    if all_strike {
+        let inner: Vec<StyledSlice> = merged
+            .iter()
+            .map(|s| {
+                let mut f = s.flags;
+                f.strike = false;
+                StyledSlice {
+                    text: s.text.clone(),
+                    flags: f,
+                    is_selected: s.is_selected,
+                }
+            })
+            .collect();
+        let inner_str = render_styled_slices(&inner, sel_range, offset + 2);
+        return format!("~~{}~~", inner_str);
     }
 
     if all_bold && all_italic {
@@ -3790,23 +3807,6 @@ fn render_styled_slices(
             .collect();
         let inner_str = render_styled_slices(&inner, sel_range, offset + 2);
         return format!("**{}**", inner_str);
-    }
-
-    if all_strike {
-        let inner: Vec<StyledSlice> = merged
-            .iter()
-            .map(|s| {
-                let mut f = s.flags;
-                f.strike = false;
-                StyledSlice {
-                    text: s.text.clone(),
-                    flags: f,
-                    is_selected: s.is_selected,
-                }
-            })
-            .collect();
-        let inner_str = render_styled_slices(&inner, sel_range, offset + 2);
-        return format!("~~{}~~", inner_str);
     }
 
     if all_code {
@@ -5300,22 +5300,22 @@ mod tests {
         type_keystrokes(&mut doc, " ok");
         assert_eq!(doc.content, "Go ***now please*** ok");
 
-        // Bold outer, strike inner: same stacked behavior
+        // Strike outer, bold inner: same stacked behavior
         let mut doc = DocumentTab::new("y".into(), "test.md".into(), String::new(), None, None);
         doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
         doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
         type_keystrokes(&mut doc, "was");
         type_keystrokes(&mut doc, " ");
-        assert_eq!(doc.content, "**~~was~~** ");
+        assert_eq!(doc.content, "~~**was**~~ ");
         type_keystrokes(&mut doc, "here");
-        assert_eq!(doc.content, "**~~was here~~**");
+        assert_eq!(doc.content, "~~**was here**~~");
         doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
-        assert_eq!(doc.content, "**~~was here~~**");
+        assert_eq!(doc.content, "~~**was here**~~");
         assert!(doc.pending_formats.bold);
         doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
         assert!(!doc.has_pending_inline_formats());
         type_keystrokes(&mut doc, " ok");
-        assert_eq!(doc.content, "**~~was here~~** ok");
+        assert_eq!(doc.content, "~~**was here**~~ ok");
     }
 
     /// Typing into a newly created formatted span is one undo step: a single
@@ -8372,6 +8372,173 @@ mod tests {
     }
 
     #[test]
+    fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
+        let combos: Vec<(&[&str], bool, bool, bool, bool)> = vec![
+            // Pairs (6)
+            (&["bold", "italic"], true, true, false, false),
+            (&["bold", "strike"], true, false, true, false),
+            (&["bold", "code"], true, false, false, true),
+            (&["italic", "strike"], false, true, true, false),
+            (&["italic", "code"], false, true, false, true),
+            (&["strike", "code"], false, false, true, true),
+            // Triples (4)
+            (&["bold", "italic", "strike"], true, true, true, false),
+            (&["bold", "italic", "code"], true, true, false, true),
+            (&["bold", "strike", "code"], true, false, true, true),
+            (&["italic", "strike", "code"], false, true, true, true),
+        ];
+
+        for (combo, exp_b, exp_i, exp_s, exp_c) in combos {
+            // 1. Toggled on immediately after a letter: type "a", arm combo, type "hi"
+            {
+                let mut doc = DocumentTab::new("on".into(), "test.md".into(), String::new(), None, None);
+                type_keystrokes(&mut doc, "a");
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "hi");
+
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().expect("line not found");
+                assert_eq!(
+                    line.display_text, "ahi",
+                    "Leaked delimiters in display text when toggling on combo {:?}. Content was: {:?}",
+                    combo, doc.content
+                );
+
+                // 'a' must be unstyled
+                let a_src = line.offset_map.display_to_source(0);
+                let a_seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|s| s.source.start <= a_src && a_src < s.source.end)
+                    .unwrap_or_else(|| panic!("No styled segment covering 'a' for combo {:?}", combo));
+                assert!(!a_seg.bold && !a_seg.italic && !a_seg.strike && !a_seg.code,
+                    "Expected 'a' unstyled for combo {:?}, got B={} I={} S={} C={}",
+                    combo, a_seg.bold, a_seg.italic, a_seg.strike, a_seg.code);
+
+                // 'h' and 'i' must have the combo formats
+                for ch_idx in 1..3 {
+                    let src = line.offset_map.display_to_source(ch_idx);
+                    let seg = line
+                        .styled_segments
+                        .iter()
+                        .find(|s| s.source.start <= src && src < s.source.end)
+                        .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
+                    assert_eq!(seg.bold, exp_b, "Bold mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.italic, exp_i, "Italic mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.strike, exp_s, "Strike mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.code, exp_c, "Code mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                }
+            }
+
+            // 2. Toggled off with a letter typed immediately after: arm combo, type "hi", toggle off, type "y"
+            {
+                let mut doc = DocumentTab::new("off".into(), "test.md".into(), String::new(), None, None);
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "hi");
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "y");
+
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().expect("line not found");
+                assert_eq!(
+                    line.display_text, "hiy",
+                    "Leaked delimiters in display text when toggling off combo {:?}. Content was: {:?}",
+                    combo, doc.content
+                );
+
+                // 'h' and 'i' must have the combo formats
+                for ch_idx in 0..2 {
+                    let src = line.offset_map.display_to_source(ch_idx);
+                    let seg = line
+                        .styled_segments
+                        .iter()
+                        .find(|s| s.source.start <= src && src < s.source.end)
+                        .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
+                    assert_eq!(seg.bold, exp_b, "Bold mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.italic, exp_i, "Italic mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.strike, exp_s, "Strike mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.code, exp_c, "Code mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                }
+
+                // 'y' must be unstyled
+                let y_src = line.offset_map.display_to_source(2);
+                let y_seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|s| s.source.start <= y_src && y_src < s.source.end)
+                    .unwrap_or_else(|| panic!("No styled segment covering 'y' for combo {:?}", combo));
+                assert!(!y_seg.bold && !y_seg.italic && !y_seg.strike && !y_seg.code,
+                    "Expected 'y' unstyled for combo {:?}, got B={} I={} S={} C={}",
+                    combo, y_seg.bold, y_seg.italic, y_seg.strike, y_seg.code);
+            }
+
+            // 3. With prefix "x ": "x ", arm combo, type "hi", toggle off, type "y"
+            {
+                let mut doc = DocumentTab::new("prefix_off".into(), "test.md".into(), String::new(), None, None);
+                type_keystrokes(&mut doc, "x ");
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "hi");
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "y");
+
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().expect("line not found");
+                assert_eq!(
+                    line.display_text, "x hiy",
+                    "Leaked delimiters in display text when toggling off with prefix combo {:?}. Content was: {:?}",
+                    combo, doc.content
+                );
+
+                // 'x' and ' ' must be unstyled
+                for ch_idx in 0..2 {
+                    let src = line.offset_map.display_to_source(ch_idx);
+                    let seg = line
+                        .styled_segments
+                        .iter()
+                        .find(|s| s.source.start <= src && src < s.source.end)
+                        .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
+                    assert!(!seg.bold && !seg.italic && !seg.strike && !seg.code);
+                }
+
+                // 'h' and 'i' must have the combo formats
+                for ch_idx in 2..4 {
+                    let src = line.offset_map.display_to_source(ch_idx);
+                    let seg = line
+                        .styled_segments
+                        .iter()
+                        .find(|s| s.source.start <= src && src < s.source.end)
+                        .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
+                    assert_eq!(seg.bold, exp_b, "Bold mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.italic, exp_i, "Italic mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.strike, exp_s, "Strike mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.code, exp_c, "Code mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                }
+
+                // 'y' must be unstyled
+                let y_src = line.offset_map.display_to_source(4);
+                let y_seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|s| s.source.start <= y_src && y_src < s.source.end)
+                    .unwrap_or_else(|| panic!("No styled segment covering 'y' for combo {:?}", combo));
+                assert!(!y_seg.bold && !y_seg.italic && !y_seg.strike && !y_seg.code,
+                    "Expected 'y' unstyled for combo {:?}, got B={} I={} S={} C={}",
+                    combo, y_seg.bold, y_seg.italic, y_seg.strike, y_seg.code);
+            }
+        }
+    }
+
+    #[test]
     fn test_whitespace_only_inserts_with_each_format_armed() {
         let whitespaces = [" ", "\t", "   ", "  \t  "];
         let formats = [
@@ -8520,7 +8687,7 @@ mod tests {
         doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
         type_keystrokes(&mut doc, "y");
 
-        assert_eq!(doc.content, "x *~~hi~~*y");
+        assert_eq!(doc.content, "x ~~*hi*~~y");
         assert!(!doc.content.contains("<u></u>"));
         assert!(!doc.content.contains("****"));
         assert!(!doc.content.contains("~~~~"));
