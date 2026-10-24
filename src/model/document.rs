@@ -2223,16 +2223,8 @@ impl DocumentTab {
                         }
                     }
                     InlineTagKind::Code if text.contains('`') => {
-                        if range.start == pair.inner.end {
-                            // A backtick typed at the end of the content acts
-                            // as the closing fence: move over it instead of
-                            // breaking the span (a content-trailing backtick
-                            // cannot be separated from the closer).
-                            let past = pair.close_delim.end;
-                            self.caret.move_to(floor_boundary(&self.content, past));
-                            self.refresh_cursor();
-                            return;
-                        }
+                        // The backtick is literal content: re-fence the span
+                        // with a longer run so it stays intact.
                         self.refence_code_span(pair, range.start, text);
                         return;
                     }
@@ -6103,45 +6095,121 @@ mod tests {
         assert_no_delimiter_runs(&doc);
     }
 
-    /// Overlapping toggles close and reopen their markers: the italic spans
-    /// `a`, the bold+italic spans `b`, and the markers nest without literal
-    /// runs. (A third span that is bold-only right after a bold+italic span
-    /// is not representable in CommonMark - its delimiter run would merge
-    /// with the closer run and the 2+2+... arithmetic forbids the pair - so
-    /// that trailing case is covered by the flanking/synthesis tests.)
+    /// Overlapping toggles close and reopen their markers so the spans nest
+    /// properly and round-trip through the parser: each variant below must
+    /// display without raw markers and parse back to the typed spans, with
+    /// no zero-width spaces and no literal delimiter runs.
     #[test]
-    fn overlapping_toggles_nest_properly() {
+fn overlapping_toggles_nest_properly() {
+    // (first format, second format, typed chars, expected spans as
+    // (text, bold, italic, underline, strike))
+    type OverlapVariant = (
+        &'static str,
+        &'static str,
+        Vec<&'static str>,
+        Vec<(&'static str, bool, bool, bool, bool)>,
+    );
+    let variants: Vec<OverlapVariant> = vec![
+        (
+            // 1-char: a italic, b bold+italic, c bold, d plain
+            "italic",
+            "bold",
+            vec!["a", "b", "c", "d"],
+            vec![
+                ("a", false, true, false, false),
+                ("b", true, true, false, false),
+                ("c", true, false, false, false),
+                ("d", false, false, false, false),
+            ],
+        ),
+        (
+            // 2-char variant of the same overlap
+            "italic",
+            "bold",
+            vec!["ab", "cd", "ef", "gh"],
+            vec![
+                ("ab", false, true, false, false),
+                ("cd", true, true, false, false),
+                ("ef", true, false, false, false),
+                ("gh", false, false, false, false),
+            ],
+        ),
+        (
+            // mirror order: bold first, then italic
+            "bold",
+            "italic",
+            vec!["a", "b", "c", "d"],
+            vec![
+                ("a", true, false, false, false),
+                ("b", true, true, false, false),
+                ("c", false, true, false, false),
+                ("d", false, false, false, false),
+            ],
+        ),
+        (
+            // strike first, then underline
+            "strike",
+            "underline",
+            vec!["a", "b", "c", "d"],
+            vec![
+                ("a", false, false, false, true),
+                ("b", false, false, true, true),
+                ("c", false, false, true, false),
+                ("d", false, false, false, false),
+            ],
+        ),
+        (
+            // underline first, then strike
+            "underline",
+            "strike",
+            vec!["a", "b", "c", "d"],
+            vec![
+                ("a", false, false, true, false),
+                ("b", false, false, true, true),
+                ("c", false, false, false, true),
+                ("d", false, false, false, false),
+            ],
+        ),
+    ];
+    for (first, second, chars, expected) in variants {
         let mut doc = DocumentTab::new("d3".into(), "test.md".into(), String::new(), None, None);
-        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "a");
-        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "b");
-        assert_eq!(
-            doc.content, "*a**b***",
-            "typing bold inside the italic span did not nest"
-        );
-        assert!(!doc.content.contains('\u{200B}'));
-        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
-        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
-        assert_eq!(
-            doc.content, "*a**b***",
-            "toggling the formats off altered the spans"
-        );
+        doc.apply_format_in_mode(first, ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, chars[0]);
+        doc.apply_format_in_mode(second, ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, chars[1]);
+        doc.apply_format_in_mode(first, ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, chars[2]);
+        doc.apply_format_in_mode(second, ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, chars[3]);
 
+        assert!(
+            !doc.content.contains('\u{200B}'),
+            "{first}/{second}: zero-width space written"
+        );
         let content = doc.content.clone();
         let parsed = parse_document(&content);
-        let segments: Vec<(&str, bool, bool)> = parsed.lines[0]
+        assert_eq!(
+            parsed.lines[0].display_text,
+            chars.concat(),
+            "{first}/{second}: raw markers visible in the display"
+        );
+        let segments: Vec<(&str, bool, bool, bool, bool)> = parsed.lines[0]
             .styled_segments
             .iter()
-            .map(|s| (content[s.source.clone()].as_ref(), s.bold, s.italic))
+            .map(|s| {
+                (
+                    content[s.source.clone()].as_ref(),
+                    s.bold,
+                    s.italic,
+                    s.underline,
+                    s.strike,
+                )
+            })
             .collect();
-        assert_eq!(
-            segments,
-            vec![("a", false, true), ("b", true, true)],
-            "overlapping toggles rendered wrong styles"
-        );
+        assert_eq!(segments, expected, "{first}/{second}: wrong spans");
         assert_no_delimiter_runs(&doc);
     }
+}
 
     /// Toggling a non-code format while code is armed splits the code span
     /// around the change instead of nesting delimiters inside the backticks;
@@ -6200,167 +6268,208 @@ mod tests {
     /// parser synthesizes the pair for the display, on the closer and the
     /// opener side alike.
     #[test]
-    fn symbol_adjacent_delimiters_keep_flanking() {
-        // Closer side: bold emoji, toggle off, type a letter.
-        let mut doc = DocumentTab::new("d5".into(), "test.md".into(), String::new(), None, None);
-        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "\u{1F600}\u{1F600}");
-        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
-        assert_eq!(doc.content, "**\u{1F600}\u{1F600}**");
-        type_keystrokes(&mut doc, "x");
-        assert_eq!(
-            doc.content, "**\u{1F600}\u{1F600}**x",
-            "the typed text was altered"
-        );
-        assert!(!doc.content.contains('\u{200B}'), "zero-width space written");
-        let content = doc.content.clone();
-        let parsed = parse_document(&content);
-        let segments: Vec<(&str, bool)> = parsed.lines[0]
-            .styled_segments
-            .iter()
-            .map(|s| (content[s.source.clone()].as_ref(), s.bold))
-            .collect();
-        assert_eq!(segments, vec![("\u{1F600}\u{1F600}", true), ("x", false)]);
+fn symbol_adjacent_delimiters_keep_flanking() {
+    // Closer side: bold emoji, toggle off, type a letter.
+    let mut doc = DocumentTab::new("d5".into(), "test.md".into(), String::new(), None, None);
+    doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+    type_keystrokes(&mut doc, "\u{1F600}\u{1F600}");
+    doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+    assert_eq!(doc.content, "**\u{1F600}\u{1F600}**");
+    type_keystrokes(&mut doc, "x");
+    assert_eq!(
+        doc.content, "**\u{1F600}\u{1F600}**x",
+        "the typed text was altered"
+    );
+    assert!(
+        !doc.content.contains('\u{200B}'),
+        "zero-width space written"
+    );
+    let content = doc.content.clone();
+    let parsed = parse_document(&content);
+    let segments: Vec<(&str, bool)> = parsed.lines[0]
+        .styled_segments
+        .iter()
+        .map(|s| (content[s.source.clone()].as_ref(), s.bold))
+        .collect();
+    assert_eq!(segments, vec![("\u{1F600}\u{1F600}", true), ("x", false)]);
 
-        // Opener side: a letter right before a fresh span holding a symbol.
-        let mut doc = DocumentTab::new("d6".into(), "test.md".into(), "x".into(), None, None);
-        doc.place(1, false);
-        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "\u{1F600}");
-        assert_eq!(doc.content, "x**\u{1F600}**");
-        assert!(!doc.content.contains('\u{200B}'), "zero-width space written");
-        let content = doc.content.clone();
-        let parsed = parse_document(&content);
-        let segments: Vec<(&str, bool)> = parsed.lines[0]
-            .styled_segments
-            .iter()
-            .map(|s| (content[s.source.clone()].as_ref(), s.bold))
-            .collect();
-        assert_eq!(segments, vec![("x", false), ("\u{1F600}", true)]);
-    }
+    // Opener side: a letter right before a fresh span holding a symbol.
+    let mut doc = DocumentTab::new("d6".into(), "test.md".into(), "x".into(), None, None);
+    doc.place(1, false);
+    doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+    type_keystrokes(&mut doc, "\u{1F600}");
+    assert_eq!(doc.content, "x**\u{1F600}**");
+    assert!(
+        !doc.content.contains('\u{200B}'),
+        "zero-width space written"
+    );
+    let content = doc.content.clone();
+    let parsed = parse_document(&content);
+    let segments: Vec<(&str, bool)> = parsed.lines[0]
+        .styled_segments
+        .iter()
+        .map(|s| (content[s.source.clone()].as_ref(), s.bold))
+        .collect();
+    assert_eq!(segments, vec![("x", false), ("\u{1F600}", true)]);
+}
 
     /// Typing a span's own delimiter character inside it escapes it (or
     /// re-fences a code span) so the span stays intact and renders styled.
     #[test]
-    fn typing_span_delimiters_inside_keeps_the_span() {
-        // Strike: `~` inside, then a space and more text.
-        let mut doc = DocumentTab::new("d7".into(), "test.md".into(), String::new(), None, None);
-        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "a");
-        type_keystrokes(&mut doc, "~");
-        assert_eq!(doc.content, "~~a\\~~~", "the tilde was not escaped");
-        type_keystrokes(&mut doc, " ");
-        type_keystrokes(&mut doc, "b");
-        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
-        assert_eq!(doc.content, "~~a\\~ b~~");
-        let content = doc.content.clone();
-        let parsed = parse_document(&content);
-        let segments: Vec<(&str, bool)> = parsed.lines[0]
+fn typing_span_delimiters_inside_keeps_the_span() {
+    // Strike: `~` inside, then a space and more text.
+    let mut doc = DocumentTab::new("d7".into(), "test.md".into(), String::new(), None, None);
+    doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+    type_keystrokes(&mut doc, "a");
+    type_keystrokes(&mut doc, "~");
+    assert_eq!(doc.content, "~~a\\~~~", "the tilde was not escaped");
+    type_keystrokes(&mut doc, " ");
+    type_keystrokes(&mut doc, "b");
+    doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+    assert_eq!(doc.content, "~~a\\~ b~~");
+    let content = doc.content.clone();
+    let parsed = parse_document(&content);
+    let segments: Vec<(&str, bool)> = parsed.lines[0]
+        .styled_segments
+        .iter()
+        .map(|s| (content[s.source.clone()].trim_matches('\\'), s.strike))
+        .collect();
+    assert_eq!(segments, vec![("a", true), ("~ b", true)]);
+
+    // Italic: `*` inside.
+    let mut doc = DocumentTab::new("d8".into(), "test.md".into(), String::new(), None, None);
+    doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+    type_keystrokes(&mut doc, "a");
+    type_keystrokes(&mut doc, "*");
+    type_keystrokes(&mut doc, "b");
+    assert_eq!(doc.content, "*a\\*b*");
+    let content = doc.content.clone();
+    let parsed = parse_document(&content);
+    let segments: Vec<(&str, bool)> = parsed.lines[0]
+        .styled_segments
+        .iter()
+        .map(|s| (content[s.source.clone()].trim_matches('\\'), s.italic))
+        .collect();
+    assert_eq!(segments, vec![("a", true), ("*b", true)]);
+
+    // Code: a backtick typed inside the content re-fences the span with
+    // a longer run; a backtick typed at the content's end acts as the
+    // closing fence and moves the caret past it.
+    let mut doc = DocumentTab::new("d9".into(), "test.md".into(), String::new(), None, None);
+    doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+    type_keystrokes(&mut doc, "ab");
+    doc.place(2, false);
+    type_keystrokes(&mut doc, "`");
+    assert_eq!(
+        doc.content, "``a`b``",
+        "the backtick inside the code span did not re-fence"
+    );
+    let content = doc.content.clone();
+    let parsed = parse_document(&content);
+    let segments: Vec<(&str, bool)> = parsed.lines[0]
+        .styled_segments
+        .iter()
+        .map(|s| (content[s.source.clone()].as_ref(), s.code))
+        .collect();
+    assert_eq!(segments, vec![("a`b", true)]);
+
+    let mut doc = DocumentTab::new("d10".into(), "test.md".into(), String::new(), None, None);
+    doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+    type_keystrokes(&mut doc, "a");
+    type_keystrokes(&mut doc, "`");
+    assert_eq!(
+        doc.content, "``a```",
+        "the backtick did not join the content"
+    );
+    let parsed = doc.parsed();
+    assert!(
+        parsed.lines[0]
             .styled_segments
             .iter()
-            .map(|s| (content[s.source.clone()].trim_matches('\\'), s.strike))
-            .collect();
-        assert_eq!(segments, vec![("a", true), ("~ b", true)]);
-
-        // Italic: `*` inside.
-        let mut doc = DocumentTab::new("d8".into(), "test.md".into(), String::new(), None, None);
-        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "a");
-        type_keystrokes(&mut doc, "*");
-        type_keystrokes(&mut doc, "b");
-        assert_eq!(doc.content, "*a\\*b*");
-        let content = doc.content.clone();
-        let parsed = parse_document(&content);
-        let segments: Vec<(&str, bool)> = parsed.lines[0]
-            .styled_segments
-            .iter()
-            .map(|s| (content[s.source.clone()].trim_matches('\\'), s.italic))
-            .collect();
-        assert_eq!(segments, vec![("a", true), ("*b", true)]);
-
-        // Code: a backtick typed inside the content re-fences the span with
-        // a longer run; a backtick typed at the content's end acts as the
-        // closing fence and moves the caret past it.
-        let mut doc = DocumentTab::new("d9".into(), "test.md".into(), String::new(), None, None);
-        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "ab");
-        doc.place(2, false);
-        type_keystrokes(&mut doc, "`");
-        assert_eq!(
-            doc.content, "``a`b``",
-            "the backtick inside the code span did not re-fence"
-        );
-        let content = doc.content.clone();
-        let parsed = parse_document(&content);
-        let segments: Vec<(&str, bool)> = parsed.lines[0]
-            .styled_segments
-            .iter()
-            .map(|s| (content[s.source.clone()].as_ref(), s.code))
-            .collect();
-        assert_eq!(segments, vec![("a`b", true)]);
-
-        let mut doc = DocumentTab::new("d10".into(), "test.md".into(), String::new(), None, None);
-        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "a");
-        type_keystrokes(&mut doc, "`");
-        assert_eq!(doc.content, "`a`", "the closing fence was not over-typed");
-        assert_eq!(doc.cursor_offset(), 3, "the caret did not move past the fence");
-    }
+            .any(|s| s.code && doc.content[s.source.clone()] == *"a`"),
+        "the re-fenced span is not displayed as code"
+    );
+    doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+    assert_eq!(doc.cursor_offset(), 6, "the shortcut did not exit the span");
+    type_keystrokes(&mut doc, "b");
+    doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+    type_keystrokes(&mut doc, "c");
+    assert_eq!(doc.content, "``a```b`c`");
+    let content = doc.content.clone();
+    let parsed = parse_document(&content);
+    let segments: Vec<(&str, bool)> = parsed.lines[0]
+        .styled_segments
+        .iter()
+        .map(|s| (content[s.source.clone()].as_ref(), s.code))
+        .collect();
+    assert_eq!(
+        segments,
+        vec![("a`", true), ("b", false), ("c", true)],
+        "the literal backtick and the code spans rendered wrong"
+    );
+    assert_no_delimiter_runs(&doc);
+}
 
     /// The wrap path escapes the armed span's own delimiters in typed text
     /// (strike: `\~`), a literally typed `<` that would start an HTML tag is
     /// escaped as `\<`, and escape backslashes are hidden in the display
     /// with the caret mapping intact. No zero-width space is ever written.
     #[test]
-    fn wrap_escapes_delimiters_lt_and_hides_escape_backslashes() {
-        // Strike armed, text containing tildes (the wrap path).
-        let mut doc = DocumentTab::new("w1".into(), "test.md".into(), String::new(), None, None);
-        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, "~a~");
-        assert_eq!(doc.content, "~~\\~a\\~~~", "the tildes were not escaped");
-        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
-        type_keystrokes(&mut doc, " b");
-        assert_eq!(doc.content, "~~\\~a\\~~~ b");
-        assert!(!doc.content.contains('\u{200B}'));
-        let content = doc.content.clone();
-        let parsed = parse_document(&content);
-        let segments: Vec<(&str, bool)> = parsed.lines[0]
-            .styled_segments
-            .iter()
-            .map(|s| (content[s.source.clone()].trim_matches('\\'), s.strike))
-            .collect();
-        assert_eq!(segments, vec![("~a", true), ("~", true), (" b", false)]);
-        assert_no_delimiter_runs(&doc);
+fn wrap_escapes_delimiters_lt_and_hides_escape_backslashes() {
+    // Strike armed, text containing tildes (the wrap path).
+    let mut doc = DocumentTab::new("w1".into(), "test.md".into(), String::new(), None, None);
+    doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+    type_keystrokes(&mut doc, "~a~");
+    assert_eq!(doc.content, "~~\\~a\\~~~", "the tildes were not escaped");
+    doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+    type_keystrokes(&mut doc, " b");
+    assert_eq!(doc.content, "~~\\~a\\~~~ b");
+    assert!(!doc.content.contains('\u{200B}'));
+    let content = doc.content.clone();
+    let parsed = parse_document(&content);
+    let segments: Vec<(&str, bool)> = parsed.lines[0]
+        .styled_segments
+        .iter()
+        .map(|s| (content[s.source.clone()].trim_matches('\\'), s.strike))
+        .collect();
+    assert_eq!(segments, vec![("~a", true), ("~", true), (" b", false)]);
+    assert_no_delimiter_runs(&doc);
 
-        // `<` typed before a letter, and a letter typed after a `<`.
-        let mut doc = DocumentTab::new("w2".into(), "test.md".into(), String::new(), None, None);
-        type_keystrokes(&mut doc, "a");
-        type_keystrokes(&mut doc, "<");
-        type_keystrokes(&mut doc, "b");
-        assert_eq!(doc.content, "a\\<b", "the `<` was not escaped");
-        assert_eq!(parse_document(&doc.content).lines[0].display_text, "a<b");
+    // `<` typed before a letter, and a letter typed after a `<`.
+    let mut doc = DocumentTab::new("w2".into(), "test.md".into(), String::new(), None, None);
+    type_keystrokes(&mut doc, "a");
+    type_keystrokes(&mut doc, "<");
+    type_keystrokes(&mut doc, "b");
+    assert_eq!(doc.content, "a\\<b", "the `<` was not escaped");
+    assert_eq!(parse_document(&doc.content).lines[0].display_text, "a<b");
 
-        let mut doc = DocumentTab::new("w3".into(), "test.md".into(), String::new(), None, None);
-        type_keystrokes(&mut doc, "<");
-        type_keystrokes(&mut doc, "b");
-        assert_eq!(doc.content, "\\<b", "the `<` was not escaped");
-        assert_eq!(parse_document(&doc.content).lines[0].display_text, "<b");
+    let mut doc = DocumentTab::new("w3".into(), "test.md".into(), String::new(), None, None);
+    type_keystrokes(&mut doc, "<");
+    type_keystrokes(&mut doc, "b");
+    assert_eq!(doc.content, "\\<b", "the `<` was not escaped");
+    assert_eq!(parse_document(&doc.content).lines[0].display_text, "<b");
 
-        // Escape backslashes are hidden in the display and the offsets map.
-        let mut doc = DocumentTab::new("w4".into(), "test.md".into(), "**a\\*b**".into(), None, None);
-        doc.place(3, false);
-        let parsed = doc.parsed();
-        let line = &parsed.lines[0];
-        assert_eq!(line.display_text, "a*b");
-        for (idx, ch) in line.display_text.char_indices() {
-            let src = line.offset_map.display_to_source(idx);
-            assert!(
-                doc.content.is_char_boundary(src) && doc.content[src..].starts_with(ch),
-                "display {ch:?} at {idx} maps to {src}"
-            );
-        }
-        assert!(!doc.content.contains('\u{200B}'));
+    // Escape backslashes are hidden in the display and the offsets map.
+    let mut doc = DocumentTab::new(
+        "w4".into(),
+        "test.md".into(),
+        "**a\\*b**".into(),
+        None,
+        None,
+    );
+    doc.place(3, false);
+    let parsed = doc.parsed();
+    let line = &parsed.lines[0];
+    assert_eq!(line.display_text, "a*b");
+    for (idx, ch) in line.display_text.char_indices() {
+        let src = line.offset_map.display_to_source(idx);
+        assert!(
+            doc.content.is_char_boundary(src) && doc.content[src..].starts_with(ch),
+            "display {ch:?} at {idx} maps to {src}"
+        );
     }
+    assert!(!doc.content.contains('\u{200B}'));
+}
 
     #[test]
     fn test_wysiwyg_delimiter_skipping_navigation_and_atomic_backspace() {

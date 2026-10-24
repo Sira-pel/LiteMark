@@ -1530,7 +1530,29 @@ fn parse_inline_syntax(
                     && abs.end <= p.inner.end
             });
             if !in_code {
-                raw_hidden.push(abs);
+                raw_hidden.push(abs.clone());
+                // The text segment covering the escape keeps the escaped
+                // character only; the backslash is hidden.
+                let mut rebuilt: Vec<StyledSegment> = Vec::new();
+                for s in styled_segments.drain(..) {
+                    if s.source.start < abs.end && s.source.end > abs.start {
+                        if s.source.start < abs.start {
+                            rebuilt.push(StyledSegment {
+                                source: s.source.start..abs.start,
+                                ..s.clone()
+                            });
+                        }
+                        if s.source.end > abs.end {
+                            rebuilt.push(StyledSegment {
+                                source: abs.end..s.source.end,
+                                ..s.clone()
+                            });
+                        }
+                    } else {
+                        rebuilt.push(s);
+                    }
+                }
+                styled_segments = rebuilt;
             }
             i += 2;
         } else {
@@ -1539,42 +1561,6 @@ fn parse_inline_syntax(
     }
 
     (raw_hidden, inline_pairs, styled_segments)
-}
-
-/// Unicode punctuation and symbols, which CommonMark counts together for
-/// delimiter flanking. Conservative on purpose: unclassified characters
-/// count as normal text, so a wrong guess only skips a repair, never
-/// corrupts content.
-pub(crate) fn is_punct_or_symbol(c: char) -> bool {
-    if c.is_ascii() {
-        return c.is_ascii_punctuation();
-    }
-    matches!(c as u32,
-        0x00A1..=0x00A9
-        | 0x00AB..=0x00B1
-        | 0x00B4
-        | 0x00B6..=0x00B8
-        | 0x00BB
-        | 0x00BF
-        | 0x2010..=0x205E
-        | 0x20A0..=0x20CF
-        | 0x2122
-        | 0x2190..=0x2BFF
-        | 0x2E00..=0x2E7F
-        | 0x3001..=0x303F
-        | 0xFE10..=0xFE19
-        | 0xFE30..=0xFE6F
-        | 0xFF01..=0xFF0F
-        | 0xFF1A..=0xFF20
-        | 0xFF3B..=0xFF40
-        | 0xFF5B..=0xFF65
-        | 0x1F000..=0x1FAFF
-    )
-}
-
-/// A character that keeps a delimiter run flanking-valid next to it.
-pub(crate) fn is_ws_or_punct(c: char) -> bool {
-    c.is_whitespace() || is_punct_or_symbol(c)
 }
 
 /// True when the delimiter byte at `pos` is backslash-escaped and therefore
@@ -1590,15 +1576,15 @@ fn is_escaped_delim(input: &str, pos: usize) -> bool {
     backslashes % 2 == 1
 }
 
-/// Delimiter flanking per CommonMark counts Unicode punctuation and symbols,
-/// so a closing run after punctuation or a symbol and before a letter (and
-/// the mirrored opening run) cannot pair with its opener and the markers
-/// render literally. When the *only* reason a `*`/`**`/`~~` pair fails is
-/// that flanking rule, synthesize the pair for the display: the document
-/// text stays exactly as typed, the markers are hidden, and the styled
-/// segments carry the intended formatting - matching how renderers without
-/// that rule display the same text.
-#[allow(clippy::too_many_lines)]
+/// Delimiter runs that pulldown's emphasis matching rejected can still be
+/// what the user typed. Two rules reject valid-looking pairs: the flanking
+/// punctuation conditions (a closer after punctuation/symbol before a
+/// letter, or the mirrored opener) and the "multiple of 3" odd-match rule
+/// for runs that can both open and close. When runs were left unconsumed
+/// and a relaxed pairing (whitespace flanking only, no odd-match rule)
+/// matches them, synthesize the pair for the display: the document text
+/// stays exactly as typed, the markers are hidden, and the styled segments
+/// carry the intended formatting.
 fn synthesize_flanking_pairs(
     input: &str,
     base: usize,
@@ -1607,13 +1593,12 @@ fn synthesize_flanking_pairs(
     styled_segments: &mut Vec<StyledSegment>,
 ) {
     let bytes = input.as_bytes();
-    let is_delim_byte = |b: u8| b == b'*' || b == b'~' || b == b'`';
-    // Runs of unescaped `*`/`~`, in order.
+    // Runs of unescaped emphasis delimiters, in source order.
     let mut runs: Vec<(usize, usize, u8)> = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
         let b = bytes[i];
-        if (b == b'*' || b == b'~') && !is_escaped_delim(input, i) {
+        if (b == b'*' || b == b'~' || b == b'`') && !is_escaped_delim(input, i) {
             let start = i;
             while i < bytes.len() && bytes[i] == b && !is_escaped_delim(input, i) {
                 i += 1;
@@ -1626,128 +1611,153 @@ fn synthesize_flanking_pairs(
     if runs.len() < 2 {
         return;
     }
-    let in_code = |pos: usize| {
+    fn in_code(inline_pairs: &[InlinePair], pos: usize) -> bool {
         inline_pairs
             .iter()
             .any(|p| p.kind == InlineTagKind::Code && p.inner.start <= pos && pos < p.inner.end)
-    };
-    // Flanking helpers over the raw characters.
-    let char_before = |pos: usize| input[..pos].chars().next_back();
-    let char_at = |pos: usize| input[pos..].chars().next();
-    let opener_valid = |o_start: usize, o_end: usize| {
-        // left-flanking: not followed by whitespace, and either not followed
-        // by punctuation or preceded by whitespace/punctuation
-        match char_at(o_end) {
-            None => false,
-            Some(c) if c.is_whitespace() => false,
-            Some(c) if !is_punct_or_symbol(c) => true,
-            Some(_) => {
-                char_before(o_start).is_none_or(|c| c.is_whitespace() || is_punct_or_symbol(c))
-            }
-        }
-    };
-    let closer_valid = |c_start: usize, c_end: usize| {
-        // right-flanking: not preceded by whitespace, and either not preceded
-        // by punctuation or followed by whitespace/punctuation
-        match char_before(c_start) {
-            None => false,
-            Some(c) if c.is_whitespace() => false,
-            Some(c) if !is_punct_or_symbol(c) => true,
-            Some(_) => char_at(c_end).is_none_or(|c| c.is_whitespace() || is_punct_or_symbol(c)),
-        }
-    };
-    let mut synthesized: Vec<(usize, usize, usize, usize)> = Vec::new();
-    for close_idx in 0..runs.len() {
-        let (c_start, c_end, ch) = runs[close_idx];
-        if in_code(c_start) {
+    }
+    // A run consumed as the opener or closer of a parsed pair is not
+    // eligible for re-pairing.
+    fn consumed(inline_pairs: &[InlinePair], pos: usize) -> bool {
+        inline_pairs
+            .iter()
+            .any(|p| p.open_delim.start == pos || p.close_delim.start == pos)
+    }
+    let mut used = vec![false; runs.len()];
+    for open_idx in 0..runs.len() {
+        if used[open_idx]
+            || in_code(inline_pairs, runs[open_idx].0)
+            || consumed(inline_pairs, runs[open_idx].0)
+        {
             continue;
         }
-        if c_end - c_start != 2 && !(ch == b'*' && c_end - c_start == 1) {
+        let (o_start, o_end, ch) = runs[open_idx];
+        // An opener must be followed by something (not whitespace).
+        if input[o_end..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+        {
             continue;
         }
-        if ch == b'~' && c_end - c_start != 2 {
-            continue;
-        }
-        let before_punct = char_before(c_start).is_some_and(is_punct_or_symbol);
-        let after = char_at(c_end);
-        let after_plain = after.is_some_and(|c| !is_ws_or_punct(c));
-        let opener_valid_now = opener_valid(c_start, c_end);
-        // Closer side: the closer hugs punctuation and is followed by text,
-        // so it cannot close; the opener must be valid on its own.
-        if before_punct && after_plain && opener_valid_now {
-            if let Some(&(o_start, o_end, _och)) =
-                runs[..close_idx].iter().rev().find(|&&(os, oe, och)| {
-                    och == ch
-                        && oe < c_start
-                        && oe - os == c_end - c_start
-                        && !in_code(os)
-                        && opener_valid(os, oe)
-                        && !input[oe..c_start].bytes().enumerate().any(|(delta, b)| {
-                            is_delim_byte(b) && !is_escaped_delim(input, oe + delta)
-                        })
-                })
+        for close_idx in open_idx + 1..runs.len() {
+            if used[close_idx]
+                || in_code(inline_pairs, runs[close_idx].0)
+                || consumed(inline_pairs, runs[close_idx].0)
             {
-                synthesized.push((o_start, o_end, c_start, c_end));
                 continue;
             }
-        }
-        // Opener side: the opener sits between text and punctuation, so it
-        // cannot open; the closer must be valid on its own.
-        let before_plain = char_before(c_start).is_some_and(|c| !is_ws_or_punct(c));
-        let after_punct = after.is_some_and(is_punct_or_symbol);
-        if before_plain && after_punct {
-            if let Some(&(c2_start, c2_end, _och)) =
-                runs[close_idx + 1..].iter().find(|&&(os, oe, och)| {
-                    och == ch
-                        && os > c_end
-                        && oe - os == c_end - c_start
-                        && !in_code(os)
-                        && closer_valid(os, oe)
-                        && !input[c_end..os].bytes().enumerate().any(|(delta, b)| {
-                            is_delim_byte(b) && !is_escaped_delim(input, c_end + delta)
-                        })
-                })
-            {
-                synthesized.push((c_start, c_end, c2_start, c2_end));
+            let (c_start, c_end, c_ch) = runs[close_idx];
+            if c_ch != ch || c_start == o_end {
+                continue;
             }
+            // Equal-length emphasis runs; code fences pair with a longer
+            // later run (the content's own trailing backticks merged with
+            // the closer), taking its tail as the closer. Single-backtick
+            // openers are not re-paired: unequal single/double backticks in
+            // ordinary text stay literal.
+            if ch == b'`' {
+                if o_end - o_start < 2 || c_end - c_start <= o_end - o_start {
+                    continue;
+                }
+            } else if c_end - c_start != o_end - o_start
+                || (ch == b'~' && c_end - c_start != 2)
+                || c_end - c_start > 2
+            {
+                continue;
+            }
+            // Relaxed flanking: only the whitespace conditions apply. The
+            // punctuation conditions and the odd-match rule are exactly what
+            // rejected these runs in the first place.
+            if input[c_start..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+            {
+                continue;
+            }
+            let closer_start = if ch == b'`' && c_end - c_start > o_end - o_start {
+                c_end - (o_end - o_start)
+            } else {
+                c_start
+            };
+            let len = if ch == b'`' {
+                o_end - o_start
+            } else {
+                c_end - c_start
+            };
+            let kind = if ch == b'`' {
+                InlineTagKind::Code
+            } else if ch == b'~' {
+                InlineTagKind::Strike
+            } else if len == 2 {
+                InlineTagKind::Bold
+            } else {
+                InlineTagKind::Italic
+            };
+            let inner = if ch == b'`' {
+                base + o_end..base + closer_start
+            } else {
+                base + o_end..base + c_start
+            };
+            used[open_idx] = true;
+            used[close_idx] = true;
+            raw_hidden.push(base + o_start..base + o_end);
+            raw_hidden.push(base + closer_start..base + c_end);
+            inline_pairs.push(InlinePair {
+                kind,
+                open_delim: base + o_start..base + o_end,
+                inner: inner.clone(),
+                close_delim: base + closer_start..base + c_end,
+            });
+            let seg = StyledSegment {
+                source: inner.clone(),
+                bold: kind == InlineTagKind::Bold,
+                italic: kind == InlineTagKind::Italic,
+                underline: false,
+                strike: kind == InlineTagKind::Strike,
+                code: kind == InlineTagKind::Code,
+                link_url: None,
+            };
+            // The region was literal text: trim the old segments to the
+            // parts outside the synthesized span (the remainder is hidden by
+            // the marker runs below).
+            let mut rebuilt: Vec<StyledSegment> = Vec::new();
+            for s in styled_segments.drain(..) {
+                if s.source.start < inner.end && s.source.end > inner.start {
+                    if s.source.start < inner.start {
+                        rebuilt.push(StyledSegment {
+                            source: s.source.start..inner.start,
+                            ..s.clone()
+                        });
+                    }
+                    if s.source.end > inner.end {
+                        rebuilt.push(StyledSegment {
+                            source: inner.end..s.source.end,
+                            ..s
+                        });
+                    }
+                } else {
+                    rebuilt.push(s);
+                }
+            }
+            *styled_segments = rebuilt;
+            styled_segments
+                .retain(|s| !(s.source.start >= inner.start && s.source.end <= inner.end));
+            for run in [
+                base + o_start..base + o_end,
+                base + closer_start..base + c_end,
+            ] {
+                styled_segments
+                    .retain(|s| !(s.source.start >= run.start && s.source.end <= run.end));
+            }
+            let pos = styled_segments
+                .iter()
+                .position(|s| s.source.start > inner.start)
+                .unwrap_or(styled_segments.len());
+            styled_segments.insert(pos, seg);
+            break;
         }
-    }
-    for (o_start, o_end, c_start, c_end) in synthesized {
-        let len = c_end - c_start;
-        let kind = if input.as_bytes()[o_start] == b'~' {
-            InlineTagKind::Strike
-        } else if len == 2 {
-            InlineTagKind::Bold
-        } else {
-            InlineTagKind::Italic
-        };
-        let inner = base + o_end..base + c_start;
-        raw_hidden.push(base + o_start..base + o_end);
-        raw_hidden.push(base + c_start..base + c_end);
-        inline_pairs.push(InlinePair {
-            kind,
-            open_delim: base + o_start..base + o_end,
-            inner: inner.clone(),
-            close_delim: base + c_start..base + c_end,
-        });
-        let seg = StyledSegment {
-            source: inner.clone(),
-            bold: kind == InlineTagKind::Bold,
-            italic: kind == InlineTagKind::Italic,
-            underline: false,
-            strike: kind == InlineTagKind::Strike,
-            code: false,
-            link_url: None,
-        };
-        styled_segments.retain(|s| !(s.source.start >= inner.start && s.source.end <= inner.end));
-        for run in [base + o_start..base + o_end, base + c_start..base + c_end] {
-            styled_segments.retain(|s| !(s.source.start >= run.start && s.source.end <= run.end));
-        }
-        let pos = styled_segments
-            .iter()
-            .position(|s| s.source.start > inner.start)
-            .unwrap_or(styled_segments.len());
-        styled_segments.insert(pos, seg);
     }
 }
 
