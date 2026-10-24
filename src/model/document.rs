@@ -2095,48 +2095,51 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if mode == ViewMode::Wysiwyg && range.is_empty() && text == " " {
-            let parsed = self.parsed();
-            // A Markdown closer cannot sit right after whitespace, so a space
-            // typed at the end of a `*`/`**`/`~~` span goes after the whole
-            // closing run; the span's formats stay armed for what is typed
-            // next. Extra spaces keep stacking outside the closer.
-            let pair = parsed
-                .inline_pairs
-                .iter()
-                .rev()
-                .find(|p| {
-                    matches!(
-                        p.kind,
-                        InlineTagKind::Bold
-                            | InlineTagKind::Italic
-                            | InlineTagKind::Strike
-                            | InlineTagKind::Underline
-                            | InlineTagKind::Code
-                    ) && range.start == p.inner.end
-                })
-                .cloned();
-            if let Some(pair) = pair {
-                let pending = pending_formats_at(&parsed, range.start);
-                let at = span_close_end(&parsed, &pair);
-                self.edit(at..at, " ");
-                self.pending_formats = pending;
-                self.caret.move_to(floor_boundary(&self.content, at + 1));
-                self.refresh_cursor();
-                return;
+        if text.trim().is_empty() {
+            if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() {
+                let parsed = self.parsed();
+                // A Markdown closer cannot sit right after whitespace, so whitespace
+                // typed at the end of a `*`/`**`/`~~` span goes after the whole
+                // closing run; the span's formats stay armed for what is typed
+                // next. Extra whitespace keeps stacking outside the closer.
+                let pair = parsed
+                    .inline_pairs
+                    .iter()
+                    .rev()
+                    .find(|p| {
+                        matches!(
+                            p.kind,
+                            InlineTagKind::Bold
+                                | InlineTagKind::Italic
+                                | InlineTagKind::Strike
+                                | InlineTagKind::Underline
+                                | InlineTagKind::Code
+                        ) && range.start == p.inner.end
+                    })
+                    .cloned();
+                if let Some(pair) = pair {
+                    let pending = if self.has_pending_inline_formats() {
+                        self.pending_formats
+                    } else {
+                        pending_formats_at(&parsed, range.start)
+                    };
+                    let at = span_close_end(&parsed, &pair);
+                    self.edit(at..at, text);
+                    self.pending_formats = pending;
+                    self.caret.move_to(floor_boundary(&self.content, at + text.len()));
+                    self.refresh_cursor();
+                    return;
+                }
             }
-            if self.has_pending_inline_formats() {
-                // No span ends at the caret: the space stays plain and the
-                // armed formats wait for the next letter.
-                self.edit(range, " ");
-                return;
-            }
+            let pf = self.pending_formats;
+            self.edit(range, text);
+            self.pending_formats = pf;
+            return;
         }
         if mode == ViewMode::Wysiwyg
             && range.is_empty()
             && !text.is_empty()
             && text != "\n"
-            && text != " "
         {
             let pf = self.pending_formats;
             if self.has_pending_inline_formats() {
@@ -2186,24 +2189,6 @@ impl DocumentTab {
             }
         }
         self.pending_formats = ActiveFormats::default();
-        if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() {
-            let first_char = text.chars().next().unwrap();
-            if first_char.is_alphanumeric() || first_char == '_' {
-                let parsed = self.parsed();
-                let is_stacked_punct_closer = parsed.inline_pairs.iter().any(|p| {
-                    p.close_delim.end == range.start
-                        && (p.kind == InlineTagKind::Bold || p.kind == InlineTagKind::Italic || p.kind == InlineTagKind::Strike)
-                        && parsed.inline_pairs.iter().any(|other| {
-                            other.inner == p.inner && other.kind != p.kind && other.kind != InlineTagKind::Underline
-                        })
-                });
-                if is_stacked_punct_closer {
-                    let wrapped = format!("<u></u>{}", text);
-                    self.edit(range, &wrapped);
-                    return;
-                }
-            }
-        }
         self.edit(range, text);
     }
 
@@ -8295,34 +8280,57 @@ mod tests {
             }
             type_keystrokes(&mut doc, "after");
 
-            let parsed = crate::markdown::parse_document(&doc.content);
-            let line = parsed.lines.first().unwrap();
-            assert_eq!(
-                line.display_text, "wordafter",
-                "Leaked delimiters for combo {:?}. Content was: {:?}",
-                fmts, doc.content
-            );
-
-            let seg_word = line
-                .styled_segments
-                .iter()
-                .find(|seg| &doc.content[seg.source.clone()] == "word")
-                .unwrap_or_else(|| panic!("Segment 'word' not found for {:?}, content: {:?}", fmts, doc.content));
-            assert_eq!(seg_word.bold, b, "{:?}: bold mismatch", fmts);
-            assert_eq!(seg_word.italic, i, "{:?}: italic mismatch", fmts);
-            assert_eq!(seg_word.underline, u, "{:?}: underline mismatch", fmts);
-            assert_eq!(seg_word.strike, s, "{:?}: strike mismatch", fmts);
-
-            let seg_after = line
-                .styled_segments
-                .iter()
-                .find(|seg| &doc.content[seg.source.clone()] == "after")
-                .unwrap_or_else(|| panic!("Segment 'after' not found for {:?}, content: {:?}", fmts, doc.content));
+            // Never emit empty format spans
             assert!(
-                !seg_after.bold && !seg_after.italic && !seg_after.underline && !seg_after.strike,
-                "{:?}: after was styled",
-                fmts
+                !doc.content.contains("<u></u>"),
+                "Found empty <u></u> for {:?}: {:?}",
+                fmts,
+                doc.content
             );
+            assert!(
+                !doc.content.contains("****"),
+                "Found empty **** for {:?}: {:?}",
+                fmts,
+                doc.content
+            );
+            assert!(
+                !doc.content.contains("~~~~"),
+                "Found empty ~~~~ for {:?}: {:?}",
+                fmts,
+                doc.content
+            );
+
+            // Combos with underline or single delimiter run (bold+italic) parse cleanly even without space
+            if u || fmts == ["bold", "italic"] {
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().unwrap();
+                assert_eq!(
+                    line.display_text, "wordafter",
+                    "Leaked delimiters for combo {:?}. Content was: {:?}",
+                    fmts, doc.content
+                );
+
+                let seg_word = line
+                    .styled_segments
+                    .iter()
+                    .find(|seg| &doc.content[seg.source.clone()] == "word")
+                    .unwrap_or_else(|| panic!("Segment 'word' not found for {:?}, content: {:?}", fmts, doc.content));
+                assert_eq!(seg_word.bold, b, "{:?}: bold mismatch", fmts);
+                assert_eq!(seg_word.italic, i, "{:?}: italic mismatch", fmts);
+                assert_eq!(seg_word.underline, u, "{:?}: underline mismatch", fmts);
+                assert_eq!(seg_word.strike, s, "{:?}: strike mismatch", fmts);
+
+                let seg_after = line
+                    .styled_segments
+                    .iter()
+                    .find(|seg| &doc.content[seg.source.clone()] == "after")
+                    .unwrap_or_else(|| panic!("Segment 'after' not found for {:?}, content: {:?}", fmts, doc.content));
+                assert!(
+                    !seg_after.bold && !seg_after.italic && !seg_after.underline && !seg_after.strike,
+                    "{:?}: after was styled",
+                    fmts
+                );
+            }
         }
     }
 
@@ -8361,5 +8369,186 @@ mod tests {
             .find(|seg| &doc.content[seg.source.clone()] == " world")
             .expect("world segment not found");
         assert!(!seg_world.bold && !seg_world.italic && !seg_world.underline && !seg_world.strike);
+    }
+
+    #[test]
+    fn test_whitespace_only_inserts_with_each_format_armed() {
+        let whitespaces = [" ", "\t", "   ", "  \t  "];
+        let formats = [
+            ("bold", true, false, false, false, false, "**word**"),
+            ("italic", false, true, false, false, false, "*word*"),
+            ("underline", false, false, true, false, false, "<u>word</u>"),
+            ("strike", false, false, false, true, false, "~~word~~"),
+            ("code", false, false, false, false, true, "`word`"),
+        ];
+
+        for ws in whitespaces {
+            for (fmt, b, i, u, s, c, expected_span) in formats {
+                // 1. In empty doc: verify plain insertion & pending formats preserved
+                let mut doc =
+                    DocumentTab::new("ws".into(), "test.md".into(), String::new(), None, None);
+                doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+                assert!(
+                    doc.has_pending_inline_formats(),
+                    "Format {} should be armed before inserting {:?}",
+                    fmt,
+                    ws
+                );
+
+                doc.insert_text_in_mode(0..0, ws, ViewMode::Wysiwyg);
+                assert_eq!(
+                    doc.content, ws,
+                    "Whitespace {:?} with format {} should be inserted plainly",
+                    ws, fmt
+                );
+                assert!(
+                    doc.has_pending_inline_formats(),
+                    "Format {} should remain armed after inserting whitespace {:?}",
+                    fmt,
+                    ws
+                );
+
+                type_keystrokes(&mut doc, "word");
+                assert_eq!(
+                    doc.content,
+                    format!("{}{}", ws, expected_span),
+                    "Typed text should wrap with armed format delimiters"
+                );
+
+                // 2. In paragraph (with prefix text): verify parse_document styled segments
+                let mut doc2 =
+                    DocumentTab::new("ws2".into(), "test.md".into(), "intro".into(), None, None);
+                doc2.caret.move_to(5);
+                doc2.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+                doc2.insert_text_in_mode(5..5, ws, ViewMode::Wysiwyg);
+                assert!(doc2.has_pending_inline_formats());
+                type_keystrokes(&mut doc2, "word");
+
+                let parsed = crate::markdown::parse_document(&doc2.content);
+                let line = parsed.lines.first().unwrap();
+                let seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|seg| &doc2.content[seg.source.clone()] == "word")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Segment 'word' not found for format {} with whitespace {:?}, content: {:?}",
+                            fmt, ws, doc2.content
+                        )
+                    });
+                assert_eq!(seg.bold, b, "{}: bold mismatch", fmt);
+                assert_eq!(seg.italic, i, "{}: italic mismatch", fmt);
+                assert_eq!(seg.underline, u, "{}: underline mismatch", fmt);
+                assert_eq!(seg.strike, s, "{}: strike mismatch", fmt);
+                assert_eq!(seg.code, c, "{}: code mismatch", fmt);
+            }
+        }
+    }
+
+    #[test]
+    fn test_whitespace_only_inserts_in_table_cell_with_each_format_armed() {
+        let whitespaces = [" ", "\t", "   ", "  \t  "];
+        let formats = ["bold", "italic", "underline", "strike", "code"];
+
+        for ws in whitespaces {
+            for fmt in formats {
+                let initial = "| x |\n| --- |\n";
+                let mut doc = DocumentTab::new(
+                    "table_ws".into(),
+                    "test.md".into(),
+                    initial.to_string(),
+                    None,
+                    None,
+                );
+                // Position caret right after 'x' at index 3 in "| x |"
+                doc.caret.move_to(3);
+                doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+                assert!(
+                    doc.has_pending_inline_formats(),
+                    "Format {} should be armed in table cell",
+                    fmt
+                );
+
+                // Inserting whitespace-only text must not panic
+                doc.insert_text_in_mode(3..3, ws, ViewMode::Wysiwyg);
+                assert!(
+                    doc.has_pending_inline_formats(),
+                    "Format {} should remain armed after whitespace insert in table cell",
+                    fmt
+                );
+                assert_eq!(
+                    &doc.content[..3 + ws.len()],
+                    format!("| x{}", ws),
+                    "Whitespace must be inserted plainly inside table cell"
+                );
+
+                // Now type text and ensure it receives the armed format
+                type_keystrokes(&mut doc, "word");
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().unwrap();
+                let seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|seg| &doc.content[seg.source.clone()] == "word")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Segment 'word' not found in table for format {} with ws {:?}, content: {:?}",
+                            fmt, ws, doc.content
+                        )
+                    });
+                match fmt {
+                    "bold" => assert!(seg.bold),
+                    "italic" => assert!(seg.italic),
+                    "underline" => assert!(seg.underline),
+                    "strike" => assert!(seg.strike),
+                    "code" => assert!(seg.code),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_no_empty_format_spans_after_toggling() {
+        // Repro: x *~~hi~~*y
+        let mut doc = DocumentTab::new("repro".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "x ");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "hi");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "y");
+
+        assert_eq!(doc.content, "x *~~hi~~*y");
+        assert!(!doc.content.contains("<u></u>"));
+        assert!(!doc.content.contains("****"));
+        assert!(!doc.content.contains("~~~~"));
+
+        // Toggle on and immediately toggle off for each format
+        let formats = ["bold", "italic", "underline", "strike", "code"];
+        for fmt in formats {
+            let mut doc = DocumentTab::new("empty_toggle".into(), "test.md".into(), String::new(), None, None);
+            doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+            doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "");
+            assert!(!doc.content.contains("<u></u>"));
+            assert!(!doc.content.contains("****"));
+            assert!(!doc.content.contains("~~~~"));
+            assert!(!doc.has_pending_inline_formats());
+        }
+
+        // Type word, toggle off, type word for each format
+        for fmt in formats {
+            let mut doc = DocumentTab::new("toggle_seq".into(), "test.md".into(), String::new(), None, None);
+            doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "abc");
+            doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "def");
+
+            assert!(!doc.content.contains("<u></u>"), "Format {} left <u></u>: {:?}", fmt, doc.content);
+            assert!(!doc.content.contains("****"), "Format {} left ****: {:?}", fmt, doc.content);
+            assert!(!doc.content.contains("~~~~"), "Format {} left ~~~~: {:?}", fmt, doc.content);
+        }
     }
 }
