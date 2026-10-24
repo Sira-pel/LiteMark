@@ -1442,10 +1442,8 @@ impl DocumentTab {
                         &self.content,
                         &parsed,
                         pline,
-                        p_start,
-                        p_end,
-                        replace_start,
-                        replace_end,
+                        p_start..p_end,
+                        replace_start..replace_end,
                         tag_kind,
                         should_turn_on,
                     );
@@ -3820,16 +3818,16 @@ fn expand_replace_to_matching_neighbors(
     content: &str,
     parsed: &ParsedDocument,
     pline: &ParsedLine,
-    p_start: usize,
-    p_end: usize,
-    mut replace_start: usize,
-    mut replace_end: usize,
+    p_range: Range<usize>,
+    mut replace: Range<usize>,
     tag_kind: InlineTagKind,
     should_turn_on: bool,
 ) -> (usize, usize) {
     if !should_turn_on {
-        return (replace_start, replace_end);
+        return (replace.start, replace.end);
     }
+    let p_start = p_range.start;
+    let p_end = p_range.end;
     let overlapping: Vec<&StyledSegment> = pline
         .styled_segments
         .iter()
@@ -3839,7 +3837,7 @@ fn expand_replace_to_matching_neighbors(
         .windows(2)
         .any(|w| segment_flags(w[0]) != segment_flags(w[1]))
     {
-        return (replace_start, replace_end);
+        return (replace.start, replace.end);
     }
     let mut target = overlapping
         .first()
@@ -3851,10 +3849,10 @@ fn expand_replace_to_matching_neighbors(
         InlineTagKind::Underline => target.underline = true,
         InlineTagKind::Strike => target.strike = true,
         InlineTagKind::Code => target.code = true,
-        InlineTagKind::Link => return (replace_start, replace_end),
+        InlineTagKind::Link => return (replace.start, replace.end),
     }
     if !target.any_set() {
-        return (replace_start, replace_end);
+        return (replace.start, replace.end);
     }
 
     let mut left_front = p_start;
@@ -3869,9 +3867,9 @@ fn expand_replace_to_matching_neighbors(
                 && gap_is_ws_and_markers(content, &pline.hidden_ranges, seg.source.end, left_front)
             {
                 let (open, close) = covering_span(parsed, pline, seg);
-                if open < replace_start || close > replace_end || seg.source.start < left_front {
-                    replace_start = replace_start.min(open);
-                    replace_end = replace_end.max(close);
+                if open < replace.start || close > replace.end || seg.source.start < left_front {
+                    replace.start = replace.start.min(open);
+                    replace.end = replace.end.max(close);
                     left_front = left_front.min(seg.source.start);
                     changed = true;
                 }
@@ -3885,9 +3883,9 @@ fn expand_replace_to_matching_neighbors(
                 )
             {
                 let (open, close) = covering_span(parsed, pline, seg);
-                if close > replace_end || open < replace_start || seg.source.end > right_front {
-                    replace_start = replace_start.min(open);
-                    replace_end = replace_end.max(close);
+                if close > replace.end || open < replace.start || seg.source.end > right_front {
+                    replace.start = replace.start.min(open);
+                    replace.end = replace.end.max(close);
                     right_front = right_front.max(seg.source.end);
                     changed = true;
                 }
@@ -3897,7 +3895,7 @@ fn expand_replace_to_matching_neighbors(
             break;
         }
     }
-    (replace_start, replace_end)
+    (replace.start, replace.end)
 }
 
 /// The end of the whole closing-marker run of the stacked group `pair`
@@ -4180,12 +4178,20 @@ fn render_styled_slices(
     render_work_slices(&work, sel_range, offset)
 }
 
+fn slice_has_edge_ws(s: &WorkSlice) -> bool {
+    s.text.starts_with(char::is_whitespace) || s.text.ends_with(char::is_whitespace)
+}
+
 fn render_work_slices(
     slices: &[WorkSlice],
     sel_range: &mut Option<Range<usize>>,
     offset: usize,
 ) -> String {
-    let merged = coalesce_ws_between_matching(peel_flanking_whitespace(merge_work_slices(slices)));
+    // Merge matching flags first so turning a format back on joins the
+    // neighbor. Do not peel yet: shared outer formats (`*…*`, `<u>…</u>`)
+    // must still wrap spaces, which is valid as long as the opener/closer
+    // sit against non-space at the ends.
+    let merged = coalesce_ws_between_matching(merge_work_slices(slices));
 
     if merged.is_empty() {
         return String::new();
@@ -4231,6 +4237,27 @@ fn render_work_slices(
     }
 
     if all_italic {
+        let is_middle = merged.len() == 3
+            && !merged.iter().any(|s| {
+                s.flags.strike || s.flags.underline || s.flags.code || slice_has_edge_ws(s)
+            })
+            && merged[0].flags.bold
+            && !merged[1].flags.bold
+            && merged[2].flags.bold;
+        if is_middle {
+            let mut out = String::from("_");
+            for s in &merged {
+                let prefix = if s.flags.bold { "**" } else { "" };
+                let suffix = if s.flags.bold { "**" } else { "" };
+                mark_work_sel(sel_range, offset + out.len() + prefix.len(), s);
+                out.push_str(prefix);
+                out.push_str(&s.text);
+                out.push_str(suffix);
+            }
+            out.push('_');
+            return out;
+        }
+
         let inner = map_work_flags(&merged, |mut f| {
             f.italic = false;
             f
@@ -4240,6 +4267,29 @@ fn render_work_slices(
     }
 
     if all_bold {
+        let is_middle = merged.len() == 3
+            && !merged.iter().any(|s| {
+                s.flags.strike || s.flags.underline || s.flags.code || slice_has_edge_ws(s)
+            })
+            && merged[0].flags.italic
+            && !merged[1].flags.italic
+            && merged[2].flags.italic;
+        if is_middle {
+            let mut out = String::new();
+            for s in &merged {
+                let (prefix, suffix) = if s.flags.italic {
+                    ("_**", "**_")
+                } else {
+                    ("**", "**")
+                };
+                mark_work_sel(sel_range, offset + out.len() + prefix.len(), s);
+                out.push_str(prefix);
+                out.push_str(&s.text);
+                out.push_str(suffix);
+            }
+            return out;
+        }
+
         let inner = map_work_flags(&merged, |mut f| {
             f.bold = false;
             f
@@ -4268,6 +4318,14 @@ fn render_work_slices(
             let inner_str = render_work_slices(&inner, sel_range, offset + 1);
             return format!("`{}`", inner_str);
         }
+    }
+
+    // Formats diverge here, so peel spaces out of flanking-sensitive spans
+    // before writing markers. That turns `** aa` / `aa **` into ` **aa` /
+    // `aa** ` and stops `***` / `****` from forming at a word edge.
+    let merged = coalesce_ws_between_matching(peel_flanking_whitespace(merged));
+    if merged.len() <= 1 {
+        return render_work_slices(&merged, sel_range, offset);
     }
 
     // Adjacent spans whose delimiters collide (a closer and the next opener
