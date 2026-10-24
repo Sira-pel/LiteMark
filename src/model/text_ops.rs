@@ -23,11 +23,23 @@ pub struct DiffEdit {
     pub start: usize,
     pub deleted: String,
     pub inserted: String,
+    /// Caret restored by undo. Defaults to the end of the deleted range.
+    pub undo_caret: usize,
 }
 
 impl DiffEdit {
     pub fn cost(&self) -> usize {
         self.deleted.len() + self.inserted.len()
+    }
+
+    pub fn new(start: usize, deleted: String, inserted: String) -> Self {
+        let undo_caret = start + deleted.len();
+        Self {
+            start,
+            deleted,
+            inserted,
+            undo_caret,
+        }
     }
 }
 
@@ -168,11 +180,13 @@ impl UndoHistory {
         }
         let inserted = edit.deleted;
         content.replace_range(edit.start..end, &inserted);
-        let caret = edit.start + inserted.len();
+        let caret = edit.undo_caret.min(content.len());
+        let redo_caret = edit.start + edit.inserted.len();
         let inverse = DiffEdit {
             start: edit.start,
             deleted: edit.inserted,
             inserted,
+            undo_caret: redo_caret,
         };
         self.redo_bytes += inverse.cost();
         self.redo.push(inverse);
@@ -191,11 +205,13 @@ impl UndoHistory {
         }
         let inserted = edit.deleted;
         content.replace_range(edit.start..end, &inserted);
-        let caret = edit.start + inserted.len();
+        let caret = edit.undo_caret.min(content.len());
+        let undo_caret = edit.start + edit.inserted.len();
         let inverse = DiffEdit {
             start: edit.start,
             deleted: edit.inserted,
             inserted,
+            undo_caret,
         };
         self.undo_bytes += inverse.cost();
         self.undo.push(inverse);
@@ -1095,11 +1111,11 @@ mod tests {
         for index in 0..200 {
             let insert = format!("w{index}");
             let start = content.len();
-            history.push(DiffEdit {
+            history.push(DiffEdit::new(
                 start,
-                deleted: String::new(),
-                inserted: insert.clone(),
-            });
+                String::new(),
+                insert.clone(),
+            ));
             content.push_str(&insert);
         }
         let full_copies = content.len() * 200;
@@ -1123,11 +1139,7 @@ mod tests {
             let at = content.len();
             let text = ch.to_string();
             history.push_at(
-                DiffEdit {
-                    start: at,
-                    deleted: String::new(),
-                    inserted: text.clone(),
-                },
+                DiffEdit::new(at, String::new(), text.clone()),
                 start + Duration::from_millis(20 * index as u64),
             );
             content.push_str(&text);
@@ -1137,29 +1149,17 @@ mod tests {
         assert_eq!(content, "");
 
         history.push_at(
-            DiffEdit {
-                start: 0,
-                deleted: String::new(),
-                inserted: "hi".into(),
-            },
+            DiffEdit::new(0, String::new(), "hi".into()),
             start + Duration::from_millis(40),
         );
         content.push_str("hi");
         history.push_at(
-            DiffEdit {
-                start: 2,
-                deleted: String::new(),
-                inserted: " ".into(),
-            },
+            DiffEdit::new(2, String::new(), " ".into()),
             start + Duration::from_millis(60),
         );
         content.push(' ');
         history.push_at(
-            DiffEdit {
-                start: 3,
-                deleted: String::new(),
-                inserted: "you".into(),
-            },
+            DiffEdit::new(3, String::new(), "you".into()),
             start + Duration::from_millis(80),
         );
         content.push_str("you");
@@ -1171,20 +1171,12 @@ mod tests {
         let mut paused = UndoHistory::default();
         let mut paused_content = String::new();
         paused.push_at(
-            DiffEdit {
-                start: 0,
-                deleted: String::new(),
-                inserted: "a".into(),
-            },
+            DiffEdit::new(0, String::new(), "a".into()),
             start,
         );
         paused_content.push('a');
         paused.push_at(
-            DiffEdit {
-                start: 1,
-                deleted: String::new(),
-                inserted: "b".into(),
-            },
+            DiffEdit::new(1, String::new(), "b".into()),
             start + Duration::from_millis(TYPING_BURST_MS),
         );
         paused_content.push('b');
@@ -1193,29 +1185,13 @@ mod tests {
         assert_eq!(paused_content, "a");
 
         assert!(!coalesce_typing(
-            &DiffEdit {
-                start: 0,
-                deleted: "x".into(),
-                inserted: String::new(),
-            },
-            &DiffEdit {
-                start: 0,
-                deleted: String::new(),
-                inserted: "y".into(),
-            },
+            &DiffEdit::new(0, "x".into(), String::new()),
+            &DiffEdit::new(0, String::new(), "y".into()),
             0,
         ));
         assert!(!coalesce_typing(
-            &DiffEdit {
-                start: 0,
-                deleted: String::new(),
-                inserted: "a".into(),
-            },
-            &DiffEdit {
-                start: 4,
-                deleted: String::new(),
-                inserted: "b".into(),
-            },
+            &DiffEdit::new(0, String::new(), "a".into()),
+            &DiffEdit::new(4, String::new(), "b".into()),
             0,
         ));
     }
@@ -1224,11 +1200,7 @@ mod tests {
     fn undo_caret_is_the_end_of_the_restored_text() {
         let mut history = UndoHistory::default();
         let mut content = "ab".to_string();
-        history.push(DiffEdit {
-            start: 0,
-            deleted: "ab".into(),
-            inserted: "😀".into(),
-        });
+        history.push(DiffEdit::new(0, "ab".into(), "😀".into()));
         content.replace_range(0..2, "😀");
         let caret = history.undo(&mut content).unwrap();
         assert_eq!(content, "ab");

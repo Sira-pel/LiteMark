@@ -132,6 +132,9 @@ pub struct DocumentTab {
     /// formatted span, so that edit and the typing after it share one undo
     /// step.
     next_edit_opens_span_group: bool,
+    /// When set, the next `edit` records this caret on its undo entry instead
+    /// of the end of the deleted range (Enter rewrites a whole span).
+    next_undo_caret: Option<usize>,
 }
 
 impl DocumentTab {
@@ -169,6 +172,7 @@ impl DocumentTab {
             cached_parse: None,
             history: UndoHistory::default(),
             next_edit_opens_span_group: false,
+            next_undo_caret: None,
         };
         tab.refresh_cursor();
         tab
@@ -244,11 +248,9 @@ impl DocumentTab {
             self.refresh_cursor();
             return;
         }
-        let edit = DiffEdit {
-            start: range.start,
-            deleted,
-            inserted: new_text.to_string(),
-        };
+        let undo_caret = self.next_undo_caret.take().unwrap_or(range.end);
+        let mut edit = DiffEdit::new(range.start, deleted, new_text.to_string());
+        edit.undo_caret = undo_caret;
         if opens_span_group {
             self.history.push_span_opening(edit);
         } else {
@@ -522,37 +524,33 @@ impl DocumentTab {
         }
         let cursor = range.start;
         let parsed = self.parsed();
-        let Some(anchor) = parsed
-            .inline_pairs
-            .iter()
-            .rev()
-            .find(|p| {
-                p.kind != InlineTagKind::Link && cursor >= p.inner.start && cursor <= p.inner.end
-            })
-            .cloned()
-        else {
-            return false;
-        };
-        // Every format spanning the caret with the same content range is one
-        // nesting level (e.g. `***x***` is bold and italic around `x`).
-        let mut group: Vec<InlinePair> = parsed
+        let mut spanning: Vec<InlinePair> = parsed
             .inline_pairs
             .iter()
             .filter(|p| {
                 p.kind != InlineTagKind::Link
-                    && p.inner == anchor.inner
+                    && cursor > p.open_delim.start
+                    && cursor < p.close_delim.end
                     && cursor >= p.inner.start
                     && cursor <= p.inner.end
             })
             .cloned()
             .collect();
-        group.sort_by_key(|p| p.open_delim.start);
+        if spanning.is_empty() {
+            return false;
+        }
+        spanning.sort_by_key(|p| p.open_delim.start);
 
-        if cursor == anchor.inner.end {
+        let innermost = spanning.last().cloned().unwrap();
+        if cursor == innermost.inner.end {
             // End of the span: leave it, keeping the formats armed for the
             // new line.
             let pending = pending_formats_at(&parsed, cursor);
-            let at = span_close_end(&parsed, &anchor);
+            let at = spanning
+                .iter()
+                .map(|p| p.close_delim.end)
+                .max()
+                .unwrap_or(innermost.close_delim.end);
             self.edit(at..at, line_ins);
             self.pending_formats = pending;
             self.caret
@@ -561,31 +559,41 @@ impl DocumentTab {
             return true;
         }
 
-        let run_start = group
+        let run_start = spanning
             .iter()
             .map(|p| p.open_delim.start)
             .min()
-            .unwrap_or(anchor.open_delim.start);
-        let run_end = span_close_end(&parsed, &anchor);
-        let openers = self.content[run_start..anchor.inner.start].to_string();
-        let closers_rev = self.content[anchor.inner.end..run_end].to_string();
-        let before = self.content[anchor.inner.start..cursor].to_string();
-        let after = self.content[cursor..anchor.inner.end].to_string();
-        // Whitespace cannot sit against a marker (the opener may not follow
-        // whitespace and the closer may not precede it), so a trailing run of
-        // `before` leaves the closed half and a leading run of `after` stays
-        // outside the reopened one.
-        let before_core_len = before.trim_end().len();
-        let before_tail = &before[before_core_len..];
-        let after_head_len = after.len() - after.trim_start().len();
-        let after_head = &after[..after_head_len];
-        let after_core = &after[after_head_len..];
+            .unwrap_or(innermost.open_delim.start);
+        let run_end = spanning
+            .iter()
+            .map(|p| p.close_delim.end)
+            .max()
+            .unwrap_or(innermost.close_delim.end);
+
+        let open_ranges =
+            merge_adjacent_ranges(spanning.iter().map(|p| p.open_delim.clone()).collect());
+        let close_ranges =
+            merge_adjacent_ranges(spanning.iter().map(|p| p.close_delim.clone()).collect());
+        let openers: String = open_ranges
+            .iter()
+            .map(|r| &self.content[r.clone()])
+            .collect();
+        let closers: String = close_ranges
+            .iter()
+            .map(|r| &self.content[r.clone()])
+            .collect();
+
+        let prefix = self.content[run_start..cursor].to_string();
+        let suffix = self.content[cursor..run_end].to_string();
+        let before_core_len = prefix.trim_end().len();
+        let before_tail = &prefix[before_core_len..];
+        let after_head_len = suffix.len() - suffix.trim_start().len();
+        let after_head = &suffix[..after_head_len];
+        let after_core = &suffix[after_head_len..];
         let mut repl = String::new();
         if before_core_len > 0 {
-            let core = &before[..before_core_len];
-            repl.push_str(&openers);
-            repl.push_str(core);
-            repl.push_str(&closers_rev);
+            repl.push_str(&prefix[..before_core_len]);
+            repl.push_str(&closers);
         }
         repl.push_str(before_tail);
         repl.push_str(line_ins);
@@ -593,15 +601,15 @@ impl DocumentTab {
             repl.push_str(after_head);
             repl.push_str(&openers);
             repl.push_str(after_core);
-            repl.push_str(&closers_rev);
         } else {
             repl.push_str(after_head);
         }
         let caret = if after_core.is_empty() {
             run_start + repl.len()
         } else {
-            run_start + repl.len() - after_core.len() - closers_rev.len()
+            run_start + repl.len() - after_core.len()
         };
+        self.next_undo_caret = Some(cursor);
         self.edit(run_start..run_end, &repl);
         self.caret.move_to(floor_boundary(&self.content, caret));
         self.refresh_cursor();
@@ -626,6 +634,9 @@ impl DocumentTab {
             }
             if self.bare_cr_needs_extra_break(&range) {
                 self.edit(range.start..range.start, "\n\n");
+                return;
+            }
+            if self.split_inline_span_newline(&range, "\n") {
                 return;
             }
             self.edit(range, "\n");
@@ -754,11 +765,20 @@ impl DocumentTab {
 
                     if let Some((col_idx, _c_start, c_end, before_str, after_str)) = split_cell_info
                     {
-                        // Split the cell into current row and a new row below in a single undo step
-                        let repl = if before_str.ends_with(' ') { "" } else { " " };
+                        // Split the cell into current row and a new row below in a single undo step.
+                        // Close spans in the current cell and reopen them on the new row so
+                        // `| **first half** |` becomes `| **first** |` / `| **half** |`.
+                        let (span_open, span_close) =
+                            spanning_marker_runs(&self.content, &parsed, cursor)
+                                .unwrap_or_default();
+                        let after_str = format!("{span_open}{after_str}");
+                        let tail_len = before_str.len() - before_str.trim_end().len();
+                        let edit_start = range.start - tail_len;
+                        let tail = &self.content[edit_start..range.start];
                         let rest_of_line = &self.content[c_end..line_end_pos];
+                        let n_cols = cells.len().max(1);
                         let mut new_cells = Vec::new();
-                        for i in 0..col_count {
+                        for i in 0..n_cols {
                             if i == col_idx {
                                 new_cells.push(format!(" {} ", after_str));
                             } else {
@@ -766,15 +786,21 @@ impl DocumentTab {
                             }
                         }
                         let new_row = format!("\n|{}|", new_cells.join("|"));
-                        let combined = format!("{}{}{}", repl, rest_of_line, new_row);
-                        let new_row_start = range.start + repl.len() + rest_of_line.len() + 1;
-                        self.edit(range.start..line_end_pos, &combined);
+                        let combined =
+                            format!("{}{}{}{}", span_close, tail, rest_of_line, new_row);
+                        let new_row_start = edit_start
+                            + span_close.len()
+                            + tail.len()
+                            + rest_of_line.len()
+                            + 1;
+                        self.edit(edit_start..line_end_pos, &combined);
 
                         let mut target = new_row_start + 1;
                         for cell in new_cells.iter().take(col_idx) {
                             target += cell.len() + 1;
                         }
                         target += 1;
+                        target += span_open.len();
                         let caret_pos = floor_boundary(&self.content, target);
                         self.caret.move_to(caret_pos);
                         self.refresh_cursor();
@@ -1174,13 +1200,13 @@ impl DocumentTab {
                             self.refresh_cursor();
                             return;
                         }
-                        if mode == ViewMode::Wysiwyg {
+                        if mode == ViewMode::Wysiwyg && tag_kind != InlineTagKind::Link {
                             // Word-style exit: the span stays formatted and the
                             // caret moves past the whole closing run so further
                             // typing is plain in the toggled format. Other
                             // formats stacked around the caret stay armed for
                             // the next letter, and a second press of the same
-                            // toggle then disarms them.
+                            // toggle then disarms them. Links unwrap instead.
                             let mut pending = pending_formats_at(&parsed, range.start);
                             match tag_kind {
                                 InlineTagKind::Bold => pending.bold = false,
@@ -1237,6 +1263,24 @@ impl DocumentTab {
             }
 
             if range.is_empty() {
+                // Caret on the opener: unwrap the span (Left to offset 0 of
+                // `**Hello**` then Ctrl+B must drop the markers).
+                if let Some(pair) = parsed
+                    .inline_pairs
+                    .iter()
+                    .rev()
+                    .find(|p| p.kind == tag_kind && range.start == p.open_delim.start)
+                    .cloned()
+                {
+                    let inner_text = self.content[pair.inner.clone()].to_string();
+                    let edit_range = pair.open_delim.start..pair.close_delim.end;
+                    self.edit(edit_range, &inner_text);
+                    self.caret.move_to(pair.open_delim.start);
+                    self.pending_formats = ActiveFormats::default();
+                    self.refresh_cursor();
+                    return;
+                }
+
                 // In WYSIWYG mode, toggling bold/italic/underline/strike/code at an empty cursor toggles pending_formats!
                 if mode == ViewMode::Wysiwyg && tag_kind != InlineTagKind::Link {
                     match tag_kind {
@@ -1382,8 +1426,34 @@ impl DocumentTab {
                 let should_turn_on = !global_all_have_format;
 
                 let mut candidate_results = Vec::new();
+                let in_table = candidate_ranges.iter().any(|r| {
+                    parsed.line_at_offset(r.start).is_some_and(|l| {
+                        matches!(l.kind, LineKind::TableRow { .. })
+                    })
+                });
+                let rewrite_ranges: Vec<Range<usize>> = if !in_table && candidate_ranges.len() > 1 {
+                    let combined = candidate_ranges[0].start
+                        ..candidate_ranges
+                            .last()
+                            .map(|r| r.end)
+                            .unwrap_or(candidate_ranges[0].end);
+                    let has_pairs = parsed.inline_pairs.iter().any(|p| {
+                        p.kind != InlineTagKind::Link
+                            && p.open_delim.start < combined.end
+                            && span_close_end(&parsed, p) > combined.start
+                    });
+                    // Combine across lines only when rewriting existing spans
+                    // (m5). Plain select-all still wraps each line separately.
+                    if has_pairs {
+                        vec![combined]
+                    } else {
+                        candidate_ranges.clone()
+                    }
+                } else {
+                    candidate_ranges.clone()
+                };
 
-                for p_range in &candidate_ranges {
+                for p_range in &rewrite_ranges {
                     let p_start = p_range.start;
                     let p_end = p_range.end;
                     let pline = match parsed.line_at_offset(p_start) {
@@ -1391,7 +1461,7 @@ impl DocumentTab {
                         None => continue,
                     };
 
-                    let mut group_pairs: Vec<&InlinePair> = pline
+                    let mut group_pairs: Vec<&InlinePair> = parsed
                         .inline_pairs
                         .iter()
                         .filter(|p| {
@@ -1404,7 +1474,7 @@ impl DocumentTab {
                     let mut expanded = true;
                     while expanded {
                         expanded = false;
-                        for p in &pline.inline_pairs {
+                        for p in &parsed.inline_pairs {
                             if p.kind == InlineTagKind::Link
                                 || group_pairs.iter().any(|g| std::ptr::eq(*g, p))
                             {
@@ -1447,84 +1517,71 @@ impl DocumentTab {
                         tag_kind,
                         should_turn_on,
                     );
-
-                    let mut raw_slices: Vec<(Range<usize>, FormatFlags, bool)> = Vec::new();
-                    let simple_wrap = group_pairs.is_empty()
-                        && replace_start == p_start
-                        && replace_end == p_end;
-                    if simple_wrap {
-                        let mut flags = FormatFlags::default();
-                        match tag_kind {
-                            InlineTagKind::Bold => flags.bold = should_turn_on,
-                            InlineTagKind::Italic => flags.italic = should_turn_on,
-                            InlineTagKind::Underline => flags.underline = should_turn_on,
-                            InlineTagKind::Strike => flags.strike = should_turn_on,
-                            InlineTagKind::Code => flags.code = should_turn_on,
-                            InlineTagKind::Link => {}
+                    // Neighbor expansion may pull in spans that did not overlap
+                    // the selection (`aa` next to `**bb cc**`). Skip those
+                    // delimiters so they are rewritten instead of kept as text.
+                    for p in &parsed.inline_pairs {
+                        if p.kind == InlineTagKind::Link {
+                            continue;
                         }
-                        raw_slices.push((p_start..p_end, flags, true));
-                    } else {
-                        let mut segs_in_range: Vec<&StyledSegment> = pline
-                            .styled_segments
-                            .iter()
-                            .filter(|s| s.source.start < replace_end && s.source.end > replace_start)
-                            .collect();
-                        segs_in_range.sort_by_key(|s| s.source.start);
-
-                        for seg in segs_in_range {
-                            let seg_start = seg.source.start.max(replace_start);
-                            let seg_end = seg.source.end.min(replace_end);
-                            if seg_start >= seg_end {
-                                continue;
-                            }
-
-                            let orig_flags = FormatFlags {
-                                bold: seg.bold,
-                                italic: seg.italic,
-                                underline: seg.underline,
-                                strike: seg.strike,
-                                code: seg.code,
-                            };
-
-                            if seg_start < p_start {
-                                let part_end = seg_end.min(p_start);
-                                raw_slices.push((seg_start..part_end, orig_flags, false));
-                            }
-                            let overlap_start = seg_start.max(p_start);
-                            let overlap_end = seg_end.min(p_end);
-                            if overlap_start < overlap_end {
-                                let mut toggled_flags = orig_flags;
-                                match tag_kind {
-                                    InlineTagKind::Bold => toggled_flags.bold = should_turn_on,
-                                    InlineTagKind::Italic => toggled_flags.italic = should_turn_on,
-                                    InlineTagKind::Underline => toggled_flags.underline = should_turn_on,
-                                    InlineTagKind::Strike => toggled_flags.strike = should_turn_on,
-                                    InlineTagKind::Code => toggled_flags.code = should_turn_on,
-                                    InlineTagKind::Link => {}
-                                }
-                                raw_slices.push((overlap_start..overlap_end, toggled_flags, true));
-                            }
-                            if seg_end > p_end {
-                                let part_start = seg_start.max(p_end);
-                                raw_slices.push((part_start..seg_end, orig_flags, false));
-                            }
+                        if p.open_delim.start >= replace_start
+                            && span_close_end(&parsed, p) <= replace_end
+                            && !group_pairs.iter().any(|g| std::ptr::eq(*g, p))
+                        {
+                            group_pairs.push(p);
                         }
                     }
 
-                    let slices: Vec<StyledSlice> = raw_slices
-                        .iter()
-                        .map(|(r, flags, is_sel)| StyledSlice {
-                            text: self.content[r.clone()].to_string(),
-                            flags: *flags,
-                            is_selected: *is_sel,
-                        })
-                        .collect();
-
-                    let (rendered_str, sel_in_rendered) = render_styled_slices_with_selection(&slices);
+                    let simple_wrap = group_pairs.is_empty()
+                        && replace_start == p_start
+                        && replace_end == p_end;
+                    let slices: Vec<StyledSlice> = if simple_wrap {
+                        let mut flags = FormatFlags::default();
+                        apply_toggle(&mut flags, tag_kind, should_turn_on);
+                        vec![StyledSlice {
+                            text: self.content[p_start..p_end].to_string(),
+                            flags,
+                            is_selected: true,
+                        }]
+                    } else {
+                        let skip: Vec<Range<usize>> = group_pairs
+                            .iter()
+                            .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
+                            .collect();
+                        let segs: Vec<StyledSegment> = parsed
+                            .lines
+                            .iter()
+                            .filter(|l| {
+                                l.source.end > replace_start && l.source.start < replace_end
+                            })
+                            .flat_map(|l| l.styled_segments.iter().cloned())
+                            .collect();
+                        collect_rewrite_slices(
+                            &self.content,
+                            &parsed.inline_pairs,
+                            &segs,
+                            replace_start..replace_end,
+                            p_start..p_end,
+                            &skip,
+                            Some((tag_kind, should_turn_on)),
+                        )
+                    };
+                    let glued_left = replace_start > 0
+                        && self.content[..replace_start]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| !c.is_whitespace());
+                    let include_wraps = self.content[p_start..p_end].contains('\n');
+                    let (rendered_str, sel_in_rendered) =
+                        render_styled_slices_with_selection_opts(
+                            &slices,
+                            glued_left,
+                            include_wraps,
+                        );
                     candidate_results.push((replace_start..replace_end, rendered_str, sel_in_rendered, p_start));
                 }
 
-                if candidate_ranges.len() == 1 && !candidate_results.is_empty() {
+                if rewrite_ranges.len() == 1 && !candidate_results.is_empty() {
                     let (rep_range, rendered_str, sel_in_rendered, p_start) = candidate_results.remove(0);
                     self.edit(rep_range.clone(), &rendered_str);
 
@@ -1697,6 +1754,17 @@ impl DocumentTab {
                 && (orig_sel == (parts[0].range.start..parts[0].range.end)
                     || orig_sel == (parts[0].edit_range.start..parts[0].edit_range.end))
             {
+                if let (Some(cur), true) = (orig_cursor, every_part_has_format) {
+                    let unwrapped_len = edits[0].1.len();
+                    let rel = cur
+                        .saturating_sub(parts[0].range.start)
+                        .min(unwrapped_len);
+                    self.caret.move_to(min_start + rel);
+                    self.caret.reversed = false;
+                    self.pending_formats = ActiveFormats::default();
+                    self.refresh_cursor();
+                    return;
+                }
                 if let Some(split) = parts[0].split_inner.clone() {
                     self.caret.range = split;
                 } else if every_part_has_format {
@@ -2107,6 +2175,14 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
+        if mode == ViewMode::Wysiwyg
+            && !range.is_empty()
+            && !text.is_empty()
+            && text != "\n"
+            && self.replace_wysiwyg_selection(range.clone(), text)
+        {
+            return;
+        }
         if text.trim().is_empty() {
             if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() {
                 let parsed = self.parsed();
@@ -2126,7 +2202,13 @@ impl DocumentTab {
                                 | InlineTagKind::Strike
                                 | InlineTagKind::Underline
                                 | InlineTagKind::Code
-                        ) && range.start == p.inner.end
+                        ) && range.start == p.close_delim.start
+                            && !parsed.inline_pairs.iter().any(|o| {
+                                o.kind != InlineTagKind::Link
+                                    && o.inner.start <= p.inner.start
+                                    && o.inner.end >= p.inner.end
+                                    && o.inner != p.inner
+                            })
                     })
                     .cloned();
                 if let Some(pair) = pair {
@@ -2295,6 +2377,119 @@ impl DocumentTab {
         self.edit(range, text);
     }
 
+    /// Replace a WYSIWYG selection that overlaps inline markers by rewriting
+    /// the surrounding spans so unselected text keeps its formats and the
+    /// typed text is inserted plain (`**He**Xld` not `**He*X*rld`).
+    fn replace_wysiwyg_selection(&mut self, range: Range<usize>, text: &str) -> bool {
+        let parsed = self.parsed();
+        let overlapping = parsed.inline_pairs.iter().any(|p| {
+            p.kind != InlineTagKind::Link
+                && p.open_delim.start < range.end
+                && p.close_delim.end > range.start
+        });
+        if !overlapping {
+            return false;
+        }
+        let mut group_pairs: Vec<&InlinePair> = parsed
+            .inline_pairs
+            .iter()
+            .filter(|p| {
+                p.kind != InlineTagKind::Link
+                    && p.open_delim.start < range.end
+                    && span_close_end(&parsed, p) > range.start
+            })
+            .collect();
+        let mut expanded = true;
+        while expanded {
+            expanded = false;
+            for p in &parsed.inline_pairs {
+                if p.kind == InlineTagKind::Link
+                    || group_pairs.iter().any(|g| std::ptr::eq(*g, p))
+                {
+                    continue;
+                }
+                let touches = group_pairs.iter().any(|g| {
+                    p.open_delim.start < span_close_end(&parsed, g)
+                        && span_close_end(&parsed, p) > g.open_delim.start
+                });
+                if touches {
+                    group_pairs.push(p);
+                    expanded = true;
+                }
+            }
+        }
+        let replace_start = group_pairs
+            .iter()
+            .map(|p| p.open_delim.start)
+            .min()
+            .unwrap_or(range.start)
+            .min(range.start);
+        let replace_end = group_pairs
+            .iter()
+            .map(|p| span_close_end(&parsed, p))
+            .max()
+            .unwrap_or(range.end)
+            .max(range.end);
+        let skip: Vec<Range<usize>> = group_pairs
+            .iter()
+            .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
+            .collect();
+        let segs: Vec<StyledSegment> = parsed
+            .lines
+            .iter()
+            .filter(|l| l.source.end > replace_start && l.source.start < replace_end)
+            .flat_map(|l| l.styled_segments.iter().cloned())
+            .collect();
+        let slices = collect_rewrite_slices(
+            &self.content,
+            &parsed.inline_pairs,
+            &segs,
+            replace_start..replace_end,
+            range.clone(),
+            &skip,
+            None,
+        );
+        let selected: Vec<&StyledSlice> = slices.iter().filter(|s| s.is_selected).collect();
+        let typed_flags = if !selected.is_empty()
+            && selected.iter().all(|s| s.flags == selected[0].flags)
+        {
+            selected[0].flags
+        } else {
+            FormatFlags::default()
+        };
+        let mut out = Vec::new();
+        let mut replaced = false;
+        for s in slices {
+            if s.is_selected {
+                if !replaced {
+                    out.push(StyledSlice {
+                        text: text.to_string(),
+                        flags: typed_flags,
+                        is_selected: true,
+                    });
+                    replaced = true;
+                }
+            } else {
+                out.push(s);
+            }
+        }
+        if !replaced {
+            return false;
+        }
+        let glued_left = replace_start > 0
+            && self.content[..replace_start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_whitespace());
+        let (rendered, sel) = render_styled_slices_with_selection_glued(&out, glued_left);
+        self.edit(replace_start..replace_end, &rendered);
+        self.caret
+            .move_to(floor_boundary(&self.content, replace_start + sel.end));
+        self.pending_formats = ActiveFormats::default();
+        self.refresh_cursor();
+        true
+    }
+
     /// Typing a backtick inside a code span cannot be escaped (backslash is
     /// literal inside code); re-fence the whole span with a longer backtick
     /// run so the span stays intact.
@@ -2336,7 +2531,6 @@ impl DocumentTab {
 
     pub fn move_left(&mut self, extend: bool) {
         self.pending_formats = ActiveFormats::default();
-        self.history.seal();
         let target = if !extend && !self.caret.range.is_empty() {
             self.selection_range().start
         } else {
@@ -2353,7 +2547,6 @@ impl DocumentTab {
 
     pub fn move_right(&mut self, extend: bool) {
         self.pending_formats = ActiveFormats::default();
-        self.history.seal();
         let target = if !extend && !self.caret.range.is_empty() {
             self.selection_range().end
         } else {
@@ -2370,7 +2563,6 @@ impl DocumentTab {
 
     pub fn move_left_in_mode(&mut self, extend: bool, mode: ViewMode) {
         self.pending_formats = ActiveFormats::default();
-        self.history.seal();
         if mode == ViewMode::Raw {
             self.move_left(extend);
             return;
@@ -2462,7 +2654,6 @@ impl DocumentTab {
 
     pub fn move_right_in_mode(&mut self, extend: bool, mode: ViewMode) {
         self.pending_formats = ActiveFormats::default();
-        self.history.seal();
         if mode == ViewMode::Raw {
             self.move_right(extend);
             return;
@@ -3426,7 +3617,6 @@ impl DocumentTab {
 
     pub fn place(&mut self, offset: usize, extend: bool) {
         self.pending_formats = ActiveFormats::default();
-        self.history.seal();
         let mut offset = floor_boundary(&self.content, offset);
         if !extend {
             offset = snap_off_ending_interior(&self.content, offset);
@@ -3963,6 +4153,89 @@ impl FormatFlags {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SharedKind {
+    Underline,
+    Strike,
+    BoldItalic,
+    Bold,
+    Italic,
+    Code,
+}
+
+fn flag_of(s: &WorkSlice, kind: SharedKind) -> bool {
+    match kind {
+        SharedKind::Underline => s.flags.underline,
+        SharedKind::Strike => s.flags.strike,
+        SharedKind::BoldItalic => s.flags.bold && s.flags.italic,
+        SharedKind::Bold => s.flags.bold,
+        SharedKind::Italic => s.flags.italic,
+        SharedKind::Code => s.flags.code,
+    }
+}
+
+fn wrap_for_shared(kind: SharedKind) -> (String, String) {
+    match kind {
+        SharedKind::Underline => ("<u>".into(), "</u>".into()),
+        SharedKind::Strike => ("~~".into(), "~~".into()),
+        SharedKind::BoldItalic => ("***".into(), "***".into()),
+        SharedKind::Bold => ("**".into(), "**".into()),
+        SharedKind::Italic => ("*".into(), "*".into()),
+        SharedKind::Code => ("`".into(), "`".into()),
+    }
+}
+
+fn clear_shared(mut flags: FormatFlags, kind: SharedKind) -> FormatFlags {
+    match kind {
+        SharedKind::Underline => flags.underline = false,
+        SharedKind::Strike => flags.strike = false,
+        SharedKind::BoldItalic => {
+            flags.bold = false;
+            flags.italic = false;
+        }
+        SharedKind::Bold => flags.bold = false,
+        SharedKind::Italic => flags.italic = false,
+        SharedKind::Code => flags.code = false,
+    }
+    flags
+}
+
+/// Longest consecutive run that shares a wrap-able flag, but is not the whole
+/// list (`all_*` already handled that). Prefers outer kinds on a tie.
+fn longest_shared_flag_run(slices: &[WorkSlice]) -> Option<(SharedKind, usize, usize)> {
+    let kinds = [
+        SharedKind::Underline,
+        SharedKind::Strike,
+        SharedKind::BoldItalic,
+        SharedKind::Bold,
+        SharedKind::Italic,
+        SharedKind::Code,
+    ];
+    let mut best: Option<(SharedKind, usize, usize, usize)> = None;
+    for kind in kinds {
+        let mut i = 0;
+        while i < slices.len() {
+            if !flag_of(&slices[i], kind) {
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            while j + 1 < slices.len() && flag_of(&slices[j + 1], kind) {
+                j += 1;
+            }
+            let len = j - i + 1;
+            if len >= 2 && len < slices.len() {
+                let better = best.is_none_or(|(_, _, _, best_len)| len > best_len);
+                if better {
+                    best = Some((kind, i, j, len));
+                }
+            }
+            i = j + 1;
+        }
+    }
+    best.map(|(k, i, j, _)| (k, i, j))
+}
+
 fn segment_flags(seg: &StyledSegment) -> FormatFlags {
     FormatFlags {
         bold: seg.bold,
@@ -4143,7 +4416,38 @@ fn map_work_flags(
 
 fn mark_work_sel(sel_range: &mut Option<Range<usize>>, at: usize, s: &WorkSlice) {
     if let Some(sel) = &s.sel {
-        *sel_range = Some((at + sel.start)..(at + sel.end));
+        let piece = (at + sel.start)..(at + sel.end);
+        *sel_range = Some(match sel_range.take() {
+            Some(prev) => prev.start.min(piece.start)..prev.end.max(piece.end),
+            None => piece,
+        });
+    }
+}
+
+fn union_sel(sel_range: &mut Option<Range<usize>>, piece: Range<usize>) {
+    *sel_range = Some(match sel_range.take() {
+        Some(prev) => prev.start.min(piece.start)..prev.end.max(piece.end),
+        None => piece,
+    });
+}
+
+fn mark_wrapped_sel(
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+    prefix_len: usize,
+    suffix_len: usize,
+    s: &WorkSlice,
+    include_wraps: bool,
+) {
+    if let Some(sel) = &s.sel {
+        if include_wraps && sel.start == 0 && sel.end == s.text.len() {
+            union_sel(
+                sel_range,
+                offset..(offset + prefix_len + s.text.len() + suffix_len),
+            );
+        } else {
+            mark_work_sel(sel_range, offset + prefix_len, s);
+        }
     }
 }
 
@@ -4153,8 +4457,16 @@ fn wrap_work_slice(
     suffix: &str,
     offset: usize,
     sel_range: &mut Option<Range<usize>>,
+    include_wraps: bool,
 ) -> String {
-    mark_work_sel(sel_range, offset + prefix.len(), s);
+    mark_wrapped_sel(
+        sel_range,
+        offset,
+        prefix.len(),
+        suffix.len(),
+        s,
+        include_wraps,
+    );
     format!("{}{}{}", prefix, s.text, suffix)
 }
 
@@ -4162,6 +4474,16 @@ fn render_styled_slices(
     slices: &[StyledSlice],
     sel_range: &mut Option<Range<usize>>,
     offset: usize,
+) -> String {
+    render_styled_slices_opts(slices, sel_range, offset, false, false)
+}
+
+fn render_styled_slices_opts(
+    slices: &[StyledSlice],
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+    glued_left: bool,
+    include_wraps_in_sel: bool,
 ) -> String {
     let work: Vec<WorkSlice> = slices
         .iter()
@@ -4175,7 +4497,7 @@ fn render_styled_slices(
             },
         })
         .collect();
-    render_work_slices(&work, sel_range, offset)
+    render_work_slices(&work, sel_range, offset, glued_left, include_wraps_in_sel)
 }
 
 fn slice_has_edge_ws(s: &WorkSlice) -> bool {
@@ -4186,6 +4508,8 @@ fn render_work_slices(
     slices: &[WorkSlice],
     sel_range: &mut Option<Range<usize>>,
     offset: usize,
+    glued_left: bool,
+    include_wraps_in_sel: bool,
 ) -> String {
     // Merge matching flags first so turning a format back on joins the
     // neighbor. Do not peel yet: shared outer formats (`*…*`, `<u>…</u>`)
@@ -4199,7 +4523,7 @@ fn render_work_slices(
     if merged.len() == 1 {
         let s = &merged[0];
         let (prefix, suffix) = wrap_delimiters(&s.flags);
-        return wrap_work_slice(s, &prefix, &suffix, offset, sel_range);
+        return wrap_work_slice(s, &prefix, &suffix, offset, sel_range, include_wraps_in_sel);
     }
 
     let all_underline = merged.iter().all(|s| s.flags.underline);
@@ -4213,7 +4537,7 @@ fn render_work_slices(
             f.underline = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 3);
+        let inner_str = render_work_slices(&inner, sel_range, offset + 3, false, include_wraps_in_sel);
         return format!("<u>{}</u>", inner_str);
     }
 
@@ -4222,7 +4546,7 @@ fn render_work_slices(
             f.strike = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 2);
+        let inner_str = render_work_slices(&inner, sel_range, offset + 2, false, include_wraps_in_sel);
         return format!("~~{}~~", inner_str);
     }
 
@@ -4232,7 +4556,7 @@ fn render_work_slices(
             f.italic = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 3);
+        let inner_str = render_work_slices(&inner, sel_range, offset + 3, false, include_wraps_in_sel);
         return format!("***{}***", inner_str);
     }
 
@@ -4245,6 +4569,21 @@ fn render_work_slices(
             && !merged[1].flags.bold
             && merged[2].flags.bold;
         if is_middle {
+            if glued_left {
+                let mut out = String::new();
+                for s in &merged {
+                    let (prefix, suffix) = if s.flags.bold {
+                        ("***", "***")
+                    } else {
+                        ("*", "*")
+                    };
+                    mark_work_sel(sel_range, offset + out.len() + prefix.len(), s);
+                    out.push_str(prefix);
+                    out.push_str(&s.text);
+                    out.push_str(suffix);
+                }
+                return out;
+            }
             let mut out = String::from("_");
             for s in &merged {
                 let prefix = if s.flags.bold { "**" } else { "" };
@@ -4262,7 +4601,7 @@ fn render_work_slices(
             f.italic = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 1);
+        let inner_str = render_work_slices(&inner, sel_range, offset + 1, false, include_wraps_in_sel);
         return format!("*{}*", inner_str);
     }
 
@@ -4294,7 +4633,7 @@ fn render_work_slices(
             f.bold = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 2);
+        let inner_str = render_work_slices(&inner, sel_range, offset + 2, false, include_wraps_in_sel);
         return format!("**{}**", inner_str);
     }
 
@@ -4315,8 +4654,76 @@ fn render_work_slices(
                 f.code = false;
                 f
             });
-            let inner_str = render_work_slices(&inner, sel_range, offset + 1);
+            let inner_str = render_work_slices(&inner, sel_range, offset + 1, false, include_wraps_in_sel);
             return format!("`{}`", inner_str);
+        }
+    }
+
+    if let Some((kind, mut i, mut j)) = longest_shared_flag_run(&merged) {
+        let ws = |s: &WorkSlice| !s.text.is_empty() && s.text.chars().all(char::is_whitespace);
+        let orig_i = i;
+        let orig_j = j;
+        while j > i && ws(&merged[j]) {
+            j -= 1;
+        }
+        while i < j && ws(&merged[i]) {
+            i += 1;
+        }
+        if j > i && (i > 0 || j + 1 < merged.len()) {
+            let (prefix, suffix) = wrap_for_shared(kind);
+            // Collide against the slices that stay outside the original run,
+            // not the whitespace just peeled off (that whitespace loses this
+            // flag and will not wrap).
+            let left_collide = orig_i > 0 && {
+                let prev_close = wrap_delimiters(&merged[orig_i - 1].flags).1;
+                !prev_close.is_empty()
+                    && !prefix.is_empty()
+                    && prev_close.chars().next_back() == prefix.chars().next()
+            };
+            let right_collide = orig_j + 1 < merged.len() && {
+                let next_open = wrap_delimiters(&merged[orig_j + 1].flags).0;
+                !suffix.is_empty()
+                    && !next_open.is_empty()
+                    && suffix.chars().next_back() == next_open.chars().next()
+            };
+            // Skip a wrap whose new markers would sit against a neighbor's
+            // `*`/`**` and form `*a***`; peel + alternate delimiters instead.
+            if !left_collide && !right_collide {
+                // Whitespace peeled out of the wrap must lose that flag, or a
+                // trailing space stays `** **now` instead of `** …** now`.
+                let mut work = merged.clone();
+                for s in &mut work[orig_i..i] {
+                    s.flags = clear_shared(s.flags, kind);
+                }
+                if orig_j < work.len() {
+                    for s in &mut work[j + 1..=orig_j] {
+                        s.flags = clear_shared(s.flags, kind);
+                    }
+                }
+                let left = render_work_slices(
+                    &work[..i],
+                    sel_range,
+                    offset,
+                    glued_left,
+                    include_wraps_in_sel,
+                );
+                let inner = map_work_flags(&work[i..=j], |f| clear_shared(f, kind));
+                let mid = render_work_slices(
+                    &inner,
+                    sel_range,
+                    offset + left.len() + prefix.len(),
+                    false,
+                    include_wraps_in_sel,
+                );
+                let right = render_work_slices(
+                    &work[j + 1..],
+                    sel_range,
+                    offset + left.len() + prefix.len() + mid.len() + suffix.len(),
+                    false,
+                    include_wraps_in_sel,
+                );
+                return format!("{left}{prefix}{mid}{suffix}{right}");
+            }
         }
     }
 
@@ -4325,10 +4732,10 @@ fn render_work_slices(
     // `aa** ` and stops `***` / `****` from forming at a word edge.
     let merged = coalesce_ws_between_matching(peel_flanking_whitespace(merged));
     if merged.len() <= 1 {
-        return render_work_slices(&merged, sel_range, offset);
+        return render_work_slices(&merged, sel_range, offset, glued_left, include_wraps_in_sel);
     }
 
-    // Adjacent spans whose delimiters collide (a closer and the next opener
+    // Adjacent spans whose delimiters collide (a closer and the next opener)
     // sharing a character) merge into one ambiguous run that CommonMark's
     // delimiter arithmetic mis-parses. Resolve collisions before rendering:
     // switch the later span to a delimiter style whose outermost character
@@ -4376,7 +4783,14 @@ fn render_work_slices(
         } else {
             wrap_delimiters(&s.flags)
         };
-        mark_work_sel(sel_range, offset + out.len() + prefix.len(), s);
+        mark_wrapped_sel(
+            sel_range,
+            offset + out.len(),
+            prefix.len(),
+            suffix.len(),
+            s,
+            include_wraps_in_sel,
+        );
         out.push_str(&prefix);
         out.push_str(&s.text);
         out.push_str(&suffix);
@@ -4442,17 +4856,24 @@ fn alternate_wrap(flags: &FormatFlags, avoid: char) -> Option<(String, String)> 
     None
 }
 
-fn render_styled_slices_with_selection(slices: &[StyledSlice]) -> (String, Range<usize>) {
+fn render_styled_slices_with_selection_glued(
+    slices: &[StyledSlice],
+    glued_left: bool,
+) -> (String, Range<usize>) {
+    render_styled_slices_with_selection_opts(slices, glued_left, false)
+}
+
+fn render_styled_slices_with_selection_opts(
+    slices: &[StyledSlice],
+    glued_left: bool,
+    include_wraps_in_sel: bool,
+) -> (String, Range<usize>) {
     let mut sel = None;
-    let res = render_styled_slices(slices, &mut sel, 0);
+    let res = render_styled_slices_opts(slices, &mut sel, 0, glued_left, include_wraps_in_sel);
     let range = sel.unwrap_or(0..res.len());
     (res, range)
 }
 
-/// The range to replace when typed text extends a span or splices closed formats:
-/// if a space sits right before `caret`, the space is pulled back in; if armed formats
-/// only continue a subset of the stacked formats, the closed formats close before `text`
-/// and the continued formats close after `text`.
 /// The raw slice for a styled segment, including a backslash that escapes
 /// its first character: escapes are consumed by the parser, so rebuilding a
 /// region from segments must re-emit them or the escape is lost.
@@ -4466,6 +4887,193 @@ fn segment_raw_range(content: &str, source: &Range<usize>) -> Range<usize> {
         start -= 1;
     }
     start..source.end
+}
+
+fn apply_toggle(flags: &mut FormatFlags, kind: InlineTagKind, on: bool) {
+    match kind {
+        InlineTagKind::Bold => flags.bold = on,
+        InlineTagKind::Italic => flags.italic = on,
+        InlineTagKind::Underline => flags.underline = on,
+        InlineTagKind::Strike => flags.strike = on,
+        InlineTagKind::Code => flags.code = on,
+        InlineTagKind::Link => {}
+    }
+}
+
+fn flags_at_pos(pairs: &[InlinePair], segs: &[StyledSegment], pos: usize) -> FormatFlags {
+    if let Some(seg) = segs
+        .iter()
+        .find(|s| s.source.start <= pos && pos < s.source.end)
+    {
+        return segment_flags(seg);
+    }
+    let mut flags = FormatFlags::default();
+    for p in pairs {
+        if pos >= p.open_delim.start && pos < p.close_delim.end {
+            apply_toggle(&mut flags, p.kind, true);
+        }
+    }
+    flags
+}
+
+/// Openers and closers of every non-link span the caret sits in, merged into
+/// adjacent runs so nested `**… *…* …**` closes as `***` / `***`.
+fn spanning_marker_runs(
+    content: &str,
+    parsed: &ParsedDocument,
+    cursor: usize,
+) -> Option<(String, String)> {
+    let mut spanning: Vec<InlinePair> = parsed
+        .inline_pairs
+        .iter()
+        .filter(|p| {
+            p.kind != InlineTagKind::Link
+                && cursor > p.open_delim.start
+                && cursor < p.close_delim.end
+                && cursor >= p.inner.start
+                && cursor <= p.inner.end
+        })
+        .cloned()
+        .collect();
+    if spanning.is_empty() {
+        return None;
+    }
+    spanning.sort_by_key(|p| p.open_delim.start);
+    let open_ranges =
+        merge_adjacent_ranges(spanning.iter().map(|p| p.open_delim.clone()).collect());
+    let close_ranges =
+        merge_adjacent_ranges(spanning.iter().map(|p| p.close_delim.clone()).collect());
+    let openers: String = open_ranges.iter().map(|r| &content[r.clone()]).collect();
+    let closers: String = close_ranges.iter().map(|r| &content[r.clone()]).collect();
+    Some((openers, closers))
+}
+
+fn merge_adjacent_ranges(mut rs: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    if rs.is_empty() {
+        return rs;
+    }
+    rs.sort_by_key(|r| r.start);
+    let mut out = vec![rs[0].clone()];
+    for r in rs.into_iter().skip(1) {
+        let last = out.last_mut().unwrap();
+        if r.start <= last.end {
+            last.end = last.end.max(r.end);
+        } else {
+            out.push(r);
+        }
+    }
+    out
+}
+
+fn pos_in_link_markup(pair: &InlinePair, pos: usize) -> bool {
+    (pos >= pair.open_delim.start && pos < pair.inner.start)
+        || (pos >= pair.inner.end && pos < pair.close_delim.end)
+}
+
+fn skip_end_at(skips: &[Range<usize>], pos: usize) -> Option<usize> {
+    skips
+        .iter()
+        .filter(|r| pos >= r.start && pos < r.end)
+        .map(|r| r.end)
+        .max()
+}
+
+/// Rebuild a source range from styled segments **and** the hidden markdown
+/// between them (link/image syntax, HTML, escapes), skipping only the
+/// delimiter runs in `skip` (the emphasis markers being rewritten).
+fn collect_rewrite_slices(
+    content: &str,
+    pairs: &[InlinePair],
+    segs: &[StyledSegment],
+    replace: Range<usize>,
+    p_range: Range<usize>,
+    skip: &[Range<usize>],
+    toggle: Option<(InlineTagKind, bool)>,
+) -> Vec<StyledSlice> {
+    let mut bounds = vec![replace.start, replace.end];
+    bounds.push(p_range.start.clamp(replace.start, replace.end));
+    bounds.push(p_range.end.clamp(replace.start, replace.end));
+    for r in skip {
+        if r.start > replace.start && r.start < replace.end {
+            bounds.push(r.start);
+        }
+        if r.end > replace.start && r.end < replace.end {
+            bounds.push(r.end);
+        }
+    }
+    for seg in segs {
+        let raw = segment_raw_range(content, &seg.source);
+        if raw.start > replace.start && raw.start < replace.end {
+            bounds.push(raw.start);
+        }
+        if raw.end > replace.start && raw.end < replace.end {
+            bounds.push(raw.end);
+        }
+    }
+    // Split whitespace from words so a selected `" wo"` does not keep the
+    // leading space inside `* wo*` (nf2). Interior spaces between matching
+    // flags are coalesced again when wrapping.
+    let mut pos = replace.start;
+    while pos < replace.end {
+        let ch = match content[pos..].chars().next() {
+            Some(c) => c,
+            None => break,
+        };
+        let next = pos + ch.len_utf8();
+        if next < replace.end {
+            let nch = match content[next..].chars().next() {
+                Some(c) => c,
+                None => break,
+            };
+            if ch == '\n' || nch == '\n' || ch.is_whitespace() != nch.is_whitespace() {
+                bounds.push(next);
+            }
+        }
+        pos = next;
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let mut slices = Vec::new();
+    for w in bounds.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        if a >= b || skip_end_at(skip, a).is_some() {
+            continue;
+        }
+        let text = content[a..b].to_string();
+        let is_break = text == "\n";
+        let is_ws = !is_break && text.chars().all(char::is_whitespace);
+        let is_sel = a < p_range.end && b > p_range.start;
+        let mut flags = if is_break {
+            FormatFlags::default()
+        } else {
+            flags_at_pos(pairs, segs, a)
+        };
+        let turning_off = toggle.is_some_and(|(_, on)| !on);
+        let in_selected_link_markup = turning_off
+            && pairs.iter().any(|p| {
+                p.kind == InlineTagKind::Link
+                    && p.inner.start >= p_range.start
+                    && p.inner.end <= p_range.end
+                    && p.inner.end > p.inner.start
+                    && pos_in_link_markup(p, a)
+            });
+        // Turning a format on skips whitespace so flanking spaces stay
+        // outside `*`/`**`/`~~`. Turning one off must still clear it from
+        // selected spaces, or `**RAM** **usage**` becomes `RAM** **usage`.
+        if (is_sel && !is_break && (!is_ws || turning_off)) || in_selected_link_markup {
+            if let Some((kind, on)) = toggle {
+                apply_toggle(&mut flags, kind, on);
+            }
+        }
+        slices.push(StyledSlice {
+            text,
+            flags,
+            is_selected: is_sel,
+        });
+    }
+    slices
 }
 
 fn extend_or_splice_span(
