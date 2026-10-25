@@ -779,7 +779,34 @@ pub struct EditorElement<V: 'static> {
     pub mono_font_family: SharedString,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct EditorColors {
+    pub text_color: Hsla,
+    pub strong_color: Hsla,
+    pub muted_color: Hsla,
+    pub h1_color: Hsla,
+    pub h2_color: Hsla,
+    pub code_color: Hsla,
+    pub code_bg: Hsla,
+    pub link_color: Hsla,
+    pub border_color: Hsla,
+}
+
 impl<V: 'static> EditorElement<V> {
+    pub(crate) fn colors(&self) -> EditorColors {
+        EditorColors {
+            text_color: self.text_color,
+            strong_color: self.strong_color,
+            muted_color: self.muted_color,
+            h1_color: self.h1_color,
+            h2_color: self.h2_color,
+            code_color: self.code_color,
+            code_bg: self.code_bg,
+            link_color: self.link_color,
+            border_color: self.border_color,
+        }
+    }
+
     fn gutter(&self) -> Pixels {
         if self.show_line_numbers && self.view_mode == ViewMode::Raw {
             px(52.0)
@@ -1073,6 +1100,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut table_col_widths: std::collections::HashMap<Range<usize>, Vec<Pixels>> =
             std::collections::HashMap::new();
 
+        let colors = self.colors();
+
         for (line_idx, parsed_line) in self.parsed.lines.iter().enumerate() {
             if matches!(parsed_line.kind, LineKind::TableDelimiter) {
                 continue;
@@ -1134,7 +1163,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 self.marked.as_ref(),
                                 &base_font,
                                 &mono_font,
-                                self,
+                                &colors,
                             );
                             window
                                 .text_system()
@@ -1212,7 +1241,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         self.marked.as_ref(),
                         &base_font,
                         &mono_font,
-                        self,
+                        &colors,
                     );
                     let full_shaped = window.text_system().shape_line(
                         full_slice,
@@ -1244,7 +1273,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             self.marked.as_ref(),
                             &base_font,
                             &mono_font,
-                            self,
+                            &colors,
                         );
                         let shaped_sub = window.text_system().shape_line(
                             sub_slice,
@@ -1370,7 +1399,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                     .max(px(0.0))
                                     / 2.0;
                                 let strike_y = line_origin.y + (pad + shaped_sub.ascent * 1.5) * 0.5;
-                                let color = if seg.bold {
+                                let color = if seg.bold || seg.italic {
                                     self.strong_color
                                 } else {
                                     self.text_color
@@ -1689,7 +1718,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     self.marked.as_ref(),
                     &base_font,
                     &mono_font,
-                    self,
+                    &colors,
                 );
                 let shaped =
                     window
@@ -1750,7 +1779,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         let strike_w = (x2 - x1) + extend_left + extend_right;
                         let pad = (row_line_height - shaped.ascent - shaped.descent).max(px(0.0)) / 2.0;
                         let strike_y = row_origin.y + (pad + shaped.ascent * 1.5) * 0.5;
-                        let color = if seg.bold { self.strong_color } else { self.text_color };
+                        let color = if seg.bold || seg.italic { self.strong_color } else { self.text_color };
                         let thickness = if seg.bold { px(2.0) } else { px(1.75) };
                         strike_quads.push(fill(
                             Bounds::new(point(strike_x, strike_y), size(strike_w, thickness)),
@@ -2013,7 +2042,7 @@ fn collect_line_links(line: &ParsedLine) -> Vec<(Range<usize>, String)> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wysiwyg_slice_runs<V: 'static>(
+fn wysiwyg_slice_runs(
     parsed_line: &ParsedLine,
     display_slice: Range<usize>,
     shaped_slice_len: usize,
@@ -2021,22 +2050,22 @@ fn wysiwyg_slice_runs<V: 'static>(
     marked: Option<&Range<usize>>,
     base_font: &Font,
     mono_font: &Font,
-    editor: &EditorElement<V>,
+    colors: &EditorColors,
 ) -> Vec<TextRun> {
     let slice_len = display_slice.end.saturating_sub(display_slice.start);
     let (default_weight, default_color, use_mono) = match &parsed_line.kind {
-        LineKind::Heading { level: 1 } => (FontWeight::BOLD, editor.h1_color, false),
-        LineKind::Heading { level: 2 } => (FontWeight::BOLD, editor.h2_color, false),
-        LineKind::Heading { .. } => (FontWeight::BOLD, editor.strong_color, false),
+        LineKind::Heading { level: 1 } => (FontWeight::BOLD, colors.h1_color, false),
+        LineKind::Heading { level: 2 } => (FontWeight::BOLD, colors.h2_color, false),
+        LineKind::Heading { .. } => (FontWeight::BOLD, colors.strong_color, false),
         LineKind::CodeLine | LineKind::CodeFence { .. } => {
-            (FontWeight::NORMAL, editor.code_color, true)
+            (FontWeight::NORMAL, colors.code_color, true)
         }
-        LineKind::Blockquote => (FontWeight::NORMAL, editor.muted_color, false),
-        LineKind::TableRow { .. } => (FontWeight::NORMAL, editor.text_color, true),
+        LineKind::Blockquote => (FontWeight::NORMAL, colors.muted_color, false),
+        LineKind::TableRow { .. } => (FontWeight::NORMAL, colors.text_color, true),
         LineKind::ListItem {
             task: Some(true), ..
-        } => (FontWeight::NORMAL, editor.muted_color, false),
-        _ => (FontWeight::NORMAL, editor.text_color, false),
+        } => (FontWeight::NORMAL, colors.muted_color, false),
+        _ => (FontWeight::NORMAL, colors.text_color, false),
     };
 
     if slice_len == 0 {
@@ -2093,7 +2122,7 @@ fn wysiwyg_slice_runs<V: 'static>(
                 use_mono,
                 base_font,
                 mono_font,
-                editor,
+                colors,
             ));
             covered = seg_end;
         }
@@ -2128,7 +2157,7 @@ fn wysiwyg_slice_runs<V: 'static>(
 
     if matches!(parsed_line.kind, LineKind::TableRow { .. }) {
         let slice_str = &parsed_line.display_text[display_slice];
-        runs = apply_table_pipe_style(runs, slice_str, editor.border_color);
+        runs = apply_table_pipe_style(runs, slice_str, colors.border_color);
     }
 
     runs.retain(|r| r.len > 0);
@@ -2136,7 +2165,7 @@ fn wysiwyg_slice_runs<V: 'static>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wysiwyg_cell_runs<V: 'static>(
+fn wysiwyg_cell_runs(
     parsed_line: &ParsedLine,
     disp_len: usize,
     shaped_slice_len: usize,
@@ -2144,10 +2173,10 @@ fn wysiwyg_cell_runs<V: 'static>(
     marked: Option<&Range<usize>>,
     base_font: &Font,
     mono_font: &Font,
-    editor: &EditorElement<V>,
+    colors: &EditorColors,
 ) -> Vec<TextRun> {
     let default_weight = FontWeight::NORMAL;
-    let default_color = editor.text_color;
+    let default_color = colors.text_color;
 
     if disp_len == 0 {
         let mut f = base_font.clone();
@@ -2199,7 +2228,7 @@ fn wysiwyg_cell_runs<V: 'static>(
             false,
             base_font,
             mono_font,
-            editor,
+            colors,
         ));
         covered = seg_end;
     }
@@ -2232,7 +2261,7 @@ fn wysiwyg_cell_runs<V: 'static>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn segment_to_run<V: 'static>(
+fn segment_to_run(
     seg: &StyledSegment,
     len: usize,
     line_kind: &LineKind,
@@ -2241,7 +2270,7 @@ fn segment_to_run<V: 'static>(
     use_mono: bool,
     base_font: &Font,
     mono_font: &Font,
-    editor: &EditorElement<V>,
+    colors: &EditorColors,
 ) -> TextRun {
     let mut font = if seg.code || use_mono {
         mono_font.clone()
@@ -2258,17 +2287,17 @@ fn segment_to_run<V: 'static>(
     }
 
     let color = if seg.code {
-        editor.code_color
+        colors.code_color
     } else if seg.link_url.is_some() {
-        editor.link_color
-    } else if seg.bold && default_color == editor.text_color {
-        editor.strong_color
+        colors.link_color
+    } else if (seg.bold || seg.italic) && default_color == colors.text_color {
+        colors.strong_color
     } else {
         default_color
     };
 
     let background_color = if seg.code {
-        Some(editor.code_bg)
+        Some(colors.code_bg)
     } else {
         None
     };
@@ -3105,5 +3134,103 @@ mod tests {
         );
         let total: Pixels = widths.iter().copied().fold(px(0.0), |a, b| a + b);
         assert!(total <= target_w + px(0.01));
+    }
+
+    #[test]
+    fn test_wysiwyg_slice_runs_standalone_italic_and_combos() {
+        use gpui::{font, hsla, FontStyle, FontWeight};
+        let colors = super::EditorColors {
+            text_color: hsla(0.0, 0.0, 0.8, 1.0),
+            strong_color: hsla(0.0, 0.0, 1.0, 1.0),
+            muted_color: hsla(0.0, 0.0, 0.5, 1.0),
+            h1_color: hsla(0.1, 0.8, 0.5, 1.0),
+            h2_color: hsla(0.2, 0.8, 0.5, 1.0),
+            code_color: hsla(0.3, 0.8, 0.5, 1.0),
+            code_bg: hsla(0.4, 0.8, 0.5, 1.0),
+            link_color: hsla(0.5, 0.8, 0.5, 1.0),
+            border_color: hsla(0.6, 0.8, 0.5, 1.0),
+        };
+        let base_font = font("Ubuntu");
+        let mono_font = font("Ubuntu Mono");
+
+        // 1. Standalone italic
+        let doc = parse_document("Normal *italic* text");
+        let line = &doc.lines[0];
+        let runs = super::wysiwyg_slice_runs(
+            line,
+            0..line.display_text.len(),
+            line.display_text.len(),
+            &line.offset_map,
+            None,
+            &base_font,
+            &mono_font,
+            &colors,
+        );
+        // Expect 3 runs: "Normal ", "italic", " text"
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].color, colors.text_color);
+        assert_eq!(runs[0].font.style, FontStyle::Normal);
+        assert_eq!(runs[0].font.weight, FontWeight::NORMAL);
+
+        // Standalone italic must have FontStyle::Italic and strong_color for high contrast
+        assert_eq!(runs[1].font.style, FontStyle::Italic);
+        assert_eq!(runs[1].font.weight, FontWeight::NORMAL);
+        assert_eq!(runs[1].color, colors.strong_color);
+
+        assert_eq!(runs[2].color, colors.text_color);
+        assert_eq!(runs[2].font.style, FontStyle::Normal);
+
+        // 2. Bold
+        let doc_bold = parse_document("Normal **bold** text");
+        let line_bold = &doc_bold.lines[0];
+        let runs_bold = super::wysiwyg_slice_runs(
+            line_bold,
+            0..line_bold.display_text.len(),
+            line_bold.display_text.len(),
+            &line_bold.offset_map,
+            None,
+            &base_font,
+            &mono_font,
+            &colors,
+        );
+        assert_eq!(runs_bold.len(), 3);
+        assert_eq!(runs_bold[1].font.style, FontStyle::Normal);
+        assert_eq!(runs_bold[1].font.weight, FontWeight::BOLD);
+        assert_eq!(runs_bold[1].color, colors.strong_color);
+
+        // 3. Bold + Italic
+        let doc_bi = parse_document("Normal ***bold italic*** text");
+        let line_bi = &doc_bi.lines[0];
+        let runs_bi = super::wysiwyg_slice_runs(
+            line_bi,
+            0..line_bi.display_text.len(),
+            line_bi.display_text.len(),
+            &line_bi.offset_map,
+            None,
+            &base_font,
+            &mono_font,
+            &colors,
+        );
+        assert_eq!(runs_bi.len(), 3);
+        assert_eq!(runs_bi[1].font.style, FontStyle::Italic);
+        assert_eq!(runs_bi[1].font.weight, FontWeight::BOLD);
+        assert_eq!(runs_bi[1].color, colors.strong_color);
+
+        // 4. Blockquote italic maintains blockquote's muted color
+        let doc_bq = parse_document("> A *quote with italic* text");
+        let line_bq = &doc_bq.lines[0];
+        let runs_bq = super::wysiwyg_slice_runs(
+            line_bq,
+            0..line_bq.display_text.len(),
+            line_bq.display_text.len(),
+            &line_bq.offset_map,
+            None,
+            &base_font,
+            &mono_font,
+            &colors,
+        );
+        for run in &runs_bq {
+            assert_eq!(run.color, colors.muted_color);
+        }
     }
 }

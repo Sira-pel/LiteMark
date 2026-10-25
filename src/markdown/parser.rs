@@ -1258,6 +1258,68 @@ fn merge_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<
     merged
 }
 
+pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut modified = None;
+
+    let is_delim = |b: u8| b == b'*' || b == b'~' || b == b'_' || b == b'`';
+
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'~' || bytes[i] == b'*' || bytes[i] == b'_' {
+            let delim_byte = bytes[i];
+            let start = i;
+            while i < len && bytes[i] == delim_byte {
+                i += 1;
+            }
+            let end = i;
+
+            // Check opening delimiter preceded by alphanumeric and followed by code backtick (e.g. `a**`hi`**` or `a*`hi`*`)
+            if start > 0 && end < len {
+                let prev_ch = input[..start].chars().next_back().unwrap();
+                let next_b = bytes[end];
+                if prev_ch.is_alphanumeric() && next_b == b'`' {
+                    let prev_len = prev_ch.len_utf8();
+                    let buf = modified.get_or_insert_with(|| input.as_bytes().to_vec());
+                    for b in &mut buf[start - prev_len..start] {
+                        *b = b'.';
+                    }
+                }
+            }
+
+            // Check closing delimiter preceded by inner delimiter and followed by alphanumeric (e.g. `hi*~~y` or `hi`**y`)
+            if start > 0 && end < len {
+                let prev_b = bytes[start - 1];
+                if is_delim(prev_b) {
+                    let mut p = start;
+                    while p > 0 && is_delim(bytes[p - 1]) {
+                        p -= 1;
+                    }
+                    if p > 0 {
+                        let prev_ch = input[..p].chars().next_back().unwrap();
+                        let next_ch = input[end..].chars().next().unwrap();
+                        if prev_ch.is_alphanumeric() && next_ch.is_alphanumeric() {
+                            let ch_len = next_ch.len_utf8();
+                            let buf = modified.get_or_insert_with(|| input.as_bytes().to_vec());
+                            for b in &mut buf[end..end + ch_len] {
+                                *b = b'.';
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    match modified {
+        Some(buf) => std::borrow::Cow::Owned(String::from_utf8(buf).unwrap()),
+        None => std::borrow::Cow::Borrowed(input),
+    }
+}
+
 fn parse_inline_syntax(
     input: &str,
     base: usize,
@@ -1270,9 +1332,10 @@ fn parse_inline_syntax(
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
+    let prepared = prepare_for_pulldown(input);
     let mut options = pulldown_cmark::Options::empty();
     options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
-    let parser = pulldown_cmark::Parser::new_ext(input, options).into_offset_iter();
+    let parser = pulldown_cmark::Parser::new_ext(&prepared, options).into_offset_iter();
 
     let mut raw_hidden = Vec::new();
     let mut inline_pairs = Vec::new();
@@ -1443,7 +1506,368 @@ fn parse_inline_syntax(
         }
     }
 
+    normalize_shared_run_pairs(&mut inline_pairs);
+    synthesize_flanking_pairs(
+        input,
+        base,
+        &mut raw_hidden,
+        &mut inline_pairs,
+        &mut styled_segments,
+    );
+
+    // Backslash escapes: the parser consumes `\X` (X an ASCII punctuation
+    // character) and shows only `X`, so the backslash is hidden in the
+    // WYSIWYG display with the offset map carrying the caret across it.
+    // Backslashes inside code spans stay visible: code content is literal.
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() {
+            let abs = base + i..base + i + 1;
+            let in_code = inline_pairs.iter().any(|p| {
+                p.kind == InlineTagKind::Code
+                    && p.inner.start <= abs.start
+                    && abs.end <= p.inner.end
+            });
+            if !in_code {
+                raw_hidden.push(abs.clone());
+                // The text segment covering the escape keeps the escaped
+                // character only; the backslash is hidden.
+                let mut rebuilt: Vec<StyledSegment> = Vec::new();
+                for s in styled_segments.drain(..) {
+                    if s.source.start < abs.end && s.source.end > abs.start {
+                        if s.source.start < abs.start {
+                            rebuilt.push(StyledSegment {
+                                source: s.source.start..abs.start,
+                                ..s.clone()
+                            });
+                        }
+                        if s.source.end > abs.end {
+                            rebuilt.push(StyledSegment {
+                                source: abs.end..s.source.end,
+                                ..s.clone()
+                            });
+                        }
+                    } else {
+                        rebuilt.push(s);
+                    }
+                }
+                styled_segments = rebuilt;
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
     (raw_hidden, inline_pairs, styled_segments)
+}
+
+/// True when the delimiter byte at `pos` is backslash-escaped and therefore
+/// not part of any delimiter run.
+fn is_escaped_delim(input: &str, pos: usize) -> bool {
+    let bytes = input.as_bytes();
+    let mut backslashes = 0usize;
+    let mut p = pos;
+    while p > 0 && bytes[p - 1] == b'\\' {
+        backslashes += 1;
+        p -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+/// Delimiter runs that pulldown's emphasis matching rejected can still be
+/// what the user typed. Two rules reject valid-looking pairs: the flanking
+/// punctuation conditions (a closer after punctuation/symbol before a
+/// letter, or the mirrored opener) and the "multiple of 3" odd-match rule
+/// for runs that can both open and close. When runs were left unconsumed
+/// and a relaxed pairing (whitespace flanking only, no odd-match rule)
+/// matches them, synthesize the pair for the display: the document text
+/// stays exactly as typed, the markers are hidden, and the styled segments
+/// carry the intended formatting.
+fn synthesize_flanking_pairs(
+    input: &str,
+    base: usize,
+    raw_hidden: &mut Vec<std::ops::Range<usize>>,
+    inline_pairs: &mut Vec<InlinePair>,
+    styled_segments: &mut Vec<StyledSegment>,
+) {
+    let bytes = input.as_bytes();
+    // Runs of unescaped emphasis delimiters, in source order.
+    let mut runs: Vec<(usize, usize, u8)> = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if (b == b'*' || b == b'~' || b == b'`') && !is_escaped_delim(input, i) {
+            let start = i;
+            while i < bytes.len() && bytes[i] == b && !is_escaped_delim(input, i) {
+                i += 1;
+            }
+            runs.push((start, i, b));
+        } else {
+            i += 1;
+        }
+    }
+    if runs.len() < 2 {
+        return;
+    }
+    fn in_code(inline_pairs: &[InlinePair], pos: usize) -> bool {
+        inline_pairs
+            .iter()
+            .any(|p| p.kind == InlineTagKind::Code && p.inner.start <= pos && pos < p.inner.end)
+    }
+    // A run consumed as the opener or closer of a parsed pair is not
+    // eligible for re-pairing. `run` is absolute (`base + start..base + end`)
+    // so it can be compared with `inline_pairs`. Every byte of the run must
+    // sit inside an open or close delim: a `***` split into `**` + `*` is
+    // covered, but an extra leftover backtick in ``a``` is not.
+    fn consumed(inline_pairs: &[InlinePair], run: std::ops::Range<usize>) -> bool {
+        if run.start >= run.end {
+            return false;
+        }
+        let mut pos = run.start;
+        while pos < run.end {
+            let cover = inline_pairs.iter().find_map(|p| {
+                if p.open_delim.start <= pos && pos < p.open_delim.end {
+                    Some(p.open_delim.end)
+                } else if p.close_delim.start <= pos && pos < p.close_delim.end {
+                    Some(p.close_delim.end)
+                } else {
+                    None
+                }
+            });
+            match cover {
+                Some(end) => pos = end.max(pos + 1),
+                None => return false,
+            }
+        }
+        true
+    }
+    let mut used = vec![false; runs.len()];
+    for open_idx in 0..runs.len() {
+        let abs_open = base + runs[open_idx].0..base + runs[open_idx].1;
+        if used[open_idx]
+            || in_code(inline_pairs, abs_open.start)
+            || consumed(inline_pairs, abs_open)
+        {
+            continue;
+        }
+        let (o_start, o_end, ch) = runs[open_idx];
+        // An opener must be followed by something (not whitespace).
+        if input[o_end..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+        {
+            continue;
+        }
+        for close_idx in open_idx + 1..runs.len() {
+            let abs_close = base + runs[close_idx].0..base + runs[close_idx].1;
+            if used[close_idx]
+                || in_code(inline_pairs, abs_close.start)
+                || consumed(inline_pairs, abs_close)
+            {
+                continue;
+            }
+            let (c_start, c_end, c_ch) = runs[close_idx];
+            if c_ch != ch || c_start == o_end {
+                continue;
+            }
+            // Equal-length emphasis runs; code fences pair with a longer
+            // later run (the content's own trailing backticks merged with
+            // the closer), taking its tail as the closer. Single-backtick
+            // openers are not re-paired: unequal single/double backticks in
+            // ordinary text stay literal.
+            if ch == b'`' {
+                if o_end - o_start < 2 || c_end - c_start <= o_end - o_start {
+                    continue;
+                }
+            } else if c_end - c_start != o_end - o_start
+                || (ch == b'~' && c_end - c_start != 2)
+                || c_end - c_start > 2
+            {
+                continue;
+            }
+            // Relaxed flanking: only the whitespace conditions apply. The
+            // punctuation conditions and the odd-match rule are exactly what
+            // rejected these runs in the first place. The closer cannot be
+            // preceded by whitespace (`input[c_start..]` is the delimiter).
+            if input[..c_start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+            {
+                continue;
+            }
+            let closer_start = if ch == b'`' && c_end - c_start > o_end - o_start {
+                c_end - (o_end - o_start)
+            } else {
+                c_start
+            };
+            let len = if ch == b'`' {
+                o_end - o_start
+            } else {
+                c_end - c_start
+            };
+            let kind = if ch == b'`' {
+                InlineTagKind::Code
+            } else if ch == b'~' {
+                InlineTagKind::Strike
+            } else if len == 2 {
+                InlineTagKind::Bold
+            } else {
+                InlineTagKind::Italic
+            };
+            let inner = if ch == b'`' {
+                base + o_end..base + closer_start
+            } else {
+                base + o_end..base + c_start
+            };
+            used[open_idx] = true;
+            used[close_idx] = true;
+            raw_hidden.push(base + o_start..base + o_end);
+            raw_hidden.push(base + closer_start..base + c_end);
+            inline_pairs.push(InlinePair {
+                kind,
+                open_delim: base + o_start..base + o_end,
+                inner: inner.clone(),
+                close_delim: base + closer_start..base + c_end,
+            });
+            let or_kind = |s: &mut StyledSegment| match kind {
+                InlineTagKind::Bold => s.bold = true,
+                InlineTagKind::Italic => s.italic = true,
+                InlineTagKind::Underline => s.underline = true,
+                InlineTagKind::Strike => s.strike = true,
+                InlineTagKind::Code => s.code = true,
+                InlineTagKind::Link => {}
+            };
+            // Keep segments already inside the new span (nested bold, underline,
+            // links) and OR the synthesized style onto each. Only fill a gap
+            // when the inner range had no segments at all.
+            let mut rebuilt: Vec<StyledSegment> = Vec::new();
+            let mut inner_covered = false;
+            for s in styled_segments.drain(..) {
+                if s.source.start < inner.end && s.source.end > inner.start {
+                    if s.source.start < inner.start {
+                        rebuilt.push(StyledSegment {
+                            source: s.source.start..inner.start,
+                            ..s.clone()
+                        });
+                    }
+                    let mid_start = s.source.start.max(inner.start);
+                    let mid_end = s.source.end.min(inner.end);
+                    if mid_end > mid_start {
+                        let mut mid = s.clone();
+                        mid.source = mid_start..mid_end;
+                        or_kind(&mut mid);
+                        rebuilt.push(mid);
+                        inner_covered = true;
+                    }
+                    if s.source.end > inner.end {
+                        rebuilt.push(StyledSegment {
+                            source: inner.end..s.source.end,
+                            ..s
+                        });
+                    }
+                } else {
+                    rebuilt.push(s);
+                }
+            }
+            // Marker runs are hidden: cut them out of every segment before
+            // merging, so leftover closer ticks are not glued onto the text
+            // that follows (` ``a```b`c` ` must keep `b` separate from `` ` ``).
+            for run in [
+                base + o_start..base + o_end,
+                base + closer_start..base + c_end,
+            ] {
+                let mut next = Vec::new();
+                for s in std::mem::take(&mut rebuilt) {
+                    if s.source.start < run.end && s.source.end > run.start {
+                        if s.source.start < run.start {
+                            next.push(StyledSegment {
+                                source: s.source.start..run.start,
+                                ..s.clone()
+                            });
+                        }
+                        if s.source.end > run.end {
+                            next.push(StyledSegment {
+                                source: run.end..s.source.end,
+                                ..s
+                            });
+                        }
+                    } else {
+                        next.push(s);
+                    }
+                }
+                rebuilt = next;
+            }
+            rebuilt.sort_by_key(|s| s.source.start);
+            let mut i = 0;
+            while i + 1 < rebuilt.len() {
+                let same = rebuilt[i].source.end == rebuilt[i + 1].source.start
+                    && rebuilt[i].bold == rebuilt[i + 1].bold
+                    && rebuilt[i].italic == rebuilt[i + 1].italic
+                    && rebuilt[i].underline == rebuilt[i + 1].underline
+                    && rebuilt[i].strike == rebuilt[i + 1].strike
+                    && rebuilt[i].code == rebuilt[i + 1].code
+                    && rebuilt[i].link_url == rebuilt[i + 1].link_url;
+                if same {
+                    rebuilt[i].source.end = rebuilt[i + 1].source.end;
+                    rebuilt.remove(i + 1);
+                } else {
+                    i += 1;
+                }
+            }
+            *styled_segments = rebuilt;
+            if !inner_covered {
+                let mut seg = StyledSegment {
+                    source: inner.clone(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    strike: false,
+                    code: false,
+                    link_url: None,
+                };
+                or_kind(&mut seg);
+                let pos = styled_segments
+                    .iter()
+                    .position(|s| s.source.start > inner.start)
+                    .unwrap_or(styled_segments.len());
+                styled_segments.insert(pos, seg);
+            }
+            break;
+        }
+    }
+}
+
+/// pulldown reports markers that share one delimiter run (`***x***`,
+/// `**~~x~~**`) with overlapping event ranges, so the outer pair's `inner`
+/// claims the inner pair's markers as its content. When a pair's inner is
+/// exactly another pair wrapped in its delimiters, adopt the nested inner as
+/// the real content range, so caret mapping, exits, and splits see the actual
+/// text. Display and hidden ranges are unaffected.
+fn normalize_shared_run_pairs(inline_pairs: &mut [InlinePair]) {
+    loop {
+        let mut changed = false;
+        for i in 0..inline_pairs.len() {
+            let inner = inline_pairs[i].inner.clone();
+            let nested = (0..inline_pairs.len()).find(|&j| {
+                j != i
+                    && inline_pairs[j].open_delim.start == inner.start
+                    && inline_pairs[j].close_delim.end == inner.end
+                    && inline_pairs[j].inner.start > inner.start
+                    && inline_pairs[j].inner.end < inner.end
+            });
+            if let Some(j) = nested {
+                inline_pairs[i].inner = inline_pairs[j].inner.clone();
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 struct OpenFence {
@@ -1744,6 +2168,21 @@ fn atx_heading_within(line: &str, max_indent: usize) -> Option<(u8, std::ops::Ra
 /// `# **foo** #` keeps the inner `**`.
 pub(crate) fn atx_content_range(line: &str) -> Option<std::ops::Range<usize>> {
     atx_heading(line).map(|(_level, content)| content)
+}
+
+/// ATX content range for the WYSIWYG display: like `atx_content_range`, but
+/// when the heading has no closing-hash run its trailing spaces stay in the
+/// content, so typing at the end of a heading keeps them visible. A tail that
+/// contains a non-space byte is a closing-hash run and stays hidden.
+pub(crate) fn atx_display_content_range(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
+    atx_heading(line).map(|(level, content)| {
+        let tail_is_space = line[content.end..].bytes().all(|b| b == b' ' || b == b'\t');
+        if tail_is_space {
+            (level, content.start..line.len())
+        } else {
+            (level, content)
+        }
+    })
 }
 
 #[allow(clippy::single_range_in_vec_init)]
@@ -2612,7 +3051,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             }
         }
 
-        if let Some((level, content)) = atx_heading(line) {
+        if let Some((level, content)) = atx_display_content_range(line) {
             list_walk.note_block(line);
             let parsed = atx_line(i, line_source, line, level, content);
             all_hidden.extend(parsed.hidden_ranges.iter().cloned());
@@ -3288,26 +3727,31 @@ mod tests {
                 ],
             ),
             (
+                // The WYSIWYG display hides escape backslashes, so the
+                // display shows the escaped characters unescaped.
                 "ex65-escaped-atx",
                 "\\## foo",
-                vec![leaf("p", "\\## foo", "\\## foo")],
+                vec![leaf("p", "## foo", "\\## foo")],
             ),
             (
                 "ex66-atx-inline",
                 "# foo *bar* \\*baz\\*",
                 vec![leaf_marks(
                     "h1",
-                    "foo bar \\*baz\\*",
+                    "foo bar *baz*",
                     "# foo *bar* \\*baz\\*",
                     "I:bar",
                 )],
             ),
             (
+                // CommonMark 0.31.2 ex67 trims the trailing run, but the
+                // WYSIWYG display keeps it so typing spaces at the end of a
+                // heading does not swallow them until the next letter.
                 "ex67-atx-trim",
                 "#                  foo                     ",
                 vec![leaf(
                     "h1",
-                    "foo",
+                    "foo                     ",
                     "#                  foo                     ",
                 )],
             ),
@@ -3360,9 +3804,9 @@ mod tests {
                 "ex76-escaped-closer",
                 "### foo \\###\n## foo #\\##\n# foo \\#",
                 vec![
-                    leaf("h3", "foo \\###", "### foo \\###"),
-                    leaf("h2", "foo #\\##", "## foo #\\##"),
-                    leaf("h1", "foo \\#", "# foo \\#"),
+                    leaf("h3", "foo ###", "### foo \\###"),
+                    leaf("h2", "foo ###", "## foo #\\##"),
+                    leaf("h1", "foo #", "# foo \\#"),
                 ],
             ),
             (
@@ -5867,5 +6311,147 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             vec![2],
             "tail-vtab"
         );
+    }
+
+    fn wrap_snippet_contexts(inner: &str) -> Vec<(&'static str, String)> {
+        vec![
+            ("line1", inner.to_string()),
+            ("line2", format!("x\n{inner}")),
+            ("list", format!("- {inner}")),
+            ("heading", format!("# {inner}")),
+            ("quote", format!("> {inner}")),
+            (
+                "table",
+                format!("| {inner} | z |\n| --- | --- |"),
+            ),
+        ]
+    }
+
+    fn word_style(
+        md: &str,
+        word: &str,
+    ) -> (bool, bool, bool, bool, bool) {
+        let start = md.find(word).unwrap_or_else(|| panic!("{word:?} not in {md:?}"));
+        let end = start + word.len();
+        let doc = parse_document(md);
+        let segs: Vec<_> = doc
+            .lines
+            .iter()
+            .flat_map(|line| line.styled_segments.iter())
+            .filter(|s| s.source.start < end && s.source.end > start)
+            .collect();
+        assert!(
+            !segs.is_empty(),
+            "word {word:?} missing in {md:?} segs={:?}",
+            doc.lines
+                .iter()
+                .flat_map(|line| line.styled_segments.iter())
+                .map(|s| md.get(s.source.clone()).unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+        let s = segs[0];
+        (s.bold, s.italic, s.underline, s.strike, s.code)
+    }
+
+    fn display_of(md: &str, line: usize) -> String {
+        parse_document(md).lines[line].display_text.clone()
+    }
+
+    /// Already-parsed pairs must not be re-synthesized when `base > 0`.
+    /// Line 2, list items, headings, quotes, and table cells all use a
+    /// non-zero base; without adding it, outer underline is overwritten.
+    #[test]
+    fn synthesize_does_not_clobber_parsed_pairs_when_base_is_nonzero() {
+        for (label, md) in wrap_snippet_contexts("<u>**hello**</u>") {
+            assert_eq!(
+                word_style(&md, "hello"),
+                (true, false, true, false, false),
+                "{label}: underline+bold lost in {md:?}"
+            );
+        }
+        for (label, md) in wrap_snippet_contexts("<u>*hi*</u>") {
+            assert_eq!(
+                word_style(&md, "hi"),
+                (false, true, true, false, false),
+                "{label}: underline+italic lost in {md:?}"
+            );
+        }
+        // The exact quote and table repros from the bug report.
+        assert_eq!(
+            word_style("> <u>*hi*</u> x", "hi"),
+            (false, true, true, false, false),
+            "quote repro dropped underline"
+        );
+        assert_eq!(
+            word_style("| <u>**a**</u> | b |\n| --- | --- |", "a"),
+            (true, false, true, false, false),
+            "table-cell repro dropped underline"
+        );
+    }
+
+    /// A closer preceded by a space is not right-flanking; the pair must
+    /// stay literal instead of italicizing the preceding word.
+    #[test]
+    fn synthesize_skips_closer_preceded_by_whitespace() {
+        for (label, md) in wrap_snippet_contexts("x*foo *bar") {
+            let (bold, italic, underline, strike, code) = word_style(&md, "foo");
+            assert!(
+                !bold && !italic && !underline && !strike && !code,
+                "{label}: foo was styled in {md:?}"
+            );
+            let doc = parse_document(&md);
+            let line = doc
+                .lines
+                .iter()
+                .find(|l| l.display_text.contains("foo"))
+                .unwrap_or(&doc.lines[0]);
+            assert!(
+                line.display_text.contains('*'),
+                "{label}: asterisks were hidden in {:?} of {md:?}",
+                line.display_text
+            );
+        }
+        assert_eq!(display_of("x*foo *bar", 0), "x*foo *bar");
+        assert_eq!(display_of("x\nx*foo *bar", 1), "x*foo *bar");
+    }
+
+    /// Synthesizing an outer pair must OR the new style onto nested
+    /// segments instead of replacing them with a single un-nested span.
+    #[test]
+    fn synthesize_ors_style_onto_nested_segments() {
+        for (label, md) in wrap_snippet_contexts("x*a **b** c*y") {
+            assert_eq!(
+                word_style(&md, "a"),
+                (false, true, false, false, false),
+                "{label}: a lost italic in {md:?}"
+            );
+            assert_eq!(
+                word_style(&md, "b"),
+                (true, true, false, false, false),
+                "{label}: b is not bold+italic in {md:?}"
+            );
+            assert_eq!(
+                word_style(&md, "c"),
+                (false, true, false, false, false),
+                "{label}: c lost italic in {md:?}"
+            );
+            let doc = parse_document(&md);
+            if label != "table" {
+                let line = doc
+                    .lines
+                    .iter()
+                    .find(|l| {
+                        l.styled_segments
+                            .iter()
+                            .any(|s| md.get(s.source.clone()) == Some("b"))
+                    })
+                    .unwrap_or(&doc.lines[0]);
+                assert!(
+                    !line.display_text.contains('*'),
+                    "{label}: raw markers in {:?} of {md:?}",
+                    line.display_text
+                );
+            }
+        }
     }
 }

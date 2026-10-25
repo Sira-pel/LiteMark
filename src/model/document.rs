@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlineTagKind,
-    LineKind, ParsedDocument, ParsedLine, TableColumnAlign,
+    accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlinePair,
+    InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment, TableColumnAlign,
 };
 
 use super::text_ops::{
@@ -128,6 +128,13 @@ pub struct DocumentTab {
     pub revision: u64,
     cached_parse: Option<(u64, Arc<ParsedDocument>)>,
     history: UndoHistory,
+    /// Set right before the edit that wraps freshly typed text into a new
+    /// formatted span, so that edit and the typing after it share one undo
+    /// step.
+    next_edit_opens_span_group: bool,
+    /// When set, the next `edit` records this caret on its undo entry instead
+    /// of the end of the deleted range (Enter rewrites a whole span).
+    next_undo_caret: Option<usize>,
 }
 
 impl DocumentTab {
@@ -164,6 +171,8 @@ impl DocumentTab {
             revision: 1,
             cached_parse: None,
             history: UndoHistory::default(),
+            next_edit_opens_span_group: false,
+            next_undo_caret: None,
         };
         tab.refresh_cursor();
         tab
@@ -225,6 +234,7 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
+        let opens_span_group = std::mem::take(&mut self.next_edit_opens_span_group);
         let range = self.clamp_range(range);
         if !self.content.is_char_boundary(range.start) || !self.content.is_char_boundary(range.end)
         {
@@ -238,11 +248,14 @@ impl DocumentTab {
             self.refresh_cursor();
             return;
         }
-        self.history.push(DiffEdit {
-            start: range.start,
-            deleted,
-            inserted: new_text.to_string(),
-        });
+        let undo_caret = self.next_undo_caret.take().unwrap_or(range.end);
+        let mut edit = DiffEdit::new(range.start, deleted, new_text.to_string());
+        edit.undo_caret = undo_caret;
+        if opens_span_group {
+            self.history.push_span_opening(edit);
+        } else {
+            self.history.push(edit);
+        }
         let cursor_at = range.start + new_text.len();
         self.content.replace_range(range, new_text);
         let cursor = snap_off_ending_interior(&self.content, cursor_at);
@@ -499,10 +512,115 @@ impl DocumentTab {
         }
     }
 
+    /// Enter with the caret inside an inline formatting span: close the span
+    /// before the newline and reopen it after `line_ins` on the new line, so
+    /// no markers straddle the break. A caret at the end of the span closes
+    /// it and keeps the formats armed so the next letter reopens them on the
+    /// new line. `line_ins` is the line-prefix text the caller would insert
+    /// at the caret (for example `"\n> "` inside a blockquote).
+    fn split_inline_span_newline(&mut self, range: &Range<usize>, line_ins: &str) -> bool {
+        if !range.is_empty() {
+            return false;
+        }
+        let cursor = range.start;
+        let parsed = self.parsed();
+        let mut spanning: Vec<InlinePair> = parsed
+            .inline_pairs
+            .iter()
+            .filter(|p| {
+                p.kind != InlineTagKind::Link
+                    && cursor > p.open_delim.start
+                    && cursor < p.close_delim.end
+                    && cursor >= p.inner.start
+                    && cursor <= p.inner.end
+            })
+            .cloned()
+            .collect();
+        if spanning.is_empty() {
+            return false;
+        }
+        spanning.sort_by_key(|p| p.open_delim.start);
+
+        let innermost = spanning.last().cloned().unwrap();
+        if cursor == innermost.inner.end {
+            // End of the span: leave it, keeping the formats armed for the
+            // new line.
+            let pending = pending_formats_at(&parsed, cursor);
+            let at = spanning
+                .iter()
+                .map(|p| p.close_delim.end)
+                .max()
+                .unwrap_or(innermost.close_delim.end);
+            self.edit(at..at, line_ins);
+            self.pending_formats = pending;
+            self.caret
+                .move_to(floor_boundary(&self.content, at + line_ins.len()));
+            self.refresh_cursor();
+            return true;
+        }
+
+        let run_start = spanning
+            .iter()
+            .map(|p| p.open_delim.start)
+            .min()
+            .unwrap_or(innermost.open_delim.start);
+        let run_end = spanning
+            .iter()
+            .map(|p| p.close_delim.end)
+            .max()
+            .unwrap_or(innermost.close_delim.end);
+
+        let open_ranges =
+            merge_adjacent_ranges(spanning.iter().map(|p| p.open_delim.clone()).collect());
+        let close_ranges =
+            merge_adjacent_ranges(spanning.iter().map(|p| p.close_delim.clone()).collect());
+        let openers: String = open_ranges
+            .iter()
+            .map(|r| &self.content[r.clone()])
+            .collect();
+        let closers: String = close_ranges
+            .iter()
+            .map(|r| &self.content[r.clone()])
+            .collect();
+
+        let prefix = self.content[run_start..cursor].to_string();
+        let suffix = self.content[cursor..run_end].to_string();
+        let before_core_len = prefix.trim_end().len();
+        let before_tail = &prefix[before_core_len..];
+        let after_head_len = suffix.len() - suffix.trim_start().len();
+        let after_head = &suffix[..after_head_len];
+        let after_core = &suffix[after_head_len..];
+        let mut repl = String::new();
+        if before_core_len > 0 {
+            repl.push_str(&prefix[..before_core_len]);
+            repl.push_str(&closers);
+        }
+        repl.push_str(before_tail);
+        repl.push_str(line_ins);
+        if !after_core.is_empty() {
+            repl.push_str(after_head);
+            repl.push_str(&openers);
+            repl.push_str(after_core);
+        } else {
+            repl.push_str(after_head);
+        }
+        let caret = if after_core.is_empty() {
+            run_start + repl.len()
+        } else {
+            run_start + repl.len() - after_core.len()
+        };
+        self.next_undo_caret = Some(cursor);
+        self.edit(run_start..run_end, &repl);
+        self.caret.move_to(floor_boundary(&self.content, caret));
+        self.refresh_cursor();
+        true
+    }
+
     pub fn smart_newline(&mut self, is_shift: bool) {
         if self.is_read_only() {
             return;
         }
+        self.history.seal();
         let range = self.selection_range();
         if is_shift {
             // Shift+Enter in a table cell leaves the table without touching it.
@@ -516,6 +634,9 @@ impl DocumentTab {
             }
             if self.bare_cr_needs_extra_break(&range) {
                 self.edit(range.start..range.start, "\n\n");
+                return;
+            }
+            if self.split_inline_span_newline(&range, "\n") {
                 return;
             }
             self.edit(range, "\n");
@@ -644,11 +765,20 @@ impl DocumentTab {
 
                     if let Some((col_idx, _c_start, c_end, before_str, after_str)) = split_cell_info
                     {
-                        // Split the cell into current row and a new row below in a single undo step
-                        let repl = if before_str.ends_with(' ') { "" } else { " " };
+                        // Split the cell into current row and a new row below in a single undo step.
+                        // Close spans in the current cell and reopen them on the new row so
+                        // `| **first half** |` becomes `| **first** |` / `| **half** |`.
+                        let (span_open, span_close) =
+                            spanning_marker_runs(&self.content, &parsed, cursor)
+                                .unwrap_or_default();
+                        let after_str = format!("{span_open}{after_str}");
+                        let tail_len = before_str.len() - before_str.trim_end().len();
+                        let edit_start = range.start - tail_len;
+                        let tail = &self.content[edit_start..range.start];
                         let rest_of_line = &self.content[c_end..line_end_pos];
+                        let n_cols = cells.len().max(1);
                         let mut new_cells = Vec::new();
-                        for i in 0..col_count {
+                        for i in 0..n_cols {
                             if i == col_idx {
                                 new_cells.push(format!(" {} ", after_str));
                             } else {
@@ -656,15 +786,21 @@ impl DocumentTab {
                             }
                         }
                         let new_row = format!("\n|{}|", new_cells.join("|"));
-                        let combined = format!("{}{}{}", repl, rest_of_line, new_row);
-                        let new_row_start = range.start + repl.len() + rest_of_line.len() + 1;
-                        self.edit(range.start..line_end_pos, &combined);
+                        let combined =
+                            format!("{}{}{}{}", span_close, tail, rest_of_line, new_row);
+                        let new_row_start = edit_start
+                            + span_close.len()
+                            + tail.len()
+                            + rest_of_line.len()
+                            + 1;
+                        self.edit(edit_start..line_end_pos, &combined);
 
                         let mut target = new_row_start + 1;
                         for cell in new_cells.iter().take(col_idx) {
                             target += cell.len() + 1;
                         }
                         target += 1;
+                        target += span_open.len();
                         let caret_pos = floor_boundary(&self.content, target);
                         self.caret.move_to(caret_pos);
                         self.refresh_cursor();
@@ -728,7 +864,11 @@ impl DocumentTab {
                 }
             } else {
                 let kept = &line[..item.indent_bytes];
-                self.edit(range, &item.continuation(kept));
+                let cont = item.continuation(kept);
+                if self.split_inline_span_newline(&range, &cont) {
+                    return;
+                }
+                self.edit(range, &cont);
             }
             return;
         }
@@ -746,6 +886,9 @@ impl DocumentTab {
                 }
             } else {
                 let ins = format!("\n{}> ", indent);
+                if self.split_inline_span_newline(&range, &ins) {
+                    return;
+                }
                 self.edit(range, &ins);
             }
             return;
@@ -757,6 +900,9 @@ impl DocumentTab {
                 .iter()
                 .any(|p| trimmed_start.starts_with(p));
         if is_heading {
+            if self.split_inline_span_newline(&range, "\n") {
+                return;
+            }
             self.edit(range, "\n");
             return;
         }
@@ -764,11 +910,17 @@ impl DocumentTab {
         // 6. Indented code/text: maintain indentation
         if !indent.is_empty() && !trimmed_start.is_empty() {
             let ins = format!("\n{}", indent);
+            if self.split_inline_span_newline(&range, &ins) {
+                return;
+            }
             self.edit(range, &ins);
             return;
         }
 
         // 7. Default newline
+        if self.split_inline_span_newline(&range, "\n") {
+            return;
+        }
         self.edit(range, "\n");
     }
 
@@ -949,6 +1101,9 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
+        // A format toggle is an undo boundary: pending span typing groups end
+        // here so text typed after the toggle starts a new step.
+        self.history.seal();
 
         // 1. Block-level formats: h1, h2, h3, ul, ol, checklist, quote
         let block_target = match cmd {
@@ -991,70 +1146,8 @@ impl DocumentTab {
             if range.is_empty() {
                 let cursor = range.start;
 
-                // Check if cursor is inside an existing InlinePair of `tag_kind`
-                if let Some(pair) = parsed
-                    .inline_pairs
-                    .iter()
-                    .rev()
-                    .find(|p| {
-                        p.kind == tag_kind
-                            && range.start >= p.open_delim.start
-                            && range.end <= p.close_delim.end
-                    })
-                    .cloned()
-                {
-                    let inner_text = self.content[pair.inner.clone()].to_string();
-                    let edit_range = pair.open_delim.start..pair.close_delim.end;
-                    // If the inner text is just the default unmodified placeholder and the user immediately toggled off,
-                    // remove the placeholder too so pressing Ctrl+B twice on an empty spot leaves it empty!
-                    if inner_text == placeholder && range == pair.inner {
-                        let pos = pair.open_delim.start;
-                        self.edit(edit_range, "");
-                        self.caret.move_to(pos);
-                        self.pending_formats = ActiveFormats::default();
-                        self.refresh_cursor();
-                        return;
-                    }
-                    let new_start = pair.open_delim.start;
-                    self.edit(edit_range, &inner_text);
-                    let rel = range
-                        .start
-                        .saturating_sub(pair.inner.start)
-                        .min(inner_text.len());
-                    self.caret.move_to(new_start + rel);
-                    self.pending_formats = ActiveFormats::default();
-                    self.refresh_cursor();
-                    return;
-                }
-
-                // Check empty delimiters right around cursor, e.g. `**|**`
-                if outer_is_delimited(&self.content, cursor, cursor, prefix, suffix) {
-                    let edit_range = (cursor - prefix.len())..(cursor + suffix.len());
-                    let pos = cursor - prefix.len();
-                    self.edit(edit_range, "");
-                    self.caret.move_to(pos);
-                    self.pending_formats = ActiveFormats::default();
-                    self.refresh_cursor();
-                    return;
-                }
-
                 let word_start = super::text_ops::word_left(&self.content, cursor);
                 let word_end = super::text_ops::word_right(&self.content, cursor);
-
-                if outer_is_delimited(&self.content, word_start, word_end, prefix, suffix) {
-                    let core = self.content[word_start..word_end].to_string();
-                    let edit_range = (word_start - prefix.len())..(word_end + suffix.len());
-                    let new_start = word_start - prefix.len();
-                    let new_end = new_start + core.len();
-                    self.edit(edit_range, &core);
-                    self.caret.range = new_start..new_end;
-                    self.caret.reversed = false;
-                    self.pending_formats = ActiveFormats::default();
-                    self.refresh_cursor();
-                    return;
-                }
-
-                // Expand to word only if cursor is touching/inside an alphanumeric word on the same line
                 let line_s = home_offset(&self.content, cursor);
                 let line_e = parsed
                     .line_at_offset(cursor)
@@ -1062,16 +1155,16 @@ impl DocumentTab {
                     .unwrap_or_else(|| line_end(&self.content, cursor));
                 let w_start = word_start.max(line_s);
                 let w_end = word_end.min(line_e);
-                let touching_word = (cursor > w_start
+                let touching_word = cursor > w_start
+                    && cursor < w_end
                     && self.content[..cursor]
                         .chars()
                         .next_back()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_'))
-                    || (cursor < w_end
-                        && self.content[cursor..]
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.is_alphanumeric() || c == '_'));
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    && self.content[cursor..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_');
                 if touching_word && w_start < w_end {
                     let extent = super::text_ops::word_extent(&self.content, cursor);
                     if self.content[extent.clone()]
@@ -1081,9 +1174,113 @@ impl DocumentTab {
                         range = extent;
                     }
                 }
+
+                if range.is_empty() {
+                    // Check if cursor is strictly inside an existing InlinePair of `tag_kind`
+                    if let Some(pair) = parsed
+                        .inline_pairs
+                        .iter()
+                        .rev()
+                        .find(|p| {
+                            p.kind == tag_kind
+                                && range.start > p.open_delim.start
+                                && range.end < span_close_end(&parsed, p)
+                        })
+                        .cloned()
+                    {
+                        let inner_text = self.content[pair.inner.clone()].to_string();
+                        let edit_range = pair.open_delim.start..pair.close_delim.end;
+                        // If the inner text is just the default unmodified placeholder and the user immediately toggled off,
+                        // remove the placeholder too so pressing Ctrl+B twice on an empty spot leaves it empty!
+                        if inner_text == placeholder && range == pair.inner {
+                            let pos = pair.open_delim.start;
+                            self.edit(edit_range, "");
+                            self.caret.move_to(pos);
+                            self.pending_formats = ActiveFormats::default();
+                            self.refresh_cursor();
+                            return;
+                        }
+                        if mode == ViewMode::Wysiwyg && tag_kind != InlineTagKind::Link {
+                            // Word-style exit: the span stays formatted and the
+                            // caret moves past the whole closing run so further
+                            // typing is plain in the toggled format. Other
+                            // formats stacked around the caret stay armed for
+                            // the next letter, and a second press of the same
+                            // toggle then disarms them. Links unwrap instead.
+                            let mut pending = pending_formats_at(&parsed, range.start);
+                            match tag_kind {
+                                InlineTagKind::Bold => pending.bold = false,
+                                InlineTagKind::Italic => pending.italic = false,
+                                InlineTagKind::Underline => pending.underline = false,
+                                InlineTagKind::Strike => pending.strike = false,
+                                InlineTagKind::Code => pending.code = false,
+                                InlineTagKind::Link => {}
+                            }
+                            if range.start > pair.open_delim.start {
+                                let group_end = span_close_end(&parsed, &pair);
+                                self.caret.move_to(floor_boundary(&self.content, group_end));
+                            }
+                            self.pending_formats = pending;
+                            self.refresh_cursor();
+                            return;
+                        }
+                        let new_start = pair.open_delim.start;
+                        self.edit(edit_range, &inner_text);
+                        let rel = range
+                            .start
+                            .saturating_sub(pair.inner.start)
+                            .min(inner_text.len());
+                        self.caret.move_to(new_start + rel);
+                        self.pending_formats = ActiveFormats::default();
+                        self.refresh_cursor();
+                        return;
+                    }
+
+                    // Check empty delimiters right around cursor, e.g. `**|**`
+                    if outer_is_delimited(&self.content, cursor, cursor, prefix, suffix) {
+                        let edit_range = (cursor - prefix.len())..(cursor + suffix.len());
+                        let pos = cursor - prefix.len();
+                        self.edit(edit_range, "");
+                        self.caret.move_to(pos);
+                        self.pending_formats = ActiveFormats::default();
+                        self.refresh_cursor();
+                        return;
+                    }
+
+                    if outer_is_delimited(&self.content, word_start, word_end, prefix, suffix) {
+                        let core = self.content[word_start..word_end].to_string();
+                        let edit_range = (word_start - prefix.len())..(word_end + suffix.len());
+                        let new_start = word_start - prefix.len();
+                        let new_end = new_start + core.len();
+                        self.edit(edit_range, &core);
+                        self.caret.range = new_start..new_end;
+                        self.caret.reversed = false;
+                        self.pending_formats = ActiveFormats::default();
+                        self.refresh_cursor();
+                        return;
+                    }
+                }
             }
 
             if range.is_empty() {
+                // Caret on the opener: unwrap the span (Left to offset 0 of
+                // `**Hello**` then Ctrl+B must drop the markers).
+                if let Some(pair) = parsed
+                    .inline_pairs
+                    .iter()
+                    .rev()
+                    .find(|p| p.kind == tag_kind && range.start == p.open_delim.start)
+                    .cloned()
+                {
+                    let inner_text = self.content[pair.inner.clone()].to_string();
+                    let edit_range = pair.open_delim.start..pair.close_delim.end;
+                    self.edit(edit_range, &inner_text);
+                    self.caret.move_to(pair.open_delim.start);
+                    self.pending_formats = ActiveFormats::default();
+                    self.refresh_cursor();
+                    return;
+                }
+
                 // In WYSIWYG mode, toggling bold/italic/underline/strike/code at an empty cursor toggles pending_formats!
                 if mode == ViewMode::Wysiwyg && tag_kind != InlineTagKind::Link {
                     match tag_kind {
@@ -1122,6 +1319,11 @@ impl DocumentTab {
             }
 
             // Non-empty selection: collect parts across table cells or lines separately
+            let orig_cursor = if self.caret.range.is_empty() {
+                Some(self.caret.range.start)
+            } else {
+                None
+            };
             let orig_sel = range.clone();
             struct InlinePartInfo {
                 range: Range<usize>,
@@ -1129,6 +1331,9 @@ impl DocumentTab {
                 edit_range: Range<usize>,
                 unwrapped_text: String,
                 wrapped_text: String,
+                /// For a partial unformat, the new range of the selection's
+                /// text after the surrounding span was split.
+                split_inner: Option<Range<usize>>,
             }
 
             let mut candidate_ranges: Vec<Range<usize>> = Vec::new();
@@ -1196,6 +1401,271 @@ impl DocumentTab {
                 return;
             }
 
+            if tag_kind != InlineTagKind::Link {
+                let global_all_have_format = !candidate_ranges.is_empty()
+                    && candidate_ranges.iter().all(|p_range| {
+                        let pline = match parsed.line_at_offset(p_range.start) {
+                            Some(l) => l,
+                            None => return false,
+                        };
+                        let overlapping_segs: Vec<&StyledSegment> = pline
+                            .styled_segments
+                            .iter()
+                            .filter(|s| s.source.start < p_range.end && s.source.end > p_range.start)
+                            .collect();
+                        !overlapping_segs.is_empty()
+                            && overlapping_segs.iter().all(|s| match tag_kind {
+                                InlineTagKind::Bold => s.bold,
+                                InlineTagKind::Italic => s.italic,
+                                InlineTagKind::Underline => s.underline,
+                                InlineTagKind::Strike => s.strike,
+                                InlineTagKind::Code => s.code,
+                                InlineTagKind::Link => false,
+                            })
+                    });
+                let should_turn_on = !global_all_have_format;
+
+                let mut candidate_results = Vec::new();
+                let in_table = candidate_ranges.iter().any(|r| {
+                    parsed.line_at_offset(r.start).is_some_and(|l| {
+                        matches!(l.kind, LineKind::TableRow { .. })
+                    })
+                });
+                let rewrite_ranges: Vec<Range<usize>> = if !in_table && candidate_ranges.len() > 1 {
+                    let combined = candidate_ranges[0].start
+                        ..candidate_ranges
+                            .last()
+                            .map(|r| r.end)
+                            .unwrap_or(candidate_ranges[0].end);
+                    let has_pairs = parsed.inline_pairs.iter().any(|p| {
+                        p.kind != InlineTagKind::Link
+                            && p.open_delim.start < combined.end
+                            && span_close_end(&parsed, p) > combined.start
+                    });
+                    // Combine across lines only when rewriting existing spans
+                    // (m5). Plain select-all still wraps each line separately.
+                    if has_pairs {
+                        vec![combined]
+                    } else {
+                        candidate_ranges.clone()
+                    }
+                } else {
+                    candidate_ranges.clone()
+                };
+
+                for p_range in &rewrite_ranges {
+                    let p_start = p_range.start;
+                    let p_end = p_range.end;
+                    let pline = match parsed.line_at_offset(p_start) {
+                        Some(l) => l,
+                        None => continue,
+                    };
+
+                    let mut group_pairs: Vec<&InlinePair> = parsed
+                        .inline_pairs
+                        .iter()
+                        .filter(|p| {
+                            p.kind != InlineTagKind::Link
+                                && p.open_delim.start < p_end
+                                && span_close_end(&parsed, p) > p_start
+                        })
+                        .collect();
+
+                    let mut expanded = true;
+                    while expanded {
+                        expanded = false;
+                        for p in &parsed.inline_pairs {
+                            if p.kind == InlineTagKind::Link
+                                || group_pairs.iter().any(|g| std::ptr::eq(*g, p))
+                            {
+                                continue;
+                            }
+                            let touches = group_pairs.iter().any(|g| {
+                                p.open_delim.start < span_close_end(&parsed, g)
+                                    && span_close_end(&parsed, p) > g.open_delim.start
+                            });
+                            if touches {
+                                group_pairs.push(p);
+                                expanded = true;
+                            }
+                        }
+                    }
+
+                    let (replace_start, replace_end) = if group_pairs.is_empty() {
+                        (p_start, p_end)
+                    } else {
+                        let r_start = group_pairs
+                            .iter()
+                            .map(|p| p.open_delim.start)
+                            .min()
+                            .unwrap()
+                            .min(p_start);
+                        let r_end = group_pairs
+                            .iter()
+                            .map(|p| span_close_end(&parsed, p))
+                            .max()
+                            .unwrap()
+                            .max(p_end);
+                        (r_start, r_end)
+                    };
+                    let (replace_start, replace_end) = expand_replace_to_matching_neighbors(
+                        &self.content,
+                        &parsed,
+                        pline,
+                        p_start..p_end,
+                        replace_start..replace_end,
+                        tag_kind,
+                        should_turn_on,
+                    );
+                    // Neighbor expansion may pull in spans that did not overlap
+                    // the selection (`aa` next to `**bb cc**`). Skip those
+                    // delimiters so they are rewritten instead of kept as text.
+                    for p in &parsed.inline_pairs {
+                        if p.kind == InlineTagKind::Link {
+                            continue;
+                        }
+                        if p.open_delim.start >= replace_start
+                            && span_close_end(&parsed, p) <= replace_end
+                            && !group_pairs.iter().any(|g| std::ptr::eq(*g, p))
+                        {
+                            group_pairs.push(p);
+                        }
+                    }
+
+                    let simple_wrap = group_pairs.is_empty()
+                        && replace_start == p_start
+                        && replace_end == p_end;
+                    let slices: Vec<StyledSlice> = if simple_wrap {
+                        let mut flags = FormatFlags::default();
+                        apply_toggle(&mut flags, tag_kind, should_turn_on);
+                        vec![StyledSlice {
+                            text: self.content[p_start..p_end].to_string(),
+                            flags,
+                            is_selected: true,
+                        }]
+                    } else {
+                        let skip: Vec<Range<usize>> = group_pairs
+                            .iter()
+                            .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
+                            .collect();
+                        let segs: Vec<StyledSegment> = parsed
+                            .lines
+                            .iter()
+                            .filter(|l| {
+                                l.source.end > replace_start && l.source.start < replace_end
+                            })
+                            .flat_map(|l| l.styled_segments.iter().cloned())
+                            .collect();
+                        collect_rewrite_slices(
+                            &self.content,
+                            &parsed.inline_pairs,
+                            &segs,
+                            replace_start..replace_end,
+                            p_start..p_end,
+                            &skip,
+                            Some((tag_kind, should_turn_on)),
+                        )
+                    };
+                    let glued_left = replace_start > 0
+                        && self.content[..replace_start]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| !c.is_whitespace());
+                    let include_wraps = self.content[p_start..p_end].contains('\n');
+                    let (rendered_str, sel_in_rendered) =
+                        render_styled_slices_with_selection_opts(
+                            &slices,
+                            glued_left,
+                            include_wraps,
+                        );
+                    candidate_results.push((replace_start..replace_end, rendered_str, sel_in_rendered, p_start));
+                }
+
+                if rewrite_ranges.len() == 1 && !candidate_results.is_empty() {
+                    let (rep_range, rendered_str, sel_in_rendered, p_start) = candidate_results.remove(0);
+                    self.edit(rep_range.clone(), &rendered_str);
+
+                    if let Some(cur) = orig_cursor {
+                        let cursor_in_sel = cur.saturating_sub(p_start);
+                        let target_pos = rep_range.start + sel_in_rendered.start + cursor_in_sel.min(sel_in_rendered.len());
+                        self.caret.move_to(floor_boundary(&self.content, target_pos));
+                    } else {
+                        let new_start = rep_range.start + sel_in_rendered.start;
+                        let new_end = rep_range.start + sel_in_rendered.end;
+                        self.caret.range = new_start..new_end;
+                        self.caret.reversed = false;
+                    }
+                    self.pending_formats = ActiveFormats::default();
+                    self.refresh_cursor();
+                    return;
+                }
+
+                let edits: Vec<(Range<usize>, String)> = candidate_results
+                    .into_iter()
+                    .filter(|(r, repl, _, _)| self.content[r.clone()] != *repl)
+                    .map(|(r, repl, _, _)| (r, repl))
+                    .collect();
+
+                if edits.is_empty() {
+                    return;
+                }
+
+                let min_start = edits.first().unwrap().0.start;
+                let max_end = edits.last().unwrap().0.end;
+                let span_range = min_start..max_end;
+
+                let mut replacement = String::with_capacity(
+                    max_end - min_start + edits.len() * (prefix.len() + suffix.len()),
+                );
+                let mut cursor = min_start;
+                for (r, repl) in &edits {
+                    if r.start > cursor {
+                        replacement.push_str(&self.content[cursor..r.start]);
+                    }
+                    replacement.push_str(repl);
+                    cursor = r.end;
+                }
+                if max_end > cursor {
+                    replacement.push_str(&self.content[cursor..max_end]);
+                }
+
+                self.edit(span_range, &replacement);
+
+                let map_offset = |offset: usize| -> usize {
+                    if offset <= min_start {
+                        return offset;
+                    }
+                    let mut mapped = min_start;
+                    let mut orig_cursor = min_start;
+                    for (r, repl) in &edits {
+                        if offset <= r.start {
+                            mapped += offset - orig_cursor;
+                            return mapped;
+                        }
+                        mapped += r.start - orig_cursor;
+                        if offset <= r.end {
+                            mapped += repl.len();
+                            return mapped;
+                        }
+                        mapped += repl.len();
+                        orig_cursor = r.end;
+                    }
+                    if offset > orig_cursor {
+                        mapped += offset - orig_cursor;
+                    }
+                    mapped
+                };
+                let new_start = map_offset(orig_sel.start);
+                let new_end = map_offset(orig_sel.end);
+                let new_start = floor_boundary(&self.content, new_start);
+                let new_end = floor_boundary(&self.content, new_end);
+                self.caret.range = new_start..new_end;
+                self.caret.reversed = false;
+                self.pending_formats = ActiveFormats::default();
+                self.refresh_cursor();
+                return;
+            }
+
             let mut parts: Vec<InlinePartInfo> = Vec::with_capacity(candidate_ranges.len());
 
             for p_range in candidate_ranges {
@@ -1203,9 +1673,11 @@ impl DocumentTab {
                 let p_end = p_range.end;
                 let part_text = &self.content[p_start..p_end];
 
-                let (has_format, edit_range, unwrapped_text) = if tag_kind == InlineTagKind::Link {
+                let (has_format, edit_range, unwrapped_text, split_inner) = if tag_kind
+                    == InlineTagKind::Link
+                {
                     if let Some(inner) = is_single_link(part_text) {
-                        (true, p_start..p_end, inner.to_string())
+                        (true, p_start..p_end, inner.to_string(), None)
                     } else if let Some(pair) = parsed.inline_pairs.iter().find(|p| {
                         p.kind == InlineTagKind::Link
                             && (p.inner == (p_start..p_end)
@@ -1215,34 +1687,17 @@ impl DocumentTab {
                             true,
                             pair.open_delim.start..pair.close_delim.end,
                             self.content[pair.inner.clone()].to_string(),
+                            None,
                         )
                     } else if let Some((outer_range, inner)) =
                         unwrap_outer_link(&self.content, p_start, p_end)
                     {
-                        (true, outer_range, inner)
+                        (true, outer_range, inner, None)
                     } else {
-                        (false, p_start..p_end, String::new())
+                        (false, p_start..p_end, String::new(), None)
                     }
                 } else {
-                    if is_delimited(part_text, prefix, suffix) {
-                        let unwrapped = &part_text[prefix.len()..part_text.len() - suffix.len()];
-                        (true, p_start..p_end, unwrapped.to_string())
-                    } else if let Some(pair) = parsed.inline_pairs.iter().find(|p| {
-                        p.kind == tag_kind
-                            && (p.inner == (p_start..p_end)
-                                || (p.open_delim.start == p_start && p.close_delim.end == p_end))
-                    }) {
-                        (
-                            true,
-                            pair.open_delim.start..pair.close_delim.end,
-                            self.content[pair.inner.clone()].to_string(),
-                        )
-                    } else if outer_is_delimited(&self.content, p_start, p_end, prefix, suffix) {
-                        let edit_range = (p_start - prefix.len())..(p_end + suffix.len());
-                        (true, edit_range, part_text.to_string())
-                    } else {
-                        (false, p_start..p_end, String::new())
-                    }
+                    (false, p_start..p_end, String::new(), None)
                 };
 
                 let wrapped_text = format!("{}{}{}", prefix, part_text, suffix);
@@ -1252,6 +1707,7 @@ impl DocumentTab {
                     edit_range,
                     unwrapped_text,
                     wrapped_text,
+                    split_inner,
                 });
             }
 
@@ -1298,7 +1754,20 @@ impl DocumentTab {
                 && (orig_sel == (parts[0].range.start..parts[0].range.end)
                     || orig_sel == (parts[0].edit_range.start..parts[0].edit_range.end))
             {
-                if every_part_has_format {
+                if let (Some(cur), true) = (orig_cursor, every_part_has_format) {
+                    let unwrapped_len = edits[0].1.len();
+                    let rel = cur
+                        .saturating_sub(parts[0].range.start)
+                        .min(unwrapped_len);
+                    self.caret.move_to(min_start + rel);
+                    self.caret.reversed = false;
+                    self.pending_formats = ActiveFormats::default();
+                    self.refresh_cursor();
+                    return;
+                }
+                if let Some(split) = parts[0].split_inner.clone() {
+                    self.caret.range = split;
+                } else if every_part_has_format {
                     let unwrapped_len = edits[0].1.len();
                     self.caret.range = min_start..min_start + unwrapped_len;
                 } else {
@@ -1706,34 +2175,119 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() && text != "\n" {
+        if mode == ViewMode::Wysiwyg
+            && !range.is_empty()
+            && !text.is_empty()
+            && text != "\n"
+            && self.replace_wysiwyg_selection(range.clone(), text)
+        {
+            return;
+        }
+        if text.trim().is_empty() {
+            if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() {
+                let parsed = self.parsed();
+                // A Markdown closer cannot sit right after whitespace, so whitespace
+                // typed at the end of a `*`/`**`/`~~` span goes after the whole
+                // closing run; the span's formats stay armed for what is typed
+                // next. Extra whitespace keeps stacking outside the closer.
+                let pair = parsed
+                    .inline_pairs
+                    .iter()
+                    .rev()
+                    .find(|p| {
+                        matches!(
+                            p.kind,
+                            InlineTagKind::Bold
+                                | InlineTagKind::Italic
+                                | InlineTagKind::Strike
+                                | InlineTagKind::Underline
+                                | InlineTagKind::Code
+                        ) && range.start == p.close_delim.start
+                            && !parsed.inline_pairs.iter().any(|o| {
+                                o.kind != InlineTagKind::Link
+                                    && o.inner.start <= p.inner.start
+                                    && o.inner.end >= p.inner.end
+                                    && o.inner != p.inner
+                            })
+                    })
+                    .cloned();
+                if let Some(pair) = pair {
+                    let pending = if self.has_pending_inline_formats() {
+                        self.pending_formats
+                    } else {
+                        pending_formats_at(&parsed, range.start)
+                    };
+                    let at = span_close_end(&parsed, &pair);
+                    self.edit(at..at, text);
+                    self.pending_formats = pending;
+                    self.caret.move_to(floor_boundary(&self.content, at + text.len()));
+                    self.refresh_cursor();
+                    return;
+                }
+            }
             let pf = self.pending_formats;
+            self.edit(range, text);
+            self.pending_formats = pf;
+            return;
+        }
+        if mode == ViewMode::Wysiwyg
+            && range.is_empty()
+            && !text.is_empty()
+            && text != "\n"
+        {
+            let pf = self.pending_formats;
+            if self.has_pending_inline_formats() {
+                let parsed = self.parsed();
+                // The armed formats extend a span ending right at the caret
+                // (with or without a trailing space) or continue a subset of its formats.
+                if let Some((run_range, repl, caret)) =
+                    extend_or_splice_span(&self.content, &parsed, &pf, range.start, text)
+                {
+                    self.pending_formats = ActiveFormats::default();
+                    self.edit(run_range, &repl);
+                    self.caret.move_to(floor_boundary(&self.content, caret));
+                    self.refresh_cursor();
+                    return;
+                }
+            }
             if pf.bold || pf.italic || pf.underline || pf.strike || pf.code {
-                let mut open = String::new();
-                let mut close = String::new();
-                if pf.bold {
-                    open.push_str("**");
-                    close.insert_str(0, "**");
+                let flags = FormatFlags {
+                    bold: pf.bold,
+                    italic: pf.italic,
+                    underline: pf.underline,
+                    strike: pf.strike,
+                    code: pf.code,
+                };
+                let lead_len = text.len() - text.trim_start().len();
+                let trail_len = text.len() - text.trim_end().len();
+                let lead_ws = &text[..lead_len];
+                let trail_ws = &text[text.len() - trail_len..];
+                let core = &text[lead_len..text.len() - trail_len];
+                // The span's own delimiter characters inside the typed text
+                // would end the span early; escape them so it stays intact.
+                let core_owned;
+                let core = if pf.strike && core.contains('~') {
+                    core_owned = core.replace('~', "\\~");
+                    &core_owned
+                } else if (pf.bold || pf.italic) && core.contains('*') {
+                    core_owned = core.replace('*', "\\*");
+                    &core_owned
+                } else {
+                    core
+                };
+
+                let (open, close) = wrap_delimiters(&flags);
+                let wrapped = format!("{}{}{}{}{}", lead_ws, open, core, close, trail_ws);
+                let close_start = wrapped.len() - trail_ws.len() - close.len();
+                let cursor_after = if trail_len > 0 {
+                    range.start + wrapped.len()
+                } else {
+                    range.start + close_start
+                };
+                if trail_len == 0 {
+                    self.pending_formats = ActiveFormats::default();
                 }
-                if pf.italic {
-                    open.push('*');
-                    close.insert(0, '*');
-                }
-                if pf.underline {
-                    open.push_str("<u>");
-                    close.insert_str(0, "</u>");
-                }
-                if pf.strike {
-                    open.push_str("~~");
-                    close.insert_str(0, "~~");
-                }
-                if pf.code {
-                    open.push('`');
-                    close.insert(0, '`');
-                }
-                let wrapped = format!("{}{}{}", open, text, close);
-                let cursor_after = range.start + open.len() + text.len();
-                self.pending_formats = ActiveFormats::default();
+                self.next_edit_opens_span_group = true;
                 self.edit(range, &wrapped);
                 self.caret
                     .move_to(floor_boundary(&self.content, cursor_after));
@@ -1741,8 +2295,228 @@ impl DocumentTab {
                 return;
             }
         }
+        // Typing a span's own delimiter characters inside it would end the
+        // span early: escape them so the span stays intact. Backticks cannot
+        // be escaped inside a code span, so the span is re-fenced with a
+        // longer backtick run instead.
+        let mut escaped: Option<String> = None;
+        if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() {
+            let parsed = self.parsed();
+            if let Some(pair) = parsed.inline_pairs.iter().rev().find(|p| {
+                range.start >= p.inner.start && range.start <= p.inner.end
+            }) {
+                match pair.kind {
+                    InlineTagKind::Bold | InlineTagKind::Italic => {
+                        if text.contains('*') {
+                            escaped = Some(text.replace('*', "\\*"));
+                        }
+                    }
+                    InlineTagKind::Strike => {
+                        if text.contains('~') {
+                            escaped = Some(text.replace('~', "\\~"));
+                        }
+                    }
+                    InlineTagKind::Code if text.contains('`') => {
+                        // The backtick is literal content: re-fence the span
+                        // with a longer run so it stays intact.
+                        self.refence_code_span(pair, range.start, text);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let text = escaped.as_deref().unwrap_or(text);
+
+        // A literally typed `<` must not start an HTML tag (`<u>a<b>c</u>`);
+        // escape it so it renders as text. Skipped inside code spans, whose
+        // content is literal.
+        if mode == ViewMode::Wysiwyg && range.is_empty() && text.chars().count() == 1 {
+            let parsed = self.parsed();
+            let in_code = parsed.inline_pairs.iter().any(|p| {
+                p.kind == InlineTagKind::Code
+                    && range.start > p.inner.start
+                    && range.start < p.inner.end
+            });
+            if !in_code {
+                let next_char = self.content[range.start..].chars().next();
+                let starts_tag =
+                    next_char.is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+                let prev_is_lt = range.start > 0
+                    && self.content[..range.start].ends_with('<')
+                    && !self.content[..range.start].ends_with("\\<");
+                let typed_tag_cont = text
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+                if text == "<" && starts_tag {
+                    let escaped = format!("\\{text}");
+                    let start = range.start;
+                    self.pending_formats = ActiveFormats::default();
+                    self.edit(start..start, &escaped);
+                    self.caret
+                        .move_to(floor_boundary(&self.content, start + escaped.len()));
+                    self.refresh_cursor();
+                    return;
+                }
+                if typed_tag_cont && prev_is_lt {
+                    // The `<` right before the caret becomes `\<` and the
+                    // typed character follows it, in one edit.
+                    let lt = range.start - 1;
+                    let repl = format!("\\<{text}");
+                    let caret = lt + repl.len();
+                    self.pending_formats = ActiveFormats::default();
+                    self.edit(lt..range.start, &repl);
+                    self.caret.move_to(floor_boundary(&self.content, caret));
+                    self.refresh_cursor();
+                    return;
+                }
+            }
+        }
         self.pending_formats = ActiveFormats::default();
         self.edit(range, text);
+    }
+
+    /// Replace a WYSIWYG selection that overlaps inline markers by rewriting
+    /// the surrounding spans so unselected text keeps its formats and the
+    /// typed text is inserted plain (`**He**Xld` not `**He*X*rld`).
+    fn replace_wysiwyg_selection(&mut self, range: Range<usize>, text: &str) -> bool {
+        let parsed = self.parsed();
+        let overlapping = parsed.inline_pairs.iter().any(|p| {
+            p.kind != InlineTagKind::Link
+                && p.open_delim.start < range.end
+                && p.close_delim.end > range.start
+        });
+        if !overlapping {
+            return false;
+        }
+        let mut group_pairs: Vec<&InlinePair> = parsed
+            .inline_pairs
+            .iter()
+            .filter(|p| {
+                p.kind != InlineTagKind::Link
+                    && p.open_delim.start < range.end
+                    && span_close_end(&parsed, p) > range.start
+            })
+            .collect();
+        let mut expanded = true;
+        while expanded {
+            expanded = false;
+            for p in &parsed.inline_pairs {
+                if p.kind == InlineTagKind::Link
+                    || group_pairs.iter().any(|g| std::ptr::eq(*g, p))
+                {
+                    continue;
+                }
+                let touches = group_pairs.iter().any(|g| {
+                    p.open_delim.start < span_close_end(&parsed, g)
+                        && span_close_end(&parsed, p) > g.open_delim.start
+                });
+                if touches {
+                    group_pairs.push(p);
+                    expanded = true;
+                }
+            }
+        }
+        let replace_start = group_pairs
+            .iter()
+            .map(|p| p.open_delim.start)
+            .min()
+            .unwrap_or(range.start)
+            .min(range.start);
+        let replace_end = group_pairs
+            .iter()
+            .map(|p| span_close_end(&parsed, p))
+            .max()
+            .unwrap_or(range.end)
+            .max(range.end);
+        let skip: Vec<Range<usize>> = group_pairs
+            .iter()
+            .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
+            .collect();
+        let segs: Vec<StyledSegment> = parsed
+            .lines
+            .iter()
+            .filter(|l| l.source.end > replace_start && l.source.start < replace_end)
+            .flat_map(|l| l.styled_segments.iter().cloned())
+            .collect();
+        let slices = collect_rewrite_slices(
+            &self.content,
+            &parsed.inline_pairs,
+            &segs,
+            replace_start..replace_end,
+            range.clone(),
+            &skip,
+            None,
+        );
+        let selected: Vec<&StyledSlice> = slices.iter().filter(|s| s.is_selected).collect();
+        let typed_flags = if !selected.is_empty()
+            && selected.iter().all(|s| s.flags == selected[0].flags)
+        {
+            selected[0].flags
+        } else {
+            FormatFlags::default()
+        };
+        let mut out = Vec::new();
+        let mut replaced = false;
+        for s in slices {
+            if s.is_selected {
+                if !replaced {
+                    out.push(StyledSlice {
+                        text: text.to_string(),
+                        flags: typed_flags,
+                        is_selected: true,
+                    });
+                    replaced = true;
+                }
+            } else {
+                out.push(s);
+            }
+        }
+        if !replaced {
+            return false;
+        }
+        let glued_left = replace_start > 0
+            && self.content[..replace_start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_whitespace());
+        let (rendered, sel) = render_styled_slices_with_selection_glued(&out, glued_left);
+        self.edit(replace_start..replace_end, &rendered);
+        self.caret
+            .move_to(floor_boundary(&self.content, replace_start + sel.end));
+        self.pending_formats = ActiveFormats::default();
+        self.refresh_cursor();
+        true
+    }
+
+    /// Typing a backtick inside a code span cannot be escaped (backslash is
+    /// literal inside code); re-fence the whole span with a longer backtick
+    /// run so the span stays intact.
+    fn refence_code_span(&mut self, pair: &InlinePair, caret: usize, text: &str) {
+        let inner_start = pair.inner.start;
+        let inner_end = pair.inner.end;
+        let mut new_inner = String::with_capacity(inner_end - inner_start + text.len());
+        new_inner.push_str(&self.content[inner_start..caret]);
+        new_inner.push_str(text);
+        new_inner.push_str(&self.content[caret..inner_end]);
+        let mut max_run = 0usize;
+        let mut run = 0usize;
+        for c in new_inner.chars() {
+            if c == '`' {
+                run += 1;
+                max_run = max_run.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        let fence = "`".repeat(max_run.max(pair.open_delim.len() - 1) + 1);
+        let repl = format!("{}{}{}", fence, new_inner, fence);
+        let caret_after = pair.open_delim.start + fence.len() + (caret - inner_start) + text.len();
+        self.edit(pair.open_delim.start..pair.close_delim.end, &repl);
+        self.caret
+            .move_to(floor_boundary(&self.content, caret_after));
+        self.refresh_cursor();
     }
 
     #[allow(dead_code)]
@@ -2024,7 +2798,8 @@ impl DocumentTab {
 
         // 1. Check if cursor is inside or immediately after an InlinePair
         for pair in parsed.inline_pairs.iter().rev() {
-            let prev_vis = if cursor == pair.close_delim.end {
+            let group_end = span_close_end(&parsed, pair);
+            let prev_vis = if cursor >= pair.inner.end && cursor <= group_end {
                 pair.inner.end
             } else {
                 cursor
@@ -2033,18 +2808,18 @@ impl DocumentTab {
                 let prev_g = previous_grapheme(&self.content, prev_vis);
                 if prev_g <= pair.inner.start && prev_vis == pair.inner.end {
                     // Only 1 visible grapheme inside this formatted span! Delete the whole span + delimiters!
-                    let start = pair.open_delim.start;
-                    let end = pair.close_delim.end;
-                    self.edit(start..end, "");
+                    let start = span_open_start(&parsed, pair);
+                    self.edit(start..group_end, "");
                     self.caret.move_to(start);
                     self.refresh_cursor();
                     return true;
-                } else if cursor == pair.close_delim.end {
-                    // Cursor was right outside `**word**|` -> delete the last visible grapheme inside `word`
-                    let close_len = pair.close_delim.len();
+                } else if cursor >= pair.inner.end && cursor <= group_end {
+                    // Cursor was right outside the closing run -> delete the last
+                    // visible grapheme inside `word`; never split a delimiter.
+                    let deleted = prev_vis - prev_g;
                     self.edit(prev_g..prev_vis, "");
                     self.caret
-                        .move_to(floor_boundary(&self.content, prev_g + close_len));
+                        .move_to(floor_boundary(&self.content, group_end - deleted));
                     self.refresh_cursor();
                     return true;
                 }
@@ -2095,6 +2870,40 @@ impl DocumentTab {
                     }
                     return;
                 }
+
+                // Delete skips hidden delimiters like Backspace does, and
+                // drops a span whose last visible grapheme it removes
+                // instead of leaving lone markers behind.
+                let next_vis = next_visible_pos(&parsed, cursor);
+                if next_vis >= self.content.len() {
+                    return;
+                }
+                for pair in parsed.inline_pairs.iter().rev() {
+                    if next_vis < pair.inner.start || next_vis >= pair.inner.end {
+                        continue;
+                    }
+                    let only =
+                        previous_grapheme(&self.content, pair.inner.end) <= pair.inner.start;
+                    if only {
+                        let start = span_open_start(&parsed, pair);
+                        let end = span_close_end(&parsed, pair);
+                        self.edit(start..end, "");
+                        self.caret.move_to(floor_boundary(&self.content, start));
+                        self.refresh_cursor();
+                        return;
+                    }
+                    let g_end = next_grapheme(&self.content, next_vis);
+                    self.edit(next_vis..g_end, "");
+                    self.caret
+                        .move_to(floor_boundary(&self.content, cursor.min(next_vis)));
+                    self.refresh_cursor();
+                    return;
+                }
+                let g_end = next_grapheme(&self.content, next_vis);
+                self.edit(next_vis..g_end, "");
+                self.caret.move_to(floor_boundary(&self.content, cursor.min(next_vis)));
+                self.refresh_cursor();
+                return;
             }
         }
         let next = next_grapheme(&self.content, cursor);
@@ -2496,6 +3305,7 @@ impl DocumentTab {
 
     pub fn move_up(&mut self, extend: bool) {
         self.pending_formats = ActiveFormats::default();
+        self.history.seal();
         move_vertical_collapsed(&self.content, &mut self.caret, -1, extend);
         self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
@@ -2503,6 +3313,7 @@ impl DocumentTab {
 
     pub fn move_down(&mut self, extend: bool) {
         self.pending_formats = ActiveFormats::default();
+        self.history.seal();
         move_vertical_collapsed(&self.content, &mut self.caret, 1, extend);
         self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
@@ -3123,6 +3934,1439 @@ fn parse_line_block_prefix(
     (indent, None, indent)
 }
 
+/// True when `from..to` is only whitespace and delimiter markup, so a
+/// neighboring span with matching flags can merge across that gap.
+fn gap_is_ws_and_markers(content: &str, hidden: &[Range<usize>], from: usize, to: usize) -> bool {
+    if to < from {
+        return false;
+    }
+    let mut i = from;
+    while i < to {
+        if content[i..].starts_with('\n') {
+            return false;
+        }
+        if let Some(h) = hidden.iter().find(|r| i >= r.start && i < r.end) {
+            if !is_delimiter_markup(&content[h.start..h.end]) {
+                return false;
+            }
+            i = h.end;
+            continue;
+        }
+        let Some(ch) = content[i..].chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() && ch != '\n' {
+            i += ch.len_utf8();
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn is_delimiter_markup(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty()
+        && (t.chars().all(|c| matches!(c, '*' | '_' | '~' | '`'))
+            || t.eq_ignore_ascii_case("<u>")
+            || t.eq_ignore_ascii_case("</u>"))
+}
+
+fn covering_span(
+    parsed: &ParsedDocument,
+    pline: &ParsedLine,
+    seg: &StyledSegment,
+) -> (usize, usize) {
+    let overlapping: Vec<&InlinePair> = pline
+        .inline_pairs
+        .iter()
+        .filter(|p| {
+            p.kind != InlineTagKind::Link
+                && p.inner.start <= seg.source.start
+                && p.inner.end >= seg.source.end
+        })
+        .collect();
+    if overlapping.is_empty() {
+        return (seg.source.start, seg.source.end);
+    }
+    let open = overlapping
+        .iter()
+        .map(|p| span_open_start(parsed, p))
+        .min()
+        .unwrap_or(seg.source.start);
+    let close = overlapping
+        .iter()
+        .map(|p| span_close_end(parsed, p))
+        .max()
+        .unwrap_or(seg.source.end);
+    (open, close)
+}
+
+/// When turning a format on, extend the rewrite so a neighboring span that
+/// already has the same flags is merged instead of emitting `**aa**** bb**`.
+fn expand_replace_to_matching_neighbors(
+    content: &str,
+    parsed: &ParsedDocument,
+    pline: &ParsedLine,
+    p_range: Range<usize>,
+    mut replace: Range<usize>,
+    tag_kind: InlineTagKind,
+    should_turn_on: bool,
+) -> (usize, usize) {
+    if !should_turn_on {
+        return (replace.start, replace.end);
+    }
+    let p_start = p_range.start;
+    let p_end = p_range.end;
+    let overlapping: Vec<&StyledSegment> = pline
+        .styled_segments
+        .iter()
+        .filter(|s| s.source.start < p_end && s.source.end > p_start)
+        .collect();
+    if overlapping
+        .windows(2)
+        .any(|w| segment_flags(w[0]) != segment_flags(w[1]))
+    {
+        return (replace.start, replace.end);
+    }
+    let mut target = overlapping
+        .first()
+        .map(|s| segment_flags(s))
+        .unwrap_or_default();
+    match tag_kind {
+        InlineTagKind::Bold => target.bold = true,
+        InlineTagKind::Italic => target.italic = true,
+        InlineTagKind::Underline => target.underline = true,
+        InlineTagKind::Strike => target.strike = true,
+        InlineTagKind::Code => target.code = true,
+        InlineTagKind::Link => return (replace.start, replace.end),
+    }
+    if !target.any_set() {
+        return (replace.start, replace.end);
+    }
+
+    let mut left_front = p_start;
+    let mut right_front = p_end;
+    loop {
+        let mut changed = false;
+        for seg in &pline.styled_segments {
+            if segment_flags(seg) != target {
+                continue;
+            }
+            if seg.source.end <= left_front
+                && gap_is_ws_and_markers(content, &pline.hidden_ranges, seg.source.end, left_front)
+            {
+                let (open, close) = covering_span(parsed, pline, seg);
+                if open < replace.start || close > replace.end || seg.source.start < left_front {
+                    replace.start = replace.start.min(open);
+                    replace.end = replace.end.max(close);
+                    left_front = left_front.min(seg.source.start);
+                    changed = true;
+                }
+            }
+            if seg.source.start >= right_front
+                && gap_is_ws_and_markers(
+                    content,
+                    &pline.hidden_ranges,
+                    right_front,
+                    seg.source.start,
+                )
+            {
+                let (open, close) = covering_span(parsed, pline, seg);
+                if close > replace.end || open < replace.start || seg.source.end > right_front {
+                    replace.start = replace.start.min(open);
+                    replace.end = replace.end.max(close);
+                    right_front = right_front.max(seg.source.end);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    (replace.start, replace.end)
+}
+
+/// The end of the whole closing-marker run of the stacked group `pair`
+/// belongs to (the non-link pairs sharing its content range), so inserted
+/// spaces and exits clear every stacked closer (`***`, `~~**`).
+fn span_close_end(parsed: &ParsedDocument, pair: &InlinePair) -> usize {
+    parsed
+        .inline_pairs
+        .iter()
+        .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
+        .map(|p| p.close_delim.end)
+        .max()
+        .unwrap_or(pair.close_delim.end)
+}
+
+/// The start of the whole opening-marker run of the stacked group `pair`
+/// belongs to, so whole-span edits cover every stacked opener (`***`, `<u>**`).
+fn span_open_start(parsed: &ParsedDocument, pair: &InlinePair) -> usize {
+    parsed
+        .inline_pairs
+        .iter()
+        .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
+        .map(|p| p.open_delim.start)
+        .min()
+        .unwrap_or(pair.open_delim.start)
+}
+
+/// The next source position at or after `pos` that is not inside a hidden
+/// (WYSIWYG-invisible) range.
+fn next_visible_pos(parsed: &ParsedDocument, mut pos: usize) -> usize {
+    while let Some(r) = parsed.hidden_ranges.iter().find(|r| pos >= r.start && pos < r.end) {
+        pos = r.end;
+    }
+    pos
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FormatFlags {
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub code: bool,
+}
+
+impl FormatFlags {
+    fn any_set(self) -> bool {
+        self.bold || self.italic || self.underline || self.strike || self.code
+    }
+
+    /// Bold, italic, and strike markers cannot open or close next to a space.
+    fn flanking_sensitive(self) -> bool {
+        self.bold || self.italic || self.strike
+    }
+
+    /// Flags that may stay on a space peeled out of a flanking-sensitive span.
+    /// Underline tags do not depend on spaces, so the space can remain inside
+    /// `<u>` while sitting outside `*` / `**` / `~~`.
+    fn glue(self) -> Self {
+        Self {
+            underline: self.underline,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SharedKind {
+    Underline,
+    Strike,
+    BoldItalic,
+    Bold,
+    Italic,
+    Code,
+}
+
+fn flag_of(s: &WorkSlice, kind: SharedKind) -> bool {
+    match kind {
+        SharedKind::Underline => s.flags.underline,
+        SharedKind::Strike => s.flags.strike,
+        SharedKind::BoldItalic => s.flags.bold && s.flags.italic,
+        SharedKind::Bold => s.flags.bold,
+        SharedKind::Italic => s.flags.italic,
+        SharedKind::Code => s.flags.code,
+    }
+}
+
+fn wrap_for_shared(kind: SharedKind) -> (String, String) {
+    match kind {
+        SharedKind::Underline => ("<u>".into(), "</u>".into()),
+        SharedKind::Strike => ("~~".into(), "~~".into()),
+        SharedKind::BoldItalic => ("***".into(), "***".into()),
+        SharedKind::Bold => ("**".into(), "**".into()),
+        SharedKind::Italic => ("*".into(), "*".into()),
+        SharedKind::Code => ("`".into(), "`".into()),
+    }
+}
+
+fn clear_shared(mut flags: FormatFlags, kind: SharedKind) -> FormatFlags {
+    match kind {
+        SharedKind::Underline => flags.underline = false,
+        SharedKind::Strike => flags.strike = false,
+        SharedKind::BoldItalic => {
+            flags.bold = false;
+            flags.italic = false;
+        }
+        SharedKind::Bold => flags.bold = false,
+        SharedKind::Italic => flags.italic = false,
+        SharedKind::Code => flags.code = false,
+    }
+    flags
+}
+
+/// Longest consecutive run that shares a wrap-able flag, but is not the whole
+/// list (`all_*` already handled that). Prefers outer kinds on a tie.
+fn longest_shared_flag_run(slices: &[WorkSlice]) -> Option<(SharedKind, usize, usize)> {
+    let kinds = [
+        SharedKind::Underline,
+        SharedKind::Strike,
+        SharedKind::BoldItalic,
+        SharedKind::Bold,
+        SharedKind::Italic,
+        SharedKind::Code,
+    ];
+    let mut best: Option<(SharedKind, usize, usize, usize)> = None;
+    for kind in kinds {
+        let mut i = 0;
+        while i < slices.len() {
+            if !flag_of(&slices[i], kind) {
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            while j + 1 < slices.len() && flag_of(&slices[j + 1], kind) {
+                j += 1;
+            }
+            let len = j - i + 1;
+            if len >= 2 && len < slices.len() {
+                let better = best.is_none_or(|(_, _, _, best_len)| len > best_len);
+                if better {
+                    best = Some((kind, i, j, len));
+                }
+            }
+            i = j + 1;
+        }
+    }
+    best.map(|(k, i, j, _)| (k, i, j))
+}
+
+fn segment_flags(seg: &StyledSegment) -> FormatFlags {
+    FormatFlags {
+        bold: seg.bold,
+        italic: seg.italic,
+        underline: seg.underline,
+        strike: seg.strike,
+        code: seg.code,
+    }
+}
+
+/// One piece of text going through `render_styled_slices`, with the selected
+/// byte range (if any) tracked independently of the wrap so adjacent pieces
+/// with the same flags can merge into one span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkSlice {
+    text: String,
+    flags: FormatFlags,
+    sel: Option<Range<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyledSlice {
+    pub text: String,
+    pub flags: FormatFlags,
+    pub is_selected: bool,
+}
+
+fn wrap_delimiters(flags: &FormatFlags) -> (String, String) {
+    let mut open = String::new();
+    let mut close = String::new();
+    if flags.underline {
+        open.push_str("<u>");
+        close.push_str("</u>");
+    }
+    if flags.strike {
+        open.push_str("~~");
+        close.insert_str(0, "~~");
+    }
+    if flags.bold && flags.italic {
+        open.push_str("***");
+        close.insert_str(0, "***");
+    } else if flags.bold {
+        open.push_str("**");
+        close.insert_str(0, "**");
+    } else if flags.italic {
+        open.push('*');
+        close.insert(0, '*');
+    }
+    if flags.code {
+        open.push('`');
+        close.insert(0, '`');
+    }
+    (open, close)
+}
+
+fn append_work_slice(dest: &mut WorkSlice, src: &WorkSlice) {
+    let at = dest.text.len();
+    dest.text.push_str(&src.text);
+    if let Some(sel) = &src.sel {
+        dest.sel = Some(match &dest.sel {
+            Some(prev) => prev.start..(at + sel.end),
+            None => (at + sel.start)..(at + sel.end),
+        });
+    }
+}
+
+fn merge_work_slices(slices: &[WorkSlice]) -> Vec<WorkSlice> {
+    let mut merged: Vec<WorkSlice> = Vec::new();
+    for s in slices {
+        if s.text.is_empty() {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if last.flags == s.flags {
+                append_work_slice(last, s);
+                continue;
+            }
+        }
+        merged.push(s.clone());
+    }
+    merged
+}
+
+fn sel_overlap(sel: &Option<Range<usize>>, start: usize, end: usize) -> Option<Range<usize>> {
+    let sel = sel.as_ref()?;
+    let a = sel.start.max(start).min(end);
+    let b = sel.end.max(start).min(end);
+    if b > a {
+        Some((a - start)..(b - start))
+    } else {
+        None
+    }
+}
+
+/// Pull leading/trailing spaces out of flanking-sensitive spans so a split
+/// at a word edge cannot write `aa** bb` or `***aa **bb`. Underline stays
+/// on the peeled space so `<u>` can still wrap the whole phrase.
+fn peel_flanking_whitespace(slices: Vec<WorkSlice>) -> Vec<WorkSlice> {
+    if slices.len() <= 1 {
+        return slices;
+    }
+    let mut out = Vec::new();
+    for s in slices {
+        if !s.flags.flanking_sensitive() || s.text.chars().all(char::is_whitespace) {
+            out.push(s);
+            continue;
+        }
+        let lead = s.text.len() - s.text.trim_start().len();
+        let trail = s.text.len() - s.text.trim_end().len();
+        if lead == 0 && trail == 0 {
+            out.push(s);
+            continue;
+        }
+        let glue = s.flags.glue();
+        let core_end = s.text.len() - trail;
+        if lead > 0 {
+            out.push(WorkSlice {
+                text: s.text[..lead].to_string(),
+                flags: glue,
+                sel: sel_overlap(&s.sel, 0, lead),
+            });
+        }
+        if core_end > lead {
+            out.push(WorkSlice {
+                text: s.text[lead..core_end].to_string(),
+                flags: s.flags,
+                sel: sel_overlap(&s.sel, lead, core_end),
+            });
+        }
+        if trail > 0 {
+            out.push(WorkSlice {
+                text: s.text[core_end..].to_string(),
+                flags: glue,
+                sel: sel_overlap(&s.sel, core_end, s.text.len()),
+            });
+        }
+    }
+    merge_work_slices(&out)
+}
+
+/// `[bold "aa"] [plain " "] [bold "bb"]` becomes one span so turning a
+/// format back on at a neighbor merges instead of writing `**aa**** bb**`.
+fn coalesce_ws_between_matching(mut slices: Vec<WorkSlice>) -> Vec<WorkSlice> {
+    let mut i = 0;
+    while i + 2 < slices.len() {
+        let mid_ws =
+            !slices[i + 1].text.is_empty() && slices[i + 1].text.chars().all(char::is_whitespace);
+        let flags_match = slices[i].flags == slices[i + 2].flags && slices[i].flags.any_set();
+        let mid_ok =
+            slices[i + 1].flags == FormatFlags::default() || slices[i + 1].flags == slices[i].flags;
+        if mid_ws && flags_match && mid_ok {
+            let mid = slices[i + 1].clone();
+            let right = slices[i + 2].clone();
+            append_work_slice(&mut slices[i], &mid);
+            append_work_slice(&mut slices[i], &right);
+            slices.remove(i + 2);
+            slices.remove(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+    slices
+}
+
+fn map_work_flags(
+    slices: &[WorkSlice],
+    mut f: impl FnMut(FormatFlags) -> FormatFlags,
+) -> Vec<WorkSlice> {
+    slices
+        .iter()
+        .map(|s| WorkSlice {
+            text: s.text.clone(),
+            flags: f(s.flags),
+            sel: s.sel.clone(),
+        })
+        .collect()
+}
+
+fn mark_work_sel(sel_range: &mut Option<Range<usize>>, at: usize, s: &WorkSlice) {
+    if let Some(sel) = &s.sel {
+        let piece = (at + sel.start)..(at + sel.end);
+        *sel_range = Some(match sel_range.take() {
+            Some(prev) => prev.start.min(piece.start)..prev.end.max(piece.end),
+            None => piece,
+        });
+    }
+}
+
+fn union_sel(sel_range: &mut Option<Range<usize>>, piece: Range<usize>) {
+    *sel_range = Some(match sel_range.take() {
+        Some(prev) => prev.start.min(piece.start)..prev.end.max(piece.end),
+        None => piece,
+    });
+}
+
+fn mark_wrapped_sel(
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+    prefix_len: usize,
+    suffix_len: usize,
+    s: &WorkSlice,
+    include_wraps: bool,
+) {
+    if let Some(sel) = &s.sel {
+        if include_wraps && sel.start == 0 && sel.end == s.text.len() {
+            union_sel(
+                sel_range,
+                offset..(offset + prefix_len + s.text.len() + suffix_len),
+            );
+        } else {
+            mark_work_sel(sel_range, offset + prefix_len, s);
+        }
+    }
+}
+
+fn wrap_work_slice(
+    s: &WorkSlice,
+    prefix: &str,
+    suffix: &str,
+    offset: usize,
+    sel_range: &mut Option<Range<usize>>,
+    include_wraps: bool,
+) -> String {
+    mark_wrapped_sel(
+        sel_range,
+        offset,
+        prefix.len(),
+        suffix.len(),
+        s,
+        include_wraps,
+    );
+    format!("{}{}{}", prefix, s.text, suffix)
+}
+
+fn render_styled_slices(
+    slices: &[StyledSlice],
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+) -> String {
+    render_styled_slices_opts(slices, sel_range, offset, false, false)
+}
+
+fn render_styled_slices_opts(
+    slices: &[StyledSlice],
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+    glued_left: bool,
+    include_wraps_in_sel: bool,
+) -> String {
+    let work: Vec<WorkSlice> = slices
+        .iter()
+        .map(|s| WorkSlice {
+            text: s.text.clone(),
+            flags: s.flags,
+            sel: if s.is_selected {
+                Some(0..s.text.len())
+            } else {
+                None
+            },
+        })
+        .collect();
+    render_work_slices(&work, sel_range, offset, glued_left, include_wraps_in_sel)
+}
+
+fn slice_has_edge_ws(s: &WorkSlice) -> bool {
+    s.text.starts_with(char::is_whitespace) || s.text.ends_with(char::is_whitespace)
+}
+
+fn render_work_slices(
+    slices: &[WorkSlice],
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+    glued_left: bool,
+    include_wraps_in_sel: bool,
+) -> String {
+    // Merge matching flags first so turning a format back on joins the
+    // neighbor. Do not peel yet: shared outer formats (`*…*`, `<u>…</u>`)
+    // must still wrap spaces, which is valid as long as the opener/closer
+    // sit against non-space at the ends.
+    let merged = coalesce_ws_between_matching(merge_work_slices(slices));
+
+    if merged.is_empty() {
+        return String::new();
+    }
+    if merged.len() == 1 {
+        let s = &merged[0];
+        let (prefix, suffix) = wrap_delimiters(&s.flags);
+        return wrap_work_slice(s, &prefix, &suffix, offset, sel_range, include_wraps_in_sel);
+    }
+
+    let all_underline = merged.iter().all(|s| s.flags.underline);
+    let all_strike = merged.iter().all(|s| s.flags.strike);
+    let all_code = merged.iter().all(|s| s.flags.code);
+    let all_bold = merged.iter().all(|s| s.flags.bold);
+    let all_italic = merged.iter().all(|s| s.flags.italic);
+
+    if all_underline {
+        let inner = map_work_flags(&merged, |mut f| {
+            f.underline = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 3, false, include_wraps_in_sel);
+        return format!("<u>{}</u>", inner_str);
+    }
+
+    if all_strike {
+        let inner = map_work_flags(&merged, |mut f| {
+            f.strike = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 2, false, include_wraps_in_sel);
+        return format!("~~{}~~", inner_str);
+    }
+
+    if all_bold && all_italic {
+        let inner = map_work_flags(&merged, |mut f| {
+            f.bold = false;
+            f.italic = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 3, false, include_wraps_in_sel);
+        return format!("***{}***", inner_str);
+    }
+
+    if all_italic {
+        let is_middle = merged.len() == 3
+            && !merged.iter().any(|s| {
+                s.flags.strike || s.flags.underline || s.flags.code || slice_has_edge_ws(s)
+            })
+            && merged[0].flags.bold
+            && !merged[1].flags.bold
+            && merged[2].flags.bold;
+        if is_middle {
+            if glued_left {
+                let mut out = String::new();
+                for s in &merged {
+                    let (prefix, suffix) = if s.flags.bold {
+                        ("***", "***")
+                    } else {
+                        ("*", "*")
+                    };
+                    mark_work_sel(sel_range, offset + out.len() + prefix.len(), s);
+                    out.push_str(prefix);
+                    out.push_str(&s.text);
+                    out.push_str(suffix);
+                }
+                return out;
+            }
+            let mut out = String::from("_");
+            for s in &merged {
+                let prefix = if s.flags.bold { "**" } else { "" };
+                let suffix = if s.flags.bold { "**" } else { "" };
+                mark_work_sel(sel_range, offset + out.len() + prefix.len(), s);
+                out.push_str(prefix);
+                out.push_str(&s.text);
+                out.push_str(suffix);
+            }
+            out.push('_');
+            return out;
+        }
+
+        let inner = map_work_flags(&merged, |mut f| {
+            f.italic = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 1, false, include_wraps_in_sel);
+        return format!("*{}*", inner_str);
+    }
+
+    if all_bold {
+        let is_middle = merged.len() == 3
+            && !merged.iter().any(|s| {
+                s.flags.strike || s.flags.underline || s.flags.code || slice_has_edge_ws(s)
+            })
+            && merged[0].flags.italic
+            && !merged[1].flags.italic
+            && merged[2].flags.italic;
+        if is_middle {
+            let mut out = String::new();
+            for s in &merged {
+                let (prefix, suffix) = if s.flags.italic {
+                    ("_**", "**_")
+                } else {
+                    ("**", "**")
+                };
+                mark_work_sel(sel_range, offset + out.len() + prefix.len(), s);
+                out.push_str(prefix);
+                out.push_str(&s.text);
+                out.push_str(suffix);
+            }
+            return out;
+        }
+
+        let inner = map_work_flags(&merged, |mut f| {
+            f.bold = false;
+            f
+        });
+        let inner_str = render_work_slices(&inner, sel_range, offset + 2, false, include_wraps_in_sel);
+        return format!("**{}**", inner_str);
+    }
+
+    if all_code {
+        // A code span's content is literal, so it must never contain other
+        // delimiters. Keep one backtick span only when the non-code flags are
+        // identical across the slices (they then differ only by selection);
+        // otherwise close and reopen the code span around every non-code
+        // change, keeping the backticks adjacent to the text.
+        let non_code_equal = merged.iter().all(|s| {
+            s.flags.bold == merged[0].flags.bold
+                && s.flags.italic == merged[0].flags.italic
+                && s.flags.underline == merged[0].flags.underline
+                && s.flags.strike == merged[0].flags.strike
+        });
+        if non_code_equal {
+            let inner = map_work_flags(&merged, |mut f| {
+                f.code = false;
+                f
+            });
+            let inner_str = render_work_slices(&inner, sel_range, offset + 1, false, include_wraps_in_sel);
+            return format!("`{}`", inner_str);
+        }
+    }
+
+    if let Some((kind, mut i, mut j)) = longest_shared_flag_run(&merged) {
+        let ws = |s: &WorkSlice| !s.text.is_empty() && s.text.chars().all(char::is_whitespace);
+        let orig_i = i;
+        let orig_j = j;
+        while j > i && ws(&merged[j]) {
+            j -= 1;
+        }
+        while i < j && ws(&merged[i]) {
+            i += 1;
+        }
+        if j > i && (i > 0 || j + 1 < merged.len()) {
+            let (prefix, suffix) = wrap_for_shared(kind);
+            // Collide against the slices that stay outside the original run,
+            // not the whitespace just peeled off (that whitespace loses this
+            // flag and will not wrap).
+            let left_collide = orig_i > 0 && {
+                let prev_close = wrap_delimiters(&merged[orig_i - 1].flags).1;
+                !prev_close.is_empty()
+                    && !prefix.is_empty()
+                    && prev_close.chars().next_back() == prefix.chars().next()
+            };
+            let right_collide = orig_j + 1 < merged.len() && {
+                let next_open = wrap_delimiters(&merged[orig_j + 1].flags).0;
+                !suffix.is_empty()
+                    && !next_open.is_empty()
+                    && suffix.chars().next_back() == next_open.chars().next()
+            };
+            // Skip a wrap whose new markers would sit against a neighbor's
+            // `*`/`**` and form `*a***`; peel + alternate delimiters instead.
+            if !left_collide && !right_collide {
+                // Whitespace peeled out of the wrap must lose that flag, or a
+                // trailing space stays `** **now` instead of `** …** now`.
+                let mut work = merged.clone();
+                for s in &mut work[orig_i..i] {
+                    s.flags = clear_shared(s.flags, kind);
+                }
+                if orig_j < work.len() {
+                    for s in &mut work[j + 1..=orig_j] {
+                        s.flags = clear_shared(s.flags, kind);
+                    }
+                }
+                let left = render_work_slices(
+                    &work[..i],
+                    sel_range,
+                    offset,
+                    glued_left,
+                    include_wraps_in_sel,
+                );
+                let inner = map_work_flags(&work[i..=j], |f| clear_shared(f, kind));
+                let mid = render_work_slices(
+                    &inner,
+                    sel_range,
+                    offset + left.len() + prefix.len(),
+                    false,
+                    include_wraps_in_sel,
+                );
+                let right = render_work_slices(
+                    &work[j + 1..],
+                    sel_range,
+                    offset + left.len() + prefix.len() + mid.len() + suffix.len(),
+                    false,
+                    include_wraps_in_sel,
+                );
+                return format!("{left}{prefix}{mid}{suffix}{right}");
+            }
+        }
+    }
+
+    // Formats diverge here, so peel spaces out of flanking-sensitive spans
+    // before writing markers. That turns `** aa` / `aa **` into ` **aa` /
+    // `aa** ` and stops `***` / `****` from forming at a word edge.
+    let merged = coalesce_ws_between_matching(peel_flanking_whitespace(merged));
+    if merged.len() <= 1 {
+        return render_work_slices(&merged, sel_range, offset, glued_left, include_wraps_in_sel);
+    }
+
+    // Adjacent spans whose delimiters collide (a closer and the next opener)
+    // sharing a character) merge into one ambiguous run that CommonMark's
+    // delimiter arithmetic mis-parses. Resolve collisions before rendering:
+    // switch the later span to a delimiter style whose outermost character
+    // differs (`__`/`_` for bold and italic, strike nested inside the other
+    // formats), unless plain text follows it - then switch the earlier one,
+    // whose new closer sits against the next span's opener instead.
+    let mut use_alt = vec![false; merged.len()];
+    for i in 1..merged.len() {
+        let (_, prev_close) = wrap_delimiters(&merged[i - 1].flags);
+        let (next_open, _) = wrap_delimiters(&merged[i].flags);
+        let collide = !prev_close.is_empty()
+            && !next_open.is_empty()
+            && prev_close.ends_with(next_open.chars().next().unwrap());
+        if !collide {
+            continue;
+        }
+        let avoid = next_open.chars().next().unwrap();
+        let alt_available = alternate_wrap(&merged[i].flags, avoid).is_some();
+        let plain_follows =
+            i + 1 == merged.len() || wrap_delimiters(&merged[i + 1].flags).0.is_empty();
+        if alt_available && !plain_follows {
+            use_alt[i] = true;
+        } else if alt_available && alternate_wrap(&merged[i - 1].flags, avoid).is_some() {
+            // Plain text follows this span: its underscore closer would go
+            // intraword. Switch the earlier span instead; its new closer sits
+            // against this span's opener, which is a delimiter character.
+            use_alt[i - 1] = true;
+        } else if alt_available {
+            use_alt[i] = true;
+        }
+    }
+    let mut out = String::new();
+    for (idx, s) in merged.iter().enumerate() {
+        let (prefix, suffix) = if use_alt[idx] {
+            let avoid = if idx > 0 {
+                wrap_delimiters(&merged[idx - 1].flags)
+                    .1
+                    .chars()
+                    .next_back()
+                    .unwrap_or('*')
+            } else {
+                '*'
+            };
+            alternate_wrap(&s.flags, avoid).unwrap_or_else(|| wrap_delimiters(&s.flags))
+        } else {
+            wrap_delimiters(&s.flags)
+        };
+        mark_wrapped_sel(
+            sel_range,
+            offset + out.len(),
+            prefix.len(),
+            suffix.len(),
+            s,
+            include_wraps_in_sel,
+        );
+        out.push_str(&prefix);
+        out.push_str(&s.text);
+        out.push_str(&suffix);
+    }
+    out
+}
+
+/// An alternate delimiter wrapping for `flags` whose outermost delimiter
+/// character differs from `avoid`, used where two adjacent spans would
+/// otherwise merge their closing and opening runs into one ambiguous run.
+/// Code spans stay innermost in every variant; returns None when no
+/// alternate exists.
+fn alternate_wrap(flags: &FormatFlags, avoid: char) -> Option<(String, String)> {
+    let mut open = String::new();
+    let mut close = String::new();
+    if avoid == '*' && (flags.bold || flags.italic) {
+        // Bold and italic have a second syntax each; the underscore style
+        // moves the boundary character off `*`.
+        if flags.bold {
+            open.push_str("__");
+            close.insert_str(0, "__");
+        } else {
+            open.push('_');
+            close.insert(0, '_');
+        }
+        if flags.bold && flags.italic {
+            open.push('*');
+            close.insert(0, '*');
+        }
+        if flags.code {
+            open.push('`');
+            close.insert(0, '`');
+        }
+        return Some((open, close));
+    }
+    if avoid == '~' && flags.strike {
+        // Strike has no second syntax; nest it inside the other formats.
+        let mut outer = false;
+        if flags.underline {
+            open.push_str("<u>");
+            close.insert_str(0, "</u>");
+            outer = true;
+        }
+        if flags.bold && flags.italic {
+            open.push_str("***");
+            close.insert_str(0, "***");
+            outer = true;
+        } else if flags.bold {
+            open.push_str("**");
+            close.insert_str(0, "**");
+            outer = true;
+        } else if flags.italic {
+            open.push('*');
+            close.insert(0, '*');
+            outer = true;
+        }
+        if outer {
+            open.push_str("~~");
+            close.insert_str(0, "~~");
+            return Some((open, close));
+        }
+    }
+    None
+}
+
+fn render_styled_slices_with_selection_glued(
+    slices: &[StyledSlice],
+    glued_left: bool,
+) -> (String, Range<usize>) {
+    render_styled_slices_with_selection_opts(slices, glued_left, false)
+}
+
+fn render_styled_slices_with_selection_opts(
+    slices: &[StyledSlice],
+    glued_left: bool,
+    include_wraps_in_sel: bool,
+) -> (String, Range<usize>) {
+    let mut sel = None;
+    let res = render_styled_slices_opts(slices, &mut sel, 0, glued_left, include_wraps_in_sel);
+    let range = sel.unwrap_or(0..res.len());
+    (res, range)
+}
+
+/// The raw slice for a styled segment, including a backslash that escapes
+/// its first character: escapes are consumed by the parser, so rebuilding a
+/// region from segments must re-emit them or the escape is lost.
+fn segment_raw_range(content: &str, source: &Range<usize>) -> Range<usize> {
+    let mut start = source.start;
+    if start > 0
+        && content.as_bytes().get(start - 1) == Some(&b'\\')
+        && content[start..].chars().next().is_some_and(|c| c.is_ascii_punctuation())
+        && content.as_bytes().get(start - 2) != Some(&b'\\')
+    {
+        start -= 1;
+    }
+    start..source.end
+}
+
+fn apply_toggle(flags: &mut FormatFlags, kind: InlineTagKind, on: bool) {
+    match kind {
+        InlineTagKind::Bold => flags.bold = on,
+        InlineTagKind::Italic => flags.italic = on,
+        InlineTagKind::Underline => flags.underline = on,
+        InlineTagKind::Strike => flags.strike = on,
+        InlineTagKind::Code => flags.code = on,
+        InlineTagKind::Link => {}
+    }
+}
+
+fn flags_at_pos(pairs: &[InlinePair], segs: &[StyledSegment], pos: usize) -> FormatFlags {
+    if let Some(seg) = segs
+        .iter()
+        .find(|s| s.source.start <= pos && pos < s.source.end)
+    {
+        return segment_flags(seg);
+    }
+    let mut flags = FormatFlags::default();
+    for p in pairs {
+        if pos >= p.open_delim.start && pos < p.close_delim.end {
+            apply_toggle(&mut flags, p.kind, true);
+        }
+    }
+    flags
+}
+
+/// Openers and closers of every non-link span the caret sits in, merged into
+/// adjacent runs so nested `**… *…* …**` closes as `***` / `***`.
+fn spanning_marker_runs(
+    content: &str,
+    parsed: &ParsedDocument,
+    cursor: usize,
+) -> Option<(String, String)> {
+    let mut spanning: Vec<InlinePair> = parsed
+        .inline_pairs
+        .iter()
+        .filter(|p| {
+            p.kind != InlineTagKind::Link
+                && cursor > p.open_delim.start
+                && cursor < p.close_delim.end
+                && cursor >= p.inner.start
+                && cursor <= p.inner.end
+        })
+        .cloned()
+        .collect();
+    if spanning.is_empty() {
+        return None;
+    }
+    spanning.sort_by_key(|p| p.open_delim.start);
+    let open_ranges =
+        merge_adjacent_ranges(spanning.iter().map(|p| p.open_delim.clone()).collect());
+    let close_ranges =
+        merge_adjacent_ranges(spanning.iter().map(|p| p.close_delim.clone()).collect());
+    let openers: String = open_ranges.iter().map(|r| &content[r.clone()]).collect();
+    let closers: String = close_ranges.iter().map(|r| &content[r.clone()]).collect();
+    Some((openers, closers))
+}
+
+fn merge_adjacent_ranges(mut rs: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    if rs.is_empty() {
+        return rs;
+    }
+    rs.sort_by_key(|r| r.start);
+    let mut out = vec![rs[0].clone()];
+    for r in rs.into_iter().skip(1) {
+        let last = out.last_mut().unwrap();
+        if r.start <= last.end {
+            last.end = last.end.max(r.end);
+        } else {
+            out.push(r);
+        }
+    }
+    out
+}
+
+fn pos_in_link_markup(pair: &InlinePair, pos: usize) -> bool {
+    (pos >= pair.open_delim.start && pos < pair.inner.start)
+        || (pos >= pair.inner.end && pos < pair.close_delim.end)
+}
+
+fn skip_end_at(skips: &[Range<usize>], pos: usize) -> Option<usize> {
+    skips
+        .iter()
+        .filter(|r| pos >= r.start && pos < r.end)
+        .map(|r| r.end)
+        .max()
+}
+
+/// Rebuild a source range from styled segments **and** the hidden markdown
+/// between them (link/image syntax, HTML, escapes), skipping only the
+/// delimiter runs in `skip` (the emphasis markers being rewritten).
+fn collect_rewrite_slices(
+    content: &str,
+    pairs: &[InlinePair],
+    segs: &[StyledSegment],
+    replace: Range<usize>,
+    p_range: Range<usize>,
+    skip: &[Range<usize>],
+    toggle: Option<(InlineTagKind, bool)>,
+) -> Vec<StyledSlice> {
+    let mut bounds = vec![replace.start, replace.end];
+    bounds.push(p_range.start.clamp(replace.start, replace.end));
+    bounds.push(p_range.end.clamp(replace.start, replace.end));
+    for r in skip {
+        if r.start > replace.start && r.start < replace.end {
+            bounds.push(r.start);
+        }
+        if r.end > replace.start && r.end < replace.end {
+            bounds.push(r.end);
+        }
+    }
+    for seg in segs {
+        let raw = segment_raw_range(content, &seg.source);
+        if raw.start > replace.start && raw.start < replace.end {
+            bounds.push(raw.start);
+        }
+        if raw.end > replace.start && raw.end < replace.end {
+            bounds.push(raw.end);
+        }
+    }
+    // Split whitespace from words so a selected `" wo"` does not keep the
+    // leading space inside `* wo*` (nf2). Interior spaces between matching
+    // flags are coalesced again when wrapping.
+    let mut pos = replace.start;
+    while pos < replace.end {
+        let ch = match content[pos..].chars().next() {
+            Some(c) => c,
+            None => break,
+        };
+        let next = pos + ch.len_utf8();
+        if next < replace.end {
+            let nch = match content[next..].chars().next() {
+                Some(c) => c,
+                None => break,
+            };
+            if ch == '\n' || nch == '\n' || ch.is_whitespace() != nch.is_whitespace() {
+                bounds.push(next);
+            }
+        }
+        pos = next;
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    let mut slices = Vec::new();
+    for w in bounds.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        if a >= b || skip_end_at(skip, a).is_some() {
+            continue;
+        }
+        let text = content[a..b].to_string();
+        let is_break = text == "\n";
+        let is_ws = !is_break && text.chars().all(char::is_whitespace);
+        let is_sel = a < p_range.end && b > p_range.start;
+        let mut flags = if is_break {
+            FormatFlags::default()
+        } else {
+            flags_at_pos(pairs, segs, a)
+        };
+        let turning_off = toggle.is_some_and(|(_, on)| !on);
+        let in_selected_link_markup = turning_off
+            && pairs.iter().any(|p| {
+                p.kind == InlineTagKind::Link
+                    && p.inner.start >= p_range.start
+                    && p.inner.end <= p_range.end
+                    && p.inner.end > p.inner.start
+                    && pos_in_link_markup(p, a)
+            });
+        // Turning a format on skips whitespace so flanking spaces stay
+        // outside `*`/`**`/`~~`. Turning one off must still clear it from
+        // selected spaces, or `**RAM** **usage**` becomes `RAM** **usage`.
+        if (is_sel && !is_break && (!is_ws || turning_off)) || in_selected_link_markup {
+            if let Some((kind, on)) = toggle {
+                apply_toggle(&mut flags, kind, on);
+            }
+        }
+        slices.push(StyledSlice {
+            text,
+            flags,
+            is_selected: is_sel,
+        });
+    }
+    slices
+}
+
+fn extend_or_splice_span(
+    content: &str,
+    parsed: &ParsedDocument,
+    pending: &ActiveFormats,
+    caret: usize,
+    text: &str,
+) -> Option<(Range<usize>, String, usize)> {
+    if caret == 0 {
+        return None;
+    }
+    let has_any_armed =
+        pending.bold || pending.italic || pending.underline || pending.strike || pending.code;
+    if !has_any_armed {
+        return None;
+    }
+    let has_space = content.as_bytes().get(caret - 1) == Some(&b' ');
+    let closer_end = if has_space { caret - 1 } else { caret };
+    // Two continuation shapes: typing right after a span's closing run (or
+    // after the trailing space it owns), and typing at the end of a span's
+    // content while formats are armed - the second keeps the span's own
+    // formats on the new text instead of nesting raw markers inside it.
+    // Several stacked pairs can share a closing run; prefer one whose group
+    // carries every armed format.
+    let mut after_candidates: Vec<InlinePair> = parsed
+        .inline_pairs
+        .iter()
+        .rev()
+        .filter(|p| {
+            p.kind != InlineTagKind::Link
+                && (span_close_end(parsed, p) == closer_end
+                    || close_run_reaches(content, p, closer_end))
+        })
+        .cloned()
+        .collect();
+    let is_armed = |k: InlineTagKind| match k {
+        InlineTagKind::Bold => pending.bold,
+        InlineTagKind::Italic => pending.italic,
+        InlineTagKind::Underline => pending.underline,
+        InlineTagKind::Strike => pending.strike,
+        InlineTagKind::Code => pending.code,
+        InlineTagKind::Link => false,
+    };
+    // Several stacked pairs can share a closing run; prefer one whose group
+    // carries every armed format. A pair whose closer sits inside that run
+    // (it ends at the caret too) is also a candidate.
+    after_candidates.sort_by_key(|p| {
+        let carries_armed = [
+            InlineTagKind::Bold,
+            InlineTagKind::Italic,
+            InlineTagKind::Underline,
+            InlineTagKind::Strike,
+            InlineTagKind::Code,
+        ]
+        .iter()
+        .all(|&k| {
+            !is_armed(k)
+                || parsed
+                    .inline_pairs
+                    .iter()
+                    .any(|q| q.kind == k && q.inner == p.inner)
+        });
+        if carries_armed {
+            0
+        } else {
+            1
+        }
+    });
+    for a in &after_candidates {
+        if let Some(r) = splice_for_anchor(content, parsed, pending, caret, text, a, false) {
+            return Some(r);
+        }
+    }
+    let inside_candidate = parsed
+        .inline_pairs
+        .iter()
+        .rev()
+        .find(|p| {
+            p.kind != InlineTagKind::Link && p.inner.end == caret && p.inner.end > p.inner.start
+        })
+        .cloned()?;
+    splice_for_anchor(content, parsed, pending, caret, text, &inside_candidate, true)
+}
+
+/// True when the maximal delimiter run that contains `pair`'s closer extends
+/// up to `caret`, i.e. the caret stands right after the shared closing run.
+fn close_run_reaches(content: &str, pair: &InlinePair, caret: usize) -> bool {
+    let bytes = content.as_bytes();
+    let Some(delim) = bytes.get(pair.close_delim.start).copied() else {
+        return false;
+    };
+    pair.close_delim.end < caret
+        && bytes[pair.close_delim.end..caret].iter().all(|&b| b == delim)
+}
+
+fn splice_for_anchor(
+    content: &str,
+    parsed: &ParsedDocument,
+    pending: &ActiveFormats,
+    caret: usize,
+    text: &str,
+    anchor: &InlinePair,
+    inside: bool,
+) -> Option<(Range<usize>, String, usize)> {
+    let group: Vec<InlinePair> = parsed
+        .inline_pairs
+        .iter()
+        .filter(|p| p.kind != InlineTagKind::Link && p.inner == anchor.inner)
+        .cloned()
+        .collect();
+    if group.is_empty() {
+        return None;
+    }
+    let is_armed = |k: InlineTagKind| match k {
+        InlineTagKind::Bold => pending.bold,
+        InlineTagKind::Italic => pending.italic,
+        InlineTagKind::Underline => pending.underline,
+        InlineTagKind::Strike => pending.strike,
+        InlineTagKind::Code => pending.code,
+        InlineTagKind::Link => false,
+    };
+    let all_armed_in_group = [
+        InlineTagKind::Bold,
+        InlineTagKind::Italic,
+        InlineTagKind::Underline,
+        InlineTagKind::Strike,
+        InlineTagKind::Code,
+    ]
+    .iter()
+    .all(|&k| !is_armed(k) || group.iter().any(|p| p.kind == k));
+    if !inside && !all_armed_in_group {
+        return None;
+    }
+    if inside {
+        // Only when the span is the innermost thing around the caret;
+        // distinct nested pairs keep the old behavior.
+        let nested = parsed.inline_pairs.iter().any(|p| {
+            p.kind != InlineTagKind::Link
+                && p.inner != anchor.inner
+                && caret >= p.open_delim.start
+                && caret <= p.close_delim.end
+        });
+        if nested {
+            return None;
+        }
+    }
+
+    let has_space = content.as_bytes().get(caret - 1) == Some(&b' ');
+    let closer_end = if has_space { caret - 1 } else { caret };
+    let group_open_start = span_open_start(parsed, anchor);
+    let group_close_end = span_close_end(parsed, anchor);
+    // Pairs whose closing markers sit inside the shared run that ends at the
+    // caret are re-rendered together with the anchor's group, so their
+    // openers are not left dangling by the replacement.
+    let mut range_start = group_open_start;
+    if !inside && caret > group_close_end {
+        let delim = content.as_bytes()[anchor.close_delim.start];
+        for p in &parsed.inline_pairs {
+            if p.kind == InlineTagKind::Link || p.inner == anchor.inner {
+                continue;
+            }
+            if p.close_delim.end > group_close_end
+                && p.close_delim.end <= caret
+                && content[group_close_end..p.close_delim.end]
+                    .bytes()
+                    .all(|b| b == delim)
+            {
+                range_start = range_start.min(span_open_start(parsed, p));
+            }
+        }
+    }
+
+    let trail_len = if inside {
+        0
+    } else {
+        text.len() - text.trim_end().len()
+    };
+    let trail_ws = &text[text.len() - trail_len..];
+    let trimmed_text = &text[..text.len() - trail_len];
+    let lead_text = if inside {
+        trimmed_text.to_string()
+    } else if has_space {
+        format!(" {}", trimmed_text)
+    } else {
+        trimmed_text.to_string()
+    };
+
+    let in_group = |k: InlineTagKind| group.iter().any(|p| p.kind == k);
+    let cont_flags = if inside {
+        FormatFlags {
+            bold: pending.bold || in_group(InlineTagKind::Bold),
+            italic: pending.italic || in_group(InlineTagKind::Italic),
+            underline: pending.underline || in_group(InlineTagKind::Underline),
+            strike: pending.strike || in_group(InlineTagKind::Strike),
+            code: pending.code || in_group(InlineTagKind::Code),
+        }
+    } else {
+        FormatFlags {
+            bold: pending.bold,
+            italic: pending.italic,
+            underline: pending.underline,
+            strike: pending.strike,
+            code: pending.code,
+        }
+    };
+
+    let seg_end_limit = if inside { caret } else { closer_end };
+    let pline = parsed.line_at_offset(range_start);
+    let existing_segs: Vec<&StyledSegment> = pline
+        .map(|l| {
+            l.styled_segments
+                .iter()
+                .filter(|s| s.source.start >= range_start && s.source.end <= seg_end_limit)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut slices: Vec<StyledSlice> = if !existing_segs.is_empty() {
+        existing_segs
+            .iter()
+            .map(|s| {
+                let raw = segment_raw_range(content, &s.source);
+                StyledSlice {
+                    text: content[raw].to_string(),
+                    flags: FormatFlags {
+                        bold: s.bold,
+                        italic: s.italic,
+                        underline: s.underline,
+                        strike: s.strike,
+                        code: s.code,
+                    },
+                    is_selected: false,
+                }
+            })
+            .collect()
+    } else {
+        let anchor_flags = FormatFlags {
+            bold: in_group(InlineTagKind::Bold),
+            italic: in_group(InlineTagKind::Italic),
+            underline: in_group(InlineTagKind::Underline),
+            strike: in_group(InlineTagKind::Strike),
+            code: in_group(InlineTagKind::Code),
+        };
+        vec![StyledSlice {
+            text: content[anchor.inner.clone()].to_string(),
+            flags: anchor_flags,
+            is_selected: false,
+        }]
+    };
+
+    if !lead_text.is_empty() {
+        slices.push(StyledSlice {
+            text: lead_text,
+            flags: cont_flags,
+            is_selected: true,
+        });
+    }
+
+    let mut sel = None;
+    let rendered = render_styled_slices(&slices, &mut sel, 0);
+    let repl = format!("{}{}", rendered, trail_ws);
+    let replace_end = if inside { group_close_end } else { caret };
+    let new_caret = if trail_len > 0 {
+        range_start + repl.len()
+    } else if let Some(s) = sel {
+        range_start + s.end
+    } else {
+        range_start + repl.len()
+    };
+    Some((range_start..replace_end, repl, new_caret))
+}
+
+/// Inline formats that stay armed at `cursor`, from every marker pair around
+/// it. Used to keep typing inside an edited span and to carry formats across
+/// a line break.
+fn pending_formats_at(parsed: &ParsedDocument, cursor: usize) -> ActiveFormats {
+    let mut fmt = ActiveFormats::default();
+    for pair in &parsed.inline_pairs {
+        if cursor >= pair.open_delim.start && cursor <= pair.close_delim.end {
+            match pair.kind {
+                InlineTagKind::Bold => fmt.bold = true,
+                InlineTagKind::Italic => fmt.italic = true,
+                InlineTagKind::Underline => fmt.underline = true,
+                InlineTagKind::Strike => fmt.strike = true,
+                InlineTagKind::Code => fmt.code = true,
+                InlineTagKind::Link => {}
+            }
+        }
+    }
+    fmt
+}
+
 fn compute_active_formats(
     parsed: &ParsedDocument,
     cursor: usize,
@@ -3262,23 +5506,6 @@ fn blank_gap_after_table(rest: &str) -> (usize, &'static str, usize) {
     }
 }
 
-fn is_delimited(text: &str, prefix: &str, suffix: &str) -> bool {
-    if text.len() < prefix.len() + suffix.len() {
-        return false;
-    }
-    if !text.starts_with(prefix) || !text.ends_with(suffix) {
-        return false;
-    }
-    if prefix == "*" {
-        let triple = text.starts_with("***") && text.ends_with("***") && text.len() >= 6;
-        let single = !text.starts_with("**") && !text.ends_with("**");
-        triple || single
-    } else if prefix == "`" {
-        !text.starts_with("```") && !text.ends_with("```")
-    } else {
-        true
-    }
-}
 
 fn outer_is_delimited(content: &str, start: usize, end: usize, prefix: &str, suffix: &str) -> bool {
     if start > content.len() || end > content.len() || start > end {
@@ -4143,6 +6370,1300 @@ mod tests {
         doc2.insert_text_in_mode(range, "hello", ViewMode::Wysiwyg);
         assert_eq!(doc2.content, "<u>hello</u>");
         assert!(!doc2.pending_formats.underline);
+    }
+
+    /// Type `text` one character at a time at the current caret, as the
+    /// editor does for real keystrokes.
+    fn type_keystrokes(doc: &mut DocumentTab, text: &str) {
+        for ch in text.chars() {
+            let range = doc.selection_range();
+            doc.insert_text_in_mode(range, &ch.to_string(), ViewMode::Wysiwyg);
+        }
+    }
+
+    fn pending_flag(doc: &DocumentTab, cmd: &str) -> bool {
+        match cmd {
+            "bold" => doc.pending_formats.bold,
+            "italic" => doc.pending_formats.italic,
+            "strike" => doc.pending_formats.strike,
+            _ => false,
+        }
+    }
+
+    fn styled_flag(doc: &mut DocumentTab, cmd: &str) -> bool {
+        let kind = match cmd {
+            "bold" => InlineTagKind::Bold,
+            "italic" => InlineTagKind::Italic,
+            "strike" => InlineTagKind::Strike,
+            _ => InlineTagKind::Link,
+        };
+        doc.parsed().inline_pairs.iter().any(|p| p.kind == kind)
+    }
+
+    /// Ctrl+B/I/U/Shift+S/` with no selection, type a word, then toggle the
+    /// same format off: the span must stay formatted and the caret must move
+    /// past the closing marker so the following words are plain.
+    #[test]
+    fn toggle_off_after_typing_keeps_the_span_and_exits_it() {
+        for (cmd, prefix, suffix) in [
+            ("bold", "**", "**"),
+            ("italic", "*", "*"),
+            ("underline", "<u>", "</u>"),
+            ("strike", "~~", "~~"),
+            ("code", "`", "`"),
+        ] {
+            let mut doc =
+                DocumentTab::new("b".into(), "test.md".into(), "This is ".into(), None, None);
+            doc.place(8, false);
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "very");
+            let wrapped = format!("This is {prefix}very{suffix}");
+            assert_eq!(doc.content, wrapped, "{cmd}: typing did not wrap");
+
+            // Second toggle: exit the span, do not unwrap it
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc.content, wrapped,
+                "{cmd}: second toggle removed the formatting"
+            );
+            assert!(!doc.content.contains('\u{200B}'));
+            assert_eq!(
+                doc.cursor_offset(),
+                wrapped.len(),
+                "{cmd}: caret did not move past the closing marker"
+            );
+            assert!(
+                !doc.has_pending_inline_formats(),
+                "{cmd}: pending formats stayed armed after leaving the span"
+            );
+
+            // Further typing is plain
+            type_keystrokes(&mut doc, " important");
+            assert_eq!(
+                doc.content,
+                format!("This is {prefix}very{suffix} important"),
+                "{cmd}: text after leaving the span is not plain"
+            );
+        }
+    }
+
+    /// A space typed at the end of a `*`/`**`/`~~` span must not land right
+    /// before the closer (a closer cannot follow whitespace in Markdown). It
+    /// goes after the closing marker; the next letter pulls it back inside
+    /// and extends the span, while stopping after the space keeps it outside.
+    #[test]
+    fn space_at_span_end_types_outside_the_closer() {
+        for (cmd, open, close) in [
+            ("bold", "**", "**"),
+            ("italic", "*", "*"),
+            ("strike", "~~", "~~"),
+        ] {
+            let mut doc = DocumentTab::new("s".into(), "test.md".into(), String::new(), None, None);
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "read");
+            type_keystrokes(&mut doc, " ");
+            assert_eq!(
+                doc.content,
+                format!("{open}read{close} "),
+                "{cmd}: space did not move outside the closing marker"
+            );
+            assert!(!doc.content.contains('\u{200B}'));
+            assert!(
+                pending_flag(&doc, cmd),
+                "{cmd}: format is not armed after the space"
+            );
+            let parsed = doc.parsed();
+            let line = parsed.line_at_offset(0).unwrap();
+            assert_eq!(
+                line.display_text, "read ",
+                "{cmd}: raw markers leaked into the display"
+            );
+
+            // The next letter extends the original span, keeping one span
+            type_keystrokes(&mut doc, "me");
+            assert_eq!(
+                doc.content,
+                format!("{open}read me{close}"),
+                "{cmd}: continued typing did not extend the span"
+            );
+            assert!(
+                styled_flag(&mut doc, cmd),
+                "{cmd}: continued typing is not rendered formatted"
+            );
+        }
+    }
+
+    /// Enter with the caret inside a bold span closes it before the newline
+    /// and reopens it on the new line; at the end of the span it leaves the
+    /// format armed so the next line continues bold.
+    #[test]
+    fn enter_inside_bold_span_closes_and_reopens_it() {
+        let mut doc = DocumentTab::new("e".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        let range = doc.selection_range();
+        doc.insert_text_in_mode(range, "first half", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "**first half**");
+
+        // Caret between "first" and " half": split the span around the break
+        doc.place(7, false);
+        doc.smart_newline(false);
+        assert_eq!(
+            doc.content, "**first**\n **half**",
+            "Enter did not close and reopen the bold span"
+        );
+        assert_eq!(
+            doc.cursor_offset(),
+            13,
+            "caret is not at the start of the reopened span"
+        );
+        assert!(
+            doc.active_formats.bold,
+            "the reopened span is not bold at the caret"
+        );
+
+        // Typing at the end of the reopened span stays bold
+        doc.place(doc.content.len() - 2, false);
+        type_keystrokes(&mut doc, "!");
+        assert_eq!(doc.content, "**first**\n **half!**");
+
+        // Caret at the end of the span: close it, keep bold armed, the next
+        // letter reopens it on the new line
+        let mut doc2 = DocumentTab::new("e2".into(), "test.md".into(), String::new(), None, None);
+        doc2.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        let range = doc2.selection_range();
+        doc2.insert_text_in_mode(range, "first half", ViewMode::Wysiwyg);
+        doc2.smart_newline(false);
+        assert_eq!(doc2.content, "**first half**\n");
+        assert!(doc2.pending_formats.bold);
+        type_keystrokes(&mut doc2, "second");
+        assert_eq!(doc2.content, "**first half**\n**second**");
+    }
+
+    /// Trailing spaces of an ATX heading stay in the WYSIWYG display and the
+    /// caret mapping, so typing a space at the end of a heading does not
+    /// vanish until the next letter.
+    #[test]
+    fn heading_trailing_space_stays_in_display_and_caret() {
+        let mut doc = DocumentTab::new("h".into(), "test.md".into(), "# my".into(), None, None);
+        doc.place(4, false);
+        type_keystrokes(&mut doc, " ");
+        assert_eq!(doc.content, "# my ");
+        let parsed = doc.parsed();
+        let line = parsed.line_at_offset(0).unwrap();
+        assert_eq!(line.display_text, "my ", "trailing space left the display");
+        assert_eq!(doc.cursor_offset(), 5, "caret fell back before the space");
+
+        type_keystrokes(&mut doc, "note");
+        assert_eq!(doc.content, "# my note");
+    }
+
+    /// Unformatting part of a larger span splits it cleanly instead of
+    /// leaving stray markers; for underline it must not nest a second <u>.
+    #[test]
+    fn partial_unformat_splits_the_span() {
+        for (cmd, open, close) in [
+            ("bold", "**", "**"),
+            ("italic", "*", "*"),
+            ("underline", "<u>", "</u>"),
+            ("strike", "~~", "~~"),
+            ("code", "`", "`"),
+        ] {
+            let wrapped = format!("{open}Hello{close}");
+
+            // Start of the span: "He" becomes plain, "llo" stays formatted
+            let mut doc =
+                DocumentTab::new("p".into(), "test.md".into(), wrapped.clone(), None, None);
+            doc.caret.range = open.len()..open.len() + 2;
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc.content,
+                format!("He{open}llo{close}"),
+                "{cmd}: unformatting the start left stray markers"
+            );
+
+            // End of the span: "llo" becomes plain, "He" stays formatted
+            let mut doc =
+                DocumentTab::new("p".into(), "test.md".into(), wrapped.clone(), None, None);
+            doc.caret.range = open.len() + 2..open.len() + 5;
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc.content,
+                format!("{open}He{close}llo"),
+                "{cmd}: unformatting the end left stray markers"
+            );
+
+            // Middle of the span: "ell" becomes plain, both halves formatted
+            let mut doc = DocumentTab::new("p".into(), "test.md".into(), wrapped, None, None);
+            doc.caret.range = open.len() + 1..open.len() + 4;
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_eq!(
+                doc.content,
+                format!("{open}H{close}ell{open}o{close}"),
+                "{cmd}: unformatting the middle left stray markers"
+            );
+        }
+    }
+
+    fn flags_for_word(content: &str, word: &str) -> (bool, bool, bool, bool) {
+        let parsed = parse_document(content);
+        let segs: Vec<_> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .filter(|s| {
+                let text = &content[s.source.clone()];
+                text == word || text.split_whitespace().any(|w| w == word)
+            })
+            .collect();
+        assert!(
+            !segs.is_empty(),
+            "word {word:?} missing in {content:?} segs={:?}",
+            parsed.lines[0]
+                .styled_segments
+                .iter()
+                .map(|s| &content[s.source.clone()])
+                .collect::<Vec<_>>()
+        );
+        let s = segs[0];
+        (s.bold, s.italic, s.underline, s.strike)
+    }
+
+    fn assert_clean_display(content: &str, expected: &str) {
+        assert!(
+            !content.contains('\u{200B}'),
+            "zero-width space in {content:?}"
+        );
+        assert!(
+            !content.contains("****"),
+            "adjacent bold runs in {content:?}"
+        );
+        let parsed = parse_document(content);
+        assert_eq!(
+            parsed.lines[0].display_text, expected,
+            "raw markers in display of {content:?}"
+        );
+        for ch in ['*', '~', '_'] {
+            assert!(
+                !parsed.lines[0].display_text.contains(ch),
+                "literal {ch:?} in display {:?} of {content:?}",
+                parsed.lines[0].display_text
+            );
+        }
+    }
+
+    fn select_once(doc: &mut DocumentTab, word: &str) {
+        let start = doc.content.find(word).expect(word);
+        doc.caret.range = start..(start + word.len());
+    }
+
+    /// Unformatting a word whose selection ends on the space before the next
+    /// word must move that space outside the leftover markers. Re-applying
+    /// the format must merge back into the neighbor instead of `**aa**** bb**`.
+    #[test]
+    fn unformat_before_space_moves_space_outside_markers() {
+        for (cmd, wrapped) in [
+            ("bold", "**aa bb cc**"),
+            ("italic", "*aa bb cc*"),
+            ("strike", "~~aa bb cc~~"),
+        ] {
+            let mut doc = DocumentTab::new(
+                "e1".into(),
+                "test.md".into(),
+                wrapped.to_string(),
+                None,
+                None,
+            );
+            select_once(&mut doc, "aa");
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_clean_display(&doc.content, "aa bb cc");
+            let aa = flags_for_word(&doc.content, "aa");
+            let bb = flags_for_word(&doc.content, "bb");
+            let cc = flags_for_word(&doc.content, "cc");
+            assert_eq!(
+                aa,
+                (false, false, false, false),
+                "{cmd} left aa styled in {}",
+                doc.content
+            );
+            let expect = match cmd {
+                "bold" => (true, false, false, false),
+                "italic" => (false, true, false, false),
+                "strike" => (false, false, false, true),
+                _ => unreachable!(),
+            };
+            assert_eq!(bb, expect, "{cmd} dropped bb in {}", doc.content);
+            assert_eq!(cc, expect, "{cmd} dropped cc in {}", doc.content);
+            assert!(
+                !doc.content.contains("aa** ")
+                    && !doc.content.contains("aa* ")
+                    && !doc.content.contains("aa~~ "),
+                "{cmd}: space stayed inside the leftover opener: {}",
+                doc.content
+            );
+
+            // Turning the format back on merges with the neighboring span.
+            select_once(&mut doc, "aa");
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            assert_clean_display(&doc.content, "aa bb cc");
+            assert_eq!(
+                flags_for_word(&doc.content, "aa"),
+                expect,
+                "{cmd} re-apply: {}",
+                doc.content
+            );
+            assert_eq!(
+                flags_for_word(&doc.content, "bb"),
+                expect,
+                "{cmd} re-apply: {}",
+                doc.content
+            );
+            assert!(
+                !doc.content.contains("****") && !doc.content.contains("~~~~"),
+                "{cmd} re-apply stacked markers: {}",
+                doc.content
+            );
+        }
+
+        // Same flanking split when italic is already on (bold+italic span).
+        let mut doc = DocumentTab::new(
+            "e1b".into(),
+            "test.md".into(),
+            "***aa bb cc***".into(),
+            None,
+            None,
+        );
+        select_once(&mut doc, "aa");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (false, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, true, false, false)
+        );
+
+        // Underline tags do not depend on spaces; the leftover words stay
+        // underlined while the flanking-sensitive markers move off the gap.
+        let mut doc = DocumentTab::new(
+            "e1c".into(),
+            "test.md".into(),
+            "<u>**aa bb cc**</u>".into(),
+            None,
+            None,
+        );
+        select_once(&mut doc, "aa");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (false, false, true, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, false, true, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, false, true, false)
+        );
+    }
+
+    /// Removing bold or italic from the middle or end of a bold+italic span
+    /// must not write `***aa **bb cc*` runs that merge and stop pairing.
+    #[test]
+    fn stacked_unformat_at_word_edge_does_not_merge_stars() {
+        // End: drop italic from "bb cc"
+        let mut doc = DocumentTab::new(
+            "e2".into(),
+            "test.md".into(),
+            "***aa bb cc***".into(),
+            None,
+            None,
+        );
+        doc.caret.range = 6..11; // "bb cc"
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, false, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, false, false, false)
+        );
+        assert!(
+            !doc.content.contains("***aa **") && !doc.content.contains("**aa ***"),
+            "end unformat merged delimiter runs: {}",
+            doc.content
+        );
+
+        // End: drop bold from "bb cc"
+        let mut doc = DocumentTab::new(
+            "e2b".into(),
+            "test.md".into(),
+            "***aa bb cc***".into(),
+            None,
+            None,
+        );
+        doc.caret.range = 6..11;
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (false, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (false, true, false, false)
+        );
+
+        // Middle: drop italic from "bb"
+        let mut doc = DocumentTab::new(
+            "e2c".into(),
+            "test.md".into(),
+            "***aa bb cc***".into(),
+            None,
+            None,
+        );
+        select_once(&mut doc, "bb");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (true, true, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, false, false, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, true, false, false)
+        );
+        assert!(
+            !doc.content.contains("_**aa **_") && !doc.content.contains("**aa **_"),
+            "middle italic unformat wrote colliding markers: {}",
+            doc.content
+        );
+
+        // Same middle split with underline also on.
+        let mut doc = DocumentTab::new(
+            "e2d".into(),
+            "test.md".into(),
+            "<u>***aa bb cc***</u>".into(),
+            None,
+            None,
+        );
+        select_once(&mut doc, "bb");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        assert_clean_display(&doc.content, "aa bb cc");
+        assert_eq!(
+            flags_for_word(&doc.content, "aa"),
+            (true, true, true, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "bb"),
+            (true, false, true, false)
+        );
+        assert_eq!(
+            flags_for_word(&doc.content, "cc"),
+            (true, true, true, false)
+        );
+    }
+
+    /// Stacked bold+italic typing (`***`, from Ctrl+B then Ctrl+I) must keep
+    /// one span across spaces and both toggle-offs, and the text typed after
+    /// leaving the stack must be plain. Same for bold+strike (`**~~`).
+    #[test]
+    fn stacked_typing_keeps_one_span_and_toggles_off_cleanly() {
+        let mut doc = DocumentTab::new("x".into(), "test.md".into(), "Go ".into(), None, None);
+        doc.place(3, false);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now");
+        type_keystrokes(&mut doc, " ");
+        assert_eq!(
+            doc.content, "Go ***now*** ",
+            "space did not move outside the stacked closing run"
+        );
+        let parsed = doc.parsed();
+        let line = parsed.line_at_offset(0).unwrap();
+        assert_eq!(
+            line.display_text, "Go now ",
+            "raw markers leaked into the display"
+        );
+
+        type_keystrokes(&mut doc, "please");
+        assert_eq!(
+            doc.content, "Go ***now please***",
+            "stacked typing split the span"
+        );
+
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        assert_eq!(
+            doc.content, "Go ***now please***",
+            "Ctrl+I unwrapped the stacked span"
+        );
+        assert_eq!(
+            doc.cursor_offset(),
+            19,
+            "Ctrl+I did not exit past the stacked closing run"
+        );
+        assert!(
+            doc.pending_formats.bold,
+            "bold did not stay armed after leaving italic"
+        );
+
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "Go ***now please***");
+        assert!(
+            !doc.has_pending_inline_formats(),
+            "bold is still armed after the second toggle"
+        );
+        type_keystrokes(&mut doc, " ok");
+        assert_eq!(doc.content, "Go ***now please*** ok");
+
+        // Strike outer, bold inner: same stacked behavior
+        let mut doc = DocumentTab::new("y".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "was");
+        type_keystrokes(&mut doc, " ");
+        assert_eq!(doc.content, "~~**was**~~ ");
+        type_keystrokes(&mut doc, "here");
+        assert_eq!(doc.content, "~~**was here**~~");
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "~~**was here**~~");
+        assert!(doc.pending_formats.bold);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert!(!doc.has_pending_inline_formats());
+        type_keystrokes(&mut doc, " ok");
+        assert_eq!(doc.content, "~~**was here**~~ ok");
+    }
+
+    /// Typing into a newly created formatted span is one undo step: a single
+    /// undo removes the whole span (and redo brings it back), for plain and
+    /// stacked spans alike.
+    #[test]
+    fn undo_removes_a_newly_typed_span_in_one_step() {
+        let mut doc = DocumentTab::new("u".into(), "test.md".into(), "Hello ".into(), None, None);
+        doc.place(6, false);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "world");
+        assert_eq!(doc.content, "Hello **world**");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert!(doc.undo(), "undo failed");
+        assert_eq!(
+            doc.content, "Hello ",
+            "one undo did not remove the whole span"
+        );
+        assert!(doc.redo(), "redo failed");
+        assert_eq!(doc.content, "Hello **world**");
+
+        // Stacked span with a space inside: still one undo step
+        let mut doc = DocumentTab::new("v".into(), "test.md".into(), "Go ".into(), None, None);
+        doc.place(3, false);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now please");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert!(doc.undo(), "undo failed");
+        assert_eq!(
+            doc.content, "Go ",
+            "one undo did not remove the stacked span"
+        );
+    }
+
+    /// Extra spaces typed at the end of an emphasis span keep stacking
+    /// outside the closer: the broken `**a  **` form never appears, the
+    /// display stays formatted, and the next letter is still bold.
+    #[test]
+    fn extra_spaces_at_span_end_stay_outside_the_closer() {
+        for (cmd, open, close) in [
+            ("bold", "**", "**"),
+            ("italic", "*", "*"),
+            ("strike", "~~", "~~"),
+        ] {
+            let mut doc = DocumentTab::new("w".into(), "test.md".into(), String::new(), None, None);
+            doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "a");
+            type_keystrokes(&mut doc, " ");
+            type_keystrokes(&mut doc, " ");
+            assert_eq!(
+                doc.content,
+                format!("{open}a{close}  "),
+                "{cmd}: the second space reentered the span"
+            );
+            let parsed = doc.parsed();
+            let line = parsed.line_at_offset(0).unwrap();
+            assert_eq!(
+                line.display_text, "a  ",
+                "{cmd}: raw markers leaked into the display"
+            );
+            assert!(
+                pending_flag(&doc, cmd),
+                "{cmd}: format is not armed after the spaces"
+            );
+
+            // the next letter is still formatted
+            type_keystrokes(&mut doc, "b");
+            assert_eq!(
+                doc.content,
+                format!("{open}a{close}  {open}b{close}"),
+                "{cmd}: the letter after the spaces is not formatted"
+            );
+            assert!(styled_flag(&mut doc, cmd));
+        }
+    }
+
+    /// Ctrl+B with no selection wraps the current word only when the caret
+    /// is strictly inside it (letters on both sides). At the end of a word
+    /// just typed the format is armed for the letters typed next instead, so
+    /// `un{Ctrl+B}believ{Ctrl+B}able` saves as `un**believ**able`.
+    #[test]
+    fn toggle_at_word_end_arms_instead_of_wrapping_the_word() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "un");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "un", "Ctrl+B wrapped the word the caret ends");
+        assert!(
+            doc.pending_formats.bold,
+            "bold is not armed at the word end"
+        );
+
+        type_keystrokes(&mut doc, "believ");
+        assert_eq!(doc.content, "un**believ**");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "un**believ**");
+        type_keystrokes(&mut doc, "able");
+        assert_eq!(doc.content, "un**believ**able");
+
+        // A caret strictly inside a word still wraps the whole word
+        let mut doc = DocumentTab::new("t2".into(), "test.md".into(), "Hello".into(), None, None);
+        doc.place(3, false);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "**Hello**");
+
+        // A caret at the start of a word arms the format without wrapping
+        let mut doc = DocumentTab::new("t3".into(), "test.md".into(), " world".into(), None, None);
+        doc.place(1, false);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, " world");
+        assert!(doc.pending_formats.bold);
+    }
+
+    /// Inline code is always the innermost format with its backticks adjacent
+    /// to the text, and no other delimiters are ever emitted inside a code
+    /// span: when a non-code format turns off mid-typing, the code span
+    /// closes, the format closes, and the code span reopens
+    /// (`**`hi`**`yo`). Covers every pair and triple containing code.
+    #[test]
+    fn code_stays_innermost_when_a_non_code_format_toggles_off() {
+        // (armed formats, format toggled off mid-typing, expected content,
+        //  flags of "hi", flags of "yo" as (bold, italic, underline, strike, code))
+        type CodeCombo = (
+            &'static [&'static str],
+            &'static str,
+            &'static str,
+            (bool, bool, bool, bool, bool),
+            (bool, bool, bool, bool, bool),
+        );
+        let combos: &[CodeCombo] = &[
+            (
+                &["bold", "code"],
+                "bold",
+                "**`hi`**`yo`",
+                (true, false, false, false, true),
+                (false, false, false, false, true),
+            ),
+            (
+                &["italic", "code"],
+                "italic",
+                "*`hi`*`yo`",
+                (false, true, false, false, true),
+                (false, false, false, false, true),
+            ),
+            (
+                &["underline", "code"],
+                "underline",
+                "<u>`hi`</u>`yo`",
+                (false, false, true, false, true),
+                (false, false, false, false, true),
+            ),
+            (
+                &["strike", "code"],
+                "strike",
+                "~~`hi`~~`yo`",
+                (false, false, false, true, true),
+                (false, false, false, false, true),
+            ),
+            (
+                &["bold", "italic", "code"],
+                "bold",
+                "***`hi`**`yo`*",
+                (true, true, false, false, true),
+                (false, true, false, false, true),
+            ),
+            (
+                &["bold", "underline", "code"],
+                "bold",
+                "<u>**`hi`**`yo`</u>",
+                (true, false, true, false, true),
+                (false, false, true, false, true),
+            ),
+            (
+                &["bold", "strike", "code"],
+                "bold",
+                "~~**`hi`**`yo`~~",
+                (true, false, false, true, true),
+                (false, false, false, true, true),
+            ),
+            (
+                &["italic", "underline", "code"],
+                "italic",
+                "<u>*`hi`*`yo`</u>",
+                (false, true, true, false, true),
+                (false, false, true, false, true),
+            ),
+            (
+                &["italic", "strike", "code"],
+                "italic",
+                "~~*`hi`*`yo`~~",
+                (false, true, false, true, true),
+                (false, false, false, true, true),
+            ),
+            (
+                &["underline", "strike", "code"],
+                "underline",
+                "~~<u>`hi`</u>`yo`~~",
+                (false, false, true, true, true),
+                (false, false, false, true, true),
+            ),
+        ];
+
+        for (formats, toggle_off, expected, hi_flags, yo_flags) in combos {
+            let mut doc = DocumentTab::new("c".into(), "test.md".into(), String::new(), None, None);
+            type_keystrokes(&mut doc, "x ");
+            for format in *formats {
+                doc.apply_format_in_mode(format, ViewMode::Wysiwyg);
+            }
+            type_keystrokes(&mut doc, "hi");
+            let mut flags = FormatFlags::default();
+            for format in *formats {
+                match *format {
+                    "bold" => flags.bold = true,
+                    "italic" => flags.italic = true,
+                    "underline" => flags.underline = true,
+                    "strike" => flags.strike = true,
+                    "code" => flags.code = true,
+                    _ => {}
+                }
+            }
+            let (open, close) = wrap_delimiters(&flags);
+            let wrapped = format!("x {}hi{}", open, close);
+            assert_eq!(
+                doc.content, wrapped,
+                "{formats:?}: typing did not wrap with the code span innermost"
+            );
+
+            doc.apply_format_in_mode(toggle_off, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "yo");
+            assert_eq!(
+                doc.content,
+                format!("x {expected}"),
+                "{formats:?}: toggling off {toggle_off} misplaced the delimiters"
+            );
+
+            // The saved Markdown renders as styled text, never as literal
+            // markers inside a code span.
+            let parsed = parse_document(&doc.content);
+            let segments: Vec<(&str, bool, bool, bool, bool, bool)> = parsed.lines[0]
+                .styled_segments
+                .iter()
+                .map(|s| {
+                    (
+                        &doc.content[s.source.clone()],
+                        s.bold,
+                        s.italic,
+                        s.underline,
+                        s.strike,
+                        s.code,
+                    )
+                })
+                .collect();
+            let hi = segments
+                .iter()
+                .find(|(text, ..)| *text == "hi")
+                .unwrap_or_else(|| panic!("{formats:?}: no segment for hi in {segments:?}"));
+            let yo = segments
+                .iter()
+                .find(|(text, ..)| *text == "yo")
+                .unwrap_or_else(|| panic!("{formats:?}: no segment for yo in {segments:?}"));
+            assert_eq!(
+                (hi.1, hi.2, hi.3, hi.4, hi.5),
+                *hi_flags,
+                "{formats:?}: wrong styles on hi"
+            );
+            assert_eq!(
+                (yo.1, yo.2, yo.3, yo.4, yo.5),
+                *yo_flags,
+                "{formats:?}: wrong styles on yo"
+            );
+        }
+    }
+
+    /// No styled segment may render a delimiter run as literal text, and no
+    /// edit may write a zero-width space into the content.
+    fn assert_no_delimiter_runs(doc: &DocumentTab) {
+        assert!(
+            !doc.content.contains('\u{200B}'),
+            "zero-width space written into {:?}",
+            doc.content
+        );
+        let content = doc.content.clone();
+        let parsed = parse_document(&content);
+        for line in &parsed.lines {
+            for seg in &line.styled_segments {
+                let text = &content[seg.source.clone()];
+                assert!(
+                    !text.contains("**") && !text.contains("~~"),
+                    "literal delimiter rendered in {text:?} of {content:?}"
+                );
+            }
+        }
+    }
+
+    /// Delete skips hidden delimiters like Backspace does and drops a span
+    /// whose last visible grapheme it removes, instead of eating marker
+    /// characters (`x **ab**` must not become `xy*ab**`).
+    #[test]
+    fn delete_forward_skips_delimiters_and_drops_empty_spans() {
+        let mut doc = DocumentTab::new("d1".into(), "test.md".into(), "x **ab**".into(), None, None);
+        doc.place(1, false);
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "x**ab**", "Delete ate a visible character");
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "x**b**", "Delete ate an opener character instead of skipping it");
+        doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+        assert_eq!(
+            doc.content, "x",
+            "Delete did not drop the span once it was empty"
+        );
+        let parsed = parse_document(&doc.content);
+        assert!(parsed.lines[0].styled_segments.iter().all(|s| !s.bold));
+    }
+
+    /// Backspace through a stacked span never splits a delimiter: the empty
+    /// span is dropped whole, and text typed afterwards stays outside the
+    /// tags (`<u>z/u>` must be impossible).
+    #[test]
+    fn backspace_through_stacked_span_drops_it_whole() {
+        let mut doc = DocumentTab::new("d2".into(), "test.md".into(), String::new(), None, None);
+        for f in ["bold", "italic", "underline"] {
+            doc.apply_format_in_mode(f, ViewMode::Wysiwyg);
+        }
+        type_keystrokes(&mut doc, "ab");
+        assert_eq!(doc.content, "<u>***ab***</u>");
+        for f in ["bold", "italic", "underline"] {
+            doc.apply_format_in_mode(f, ViewMode::Wysiwyg);
+        }
+        for _ in 0..3 {
+            doc.smart_backspace_in_mode(ViewMode::Wysiwyg);
+        }
+        assert_eq!(doc.content, "", "backspace split a delimiter");
+        type_keystrokes(&mut doc, "z");
+        assert_eq!(doc.content, "z");
+        assert_no_delimiter_runs(&doc);
+    }
+
+    /// Overlapping toggles close and reopen their markers so the spans nest
+    /// properly and round-trip through the parser: each variant below must
+    /// display without raw markers and parse back to the typed spans, with
+    /// no zero-width spaces and no literal delimiter runs.
+    #[test]
+    fn overlapping_toggles_nest_properly() {
+        // (first format, second format, typed chars, expected spans as
+        // (text, bold, italic, underline, strike))
+        type OverlapVariant = (
+            &'static str,
+            &'static str,
+            Vec<&'static str>,
+            Vec<(&'static str, bool, bool, bool, bool)>,
+        );
+        let variants: Vec<OverlapVariant> = vec![
+            (
+                // 1-char: a italic, b bold+italic, c bold, d plain
+                "italic",
+                "bold",
+                vec!["a", "b", "c", "d"],
+                vec![
+                    ("a", false, true, false, false),
+                    ("b", true, true, false, false),
+                    ("c", true, false, false, false),
+                    ("d", false, false, false, false),
+                ],
+            ),
+            (
+                // 2-char variant of the same overlap
+                "italic",
+                "bold",
+                vec!["ab", "cd", "ef", "gh"],
+                vec![
+                    ("ab", false, true, false, false),
+                    ("cd", true, true, false, false),
+                    ("ef", true, false, false, false),
+                    ("gh", false, false, false, false),
+                ],
+            ),
+            (
+                // mirror order: bold first, then italic
+                "bold",
+                "italic",
+                vec!["a", "b", "c", "d"],
+                vec![
+                    ("a", true, false, false, false),
+                    ("b", true, true, false, false),
+                    ("c", false, true, false, false),
+                    ("d", false, false, false, false),
+                ],
+            ),
+            (
+                // strike first, then underline
+                "strike",
+                "underline",
+                vec!["a", "b", "c", "d"],
+                vec![
+                    ("a", false, false, false, true),
+                    ("b", false, false, true, true),
+                    ("c", false, false, true, false),
+                    ("d", false, false, false, false),
+                ],
+            ),
+            (
+                // underline first, then strike
+                "underline",
+                "strike",
+                vec!["a", "b", "c", "d"],
+                vec![
+                    ("a", false, false, true, false),
+                    ("b", false, false, true, true),
+                    ("c", false, false, false, true),
+                    ("d", false, false, false, false),
+                ],
+            ),
+        ];
+        for (first, second, chars, expected) in variants {
+            let mut doc = DocumentTab::new("d3".into(), "test.md".into(), String::new(), None, None);
+            doc.apply_format_in_mode(first, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, chars[0]);
+            doc.apply_format_in_mode(second, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, chars[1]);
+            doc.apply_format_in_mode(first, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, chars[2]);
+            doc.apply_format_in_mode(second, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, chars[3]);
+
+            assert!(
+                !doc.content.contains('\u{200B}'),
+                "{first}/{second}: zero-width space written"
+            );
+            let content = doc.content.clone();
+            let parsed = parse_document(&content);
+            assert_eq!(
+                parsed.lines[0].display_text,
+                chars.concat(),
+                "{first}/{second}: raw markers visible in the display"
+            );
+            let segments: Vec<(&str, bool, bool, bool, bool)> = parsed.lines[0]
+                .styled_segments
+                .iter()
+                .map(|s| {
+                    (
+                        content[s.source.clone()].as_ref(),
+                        s.bold,
+                        s.italic,
+                        s.underline,
+                        s.strike,
+                    )
+                })
+                .collect();
+            assert_eq!(segments, expected, "{first}/{second}: wrong spans");
+            assert_no_delimiter_runs(&doc);
+        }
+    }
+
+    /// Toggling a non-code format while code is armed splits the code span
+    /// around the change instead of nesting delimiters inside the backticks;
+    /// the code span stays innermost and adjacent to the text.
+    #[test]
+    fn toggles_split_code_span_keeping_code_innermost() {
+        for (format, open, close) in [
+            ("bold", "**", "**"),
+            ("italic", "*", "*"),
+            ("underline", "<u>", "</u>"),
+            ("strike", "~~", "~~"),
+        ] {
+            let mut doc = DocumentTab::new("d4".into(), "test.md".into(), String::new(), None, None);
+            doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "a");
+            doc.apply_format_in_mode(format, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "b");
+            doc.apply_format_in_mode(format, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "c");
+            assert_eq!(
+                doc.content,
+                format!("`a`{open}`b`{close}`c`"),
+                "{format}: delimiters nested inside the code span"
+            );
+
+            let content = doc.content.clone();
+            let parsed = parse_document(&content);
+            let segments: Vec<(&str, bool, bool, bool, bool, bool)> = parsed.lines[0]
+                .styled_segments
+                .iter()
+                .map(|s| {
+                    (
+                        content[s.source.clone()].trim_matches('\u{200B}'),
+                        s.bold,
+                        s.italic,
+                        s.underline,
+                        s.strike,
+                        s.code,
+                    )
+                })
+                .collect();
+            let want = match format {
+                "bold" => vec![("a", false, false, false, false, true), ("b", true, false, false, false, true), ("c", false, false, false, false, true)],
+                "italic" => vec![("a", false, false, false, false, true), ("b", false, true, false, false, true), ("c", false, false, false, false, true)],
+                "underline" => vec![("a", false, false, false, false, true), ("b", false, false, true, false, true), ("c", false, false, false, false, true)],
+                _ => vec![("a", false, false, false, false, true), ("b", false, false, false, true, true), ("c", false, false, false, false, true)],
+            };
+            assert_eq!(segments, want, "{format}: wrong styles");
+            assert_no_delimiter_runs(&doc);
+        }
+    }
+
+    /// A delimiter after an emoji or symbol and before a letter loses its
+    /// flanking (CommonMark counts symbols as punctuation). The document
+    /// text stays exactly as typed - no zero-width separators - and the
+    /// parser synthesizes the pair for the display, on the closer and the
+    /// opener side alike.
+    #[test]
+    fn symbol_adjacent_delimiters_keep_flanking() {
+        // Closer side: bold emoji, toggle off, type a letter.
+        let mut doc = DocumentTab::new("d5".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "\u{1F600}\u{1F600}");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "**\u{1F600}\u{1F600}**");
+        type_keystrokes(&mut doc, "x");
+        assert_eq!(
+            doc.content, "**\u{1F600}\u{1F600}**x",
+            "the typed text was altered"
+        );
+        assert!(
+            !doc.content.contains('\u{200B}'),
+            "zero-width space written"
+        );
+        let content = doc.content.clone();
+        let parsed = parse_document(&content);
+        let segments: Vec<(&str, bool)> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .map(|s| (content[s.source.clone()].as_ref(), s.bold))
+            .collect();
+        assert_eq!(segments, vec![("\u{1F600}\u{1F600}", true), ("x", false)]);
+
+        // Opener side: a letter right before a fresh span holding a symbol.
+        let mut doc = DocumentTab::new("d6".into(), "test.md".into(), "x".into(), None, None);
+        doc.place(1, false);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "\u{1F600}");
+        assert_eq!(doc.content, "x**\u{1F600}**");
+        assert!(
+            !doc.content.contains('\u{200B}'),
+            "zero-width space written"
+        );
+        let content = doc.content.clone();
+        let parsed = parse_document(&content);
+        let segments: Vec<(&str, bool)> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .map(|s| (content[s.source.clone()].as_ref(), s.bold))
+            .collect();
+        assert_eq!(segments, vec![("x", false), ("\u{1F600}", true)]);
+    }
+
+    /// Typing a span's own delimiter character inside it escapes it (or
+    /// re-fences a code span) so the span stays intact and renders styled.
+    #[test]
+    fn typing_span_delimiters_inside_keeps_the_span() {
+        // Strike: `~` inside, then a space and more text.
+        let mut doc = DocumentTab::new("d7".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "a");
+        type_keystrokes(&mut doc, "~");
+        assert_eq!(doc.content, "~~a\\~~~", "the tilde was not escaped");
+        type_keystrokes(&mut doc, " ");
+        type_keystrokes(&mut doc, "b");
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        assert_eq!(doc.content, "~~a\\~ b~~");
+        let content = doc.content.clone();
+        let parsed = parse_document(&content);
+        let segments: Vec<(&str, bool)> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .map(|s| (content[s.source.clone()].trim_matches('\\'), s.strike))
+            .collect();
+        assert_eq!(segments, vec![("a", true), ("~ b", true)]);
+
+        // Italic: `*` inside.
+        let mut doc = DocumentTab::new("d8".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "a");
+        type_keystrokes(&mut doc, "*");
+        type_keystrokes(&mut doc, "b");
+        assert_eq!(doc.content, "*a\\*b*");
+        let content = doc.content.clone();
+        let parsed = parse_document(&content);
+        let segments: Vec<(&str, bool)> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .map(|s| (content[s.source.clone()].trim_matches('\\'), s.italic))
+            .collect();
+        assert_eq!(segments, vec![("a", true), ("*b", true)]);
+
+        // Code: a backtick typed inside the content re-fences the span with
+        // a longer run; a backtick typed at the content's end acts as the
+        // closing fence and moves the caret past it.
+        let mut doc = DocumentTab::new("d9".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "ab");
+        doc.place(2, false);
+        type_keystrokes(&mut doc, "`");
+        assert_eq!(
+            doc.content, "``a`b``",
+            "the backtick inside the code span did not re-fence"
+        );
+        let content = doc.content.clone();
+        let parsed = parse_document(&content);
+        let segments: Vec<(&str, bool)> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .map(|s| (content[s.source.clone()].as_ref(), s.code))
+            .collect();
+        assert_eq!(segments, vec![("a`b", true)]);
+
+        let mut doc = DocumentTab::new("d10".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "a");
+        type_keystrokes(&mut doc, "`");
+        assert_eq!(
+            doc.content, "``a```",
+            "the backtick did not join the content"
+        );
+        let parsed = doc.parsed();
+        assert!(
+            parsed.lines[0]
+                .styled_segments
+                .iter()
+                .any(|s| s.code && doc.content[s.source.clone()] == *"a`"),
+            "the re-fenced span is not displayed as code"
+        );
+        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), 6, "the shortcut did not exit the span");
+        type_keystrokes(&mut doc, "b");
+        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "c");
+        assert_eq!(doc.content, "``a```b`c`");
+        let content = doc.content.clone();
+        let parsed = parse_document(&content);
+        let segments: Vec<(&str, bool)> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .map(|s| (content[s.source.clone()].as_ref(), s.code))
+            .collect();
+        assert_eq!(
+            segments,
+            vec![("a`", true), ("b", false), ("c", true)],
+            "the literal backtick and the code spans rendered wrong"
+        );
+        assert_no_delimiter_runs(&doc);
+    }
+
+    /// The wrap path escapes the armed span's own delimiters in typed text
+    /// (strike: `\~`), a literally typed `<` that would start an HTML tag is
+    /// escaped as `\<`, and escape backslashes are hidden in the display
+    /// with the caret mapping intact. No zero-width space is ever written.
+    #[test]
+    fn wrap_escapes_delimiters_lt_and_hides_escape_backslashes() {
+        // Strike armed, text containing tildes (the wrap path).
+        let mut doc = DocumentTab::new("w1".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "~a~");
+        assert_eq!(doc.content, "~~\\~a\\~~~", "the tildes were not escaped");
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " b");
+        assert_eq!(doc.content, "~~\\~a\\~~~ b");
+        assert!(!doc.content.contains('\u{200B}'));
+        let content = doc.content.clone();
+        let parsed = parse_document(&content);
+        let segments: Vec<(&str, bool)> = parsed.lines[0]
+            .styled_segments
+            .iter()
+            .map(|s| (content[s.source.clone()].trim_matches('\\'), s.strike))
+            .collect();
+        assert_eq!(segments, vec![("~a", true), ("~", true), (" b", false)]);
+        assert_no_delimiter_runs(&doc);
+
+        // `<` typed before a letter, and a letter typed after a `<`.
+        let mut doc = DocumentTab::new("w2".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "a");
+        type_keystrokes(&mut doc, "<");
+        type_keystrokes(&mut doc, "b");
+        assert_eq!(doc.content, "a\\<b", "the `<` was not escaped");
+        assert_eq!(parse_document(&doc.content).lines[0].display_text, "a<b");
+
+        let mut doc = DocumentTab::new("w3".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "<");
+        type_keystrokes(&mut doc, "b");
+        assert_eq!(doc.content, "\\<b", "the `<` was not escaped");
+        assert_eq!(parse_document(&doc.content).lines[0].display_text, "<b");
+
+        // Escape backslashes are hidden in the display and the offsets map.
+        let mut doc = DocumentTab::new(
+            "w4".into(),
+            "test.md".into(),
+            "**a\\*b**".into(),
+            None,
+            None,
+        );
+        doc.place(3, false);
+        let parsed = doc.parsed();
+        let line = &parsed.lines[0];
+        assert_eq!(line.display_text, "a*b");
+        for (idx, ch) in line.display_text.char_indices() {
+            let src = line.offset_map.display_to_source(idx);
+            assert!(
+                doc.content.is_char_boundary(src) && doc.content[src..].starts_with(ch),
+                "display {ch:?} at {idx} maps to {src}"
+            );
+        }
+        assert!(!doc.content.contains('\u{200B}'));
     }
 
     #[test]
@@ -6145,10 +9666,9 @@ mod tests {
         assert_eq!(doc.content, "X\nnext");
     }
 
-    /// 7ad1cff paints `# foo ` as `foo` and its visible end is offset 5. Typing
-    /// X there yields `# fooX `. BASE has no redo snap and types `# foo X`.
-    /// Removing the snap call in `redo` leaves the caret on the trailing space
-    /// and the bytes become `# foo X`.
+    /// 7ad1cff paints `# foo ` as `foo` and its visible end is offset 5. The
+    /// trailing space is part of the visible heading now, so the snap target
+    /// is offset 6 and typing X there appends after it.
     #[test]
     fn redo_after_raw_closer_delete_types_at_the_visible_end() {
         let mut doc = heading_tab("# foo #");
@@ -6160,8 +9680,8 @@ mod tests {
         assert!(doc.redo());
         let range = doc.selection_range();
         doc.insert_text_in_mode(range, "X", ViewMode::Wysiwyg);
-        assert_eq!(doc.content, "# fooX ");
-        assert_eq!(doc.caret.range, 6..6);
+        assert_eq!(doc.content, "# foo X");
+        assert_eq!(doc.caret.range, 7..7);
     }
 
     #[test]
@@ -6667,6 +10187,772 @@ mod tests {
         doc.place(b, false);
         assert!(doc.tab_table_cell(true));
         assert_eq!(doc.selection_range().start, a);
+    }
+
+    #[test]
+    fn test_inline_format_stacked_combos_table_driven() {
+        let combos: Vec<(&[&str], &str)> = vec![
+            // 2-format combos (6)
+            (&["bold", "italic"], "***Hello***"),
+            (&["bold", "underline"], "<u>**Hello**</u>"),
+            (&["bold", "strike"], "**~~Hello~~**"),
+            (&["italic", "underline"], "<u>*Hello*</u>"),
+            (&["italic", "strike"], "*~~Hello~~*"),
+            (&["strike", "underline"], "<u>~~Hello~~</u>"),
+            // 3-format combos (4)
+            (&["bold", "italic", "underline"], "<u>***Hello***</u>"),
+            (&["bold", "italic", "strike"], "***~~Hello~~***"),
+            (&["bold", "strike", "underline"], "<u>**~~Hello~~**</u>"),
+            (&["italic", "strike", "underline"], "<u>*~~Hello~~*</u>"),
+        ];
+
+        let positions = ["whole", "start", "middle", "end", "caret"];
+
+        for (combo_formats, initial_md) in &combos {
+            for &cmd in *combo_formats {
+                for &pos in &positions {
+                    let mut doc = DocumentTab::new(
+                        "tab".into(),
+                        "test.md".into(),
+                        initial_md.to_string(),
+                        None,
+                        None,
+                    );
+
+                    let word_start = doc.content.find("Hello").unwrap();
+                    match pos {
+                        "whole" => {
+                            doc.caret.range = word_start..(word_start + 5);
+                        }
+                        "start" => {
+                            doc.caret.range = word_start..(word_start + 2);
+                        }
+                        "middle" => {
+                            doc.caret.range = (word_start + 1)..(word_start + 4);
+                        }
+                        "end" => {
+                            doc.caret.range = (word_start + 2)..(word_start + 5);
+                        }
+                        "caret" => {
+                            doc.place(word_start + 2, false);
+                        }
+                        _ => unreachable!(),
+                    }
+
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+
+                    let parsed = doc.parsed();
+                    let line = parsed.lines.first().expect("Line not found");
+
+                    // 1. No leaked markers in display text
+                    assert_eq!(
+                        line.display_text, "Hello",
+                        "Display text leaked markers for combo {:?}, format {}, pos {}. Content was: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+
+                    // 2. Clean delimiters: no **** or <u><u> or ~~~~
+                    assert!(
+                        !doc.content.contains("****"),
+                        "Content contains **** for combo {:?}, format {}, pos {}: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+                    assert!(
+                        !doc.content.contains("<u><u>"),
+                        "Content contains <u><u> for combo {:?}, format {}, pos {}: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+                    assert!(
+                        !doc.content.contains("</u></u>"),
+                        "Content contains </u></u> for combo {:?}, format {}, pos {}: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+                    assert!(
+                        !doc.content.contains("~~~~"),
+                        "Content contains ~~~~ for combo {:?}, format {}, pos {}: {}",
+                        combo_formats, cmd, pos, doc.content
+                    );
+
+                    // 3. Verify format state of each letter in "Hello"
+                    for i in 0..5 {
+                        let should_have_toggled = match pos {
+                            "whole" | "caret" => false,
+                            "start" => i >= 2,
+                            "middle" => i == 0 || i == 4,
+                            "end" => i < 2,
+                            _ => unreachable!(),
+                        };
+
+                        let src_offset = line.offset_map.display_to_source(i);
+                        let seg = line
+                            .styled_segments
+                            .iter()
+                            .find(|s| s.source.start <= src_offset && src_offset < s.source.end)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "No styled segment covering char index {} at source offset {} for combo {:?}, format {}, pos {}. Content: {}",
+                                    i, src_offset, combo_formats, cmd, pos, doc.content
+                                )
+                            });
+
+                        let has_cmd = match cmd {
+                            "bold" => seg.bold,
+                            "italic" => seg.italic,
+                            "underline" => seg.underline,
+                            "strike" => seg.strike,
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(
+                            has_cmd, should_have_toggled,
+                            "Format {} on char index {} expected {} but was {} for combo {:?}, pos {}. Content: {}",
+                            cmd, i, should_have_toggled, has_cmd, combo_formats, pos, doc.content
+                        );
+
+                        // All other formats in combo_formats must remain true
+                        for &other_cmd in *combo_formats {
+                            if other_cmd == cmd {
+                                continue;
+                            }
+                            let has_other = match other_cmd {
+                                "bold" => seg.bold,
+                                "italic" => seg.italic,
+                                "underline" => seg.underline,
+                                "strike" => seg.strike,
+                                _ => unreachable!(),
+                            };
+                            assert!(
+                                has_other,
+                                "Other format {} on char index {} lost for combo {:?}, toggled {}, pos {}. Content: {}",
+                                other_cmd, i, combo_formats, cmd, pos, doc.content
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_wysiwyg_typing_format_splice_inner_outer_plain() {
+        // Arm bold + italic, type "now", turn off italic, type "ok", turn off bold, type " plain"
+        let mut doc = DocumentTab::new("t1".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now");
+        assert_eq!(doc.content, "***now***");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "ok");
+        assert_eq!(doc.content, "***now*ok**");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " plain");
+        assert_eq!(doc.content, "***now*ok** plain");
+        let parsed = doc.parsed();
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "nowok plain");
+
+        // Arm bold + italic, type "now", turn off bold (outer), type "ok", turn off italic, type " plain"
+        let mut doc = DocumentTab::new("t2".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "ok");
+        assert_eq!(doc.content, "***now**ok*");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " plain");
+        assert_eq!(doc.content, "***now**ok* plain");
+        let parsed = doc.parsed();
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "nowok plain");
+
+        // Arm bold + underline, type "now", turn off underline (inner), type "ok", turn off bold, type " plain"
+        let mut doc = DocumentTab::new("t3".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now");
+        assert_eq!(doc.content, "<u>**now**</u>");
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "ok");
+        assert_eq!(doc.content, "**<u>now</u>ok**");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " plain");
+        assert_eq!(doc.content, "**<u>now</u>ok** plain");
+        let parsed = doc.parsed();
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "nowok plain");
+
+        // Arm bold + underline, type "now", turn off bold (outer), type "ok", turn off underline, type " plain"
+        let mut doc = DocumentTab::new("t4".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "now");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "ok");
+        assert_eq!(doc.content, "<u>**now**ok</u>");
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " plain");
+        assert_eq!(doc.content, "<u>**now**ok</u> plain");
+        let parsed = doc.parsed();
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "nowok plain");
+    }
+
+    #[test]
+    fn test_wysiwyg_typing_req5_consecutive_italic_toggle() {
+        let mut doc = DocumentTab::new("t".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "a ");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "b");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "c");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " d");
+        assert_eq!(doc.content, "a *bc* d");
+        let line = doc.parsed().lines.first().unwrap().clone();
+        assert_eq!(line.display_text, "a bc d");
+    }
+
+    #[test]
+    fn test_wysiwyg_typing_req6_underline_and_code_trailing_space() {
+        let mut doc = DocumentTab::new("u".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "hello ");
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "world");
+        assert_eq!(doc.content, "<u>hello</u> world");
+        let line = doc.parsed().lines.first().unwrap().clone();
+        assert_eq!(line.display_text, "hello world");
+
+        let mut doc = DocumentTab::new("c".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "hello ");
+        doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "world");
+        assert_eq!(doc.content, "`hello` world");
+        let line = doc.parsed().lines.first().unwrap().clone();
+        assert_eq!(line.display_text, "hello world");
+    }
+
+    #[test]
+    fn test_wysiwyg_repro1_stacked_format_typing_continuation() {
+        let mut doc = DocumentTab::new("r1".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "This is a test for ");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "combination i want ");
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "jlkj ");
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+
+        assert_eq!(
+            doc.content,
+            "This is a test for <u>***combination i want** jlkj*</u> "
+        );
+        let parsed = crate::markdown::parse_document(&doc.content);
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "This is a test for combination i want jlkj ");
+
+        let s_lead = line.styled_segments.iter().find(|s| s.source == (0..19)).unwrap();
+        assert!(!s_lead.bold && !s_lead.italic && !s_lead.underline && !s_lead.strike);
+
+        let s_combo = line.styled_segments.iter().find(|s| &doc.content[s.source.clone()] == "combination i want").unwrap();
+        assert!(s_combo.bold && s_combo.italic && s_combo.underline);
+
+        let s_jlkj = line.styled_segments.iter().find(|s| &doc.content[s.source.clone()] == " jlkj").unwrap();
+        assert!(!s_jlkj.bold && s_jlkj.italic && s_jlkj.underline);
+    }
+
+    #[test]
+    fn test_wysiwyg_repro2_stacked_format_typing_disarm_plain() {
+        let mut doc = DocumentTab::new("r2".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "combination i want");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "fasjj");
+
+        assert_eq!(doc.content, "<u>***combination i want***</u>fasjj");
+        let parsed = crate::markdown::parse_document(&doc.content);
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "combination i wantfasjj");
+
+        let s_formatted = line.styled_segments.iter().find(|s| &doc.content[s.source.clone()] == "combination i want").unwrap();
+        assert!(s_formatted.bold && s_formatted.italic && s_formatted.underline && !s_formatted.strike);
+
+        let s_plain = line.styled_segments.iter().find(|s| &doc.content[s.source.clone()] == "fasjj").unwrap();
+        assert!(!s_plain.bold && !s_plain.italic && !s_plain.underline && !s_plain.strike);
+    }
+
+    #[test]
+    fn test_all_stacked_combos_followed_by_unspaced_text() {
+        let combos = [
+            // Pairs
+            (vec!["bold", "italic"], true, true, false, false),
+            (vec!["bold", "underline"], true, false, true, false),
+            (vec!["italic", "underline"], false, true, true, false),
+            (vec!["strike", "underline"], false, false, true, true),
+            (vec!["bold", "strike"], true, false, false, true),
+            (vec!["italic", "strike"], false, true, false, true),
+            // Triples
+            (vec!["bold", "italic", "underline"], true, true, true, false),
+            (vec!["bold", "strike", "underline"], true, false, true, true),
+            (vec!["italic", "strike", "underline"], false, true, true, true),
+            (vec!["bold", "italic", "strike"], true, true, false, true),
+        ];
+
+        for (fmts, b, i, u, s) in combos {
+            let mut doc = DocumentTab::new("c".into(), "test.md".into(), String::new(), None, None);
+            for &cmd in &fmts {
+                doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            }
+            type_keystrokes(&mut doc, "word");
+            for &cmd in &fmts {
+                doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+            }
+            type_keystrokes(&mut doc, "after");
+
+            // Never emit empty format spans
+            assert!(
+                !doc.content.contains("<u></u>"),
+                "Found empty <u></u> for {:?}: {:?}",
+                fmts,
+                doc.content
+            );
+            assert!(
+                !doc.content.contains("****"),
+                "Found empty **** for {:?}: {:?}",
+                fmts,
+                doc.content
+            );
+            assert!(
+                !doc.content.contains("~~~~"),
+                "Found empty ~~~~ for {:?}: {:?}",
+                fmts,
+                doc.content
+            );
+
+            // Combos with underline or single delimiter run (bold+italic) parse cleanly even without space
+            if u || fmts == ["bold", "italic"] {
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().unwrap();
+                assert_eq!(
+                    line.display_text, "wordafter",
+                    "Leaked delimiters for combo {:?}. Content was: {:?}",
+                    fmts, doc.content
+                );
+
+                let seg_word = line
+                    .styled_segments
+                    .iter()
+                    .find(|seg| &doc.content[seg.source.clone()] == "word")
+                    .unwrap_or_else(|| panic!("Segment 'word' not found for {:?}, content: {:?}", fmts, doc.content));
+                assert_eq!(seg_word.bold, b, "{:?}: bold mismatch", fmts);
+                assert_eq!(seg_word.italic, i, "{:?}: italic mismatch", fmts);
+                assert_eq!(seg_word.underline, u, "{:?}: underline mismatch", fmts);
+                assert_eq!(seg_word.strike, s, "{:?}: strike mismatch", fmts);
+
+                let seg_after = line
+                    .styled_segments
+                    .iter()
+                    .find(|seg| &doc.content[seg.source.clone()] == "after")
+                    .unwrap_or_else(|| panic!("Segment 'after' not found for {:?}, content: {:?}", fmts, doc.content));
+                assert!(
+                    !seg_after.bold && !seg_after.italic && !seg_after.underline && !seg_after.strike,
+                    "{:?}: after was styled",
+                    fmts
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_arrowing_back_into_stacked_span_and_typing() {
+        let mut doc = DocumentTab::new("arrow".into(), "test.md".into(), String::new(), None, None);
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "hello");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("underline", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, " world");
+
+        // Arrow left 7 times back into the stacked span
+        for _ in 0..7 {
+            doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+        }
+        type_keystrokes(&mut doc, "X");
+
+        let parsed = crate::markdown::parse_document(&doc.content);
+        let line = parsed.lines.first().unwrap();
+        assert_eq!(line.display_text, "hellXo world");
+
+        let seg_mod = line
+            .styled_segments
+            .iter()
+            .find(|seg| &doc.content[seg.source.clone()] == "hellXo")
+            .expect("hellXo segment not found");
+        assert!(seg_mod.bold && seg_mod.italic && seg_mod.underline && !seg_mod.strike);
+
+        let seg_world = line
+            .styled_segments
+            .iter()
+            .find(|seg| &doc.content[seg.source.clone()] == " world")
+            .expect("world segment not found");
+        assert!(!seg_world.bold && !seg_world.italic && !seg_world.underline && !seg_world.strike);
+    }
+
+    #[test]
+    fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
+        let combos: Vec<(&[&str], bool, bool, bool, bool)> = vec![
+            // Pairs (6)
+            (&["bold", "italic"], true, true, false, false),
+            (&["bold", "strike"], true, false, true, false),
+            (&["bold", "code"], true, false, false, true),
+            (&["italic", "strike"], false, true, true, false),
+            (&["italic", "code"], false, true, false, true),
+            (&["strike", "code"], false, false, true, true),
+            // Triples (4)
+            (&["bold", "italic", "strike"], true, true, true, false),
+            (&["bold", "italic", "code"], true, true, false, true),
+            (&["bold", "strike", "code"], true, false, true, true),
+            (&["italic", "strike", "code"], false, true, true, true),
+        ];
+
+        for (combo, exp_b, exp_i, exp_s, exp_c) in combos {
+            // 1. Toggled on immediately after a letter: type "a", arm combo, type "hi"
+            {
+                let mut doc = DocumentTab::new("on".into(), "test.md".into(), String::new(), None, None);
+                type_keystrokes(&mut doc, "a");
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "hi");
+
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().expect("line not found");
+                assert_eq!(
+                    line.display_text, "ahi",
+                    "Leaked delimiters in display text when toggling on combo {:?}. Content was: {:?}",
+                    combo, doc.content
+                );
+
+                // 'a' must be unstyled
+                let a_src = line.offset_map.display_to_source(0);
+                let a_seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|s| s.source.start <= a_src && a_src < s.source.end)
+                    .unwrap_or_else(|| panic!("No styled segment covering 'a' for combo {:?}", combo));
+                assert!(!a_seg.bold && !a_seg.italic && !a_seg.strike && !a_seg.code,
+                    "Expected 'a' unstyled for combo {:?}, got B={} I={} S={} C={}",
+                    combo, a_seg.bold, a_seg.italic, a_seg.strike, a_seg.code);
+
+                // 'h' and 'i' must have the combo formats
+                for ch_idx in 1..3 {
+                    let src = line.offset_map.display_to_source(ch_idx);
+                    let seg = line
+                        .styled_segments
+                        .iter()
+                        .find(|s| s.source.start <= src && src < s.source.end)
+                        .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
+                    assert_eq!(seg.bold, exp_b, "Bold mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.italic, exp_i, "Italic mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.strike, exp_s, "Strike mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.code, exp_c, "Code mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                }
+            }
+
+            // 2. Toggled off with a letter typed immediately after: arm combo, type "hi", toggle off, type "y"
+            {
+                let mut doc = DocumentTab::new("off".into(), "test.md".into(), String::new(), None, None);
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "hi");
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "y");
+
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().expect("line not found");
+                assert_eq!(
+                    line.display_text, "hiy",
+                    "Leaked delimiters in display text when toggling off combo {:?}. Content was: {:?}",
+                    combo, doc.content
+                );
+
+                // 'h' and 'i' must have the combo formats
+                for ch_idx in 0..2 {
+                    let src = line.offset_map.display_to_source(ch_idx);
+                    let seg = line
+                        .styled_segments
+                        .iter()
+                        .find(|s| s.source.start <= src && src < s.source.end)
+                        .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
+                    assert_eq!(seg.bold, exp_b, "Bold mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.italic, exp_i, "Italic mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.strike, exp_s, "Strike mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.code, exp_c, "Code mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                }
+
+                // 'y' must be unstyled
+                let y_src = line.offset_map.display_to_source(2);
+                let y_seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|s| s.source.start <= y_src && y_src < s.source.end)
+                    .unwrap_or_else(|| panic!("No styled segment covering 'y' for combo {:?}", combo));
+                assert!(!y_seg.bold && !y_seg.italic && !y_seg.strike && !y_seg.code,
+                    "Expected 'y' unstyled for combo {:?}, got B={} I={} S={} C={}",
+                    combo, y_seg.bold, y_seg.italic, y_seg.strike, y_seg.code);
+            }
+
+            // 3. With prefix "x ": "x ", arm combo, type "hi", toggle off, type "y"
+            {
+                let mut doc = DocumentTab::new("prefix_off".into(), "test.md".into(), String::new(), None, None);
+                type_keystrokes(&mut doc, "x ");
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "hi");
+                for &cmd in combo {
+                    doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
+                }
+                type_keystrokes(&mut doc, "y");
+
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().expect("line not found");
+                assert_eq!(
+                    line.display_text, "x hiy",
+                    "Leaked delimiters in display text when toggling off with prefix combo {:?}. Content was: {:?}",
+                    combo, doc.content
+                );
+
+                // 'x' and ' ' must be unstyled
+                for ch_idx in 0..2 {
+                    let src = line.offset_map.display_to_source(ch_idx);
+                    let seg = line
+                        .styled_segments
+                        .iter()
+                        .find(|s| s.source.start <= src && src < s.source.end)
+                        .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
+                    assert!(!seg.bold && !seg.italic && !seg.strike && !seg.code);
+                }
+
+                // 'h' and 'i' must have the combo formats
+                for ch_idx in 2..4 {
+                    let src = line.offset_map.display_to_source(ch_idx);
+                    let seg = line
+                        .styled_segments
+                        .iter()
+                        .find(|s| s.source.start <= src && src < s.source.end)
+                        .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
+                    assert_eq!(seg.bold, exp_b, "Bold mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.italic, exp_i, "Italic mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.strike, exp_s, "Strike mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    assert_eq!(seg.code, exp_c, "Code mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                }
+
+                // 'y' must be unstyled
+                let y_src = line.offset_map.display_to_source(4);
+                let y_seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|s| s.source.start <= y_src && y_src < s.source.end)
+                    .unwrap_or_else(|| panic!("No styled segment covering 'y' for combo {:?}", combo));
+                assert!(!y_seg.bold && !y_seg.italic && !y_seg.strike && !y_seg.code,
+                    "Expected 'y' unstyled for combo {:?}, got B={} I={} S={} C={}",
+                    combo, y_seg.bold, y_seg.italic, y_seg.strike, y_seg.code);
+            }
+        }
+    }
+
+    #[test]
+    fn test_whitespace_only_inserts_with_each_format_armed() {
+        let whitespaces = [" ", "\t", "   ", "  \t  "];
+        let formats = [
+            ("bold", true, false, false, false, false, "**word**"),
+            ("italic", false, true, false, false, false, "*word*"),
+            ("underline", false, false, true, false, false, "<u>word</u>"),
+            ("strike", false, false, false, true, false, "~~word~~"),
+            ("code", false, false, false, false, true, "`word`"),
+        ];
+
+        for ws in whitespaces {
+            for (fmt, b, i, u, s, c, expected_span) in formats {
+                // 1. In empty doc: verify plain insertion & pending formats preserved
+                let mut doc =
+                    DocumentTab::new("ws".into(), "test.md".into(), String::new(), None, None);
+                doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+                assert!(
+                    doc.has_pending_inline_formats(),
+                    "Format {} should be armed before inserting {:?}",
+                    fmt,
+                    ws
+                );
+
+                doc.insert_text_in_mode(0..0, ws, ViewMode::Wysiwyg);
+                assert_eq!(
+                    doc.content, ws,
+                    "Whitespace {:?} with format {} should be inserted plainly",
+                    ws, fmt
+                );
+                assert!(
+                    doc.has_pending_inline_formats(),
+                    "Format {} should remain armed after inserting whitespace {:?}",
+                    fmt,
+                    ws
+                );
+
+                type_keystrokes(&mut doc, "word");
+                assert_eq!(
+                    doc.content,
+                    format!("{}{}", ws, expected_span),
+                    "Typed text should wrap with armed format delimiters"
+                );
+
+                // 2. In paragraph (with prefix text): verify parse_document styled segments
+                let mut doc2 =
+                    DocumentTab::new("ws2".into(), "test.md".into(), "intro".into(), None, None);
+                doc2.caret.move_to(5);
+                doc2.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+                doc2.insert_text_in_mode(5..5, ws, ViewMode::Wysiwyg);
+                assert!(doc2.has_pending_inline_formats());
+                type_keystrokes(&mut doc2, "word");
+
+                let parsed = crate::markdown::parse_document(&doc2.content);
+                let line = parsed.lines.first().unwrap();
+                let seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|seg| &doc2.content[seg.source.clone()] == "word")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Segment 'word' not found for format {} with whitespace {:?}, content: {:?}",
+                            fmt, ws, doc2.content
+                        )
+                    });
+                assert_eq!(seg.bold, b, "{}: bold mismatch", fmt);
+                assert_eq!(seg.italic, i, "{}: italic mismatch", fmt);
+                assert_eq!(seg.underline, u, "{}: underline mismatch", fmt);
+                assert_eq!(seg.strike, s, "{}: strike mismatch", fmt);
+                assert_eq!(seg.code, c, "{}: code mismatch", fmt);
+            }
+        }
+    }
+
+    #[test]
+    fn test_whitespace_only_inserts_in_table_cell_with_each_format_armed() {
+        let whitespaces = [" ", "\t", "   ", "  \t  "];
+        let formats = ["bold", "italic", "underline", "strike", "code"];
+
+        for ws in whitespaces {
+            for fmt in formats {
+                let initial = "| x |\n| --- |\n";
+                let mut doc = DocumentTab::new(
+                    "table_ws".into(),
+                    "test.md".into(),
+                    initial.to_string(),
+                    None,
+                    None,
+                );
+                // Position caret right after 'x' at index 3 in "| x |"
+                doc.caret.move_to(3);
+                doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+                assert!(
+                    doc.has_pending_inline_formats(),
+                    "Format {} should be armed in table cell",
+                    fmt
+                );
+
+                // Inserting whitespace-only text must not panic
+                doc.insert_text_in_mode(3..3, ws, ViewMode::Wysiwyg);
+                assert!(
+                    doc.has_pending_inline_formats(),
+                    "Format {} should remain armed after whitespace insert in table cell",
+                    fmt
+                );
+                assert_eq!(
+                    &doc.content[..3 + ws.len()],
+                    format!("| x{}", ws),
+                    "Whitespace must be inserted plainly inside table cell"
+                );
+
+                // Now type text and ensure it receives the armed format
+                type_keystrokes(&mut doc, "word");
+                let parsed = crate::markdown::parse_document(&doc.content);
+                let line = parsed.lines.first().unwrap();
+                let seg = line
+                    .styled_segments
+                    .iter()
+                    .find(|seg| &doc.content[seg.source.clone()] == "word")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Segment 'word' not found in table for format {} with ws {:?}, content: {:?}",
+                            fmt, ws, doc.content
+                        )
+                    });
+                match fmt {
+                    "bold" => assert!(seg.bold),
+                    "italic" => assert!(seg.italic),
+                    "underline" => assert!(seg.underline),
+                    "strike" => assert!(seg.strike),
+                    "code" => assert!(seg.code),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_no_empty_format_spans_after_toggling() {
+        // Repro: x *~~hi~~*y
+        let mut doc = DocumentTab::new("repro".into(), "test.md".into(), String::new(), None, None);
+        type_keystrokes(&mut doc, "x ");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "hi");
+        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+        doc.apply_format_in_mode("strike", ViewMode::Wysiwyg);
+        type_keystrokes(&mut doc, "y");
+
+        assert_eq!(doc.content, "x ~~*hi*~~y");
+        assert!(!doc.content.contains("<u></u>"));
+        assert!(!doc.content.contains("****"));
+        assert!(!doc.content.contains("~~~~"));
+
+        // Toggle on and immediately toggle off for each format
+        let formats = ["bold", "italic", "underline", "strike", "code"];
+        for fmt in formats {
+            let mut doc = DocumentTab::new("empty_toggle".into(), "test.md".into(), String::new(), None, None);
+            doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+            doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+            assert_eq!(doc.content, "");
+            assert!(!doc.content.contains("<u></u>"));
+            assert!(!doc.content.contains("****"));
+            assert!(!doc.content.contains("~~~~"));
+            assert!(!doc.has_pending_inline_formats());
+        }
+
+        // Type word, toggle off, type word for each format
+        for fmt in formats {
+            let mut doc = DocumentTab::new("toggle_seq".into(), "test.md".into(), String::new(), None, None);
+            doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "abc");
+            doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
+            type_keystrokes(&mut doc, "def");
+
+            assert!(!doc.content.contains("<u></u>"), "Format {} left <u></u>: {:?}", fmt, doc.content);
+            assert!(!doc.content.contains("****"), "Format {} left ****: {:?}", fmt, doc.content);
+            assert!(!doc.content.contains("~~~~"), "Format {} left ~~~~: {:?}", fmt, doc.content);
+        }
     }
 }
 
