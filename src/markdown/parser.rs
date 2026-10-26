@@ -3224,6 +3224,194 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     }
 }
 
+fn shift_off(off: usize, pivot: usize, delta: isize) -> usize {
+    if off >= pivot {
+        (off as isize + delta).max(0) as usize
+    } else {
+        off
+    }
+}
+
+fn shift_range(r: &mut std::ops::Range<usize>, pivot: usize, delta: isize) {
+    r.start = shift_off(r.start, pivot, delta);
+    r.end = shift_off(r.end, pivot, delta);
+}
+
+fn shift_parsed_line(line: &mut ParsedLine, pivot: usize, delta: isize) {
+    shift_range(&mut line.source, pivot, delta);
+    shift_range(&mut line.prefix_range, pivot, delta);
+    for r in &mut line.hidden_ranges {
+        shift_range(r, pivot, delta);
+    }
+    for p in &mut line.inline_pairs {
+        shift_range(&mut p.open_delim, pivot, delta);
+        shift_range(&mut p.inner, pivot, delta);
+        shift_range(&mut p.close_delim, pivot, delta);
+        p.group_open_start = shift_off(p.group_open_start, pivot, delta);
+        p.group_close_end = shift_off(p.group_close_end, pivot, delta);
+    }
+    for s in &mut line.styled_segments {
+        shift_range(&mut s.source, pivot, delta);
+    }
+    line.offset_map.line_start = shift_off(line.offset_map.line_start, pivot, delta);
+    line.offset_map.line_end = shift_off(line.offset_map.line_end, pivot, delta);
+    line.offset_map.visible_start = shift_off(line.offset_map.visible_start, pivot, delta);
+    for (_, src) in &mut line.offset_map.segments {
+        shift_range(src, pivot, delta);
+    }
+}
+
+fn content_line_extent(markdown: &str, pos: usize) -> std::ops::Range<usize> {
+    let bytes = markdown.as_bytes();
+    let pos = pos.min(bytes.len());
+    let mut start = pos;
+    while start > 0 && bytes[start - 1] != b'\n' && bytes[start - 1] != b'\r' {
+        start -= 1;
+    }
+    let mut end = pos;
+    while end < bytes.len() && bytes[end] != b'\n' && bytes[end] != b'\r' {
+        end += 1;
+    }
+    start..end
+}
+
+fn kind_can_span_blocks(kind: &LineKind) -> bool {
+    matches!(
+        kind,
+        LineKind::ListItem { .. }
+            | LineKind::Blockquote
+            | LineKind::CodeFence { .. }
+            | LineKind::CodeLine
+            | LineKind::TableRow { .. }
+            | LineKind::TableDelimiter
+    )
+}
+
+fn line_may_change_block_kind(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    if trimmed.is_empty() || indent >= 4 {
+        return true;
+    }
+    if atx_heading(line).is_some()
+        || trimmed.starts_with('>')
+        || opening_fence(trimmed).is_some()
+        || trimmed.starts_with("```")
+        || trimmed.starts_with("~~~")
+        || exact_thematic_break(line, 0)
+        || is_list_marker_line(trimmed)
+        || accepted_list_marker(line, 0).is_some()
+        || is_html_block_start(trimmed)
+        || trimmed.starts_with('<')
+        || is_footnote_definition(trimmed)
+        || (trimmed.starts_with('[') && trimmed.contains("]:"))
+        || trimmed.contains('|')
+    {
+        return true;
+    }
+    false
+}
+
+/// Reparse a single in-place paragraph line after `replace` was overwritten
+/// with `new_len` bytes. Returns `None` when the change can affect block
+/// structure; the caller must then run `parse_document`.
+pub fn try_incremental_parse(
+    markdown: &str,
+    previous: &ParsedDocument,
+    replace: std::ops::Range<usize>,
+    new_len: usize,
+) -> Option<ParsedDocument> {
+    if replace.start > replace.end {
+        return None;
+    }
+    let old_len = replace.end - replace.start;
+    if markdown.len() < replace.start + new_len {
+        return None;
+    }
+    let idx = previous.line_index_at(replace.start)?;
+    let old_line = previous.lines.get(idx)?;
+    if old_line.kind != LineKind::Paragraph {
+        return None;
+    }
+    if replace.end > old_line.source.end {
+        return None;
+    }
+    if idx > 0 && kind_can_span_blocks(&previous.lines[idx - 1].kind) {
+        return None;
+    }
+    if idx + 1 < previous.lines.len() && kind_can_span_blocks(&previous.lines[idx + 1].kind) {
+        return None;
+    }
+    for (open, close) in &previous.code_blocks {
+        if replace.start >= open.start && replace.start <= close.end {
+            return None;
+        }
+    }
+    let delta = new_len as isize - old_len as isize;
+    let new_extent = content_line_extent(markdown, replace.start);
+    if new_extent.start != old_line.source.start {
+        return None;
+    }
+    let expected_end = (old_line.source.end as isize + delta) as usize;
+    if new_extent.end != expected_end {
+        return None;
+    }
+    let new_text = &markdown[new_extent.clone()];
+    if line_may_change_block_kind(new_text) {
+        return None;
+    }
+
+    let line_start = new_extent.start;
+    let line_end = new_extent.end;
+    let (inline_hidden, inline_pairs, styled_segments) =
+        parse_inline_syntax(new_text, line_start);
+    let merged_hidden = merge_ranges(inline_hidden);
+    let (display_text, offset_map) =
+        RowOffsetMap::from_hidden(new_text, line_start, line_start, &merged_hidden);
+    let rebuilt = ParsedLine {
+        line_index: old_line.line_index,
+        source: line_start..line_end,
+        kind: LineKind::Paragraph,
+        prefix_range: line_start..line_start,
+        hidden_ranges: merged_hidden,
+        inline_pairs,
+        display_text,
+        offset_map,
+        styled_segments,
+    };
+
+    let mut lines = previous.lines.clone();
+    lines[idx] = rebuilt;
+    let pivot = old_line.source.end;
+    for line in lines.iter_mut().skip(idx + 1) {
+        shift_parsed_line(line, pivot, delta);
+    }
+    let mut code_blocks = previous.code_blocks.clone();
+    for (open, close) in &mut code_blocks {
+        shift_range(open, pivot, delta);
+        shift_range(close, pivot, delta);
+    }
+
+    let mut all_hidden = Vec::new();
+    let mut all_pairs = Vec::new();
+    for line in &lines {
+        all_hidden.extend(line.hidden_ranges.iter().cloned());
+        all_pairs.extend(line.inline_pairs.iter().cloned());
+    }
+    let result = ParsedDocument {
+        lines,
+        hidden_ranges: merge_ranges(all_hidden),
+        inline_pairs: all_pairs,
+        code_blocks,
+    };
+    debug_assert_eq!(
+        result,
+        parse_document(markdown),
+        "incremental parse diverged from parse_document"
+    );
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

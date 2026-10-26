@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlinePair,
-    InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment, TableColumnAlign,
+    accepted_list_marker, parse_document, split_table_cells, try_incremental_parse,
+    unescaped_pipe_offsets, InlinePair, InlineTagKind, LineKind, ParsedDocument, ParsedLine,
+    StyledSegment, TableColumnAlign,
 };
 
 use super::text_ops::{
@@ -257,9 +258,23 @@ impl DocumentTab {
             self.history.push(edit);
         }
         let cursor_at = range.start + new_text.len();
+        let old_range = range.clone();
+        let new_len = new_text.len();
+        let prev_parse = self.cached_parse.take().and_then(|(rev, doc)| {
+            if rev == self.revision {
+                Some(doc)
+            } else {
+                None
+            }
+        });
         self.content.replace_range(range, new_text);
         let cursor = snap_off_ending_interior(&self.content, cursor_at);
         self.revision = self.revision.wrapping_add(1);
+        if let Some(prev) = prev_parse {
+            if let Some(inc) = try_incremental_parse(&self.content, &prev, old_range, new_len) {
+                self.cached_parse = Some((self.revision, Arc::new(inc)));
+            }
+        }
         self.caret.move_to(cursor.min(self.content.len()));
         self.marked_range = None;
         self.is_modified = true;
@@ -11247,6 +11262,70 @@ mod tests {
             );
         }
     }
+
+    fn next_char_boundary(s: &str, mut i: usize) -> usize {
+        i = i.min(s.len());
+        while i < s.len() && !s.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    }
+
+    fn prev_char_boundary(s: &str, mut i: usize) -> usize {
+        i = i.min(s.len());
+        while i > 0 && !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+
+    #[test]
+    fn incremental_parse_matches_full_on_random_edits() {
+        let mut rng = 0xC0FF_EE00_u64;
+        let mut next = || {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            rng
+        };
+        let mut content = mixed_perf_doc(24);
+        content.push_str("- a\n- b\n\n```\ncode\n```\n\n<div>\nhtml\n</div>\n\n[ref]: http://x\n");
+        let mut prev = parse_document(&content);
+        let mut hits = 0usize;
+        for step in 0..180 {
+            if content.is_empty() {
+                content.push('x');
+                prev = parse_document(&content);
+                continue;
+            }
+            let start = prev_char_boundary(&content, (next() as usize) % content.len());
+            let kind = (next() % 6) as u32;
+            let (range, insert): (Range<usize>, &str) = match kind {
+                0 => (start..start, "x"),
+                1 => (start..start, "Q"),
+                2 => {
+                    let end = next_char_boundary(&content, start.saturating_add(1));
+                    (start..end, "")
+                }
+                3 => (start..start, "**"),
+                4 => (start..start, " "),
+                _ => (start..start, "😀"),
+            };
+            if !content.is_char_boundary(range.start) || !content.is_char_boundary(range.end) {
+                continue;
+            }
+            content.replace_range(range.clone(), insert);
+            let full = parse_document(&content);
+            if let Some(inc) = try_incremental_parse(&content, &prev, range, insert.len()) {
+                assert_eq!(inc, full, "incremental diverged at step {step}");
+                hits += 1;
+            }
+            prev = full;
+        }
+        assert!(
+            hits > 20,
+            "expected incremental hits on paragraph edits, got {hits}"
+        );
+    }
+
 }
 
 #[cfg(test)]
