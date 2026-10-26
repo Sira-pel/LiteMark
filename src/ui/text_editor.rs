@@ -17,6 +17,7 @@ use crate::markdown::{
 use crate::model::document::visible_line_end;
 use crate::model::text_ops::{visual_rows, Caret};
 use crate::model::ViewMode;
+use crate::theme::sz;
 
 #[derive(Clone)]
 pub struct CellLine {
@@ -1341,14 +1342,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 // Table row horizontal borders
                 if is_header {
                     bg_quads.push(fill(
-                        Bounds::new(point(base_x, cur_y), size(table_w, px(1.0))),
+                        Bounds::new(point(base_x, cur_y), size(table_w, sz::STROKE)),
                         self.border_color,
                     ));
                 }
                 bg_quads.push(fill(
                     Bounds::new(
-                        point(base_x, cur_y + row_height - px(1.0)),
-                        size(table_w, px(1.0)),
+                        point(base_x, cur_y + row_height - sz::STROKE),
+                        size(table_w, sz::STROKE),
                     ),
                     self.border_color,
                 ));
@@ -1356,14 +1357,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 // Vertical borders
                 for &offset in &col_x_offsets {
                     bg_quads.push(fill(
-                        Bounds::new(point(base_x + offset, cur_y), size(px(1.0), row_height)),
+                        Bounds::new(point(base_x + offset, cur_y), size(sz::STROKE, row_height)),
                         self.border_color,
                     ));
                 }
                 bg_quads.push(fill(
                     Bounds::new(
-                        point(base_x + table_w - px(1.0), cur_y),
-                        size(px(1.0), row_height),
+                        point(base_x + table_w - sz::STROKE, cur_y),
+                        size(sz::STROKE, row_height),
                     ),
                     self.border_color,
                 ));

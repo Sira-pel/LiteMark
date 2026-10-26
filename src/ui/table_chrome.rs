@@ -1,14 +1,17 @@
 //! Hover chrome for a rendered table.
 //!
-//! A column pill sits on the top edge of the hovered header cell: a 6-dot
-//! grip, an alignment mark, and a plus. A 6-dot grip sits on the table's
-//! top-right corner. The hovered row gets the same kind of control on its
-//! left edge, without an alignment mark. Bounds are derived from the painted
-//! cell boxes so a click hits the same rect the frame drew.
+//! A column pill sits on the top edge of the hovered header cell, entirely
+//! above the cell and no wider than that column: a 6-dot grip, an alignment
+//! mark, and a plus. A 6-dot grip sits just outside the table's top-right
+//! corner. The hovered row gets a grip and a plus entirely to the left of
+//! the row. Bounds are derived from the painted cell boxes so a click hits
+//! the same rect the frame drew.
 
 use gpui::{point, Bounds, Pixels, Point, Size};
 
 use crate::markdown::TableColumnAlign;
+use crate::model::table_ops::parsed_table_source;
+use crate::model::DocumentTab;
 use crate::theme::sz;
 
 use super::text_editor::{PaintCell, TableGeom};
@@ -135,31 +138,32 @@ pub fn contains(bounds: Bounds<Pixels>, point: Point<Pixels>) -> bool {
 }
 
 pub fn column_pill_bounds(header: Bounds<Pixels>) -> Bounds<Pixels> {
-    let width = sz::TABLE_PILL * 3.0;
     let height = sz::TABLE_PILL;
-    let center_x = header.left() + header.size.width * 0.5;
-    Bounds::new(
-        point(center_x - width * 0.5, header.top() - height * 0.5),
-        size(width, height),
-    )
+    let natural = sz::TABLE_PILL * 3.0;
+    let width = if header.size.width < natural {
+        header.size.width
+    } else {
+        natural
+    };
+    let left = header.left() + (header.size.width - width) * 0.5;
+    Bounds::new(point(left, header.top() - height), size(width, height))
 }
 
 pub fn row_pill_bounds(row: Bounds<Pixels>) -> Bounds<Pixels> {
     let width = sz::TABLE_PILL * 2.0;
-    let height = sz::TABLE_PILL;
-    let center_y = row.top() + row.size.height * 0.5;
-    Bounds::new(
-        point(row.left() - width * 0.5, center_y - height * 0.5),
-        size(width, height),
-    )
+    let natural_h = sz::TABLE_PILL;
+    let height = if row.size.height < natural_h {
+        row.size.height
+    } else {
+        natural_h
+    };
+    let top = row.top() + (row.size.height - height) * 0.5;
+    Bounds::new(point(row.left() - width, top), size(width, height))
 }
 
 pub fn corner_grip_bounds(table: Bounds<Pixels>) -> Bounds<Pixels> {
     let side = sz::TABLE_PILL;
-    Bounds::new(
-        point(table.right() - side * 0.5, table.top() - side * 0.5),
-        size(side, side),
-    )
+    Bounds::new(point(table.right(), table.top() - side), size(side, side))
 }
 
 fn third(bounds: Bounds<Pixels>, index: usize) -> Bounds<Pixels> {
@@ -220,17 +224,6 @@ pub fn action_anchor(tables: &[TableGeom], hit: &TableHit, hover: Option<&TableH
 
 pub fn hit_test(tables: &[TableGeom], point: Point<Pixels>) -> Option<TableHit> {
     for table in tables {
-        let corner = corner_grip_bounds(table.bounds);
-        if contains(corner, point) {
-            let (index, anchor, align) = anchor_at(table, 0, 0);
-            return Some(TableHit {
-                source: table.source.clone(),
-                kind: TableHitKind::Corner,
-                index,
-                anchor,
-                align,
-            });
-        }
         for (index, column) in table.columns.iter().enumerate() {
             let pill = column_pill_bounds(column.header_bounds);
             if !contains(pill, point) {
@@ -268,6 +261,17 @@ pub fn hit_test(tables: &[TableGeom], point: Point<Pixels>) -> Option<TableHit> 
                 index: row.index,
                 anchor,
                 align: TableColumnAlign::None,
+            });
+        }
+        let corner = corner_grip_bounds(table.bounds);
+        if contains(corner, point) {
+            let (index, anchor, align) = anchor_at(table, 0, 0);
+            return Some(TableHit {
+                source: table.source.clone(),
+                kind: TableHitKind::Corner,
+                index,
+                anchor,
+                align,
             });
         }
     }
@@ -344,6 +348,100 @@ pub fn gap_at(tables: &[TableGeom], drag: &TableDrag, point: Point<Pixels>) -> u
         TableDragKind::Column => column_gap(table, point.x),
         TableDragKind::Row => row_gap(table, point.y),
     }
+}
+
+/// Gap while the pointer is inside the dragged table. Outside, the indicator stays put.
+pub fn drag_gap_if_inside(
+    tables: &[TableGeom],
+    drag: &TableDrag,
+    at: Point<Pixels>,
+) -> Option<usize> {
+    let table = tables.iter().find(|table| table.source == drag.source)?;
+    if !contains(table.bounds, at) {
+        return None;
+    }
+    Some(gap_at(tables, drag, at))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragRelease {
+    Cancel,
+    Move(usize),
+}
+
+/// A release inside the table commits. A release outside cancels and writes nothing.
+pub fn drag_release(tables: &[TableGeom], drag: &TableDrag, at: Point<Pixels>) -> DragRelease {
+    let Some(table) = tables.iter().find(|table| table.source == drag.source) else {
+        return DragRelease::Cancel;
+    };
+    if !contains(table.bounds, at) {
+        return DragRelease::Cancel;
+    }
+    let gap = match drag.kind {
+        TableDragKind::Column => column_gap(table, at.x),
+        TableDragKind::Row => row_gap(table, at.y),
+    };
+    let to = final_index(drag.from, gap);
+    if to == drag.from {
+        return DragRelease::Cancel;
+    }
+    if matches!(drag.kind, TableDragKind::Row) && to == 0 {
+        return DragRelease::Cancel;
+    }
+    DragRelease::Move(to)
+}
+
+/// Apply a release. Returns whether the document bytes changed.
+pub fn commit_drag_release(
+    doc: &mut DocumentTab,
+    tables: &[TableGeom],
+    drag: &TableDrag,
+    at: Point<Pixels>,
+) -> bool {
+    let DragRelease::Move(to) = drag_release(tables, drag, at) else {
+        return false;
+    };
+    match drag.kind {
+        TableDragKind::Row => doc.table_move_row_at(drag.anchor, to),
+        TableDragKind::Column => doc.table_move_col_at(drag.anchor, to),
+    }
+    true
+}
+
+/// Characters a key writes while a drag is active.
+///
+/// Every key is consumed: Escape, a modifier, and a printable key. The
+/// returned string is empty, so the key writes nothing.
+pub fn drag_key_insert(_key: &str, _typed: &str) -> &'static str {
+    ""
+}
+
+/// A key cancels the drag. The string is what that key is allowed to insert.
+pub fn clear_drag_for_key(
+    drag: Option<TableDrag>,
+    key: &str,
+    typed: &str,
+) -> (Option<TableDrag>, &'static str) {
+    if drag.is_none() {
+        return (None, "");
+    }
+    (None, drag_key_insert(key, typed))
+}
+
+/// A modifier press cancels the drag. Nothing is written.
+pub fn clear_drag_for_modifier(_drag: Option<TableDrag>) -> Option<TableDrag> {
+    None
+}
+
+/// Keep a hover on the table after an edit moves its byte range.
+pub fn retarget_hover(content: &str, hover: &TableHover) -> Option<TableHover> {
+    let probe = hover.source.start.min(content.len());
+    let source = parsed_table_source(content, probe)?;
+    Some(TableHover {
+        source,
+        col: hover.col,
+        row: hover.row,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -480,16 +578,16 @@ fn paint_align(
     align: TableColumnAlign,
     color: gpui::Hsla,
 ) {
-    let widths = [sz::R_LG, sz::R_MD, sz::R_SM];
+    let widths = [sz::TABLE_BAR_LG, sz::TABLE_BAR_MD, sz::TABLE_BAR_SM];
     let thickness = sz::STROKE;
     let gap = sz::TABLE_DOT;
     let block_h = thickness * 3.0 + gap * 2.0;
     let top = bounds.top() + (bounds.size.height - block_h) * 0.5;
     for (index, width) in widths.into_iter().enumerate() {
         let x = match align {
-            TableColumnAlign::Right => bounds.right() - sz::R_SM - width,
+            TableColumnAlign::Right => bounds.right() - sz::TABLE_ICON_PAD - width,
             TableColumnAlign::Center => bounds.left() + (bounds.size.width - width) * 0.5,
-            TableColumnAlign::Left | TableColumnAlign::None => bounds.left() + sz::R_SM,
+            TableColumnAlign::Left | TableColumnAlign::None => bounds.left() + sz::TABLE_ICON_PAD,
         };
         let y = top + (thickness + gap) * index as f32;
         window.paint_quad(gpui::fill(
@@ -500,7 +598,7 @@ fn paint_align(
 }
 
 fn paint_plus(window: &mut gpui::Window, bounds: Bounds<Pixels>, color: gpui::Hsla) {
-    let arm = sz::R_LG;
+    let arm = sz::TABLE_PLUS_ARM;
     let thickness = sz::STROKE;
     let cx = bounds.left() + bounds.size.width * 0.5;
     let cy = bounds.top() + bounds.size.height * 0.5;
@@ -559,19 +657,34 @@ fn paint_indicator(
 
 #[cfg(test)]
 mod tests {
+    use super::super::text_editor::{TableColGeom, TableGeom, TableRowGeom};
     use super::*;
+    use crate::model::table_ops::{parsed_table_source, TableOp};
     use gpui::{point, px, Bounds};
 
     fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
     }
 
+    fn overlaps(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
+        a.left() < b.right() && b.left() < a.right() && a.top() < b.bottom() && b.top() < a.bottom()
+    }
+
+    fn center_of(bounds: Bounds<Pixels>) -> Point<Pixels> {
+        point(
+            bounds.left() + bounds.size.width * 0.5,
+            bounds.top() + bounds.size.height * 0.5,
+        )
+    }
+
     #[test]
     fn column_pill_sits_on_the_header_top_edge() {
         let header = bounds(40.0, 20.0, 80.0, 28.0);
         let pill = column_pill_bounds(header);
-        let mid_y = pill.top() + pill.size.height * 0.5;
-        assert_eq!(mid_y, header.top());
+        assert_eq!(pill.bottom(), header.top());
+        assert!(pill.left() >= header.left());
+        assert!(pill.right() <= header.right());
+        assert!(!overlaps(pill, header));
         let mid_x = pill.left() + pill.size.width * 0.5;
         let header_mid = header.left() + header.size.width * 0.5;
         assert_eq!(mid_x, header_mid);
@@ -581,8 +694,10 @@ mod tests {
     fn row_pill_sits_on_the_left_edge() {
         let row = bounds(40.0, 20.0, 80.0, 28.0);
         let pill = row_pill_bounds(row);
-        let mid_x = pill.left() + pill.size.width * 0.5;
-        assert_eq!(mid_x, row.left());
+        assert_eq!(pill.right(), row.left());
+        assert!(pill.top() >= row.top());
+        assert!(pill.bottom() <= row.bottom());
+        assert!(!overlaps(pill, row));
         let mid_y = pill.top() + pill.size.height * 0.5;
         let row_mid = row.top() + row.size.height * 0.5;
         assert_eq!(mid_y, row_mid);
@@ -592,10 +707,9 @@ mod tests {
     fn corner_grip_sits_on_the_top_right() {
         let table = bounds(10.0, 30.0, 100.0, 40.0);
         let grip = corner_grip_bounds(table);
-        let mid_x = grip.left() + grip.size.width * 0.5;
-        let mid_y = grip.top() + grip.size.height * 0.5;
-        assert_eq!(mid_x, table.right());
-        assert_eq!(mid_y, table.top());
+        assert_eq!(grip.left(), table.right());
+        assert_eq!(grip.bottom(), table.top());
+        assert!(!overlaps(grip, table));
     }
 
     #[test]
@@ -607,8 +721,7 @@ mod tests {
         assert_eq!(final_index(1, 4), 3);
     }
 
-    fn sample_table() -> super::super::text_editor::TableGeom {
-        use super::super::text_editor::{TableColGeom, TableGeom, TableRowGeom};
+    fn sample_table() -> TableGeom {
         TableGeom {
             source: 0..80,
             bounds: bounds(100.0, 80.0, 180.0, 48.0),
@@ -642,12 +755,13 @@ mod tests {
     #[test]
     fn column_pill_thirds_are_grip_align_and_plus() {
         let tables = [sample_table()];
-        let grip = hit_test(&tables, point(px(128.0), px(80.0))).expect("grip");
+        let pill = column_pill_bounds(tables[0].columns[0].header_bounds);
+        let grip = hit_test(&tables, center_of(third(pill, 0))).expect("grip");
         assert_eq!(grip.kind, TableHitKind::ColGrip);
         assert_eq!(grip.index, 0);
-        let align = hit_test(&tables, point(px(145.0), px(80.0))).expect("align");
+        let align = hit_test(&tables, center_of(third(pill, 1))).expect("align");
         assert_eq!(align.kind, TableHitKind::ColAlign);
-        let plus = hit_test(&tables, point(px(160.0), px(80.0))).expect("plus");
+        let plus = hit_test(&tables, center_of(third(pill, 2))).expect("plus");
         assert_eq!(plus.kind, TableHitKind::ColPlus);
         assert_eq!(plus.anchor, 2);
     }
@@ -655,10 +769,11 @@ mod tests {
     #[test]
     fn row_pill_halves_are_grip_and_plus() {
         let tables = [sample_table()];
-        let grip = hit_test(&tables, point(px(90.0), px(116.0))).expect("row grip");
+        let pill = row_pill_bounds(tables[0].rows[1].bounds);
+        let grip = hit_test(&tables, center_of(half(pill, 0))).expect("row grip");
         assert_eq!(grip.kind, TableHitKind::RowGrip);
         assert_eq!(grip.index, 1);
-        let plus = hit_test(&tables, point(px(108.0), px(116.0))).expect("row plus");
+        let plus = hit_test(&tables, center_of(half(pill, 1))).expect("row plus");
         assert_eq!(plus.kind, TableHitKind::RowPlus);
     }
 
@@ -666,24 +781,63 @@ mod tests {
     fn a_body_click_is_not_chrome() {
         let tables = [sample_table()];
         assert!(hit_test(&tables, point(px(140.0), px(116.0))).is_none());
+        assert!(hit_test(&tables, point(px(145.0), px(90.0))).is_none());
     }
 
     #[test]
     fn corner_grip_is_the_top_right_and_keeps_the_cell() {
         let tables = [sample_table()];
-        let corner = hit_test(&tables, point(px(280.0), px(80.0))).expect("corner");
+        let grip = corner_grip_bounds(tables[0].bounds);
+        let corner = hit_test(&tables, center_of(grip)).expect("corner");
         assert_eq!(corner.kind, TableHitKind::Corner);
         let over_cell = hover_at(&tables, point(px(220.0), px(116.0)), None).expect("cell");
         assert_eq!(over_cell.col, Some(1));
         assert_eq!(over_cell.row, Some(1));
-        let on_row = hover_at(&tables, point(px(90.0), px(116.0)), Some(&over_cell)).expect("row");
+        let row_pill = row_pill_bounds(tables[0].rows[1].bounds);
+        let on_row =
+            hover_at(&tables, center_of(half(row_pill, 0)), Some(&over_cell)).expect("row");
         assert_eq!(on_row.col, Some(1));
         assert_eq!(on_row.row, Some(1));
-        let row_hit = hit_test(&tables, point(px(108.0), px(116.0))).expect("plus");
+        let row_hit = hit_test(&tables, center_of(half(row_pill, 1))).expect("plus");
         assert_eq!(action_anchor(&tables, &row_hit, Some(&on_row)), 50);
-        let on_corner =
-            hover_at(&tables, point(px(280.0), px(80.0)), Some(&on_row)).expect("corner hover");
+        let on_corner = hover_at(&tables, center_of(grip), Some(&on_row)).expect("corner hover");
         assert_eq!(action_anchor(&tables, &corner, Some(&on_corner)), 50);
+    }
+
+    #[test]
+    fn narrow_column_pills_do_not_overlap_and_plus_wins() {
+        let table = TableGeom {
+            source: 0..20,
+            bounds: bounds(0.0, 40.0, 64.0, 24.0),
+            columns: vec![
+                TableColGeom {
+                    header_bounds: bounds(0.0, 40.0, 32.0, 24.0),
+                    align: TableColumnAlign::None,
+                    anchor: 2,
+                },
+                TableColGeom {
+                    header_bounds: bounds(32.0, 40.0, 32.0, 24.0),
+                    align: TableColumnAlign::None,
+                    anchor: 8,
+                },
+            ],
+            rows: vec![TableRowGeom {
+                index: 0,
+                bounds: bounds(0.0, 40.0, 64.0, 24.0),
+                anchors: vec![2, 8],
+            }],
+        };
+        let left = column_pill_bounds(table.columns[0].header_bounds);
+        let right = column_pill_bounds(table.columns[1].header_bounds);
+        let corner = corner_grip_bounds(table.bounds);
+        assert!(!overlaps(left, right));
+        assert!(!overlaps(left, table.columns[0].header_bounds));
+        assert!(!overlaps(right, table.columns[1].header_bounds));
+        assert!(!overlaps(right, corner));
+        assert!(left.right() <= right.left());
+        let plus = hit_test(&[table], center_of(third(right, 2))).expect("plus");
+        assert_eq!(plus.kind, TableHitKind::ColPlus);
+        assert_eq!(plus.index, 1);
     }
 
     #[test]
@@ -705,5 +859,148 @@ mod tests {
             align = next_align(align);
             assert_eq!(align, expect);
         }
+    }
+
+    const TABLE: &str = "| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n";
+    const TABLE_MOVED: &str = "| A | B |\n| --- | --- |\n| g | h |\n| d | e |\n";
+
+    fn table_doc() -> DocumentTab {
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), TABLE.into(), None, None);
+        doc.caret.move_to(26);
+        doc
+    }
+
+    /// Header plus two body rows. A release at y=55 is past the last midpoint, so
+    /// the row gap is 3 and `final_index(1, 3)` is 2. x=20 is left of the table.
+    fn two_body_rows() -> TableGeom {
+        TableGeom {
+            source: 0..43,
+            bounds: bounds(100.0, 0.0, 200.0, 60.0),
+            columns: vec![TableColGeom {
+                header_bounds: bounds(100.0, 0.0, 200.0, 20.0),
+                align: TableColumnAlign::None,
+                anchor: 2,
+            }],
+            rows: vec![
+                TableRowGeom {
+                    index: 0,
+                    bounds: bounds(100.0, 0.0, 200.0, 20.0),
+                    anchors: vec![2],
+                },
+                TableRowGeom {
+                    index: 1,
+                    bounds: bounds(100.0, 20.0, 200.0, 20.0),
+                    anchors: vec![26],
+                },
+                TableRowGeom {
+                    index: 2,
+                    bounds: bounds(100.0, 40.0, 200.0, 20.0),
+                    anchors: vec![36],
+                },
+            ],
+        }
+    }
+
+    fn row_drag() -> TableDrag {
+        TableDrag {
+            source: 0..43,
+            kind: TableDragKind::Row,
+            from: 1,
+            anchor: 26,
+            gap: 1,
+        }
+    }
+
+    fn write_key(doc: &mut DocumentTab, key: &str, typed: &str, drag: TableDrag) {
+        let tables = [two_body_rows()];
+        let (still, insert) = clear_drag_for_key(Some(drag), key, typed);
+        if !insert.is_empty() {
+            let at = doc.cursor_offset();
+            doc.edit(at..at, insert);
+        }
+        if let Some(drag) = still {
+            commit_drag_release(doc, &tables, &drag, point(px(150.0), px(55.0)));
+        }
+    }
+
+    #[test]
+    fn drag_escape_writes_nothing() {
+        let mut doc = table_doc();
+        write_key(&mut doc, "escape", "", row_drag());
+        assert_eq!(doc.content, TABLE);
+    }
+
+    #[test]
+    fn drag_printable_key_writes_nothing() {
+        let mut doc = table_doc();
+        write_key(&mut doc, "x", "x", row_drag());
+        assert_eq!(doc.content, TABLE);
+    }
+
+    #[test]
+    fn drag_modifier_then_release_writes_nothing() {
+        let mut doc = table_doc();
+        let tables = [two_body_rows()];
+        let still = clear_drag_for_modifier(Some(row_drag()));
+        if let Some(drag) = still {
+            commit_drag_release(&mut doc, &tables, &drag, point(px(150.0), px(55.0)));
+        }
+        assert_eq!(doc.content, TABLE);
+    }
+
+    #[test]
+    fn drag_release_outside_writes_nothing() {
+        let mut doc = table_doc();
+        let tables = [two_body_rows()];
+        let drag = row_drag();
+        assert_eq!(
+            drag_release(&tables, &drag, point(px(20.0), px(55.0))),
+            DragRelease::Cancel
+        );
+        assert!(!commit_drag_release(
+            &mut doc,
+            &tables,
+            &drag,
+            point(px(20.0), px(55.0))
+        ));
+        assert_eq!(doc.content, TABLE);
+    }
+
+    #[test]
+    fn drag_release_inside_moves_the_row() {
+        let mut doc = table_doc();
+        let tables = [two_body_rows()];
+        let drag = row_drag();
+        assert_eq!(
+            drag_release(&tables, &drag, point(px(150.0), px(55.0))),
+            DragRelease::Move(2)
+        );
+        assert!(commit_drag_release(
+            &mut doc,
+            &tables,
+            &drag,
+            point(px(150.0), px(55.0))
+        ));
+        assert_eq!(doc.content, TABLE_MOVED);
+    }
+
+    #[test]
+    fn plus_retargets_hover_onto_the_edited_table() {
+        let mut doc = table_doc();
+        let before = parsed_table_source(&doc.content, 26).expect("table");
+        let hover = TableHover {
+            source: before.clone(),
+            col: Some(0),
+            row: Some(1),
+        };
+        assert!(doc.apply_table_op_at(26, TableOp::InsertColRight));
+        let next = retarget_hover(&doc.content, &hover).expect("hover");
+        assert_eq!(next.col, Some(0));
+        assert_eq!(next.row, Some(1));
+        assert_ne!(next.source.end, hover.source.end);
+        assert_eq!(
+            next.source,
+            parsed_table_source(&doc.content, next.source.start).expect("retarget")
+        );
     }
 }

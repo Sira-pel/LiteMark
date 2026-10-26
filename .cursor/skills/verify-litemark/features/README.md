@@ -44,6 +44,6 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 - [Find and replace](./find-replace.md) — Edit → Find, Ctrl+F, and the Replace / All bar.
 - [Format toggle](./format-toggle.md) — WYSIWYG bold, italic, link, Enter, and undo, checked by `scripts/format-toggle-gate.sh` against `fixtures/format-toggle/cases.tsv`.
 - [Table ops](./table-ops.md) — GFM table insert, delete, move, and alignment, checked by `scripts/table-ops-gate.sh` against `fixtures/table-ops/cases.tsv`.
-- [Table hover](./table-hover.md) — column pill, row pill, and corner grip on a rendered table. The controls call the table ops. Geometry is unit-tested; the window is not started.
+- [Table hover](./table-hover.md) — column pill, row pill, and corner grip on a rendered table. The controls call the table ops. Geometry and drag bytes are unit-tested. `refuse-gui.sh` exits 2; a headless Xvfb run is in that feature doc.
 - [Notes sidebar](./notes-sidebar.md) — View → Sidebar and Ctrl+\\.
 - [Theme](./theme.md) — settings gear, then Dark, Light, or System.

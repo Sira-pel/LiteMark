@@ -9,7 +9,7 @@
 # Lower MIN_CASES only when a case is removed on purpose.
 set -euo pipefail
 
-MIN_CASES=176
+MIN_CASES=180
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env.sh

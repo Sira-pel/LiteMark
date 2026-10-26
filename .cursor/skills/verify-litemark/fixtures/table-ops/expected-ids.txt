@@ -174,3 +174,7 @@ sel-cell-insert-col-right
 sel-undo-move-col
 sel-view-align-left
 view-caret-align-left
+act-insert-col-right
+act-sel-insert-col-right
+act-move-row
+act-align-left

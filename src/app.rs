@@ -8,7 +8,8 @@ use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
 use crate::ui::table_chrome::{
-    action_anchor, final_index, gap_at, hit_test, hover_at, next_align, TableDrag, TableDragKind,
+    action_anchor, clear_drag_for_key, clear_drag_for_modifier, commit_drag_release,
+    drag_gap_if_inside, hit_test, hover_at, next_align, retarget_hover, TableDrag, TableDragKind,
     TableHitKind,
 };
 use crate::ui::MenuItem;
@@ -709,7 +710,18 @@ impl LiteMarkApp {
                 _ => {}
             }
         }
+        self.retarget_table_hover();
         self.refresh_find();
+    }
+
+    fn retarget_table_hover(&mut self) {
+        let Some(hover) = self.table_hover.clone() else {
+            return;
+        };
+        let next = self
+            .active_tab()
+            .and_then(|tab| retarget_hover(&tab.content, &hover));
+        self.table_hover = next;
     }
 
     pub fn handle_insert_link(&mut self, cx: &mut App) {
@@ -2884,7 +2896,9 @@ impl LiteMarkApp {
     }
 
     fn editor_move(&mut self, _cx: &mut App, edit: impl FnOnce(&mut DocumentTab)) {
-        self.table_drag = None;
+        if self.table_drag.take().is_some() {
+            return;
+        }
         if !document_accepts_keystrokes(self.field_focus)
             || self.field_owns_keys
             || self.input_blocked()
@@ -2963,6 +2977,7 @@ impl LiteMarkApp {
                 if let Some(tab) = self.active_tab_mut() {
                     let _ = tab.apply_table_op_at(anchor, TableOp::SetAlign(next_align(hit.align)));
                 }
+                self.retarget_table_hover();
                 self.refresh_find();
             }
             TableHitKind::ColPlus => {
@@ -2971,6 +2986,7 @@ impl LiteMarkApp {
                 if let Some(tab) = self.active_tab_mut() {
                     let _ = tab.apply_table_op_at(anchor, TableOp::InsertColRight);
                 }
+                self.retarget_table_hover();
                 self.refresh_find();
             }
             TableHitKind::RowPlus => {
@@ -2979,6 +2995,7 @@ impl LiteMarkApp {
                 if let Some(tab) = self.active_tab_mut() {
                     let _ = tab.apply_table_op_at(anchor, TableOp::InsertRowBelow);
                 }
+                self.retarget_table_hover();
                 self.refresh_find();
             }
             TableHitKind::Corner => {
@@ -3023,18 +3040,12 @@ impl LiteMarkApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(drag) = self.table_drag.take() {
-            let gap = {
-                let paint = self.editor_paint.borrow();
-                gap_at(&paint.tables, &drag, event.position)
-            };
-            let to = final_index(drag.from, gap);
-            if to != drag.from {
-                if let Some(tab) = self.active_tab_mut() {
-                    match drag.kind {
-                        TableDragKind::Row => tab.table_move_row_at(drag.anchor, to),
-                        TableDragKind::Column => tab.table_move_col_at(drag.anchor, to),
-                    }
-                }
+            let tables = self.editor_paint.borrow().tables.clone();
+            let moved = self
+                .active_tab_mut()
+                .is_some_and(|tab| commit_drag_release(tab, &tables, &drag, event.position));
+            if moved {
+                self.retarget_table_hover();
                 self.refresh_find();
             }
         }
@@ -3128,12 +3139,14 @@ impl LiteMarkApp {
             let drag = self.table_drag.clone().expect("drag");
             let gap = {
                 let paint = self.editor_paint.borrow();
-                gap_at(&paint.tables, &drag, event.position)
+                drag_gap_if_inside(&paint.tables, &drag, event.position)
             };
-            if let Some(drag) = self.table_drag.as_mut() {
-                if drag.gap != gap {
-                    drag.gap = gap;
-                    cx.notify();
+            if let Some(gap) = gap {
+                if let Some(drag) = self.table_drag.as_mut() {
+                    if drag.gap != gap {
+                        drag.gap = gap;
+                        cx.notify();
+                    }
                 }
             }
             return;
@@ -3335,8 +3348,14 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.table_drag.take().is_some() {
-            cx.notify();
+        if self.table_drag.is_some() {
+            let (drag, insert) = clear_drag_for_key(self.table_drag.take(), "key", text);
+            self.table_drag = drag;
+            if insert.is_empty() {
+                window.refresh();
+                cx.notify();
+                return;
+            }
         }
         if self.forward_keystroke_to_field(text, window, cx) || self.input_blocked() {
             return;
@@ -5540,13 +5559,22 @@ impl Render for LiteMarkApp {
                 if this.table_drag.is_none() {
                     return;
                 }
-                match event.keystroke.key.as_str() {
-                    "escape" | "shift" | "control" | "alt" | "platform" | "fn" => {}
-                    _ => {
-                        this.table_drag = None;
-                        cx.notify();
-                    }
+                let typed = event.keystroke.key_char.as_deref().unwrap_or("");
+                let (drag, insert) =
+                    clear_drag_for_key(this.table_drag.take(), &event.keystroke.key, typed);
+                this.table_drag = drag;
+                if insert.is_empty() {
+                    cx.stop_propagation();
+                    cx.notify();
                 }
+            }))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _window, cx| {
+                if this.table_drag.is_none() || !event.modifiers.modified() {
+                    return;
+                }
+                this.table_drag = clear_drag_for_modifier(this.table_drag.take());
+                cx.stop_propagation();
+                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
                 if this.table_drag.is_some() {
