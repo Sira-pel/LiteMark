@@ -91,6 +91,16 @@ impl BulkTrashReport {
         }
     }
 
+    /// True once every row has reported back.
+    pub fn is_finished(&self) -> bool {
+        self.finished >= self.total
+    }
+
+    /// True if any row has failed so far.
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
+    }
+
     /// Record one result. Returns the message to show once every row has
     /// finished and at least one failed.
     pub fn record(&mut self, result: Result<(), String>) -> Option<String> {
@@ -224,6 +234,30 @@ mod tests {
         let mut r = BulkTrashReport::new(2);
         assert_eq!(r.record(Ok(())), None);
         assert_eq!(r.record(Ok(())), None);
+    }
+
+    #[test]
+    fn report_tracks_completion_and_failures() {
+        let mut r = BulkTrashReport::new(2);
+        assert!(!r.is_finished() && !r.has_failures());
+        r.record(Err("gone".into()));
+        assert!(!r.is_finished() && r.has_failures());
+        r.record(Ok(()));
+        assert!(r.is_finished());
+    }
+
+    #[test]
+    fn report_counts_a_row_that_vanished_before_trashing() {
+        let mut r = BulkTrashReport::new(3);
+        assert_eq!(
+            r.record(Err("That note is no longer in the folder.".into())),
+            None
+        );
+        assert_eq!(r.record(Err("busy".into())), None);
+        assert_eq!(
+            r.record(Ok(())),
+            Some("Moved 1 of 3 to the Trash. That note is no longer in the folder.".into())
+        );
     }
 
     #[test]

@@ -29,7 +29,14 @@ pub(crate) struct OptimisticClose {
     prev_selected: Option<SidebarTarget>,
 }
 
-type BulkReport = Rc<RefCell<BulkTrashReport>>;
+/// Shared state for one bulk trash: the result counter and the selection to
+/// put back (once, after the last row finishes) if anything failed.
+struct BulkTrash {
+    report: RefCell<BulkTrashReport>,
+    prev_selected: Option<SidebarTarget>,
+}
+
+type BulkReport = Rc<BulkTrash>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultiSelection {
@@ -2146,7 +2153,12 @@ impl LiteMarkApp {
 
     /// Undo an optimistic tab closure (the trash failed): put the tabs back
     /// in their original positions and restore the previous selection.
-    fn restore_optimistic_close(&mut self, closed: OptimisticClose, cx: &mut Context<Self>) {
+    fn restore_optimistic_close(
+        &mut self,
+        closed: OptimisticClose,
+        restore_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
         let OptimisticClose {
             tabs,
             prev_active,
@@ -2164,7 +2176,9 @@ impl LiteMarkApp {
             self.tabs.insert(at, tab);
         }
         self.active_tab_id = prev_active;
-        self.selected_target = prev_selected;
+        if restore_selection {
+            self.selected_target = prev_selected;
+        }
         self.refresh_find();
         cx.notify();
     }
@@ -2181,7 +2195,7 @@ impl LiteMarkApp {
             .find(|file| file.id == id)
             .cloned()
         else {
-            self.show_error("That note is no longer in the folder.");
+            self.report_missing("That note is no longer in the folder.", bulk);
             return;
         };
         // Optimistic removal: the note vanishes and its tabs close the same
@@ -2224,20 +2238,59 @@ impl LiteMarkApp {
     ) {
         let failed = result.clone().err();
         if failed.is_some() {
-            self.restore_optimistic_close(closed, cx);
+            // In a bulk trash the selection is put back once, below, because
+            // the rows finish in no set order.
+            self.restore_optimistic_close(closed, bulk.is_none(), cx);
         }
         self.rescan_workspace();
         match bulk {
-            Some(report) => {
-                if let Some(message) = report.borrow_mut().record(result) {
-                    self.show_error(message);
-                }
-            }
+            Some(bulk) => self.record_bulk(&bulk, result, cx),
             None => {
                 if let Some(err) = failed {
                     self.show_error(err);
                 }
             }
+        }
+    }
+
+    /// Count one row of a bulk trash. After the last row, show one message
+    /// and, if anything failed, restore the pre-trash selection (when that
+    /// row is still in the tree).
+    fn record_bulk(&mut self, bulk: &BulkTrash, result: Result<(), String>, cx: &mut Context<Self>) {
+        let message = bulk.report.borrow_mut().record(result);
+        let (finished, failed) = {
+            let report = bulk.report.borrow();
+            (report.is_finished(), report.has_failures())
+        };
+        if finished && failed {
+            let still_there = match &bulk.prev_selected {
+                Some(SidebarTarget::File(id)) => self.workspace.files.iter().any(|f| &f.id == id),
+                Some(SidebarTarget::Folder(id)) => {
+                    self.workspace.folders.iter().any(|f| &f.id == id)
+                }
+                None => false,
+            };
+            if still_there {
+                self.selected_target = bulk.prev_selected.clone();
+            }
+            cx.notify();
+        }
+        if let Some(message) = message {
+            self.show_error(message);
+        }
+    }
+
+    /// A row vanished (say, deleted outside the app) before it could be
+    /// trashed. In a bulk trash it still counts toward the total, so the
+    /// final message is not lost.
+    fn report_missing(&mut self, message: &str, bulk: Option<BulkReport>) {
+        match bulk {
+            Some(bulk) => {
+                if let Some(message) = bulk.report.borrow_mut().record(Err(message.into())) {
+                    self.show_error(message);
+                }
+            }
+            None => self.show_error(message),
         }
     }
 
@@ -2249,7 +2302,7 @@ impl LiteMarkApp {
             .find(|folder| folder.id == id)
             .cloned()
         else {
-            self.show_error("That folder is no longer available.");
+            self.report_missing("That folder is no longer available.", bulk);
             return;
         };
         // Same optimistic removal as trash_file, for the whole subtree.
@@ -2680,8 +2733,10 @@ impl LiteMarkApp {
             Prompt::DeleteMany { targets } => {
                 if choice == "Trash" {
                     self.multi_selection = None;
-                    let report: BulkReport =
-                        Rc::new(RefCell::new(BulkTrashReport::new(targets.len())));
+                    let report: BulkReport = Rc::new(BulkTrash {
+                        report: RefCell::new(BulkTrashReport::new(targets.len())),
+                        prev_selected: self.selected_target.clone(),
+                    });
                     for target in targets {
                         match target {
                             SidebarTarget::File(id) => {
