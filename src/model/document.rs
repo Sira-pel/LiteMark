@@ -4,15 +4,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlinePair,
-    InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment, TableColumnAlign,
+    accepted_list_marker, parse_document, unescaped_pipe_offsets, InlinePair, InlineTagKind,
+    LineKind, ParsedDocument, ParsedLine, StyledSegment, TableColumnAlign,
 };
 
+use super::table_ops::{self, TableOp};
 use super::text_ops::{
     find_matches, find_next, find_prev, format_replacement, home_offset, line_col, line_end,
     line_ending_len, line_ending_len_before, line_start_flags, move_vertical_collapsed,
     next_grapheme, previous_grapheme, replace_all, snap_off_ending_interior, Caret, DiffEdit,
-    UndoHistory,
+    HistoryRestore, SelectionSnap, UndoHistory,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -135,6 +136,14 @@ pub struct DocumentTab {
     /// When set, the next `edit` records this caret on its undo entry instead
     /// of the end of the deleted range (Enter rewrites a whole span).
     next_undo_caret: Option<usize>,
+    /// Caret restored by redo of the next edit. Defaults to the end of the
+    /// inserted text when unset.
+    next_redo_caret: Option<usize>,
+    /// Selection restored by undo of the next edit. Set only when the edit
+    /// started with a non-empty selection.
+    next_undo_sel: Option<SelectionSnap>,
+    /// Selection restored by redo of the next edit.
+    next_redo_sel: Option<SelectionSnap>,
 }
 
 impl DocumentTab {
@@ -173,6 +182,9 @@ impl DocumentTab {
             history: UndoHistory::default(),
             next_edit_opens_span_group: false,
             next_undo_caret: None,
+            next_redo_caret: None,
+            next_undo_sel: None,
+            next_redo_sel: None,
         };
         tab.refresh_cursor();
         tab
@@ -231,6 +243,10 @@ impl DocumentTab {
 
     /// Replace `range` and record a diff. Read-only documents ignore the edit.
     pub fn edit(&mut self, range: Range<usize>, new_text: &str) {
+        let undo_caret_override = self.next_undo_caret.take();
+        let redo_caret_override = self.next_redo_caret.take();
+        let undo_sel = self.next_undo_sel.take();
+        let redo_sel = self.next_redo_sel.take();
         if self.is_read_only() {
             return;
         }
@@ -248,9 +264,13 @@ impl DocumentTab {
             self.refresh_cursor();
             return;
         }
-        let undo_caret = self.next_undo_caret.take().unwrap_or(range.end);
+        let undo_caret = undo_caret_override.unwrap_or(range.end);
+        let redo_caret = redo_caret_override.unwrap_or(range.start + new_text.len());
         let mut edit = DiffEdit::new(range.start, deleted, new_text.to_string());
         edit.undo_caret = undo_caret;
+        edit.redo_caret = redo_caret;
+        edit.undo_sel = undo_sel;
+        edit.redo_sel = redo_sel;
         if opens_span_group {
             self.history.push_span_opening(edit);
         } else {
@@ -2922,83 +2942,61 @@ impl DocumentTab {
         })
     }
 
-    fn extract_active_table(&mut self) -> Option<TableEditContext> {
+    pub fn apply_table_op(&mut self, op: TableOp) -> bool {
+        if self.is_read_only() {
+            return false;
+        }
         let cursor = self.cursor_offset();
-        let parsed = self.parsed();
-        let table_source = parsed.lines.iter().find_map(|l| {
-            if let LineKind::TableRow {
-                ref table_source, ..
-            } = l.kind
-            {
-                if cursor >= table_source.start && cursor <= table_source.end {
-                    return Some(table_source.clone());
-                }
-            }
+        let original_sel = self.selection_snap();
+        let Some(plan) = table_ops::plan(&self.content, cursor, op) else {
+            return false;
+        };
+        let mapped = original_sel
+            .as_ref()
+            .map(|sel| mapped_selection(sel, &plan));
+        self.next_undo_caret = Some(cursor);
+        self.next_redo_caret = Some(plan.caret);
+        self.next_undo_sel = original_sel.clone();
+        self.next_redo_sel = mapped.clone();
+        let caret = plan.caret;
+        self.edit(plan.range, &plan.new_text);
+        if let Some(sel) = mapped {
+            self.restore_selection(sel);
+        } else {
+            let caret = floor_boundary(&self.content, caret.min(self.content.len()));
+            self.caret.move_to(caret);
+            self.refresh_cursor();
+        }
+        true
+    }
+
+    fn selection_snap(&self) -> Option<SelectionSnap> {
+        if self.caret.range.is_empty() {
             None
-        })?;
-
-        let mut num_cols = 1usize;
-        let mut alignments = Vec::new();
-        for l in &parsed.lines {
-            if l.source.start >= table_source.start && l.source.end <= table_source.end {
-                if let LineKind::TableRow {
-                    alignments: ref al, ..
-                } = l.kind
-                {
-                    num_cols = num_cols.max(al.len());
-                    if alignments.is_empty() {
-                        alignments = al.clone();
-                    }
-                }
-            }
+        } else {
+            Some(SelectionSnap {
+                start: self.caret.range.start,
+                end: self.caret.range.end,
+                reversed: self.caret.reversed,
+            })
         }
-        while alignments.len() < num_cols {
-            alignments.push(TableColumnAlign::None);
+    }
+
+    fn restore_selection(&mut self, sel: SelectionSnap) {
+        let start = floor_boundary(&self.content, sel.start.min(self.content.len()));
+        let end = floor_boundary(&self.content, sel.end.min(self.content.len()));
+        if end < start {
+            self.caret.range = end..start;
+            self.caret.reversed = !sel.reversed;
+        } else if start == end {
+            self.caret.move_to(start);
+        } else {
+            self.caret.range = start..end;
+            self.caret.reversed = sel.reversed;
+            self.caret.preferred_col = None;
         }
-
-        let mut rows: Vec<Vec<String>> = Vec::new();
-        let mut active_row = 0usize;
-        let mut active_col = 0usize;
-
-        for l in &parsed.lines {
-            if l.source.start >= table_source.start && l.source.end <= table_source.end {
-                if let LineKind::TableRow { ref raw_cells, .. } = l.kind {
-                    let r_idx = rows.len();
-                    let line_text = self.content.get(l.source.clone()).unwrap_or("");
-                    let split_cells = split_table_cells(line_text);
-                    let mut row_vals = Vec::with_capacity(num_cols);
-                    for c_idx in 0..num_cols {
-                        row_vals.push(split_cells.get(c_idx).cloned().unwrap_or_default());
-                    }
-                    if cursor >= l.source.start && cursor <= l.source.end {
-                        active_row = r_idx;
-                        if let Some(c_idx) = raw_cells
-                            .iter()
-                            .position(|rc| cursor >= rc.start && cursor <= rc.end)
-                        {
-                            active_col = c_idx.min(num_cols - 1);
-                        } else if let Some(c_idx) =
-                            raw_cells.iter().rposition(|rc| rc.start <= cursor)
-                        {
-                            active_col = c_idx.min(num_cols - 1);
-                        }
-                    }
-                    rows.push(row_vals);
-                }
-            }
-        }
-
-        if rows.is_empty() {
-            return None;
-        }
-
-        Some(TableEditContext {
-            table_source,
-            rows,
-            alignments,
-            active_row,
-            active_col,
-        })
+        self.caret.clamp(&self.content);
+        self.refresh_cursor();
     }
 
     pub fn insert_table_with_size(&mut self, cols: usize, rows: usize) {
@@ -3062,144 +3060,48 @@ impl DocumentTab {
     }
 
     pub fn table_add_row_above(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let Some(mut ctx) = self.extract_active_table() else {
-            return;
-        };
-        let num_cols = ctx.alignments.len().max(1);
-        let insert_idx = ctx.active_row.min(ctx.rows.len());
-        ctx.rows.insert(insert_idx, vec![String::new(); num_cols]);
-        let (new_table, cell_rel) =
-            format_markdown_table(&ctx.rows, &ctx.alignments, insert_idx, ctx.active_col);
-        let base = ctx.table_source.start;
-        self.edit(ctx.table_source, &new_table);
-        self.caret
-            .move_to(floor_boundary(&self.content, base + cell_rel.start));
-        self.refresh_cursor();
+        let _ = self.apply_table_op(TableOp::InsertRowAbove);
     }
 
     pub fn table_add_row_below(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let Some(mut ctx) = self.extract_active_table() else {
-            return;
-        };
-        let num_cols = ctx.alignments.len().max(1);
-        let insert_idx = (ctx.active_row + 1).min(ctx.rows.len());
-        ctx.rows.insert(insert_idx, vec![String::new(); num_cols]);
-        let (new_table, cell_rel) =
-            format_markdown_table(&ctx.rows, &ctx.alignments, insert_idx, ctx.active_col);
-        let base = ctx.table_source.start;
-        self.edit(ctx.table_source, &new_table);
-        self.caret
-            .move_to(floor_boundary(&self.content, base + cell_rel.start));
-        self.refresh_cursor();
+        let _ = self.apply_table_op(TableOp::InsertRowBelow);
     }
 
     pub fn table_add_col_left(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let Some(mut ctx) = self.extract_active_table() else {
-            return;
-        };
-        let insert_col = ctx.active_col.min(ctx.alignments.len());
-        ctx.alignments.insert(insert_col, TableColumnAlign::None);
-        for row in ctx.rows.iter_mut() {
-            row.insert(insert_col.min(row.len()), String::new());
-        }
-        let (new_table, cell_rel) =
-            format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, insert_col);
-        let base = ctx.table_source.start;
-        self.edit(ctx.table_source, &new_table);
-        self.caret.range = (base + cell_rel.start)..(base + cell_rel.end);
-        self.caret.reversed = false;
-        self.refresh_cursor();
+        let _ = self.apply_table_op(TableOp::InsertColLeft);
     }
 
     pub fn table_add_col_right(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let Some(mut ctx) = self.extract_active_table() else {
-            return;
-        };
-        let insert_col = (ctx.active_col + 1).min(ctx.alignments.len());
-        ctx.alignments.insert(insert_col, TableColumnAlign::None);
-        for row in ctx.rows.iter_mut() {
-            row.insert(insert_col.min(row.len()), String::new());
-        }
-        let (new_table, cell_rel) =
-            format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, insert_col);
-        let base = ctx.table_source.start;
-        self.edit(ctx.table_source, &new_table);
-        self.caret.range = (base + cell_rel.start)..(base + cell_rel.end);
-        self.caret.reversed = false;
-        self.refresh_cursor();
+        let _ = self.apply_table_op(TableOp::InsertColRight);
     }
 
     pub fn table_delete_row(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let Some(mut ctx) = self.extract_active_table() else {
-            return;
-        };
-        if ctx.rows.len() <= 1 {
-            self.table_delete_table();
-            return;
-        }
-        let remove_idx = ctx.active_row.min(ctx.rows.len() - 1);
-        ctx.rows.remove(remove_idx);
-        let target_row = remove_idx.min(ctx.rows.len() - 1);
-        let (new_table, cell_rel) =
-            format_markdown_table(&ctx.rows, &ctx.alignments, target_row, ctx.active_col);
-        let base = ctx.table_source.start;
-        self.edit(ctx.table_source, &new_table);
-        self.caret
-            .move_to(floor_boundary(&self.content, base + cell_rel.start));
-        self.refresh_cursor();
+        let _ = self.apply_table_op(TableOp::DeleteRow);
     }
 
     pub fn table_delete_col(&mut self) {
-        if self.is_read_only() {
-            return;
-        }
-        let Some(mut ctx) = self.extract_active_table() else {
-            return;
-        };
-        if ctx.alignments.len() <= 1 {
-            self.table_delete_table();
-            return;
-        }
-        let remove_col = ctx.active_col.min(ctx.alignments.len() - 1);
-        ctx.alignments.remove(remove_col);
-        for row in &mut ctx.rows {
-            if remove_col < row.len() {
-                row.remove(remove_col);
-            }
-        }
-        let target_col = remove_col.min(ctx.alignments.len() - 1);
-        let (new_table, cell_rel) =
-            format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, target_col);
-        let base = ctx.table_source.start;
-        self.edit(ctx.table_source, &new_table);
-        self.caret
-            .move_to(floor_boundary(&self.content, base + cell_rel.start));
-        self.refresh_cursor();
+        let _ = self.apply_table_op(TableOp::DeleteCol);
+    }
+
+    /// Move the caret's row to `to_index`. Index 0 is the header and is refused.
+    pub fn table_move_row(&mut self, to_index: usize) {
+        let _ = self.apply_table_op(TableOp::MoveRow { to_index });
+    }
+
+    /// Move the caret's column to `to_index`.
+    pub fn table_move_col(&mut self, to_index: usize) {
+        let _ = self.apply_table_op(TableOp::MoveCol { to_index });
     }
 
     pub fn table_delete_table(&mut self) {
         if self.is_read_only() {
             return;
         }
-        let Some(ctx) = self.extract_active_table() else {
+        let cursor = self.cursor_offset();
+        let Some(source) = table_ops::parsed_table_source(&self.content, cursor) else {
             return;
         };
-        let mut del_range = ctx.table_source.clone();
+        let mut del_range = source;
         if del_range.end < self.content.len() && self.content.as_bytes()[del_range.end] == b'\n' {
             del_range.end += 1;
         } else if del_range.start > 0 && self.content.as_bytes()[del_range.start - 1] == b'\n' {
@@ -3212,22 +3114,7 @@ impl DocumentTab {
     }
 
     pub fn table_align_column(&mut self, align: TableColumnAlign) {
-        if self.is_read_only() {
-            return;
-        }
-        let Some(mut ctx) = self.extract_active_table() else {
-            return;
-        };
-        if let Some(slot) = ctx.alignments.get_mut(ctx.active_col) {
-            *slot = align;
-        }
-        let (new_table, cell_rel) =
-            format_markdown_table(&ctx.rows, &ctx.alignments, ctx.active_row, ctx.active_col);
-        let base = ctx.table_source.start;
-        self.edit(ctx.table_source, &new_table);
-        self.caret
-            .move_to(floor_boundary(&self.content, base + cell_rel.start));
-        self.refresh_cursor();
+        let _ = self.apply_table_op(TableOp::SetAlign(align));
     }
 
     pub fn tab_table_cell(&mut self, backwards: bool) -> bool {
@@ -3713,39 +3600,43 @@ impl DocumentTab {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(caret) = self.history.undo(&mut self.content) else {
+        let Some(restore) = self.history.undo(&mut self.content) else {
             return false;
         };
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
-        self.place_after_history(caret);
+        self.place_after_history(restore);
         self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(caret) = self.history.redo(&mut self.content) else {
+        let Some(restore) = self.history.redo(&mut self.content) else {
             return false;
         };
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
-        self.place_after_history(caret);
+        self.place_after_history(restore);
         self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
         true
     }
 
-    fn place_after_history(&mut self, caret: usize) {
-        let caret = floor_boundary(
-            &self.content,
-            snap_off_ending_interior(&self.content, caret),
-        );
-        self.caret.move_to(caret);
-        self.caret.clamp(&self.content);
+    fn place_after_history(&mut self, restore: HistoryRestore) {
         self.marked_range = None;
         self.is_modified = true;
         self.refresh_stats();
+        if let Some(sel) = restore.selection {
+            self.restore_selection(sel);
+            return;
+        }
+        let caret = floor_boundary(
+            &self.content,
+            snap_off_ending_interior(&self.content, restore.caret),
+        );
+        self.caret.move_to(caret);
+        self.caret.clamp(&self.content);
         self.refresh_cursor();
     }
 
@@ -3760,13 +3651,22 @@ impl DocumentTab {
     }
 }
 
-#[derive(Debug, Clone)]
-struct TableEditContext {
-    table_source: Range<usize>,
-    rows: Vec<Vec<String>>,
-    alignments: Vec<TableColumnAlign>,
-    active_row: usize,
-    active_col: usize,
+fn mapped_selection(sel: &SelectionSnap, plan: &table_ops::TablePlan) -> SelectionSnap {
+    let start = plan.map_point(sel.start);
+    let end = plan.map_point(sel.end);
+    if end < start {
+        SelectionSnap {
+            start: end,
+            end: start,
+            reversed: !sel.reversed,
+        }
+    } else {
+        SelectionSnap {
+            start,
+            end,
+            reversed: sel.reversed,
+        }
+    }
 }
 
 fn format_markdown_table(
@@ -10958,3 +10858,5 @@ mod tests {
 
 #[cfg(test)]
 mod format_toggle_gate;
+#[cfg(test)]
+mod table_ops_gate;

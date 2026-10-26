@@ -630,6 +630,10 @@ impl LiteMarkApp {
                 "delete_row" => tab.table_delete_row(),
                 "delete_col" => tab.table_delete_col(),
                 "delete_table" => tab.table_delete_table(),
+                // Reorder passes the drop index to the same methods. This arm
+                // has no index, so the destination is out of range and refused.
+                "move_row" => tab.table_move_row(usize::MAX),
+                "move_col" => tab.table_move_col(usize::MAX),
                 _ => {}
             }
         }

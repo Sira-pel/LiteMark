@@ -83,3 +83,6 @@ jobs:
 
       - name: Format-toggle gate
         run: .cursor/skills/verify-litemark/scripts/format-toggle-gate.sh
+
+      - name: Table-ops gate
+        run: .cursor/skills/verify-litemark/scripts/table-ops-gate.sh

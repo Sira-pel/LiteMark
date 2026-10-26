@@ -703,7 +703,7 @@ fn is_delimiter_cell(cell: &str) -> bool {
     index == end
 }
 
-fn delimiter_alignments(line: &str) -> Option<Vec<TableColumnAlign>> {
+pub(crate) fn delimiter_alignments(line: &str) -> Option<Vec<TableColumnAlign>> {
     if unescaped_pipe_offsets(line).is_empty() {
         return None;
     }

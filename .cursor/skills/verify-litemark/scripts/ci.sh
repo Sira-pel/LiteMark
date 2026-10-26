@@ -9,6 +9,7 @@
 #   cargo build
 #   cargo test
 #   scripts/format-toggle-gate.sh
+#   scripts/table-ops-gate.sh
 #   cargo clippy --all-targets -- -D warnings
 #   scripts/fmt-gate.sh
 # The blob's fmt step skips when `cargo fmt --check` is dirty. This script
@@ -16,8 +17,8 @@
 #
 # This script does not apt-get install. The blob's apt list includes
 # libxcb1-dev and libfreetype6-dev. Those packages are not installed here.
-# This script runs build, test, the format-toggle gate, clippy, and the
-# fmt gate even when an earlier step fails, then exits with ci_fail.
+# This script runs build, test, the format-toggle gate, the table-ops gate,
+# clippy, and the fmt gate even when an earlier step fails, then exits with ci_fail.
 # GitHub Actions stops the job at the first failing step.
 set -euo pipefail
 
@@ -63,6 +64,18 @@ set -e
 cat "${ft_log}"
 echo "===== format-toggle exit=${ft_status} ====="
 if [[ "${ft_status}" -ne 0 ]]; then
+  fail=1
+fi
+
+echo "===== table-ops: scripts/table-ops-gate.sh ====="
+to_log="${LOG_DIR}/table-ops-gate.log"
+set +e
+"${SCRIPT_DIR}/table-ops-gate.sh" >"${to_log}" 2>&1
+to_status=$?
+set -e
+cat "${to_log}"
+echo "===== table-ops exit=${to_status} ====="
+if [[ "${to_status}" -ne 0 ]]; then
   fail=1
 fi
 
