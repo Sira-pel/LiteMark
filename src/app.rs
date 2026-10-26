@@ -3998,6 +3998,9 @@ impl Render for LiteMarkApp {
                         ),
                         Err(err) => this.show_error(err),
                     }
+                    // A sidebar click keeps arrow navigation in the tree, like
+                    // clicking a folder; clicking the editor hands it back.
+                    this.sidebar_keyboard = true;
                     cx.notify();
                 });
             }
