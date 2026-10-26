@@ -58,6 +58,8 @@ actions!(
         FocusMenuBar,
         SelectPrev,
         SelectNext,
+        ExtendSelectPrev,
+        ExtendSelectNext,
         SelectFirst,
         SelectLast,
         Confirm,

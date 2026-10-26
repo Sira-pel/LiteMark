@@ -178,6 +178,7 @@ pub struct SidebarProps<
     FClose,
     FContext,
     FDropItem,
+    FRange,
 > where
     FSelect: Fn(WorkspaceFile, &mut App) + 'static + Clone,
     FBeginCreate: Fn(Option<String>, bool, &mut App) + 'static + Clone,
@@ -188,6 +189,7 @@ pub struct SidebarProps<
     FClose: Fn(&mut App) + 'static + Clone,
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(SidebarTarget, Option<String>, bool, &mut App) + 'static + Clone,
+    FRange: Fn(SidebarTarget, &mut App) + 'static + Clone,
 {
     pub workspace: WorkspaceDirectory,
     pub selected_file_id: Option<String>,
@@ -208,6 +210,10 @@ pub struct SidebarProps<
     pub on_close: FClose,
     pub on_context_menu: FContext,
     pub on_drop_item: FDropItem,
+    /// Shift+click: extend the selection from the anchor to this row.
+    pub on_range_select: FRange,
+    /// Ids of every row in a multi-selection (empty for a single selection).
+    pub multi_ids: std::collections::HashSet<String>,
 }
 
 pub fn render_sidebar<
@@ -220,6 +226,7 @@ pub fn render_sidebar<
     FClose,
     FContext,
     FDropItem,
+    FRange,
 >(
     props: SidebarProps<
         FSelect,
@@ -231,6 +238,7 @@ pub fn render_sidebar<
         FClose,
         FContext,
         FDropItem,
+        FRange,
     >,
     theme: &Theme,
 ) -> impl IntoElement
@@ -244,6 +252,7 @@ where
     FClose: Fn(&mut App) + 'static + Clone,
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(SidebarTarget, Option<String>, bool, &mut App) + 'static + Clone,
+    FRange: Fn(SidebarTarget, &mut App) + 'static + Clone,
 {
     let on_select = props.on_select_file;
     let on_begin_create = props.on_begin_create;
@@ -254,6 +263,8 @@ where
     let on_close = props.on_close;
     let on_context = props.on_context_menu;
     let on_drop_item = props.on_drop_item;
+    let on_range_select = props.on_range_select;
+    let multi_ids = props.multi_ids;
     let creating = props.creating.clone();
     let create_field = props.create_field.clone();
     let dragging = props.dragging;
@@ -560,7 +571,9 @@ where
                                     let folder_id = folder.id.clone();
                                     let is_open = folder.is_open;
                                     let is_selected =
-                                        selected_folder_id.as_deref() == Some(&folder_id);
+                                        selected_folder_id.as_deref() == Some(&folder_id)
+                                            || multi_ids.contains(&folder_id);
+                                    let range = on_range_select.clone();
                                     let create = on_begin_create.clone();
                                     let delete = on_delete_folder.clone();
                                     let on_context = on_context.clone();
@@ -593,7 +606,13 @@ where
                                         })
                                         .on_click({
                                             let fid = folder_id.clone();
-                                            move |_, _, cx| toggle(fid.clone(), cx)
+                                            move |_, window, cx| {
+                                                if window.modifiers().shift {
+                                                    range(SidebarTarget::Folder(fid.clone()), cx);
+                                                } else {
+                                                    toggle(fid.clone(), cx);
+                                                }
+                                            }
                                         })
                                         .on_mouse_down(MouseButton::Right, {
                                             let id = folder_id.clone();
@@ -765,7 +784,9 @@ where
                                 }
                                 SidebarTreeItem::File { file, depth } => {
                                     let is_active =
-                                        selected_file_id.as_deref() == Some(&file.id);
+                                        selected_file_id.as_deref() == Some(&file.id)
+                                            || multi_ids.contains(&file.id);
+                                    let range = on_range_select.clone();
                                     let is_modified =
                                         modified_ids.contains(&file.id);
                                     let file_clone = file.clone();
@@ -812,7 +833,13 @@ where
                                                 h.bg(theme.row_hover).text_color(theme.text_primary)
                                             })
                                         })
-                                        .on_click(move |_, _, cx| sel(file_clone.clone(), cx))
+                                        .on_click(move |_, window, cx| {
+                                            if window.modifiers().shift {
+                                                range(SidebarTarget::File(file_clone.id.clone()), cx);
+                                            } else {
+                                                sel(file_clone.clone(), cx);
+                                            }
+                                        })
                                         .on_mouse_down(MouseButton::Right, {
                                             let id = fid.clone();
                                             move |event, _, cx| {

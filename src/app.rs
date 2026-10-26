@@ -30,6 +30,13 @@ pub(crate) struct OptimisticClose {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiSelection {
+    pub anchor: SidebarTarget,
+    pub cursor: SidebarTarget,
+    pub items: Vec<SidebarTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Prompt {
     CloseTab { id: String },
     CloseWindow,
@@ -37,6 +44,8 @@ pub(crate) enum Prompt {
     DeleteFolder { id: String },
     TrashDirtyFile { id: String },
     TrashDirtyFolder { id: String },
+    /// Several sidebar rows selected with Shift, trashed together.
+    DeleteMany { targets: Vec<SidebarTarget> },
     /// A new workspace folder was picked; ask whether to copy the current
     /// note into it before switching.
     SwitchWorkspace { new_dir: PathBuf },
@@ -73,6 +82,10 @@ pub struct LiteMarkApp {
     /// Currently highlighted sidebar item (drives row highlight and the
     /// Ctrl+Delete target). Falls back to the active tab's note when None.
     pub selected_target: Option<SidebarTarget>,
+    /// Shift-selected range in the sidebar; only honored while
+    /// `selected_target` is still its cursor, so any other selection change
+    /// drops it.
+    pub multi_selection: Option<MultiSelection>,
     /// True while the sidebar tree owns arrow-key navigation.
     pub sidebar_keyboard: bool,
     pub sidebar_focus_handle: FocusHandle,
@@ -318,6 +331,7 @@ impl LiteMarkApp {
             tabs: vec![initial_tab],
             active_tab_id: first_id,
             selected_target: initial_selected.map(SidebarTarget::File),
+            multi_selection: None,
             workspace,
             settings,
             show_sidebar: true,
@@ -1146,6 +1160,7 @@ impl LiteMarkApp {
     ) {
         // Opening a note (sidebar click, creation, file open) selects it in
         // the sidebar and hands keyboard focus back to the editor.
+        self.multi_selection = None;
         self.selected_target = workspace_file_id.clone().map(SidebarTarget::File);
         self.sidebar_keyboard = false;
         if let Some(path) = path.as_ref() {
@@ -1246,6 +1261,7 @@ impl LiteMarkApp {
         }
         // Clicking a folder selects it (Ctrl+Delete target) and keeps
         // keyboard navigation in the sidebar tree.
+        self.multi_selection = None;
         self.selected_target = Some(SidebarTarget::Folder(folder_id.to_string()));
         self.sidebar_keyboard = true;
     }
@@ -1278,6 +1294,118 @@ impl LiteMarkApp {
         .collect()
     }
 
+    /// The Shift-selected rows, if the selection still has several.
+    fn active_multi(&self) -> Option<&MultiSelection> {
+        self.multi_selection
+            .as_ref()
+            .filter(|m| self.selected_target.as_ref() == Some(&m.cursor) && m.items.len() > 1)
+    }
+
+    /// Extend the selection from its anchor to `to` over the visible rows.
+    fn extend_selection_to(&mut self, to: SidebarTarget) {
+        let targets = self.sidebar_visible_targets();
+        let anchor = self
+            .active_multi()
+            .map(|m| m.anchor.clone())
+            .or_else(|| self.selected_target.clone())
+            .unwrap_or_else(|| to.clone());
+        let pos = |t: &SidebarTarget| targets.iter().position(|x| x == t);
+        let (Some(a), Some(b)) = (pos(&anchor), pos(&to)) else {
+            self.selected_target = Some(to);
+            self.multi_selection = None;
+            self.sidebar_keyboard = true;
+            return;
+        };
+        let items = targets[a.min(b)..=a.max(b)].to_vec();
+        self.multi_selection = (items.len() > 1).then(|| MultiSelection {
+            anchor,
+            cursor: to.clone(),
+            items,
+        });
+        self.selected_target = Some(to);
+        self.sidebar_keyboard = true;
+    }
+
+    /// Shift+Up/Down: grow or shrink the range by one visible row.
+    fn sidebar_extend_selection(&mut self, delta: i32) {
+        let targets = self.sidebar_visible_targets();
+        if targets.is_empty() {
+            return;
+        }
+        let next = match self
+            .selected_target
+            .as_ref()
+            .and_then(|c| targets.iter().position(|t| t == c))
+        {
+            Some(pos) => (pos as i32 + delta).clamp(0, targets.len() as i32 - 1) as usize,
+            None if delta < 0 => targets.len() - 1,
+            None => 0,
+        };
+        self.extend_selection_to(targets[next].clone());
+    }
+
+    /// Ask before trashing every Shift-selected row. Rows inside a selected
+    /// folder go with it; modified notes must be saved or closed first.
+    fn request_trash_many(&mut self, items: Vec<SidebarTarget>) {
+        let folder_paths: Vec<PathBuf> = items
+            .iter()
+            .filter_map(|t| match t {
+                SidebarTarget::Folder(id) => self
+                    .workspace
+                    .folders
+                    .iter()
+                    .find(|f| &f.id == id)
+                    .map(|f| f.path.clone()),
+                SidebarTarget::File(_) => None,
+            })
+            .collect();
+        let path_of = |t: &SidebarTarget| match t {
+            SidebarTarget::Folder(id) => self
+                .workspace
+                .folders
+                .iter()
+                .find(|f| &f.id == id)
+                .map(|f| f.path.clone()),
+            SidebarTarget::File(id) => self
+                .workspace
+                .files
+                .iter()
+                .find(|f| &f.id == id)
+                .map(|f| f.path.clone()),
+        };
+        let targets: Vec<SidebarTarget> = items
+            .into_iter()
+            .filter(|t| {
+                let Some(path) = path_of(t) else {
+                    return false;
+                };
+                !folder_paths
+                    .iter()
+                    .any(|folder| path != *folder && path.starts_with(folder))
+            })
+            .collect();
+        let paths: Vec<PathBuf> = targets.iter().filter_map(path_of).collect();
+        if self.tabs.iter().any(|tab| {
+            tab.is_modified
+                && tab
+                    .file_path
+                    .as_ref()
+                    .is_some_and(|tp| paths.iter().any(|p| tp.starts_with(p)))
+        }) {
+            self.show_error("Save or close modified notes before moving several items to the Trash.");
+            return;
+        }
+        match targets.len() {
+            0 => {}
+            1 => match targets.into_iter().next() {
+                Some(SidebarTarget::File(id)) => self.request_trash_file(id),
+                Some(SidebarTarget::Folder(id)) => self.request_trash_folder(id),
+                None => {}
+            },
+            _ => self.show_prompt(Prompt::DeleteMany { targets }),
+        }
+    }
+
     /// Move the sidebar selection through the visible tree (wrapping).
     fn sidebar_move_selection(&mut self, delta: i32) {
         let targets = self.sidebar_visible_targets();
@@ -1303,6 +1431,7 @@ impl LiteMarkApp {
                 targets[new_pos].clone()
             }
         };
+        self.multi_selection = None;
         self.selected_target = Some(next);
         self.sidebar_keyboard = true;
     }
@@ -2432,6 +2561,11 @@ impl LiteMarkApp {
                     vec![("Cancel", false), ("Discard", false), ("Save", true)],
                 )
             }
+            Prompt::DeleteMany { targets } => (
+                "Move to Trash",
+                format!("Move {} items to the Trash?", targets.len()),
+                vec![("Cancel", false), ("Trash", true)],
+            ),
             Prompt::SwitchWorkspace { new_dir } => {
                 let name = self
                     .active_tab()
@@ -2561,6 +2695,17 @@ impl LiteMarkApp {
                     self.trash_folder(&id, cx);
                 }
             },
+            Prompt::DeleteMany { targets } => {
+                if choice == "Trash" {
+                    self.multi_selection = None;
+                    for target in targets {
+                        match target {
+                            SidebarTarget::File(id) => self.trash_file(&id, cx),
+                            SidebarTarget::Folder(id) => self.trash_folder(&id, cx),
+                        }
+                    }
+                }
+            }
             Prompt::SwitchWorkspace { new_dir } => match choice {
                 "Copy note" => {
                     let current = self.migratable_note_path();
@@ -4006,6 +4151,16 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_range_select = {
+            let view = view.clone();
+            move |target: SidebarTarget, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.extend_selection_to(target);
+                    cx.notify();
+                });
+            }
+        };
+
         let on_begin_create = {
             let view = view.clone();
             move |parent_id: Option<String>, is_folder: bool, cx: &mut App| {
@@ -4614,6 +4769,11 @@ impl Render for LiteMarkApp {
                 {
                     return;
                 }
+                if let Some(items) = this.active_multi().map(|m| m.items.clone()) {
+                    this.request_trash_many(items);
+                    cx.notify();
+                    return;
+                }
                 // Target whatever is selected in the sidebar (folder or
                 // note); fall back to the active tab's note.
                 let target = this.selected_target.clone().or_else(|| {
@@ -4898,6 +5058,18 @@ impl Render for LiteMarkApp {
                     this.menu_move_selection(1);
                 }
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ExtendSelectNext, _window, cx| {
+                if this.sidebar_keyboard {
+                    this.sidebar_extend_selection(1);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ExtendSelectPrev, _window, cx| {
+                if this.sidebar_keyboard {
+                    this.sidebar_extend_selection(-1);
+                    cx.notify();
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectPrev, _window, cx| {
                 if this.sidebar_keyboard {
@@ -5426,6 +5598,19 @@ impl Render for LiteMarkApp {
                                         on_close: on_toggle_sidebar.clone(),
                                         on_context_menu: on_sidebar_context.clone(),
                                         on_drop_item: on_drop_item.clone(),
+                                        on_range_select: on_range_select.clone(),
+                                        multi_ids: self
+                                            .active_multi()
+                                            .map(|m| {
+                                                m.items
+                                                    .iter()
+                                                    .map(|t| match t {
+                                                        SidebarTarget::File(id)
+                                                        | SidebarTarget::Folder(id) => id.clone(),
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default(),
                                     },
                                     &theme,
                                 ))

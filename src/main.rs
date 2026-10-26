@@ -79,6 +79,8 @@ fn main() {
                 // Sidebar tree navigation
                 KeyBinding::new("up", SelectPrev, Some("Sidebar")),
                 KeyBinding::new("down", SelectNext, Some("Sidebar")),
+                KeyBinding::new("shift-up", ExtendSelectPrev, Some("Sidebar")),
+                KeyBinding::new("shift-down", ExtendSelectNext, Some("Sidebar")),
                 KeyBinding::new("enter", Confirm, Some("Sidebar")),
                 KeyBinding::new("space", Confirm, Some("Sidebar")),
                 KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
