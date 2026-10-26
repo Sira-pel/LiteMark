@@ -1048,7 +1048,7 @@ pub struct StyledSegment {
     pub link_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum InlineTagKind {
     Bold,
     Italic,
@@ -3312,20 +3312,38 @@ fn line_may_change_block_kind(line: &str) -> bool {
     false
 }
 
+fn bytes_have_inline_markup(s: &str) -> bool {
+    s.bytes().any(|b| {
+        matches!(
+            b,
+            b'*' | b'_' | b'~' | b'`' | b'<' | b'>' | b'[' | b']' | b'(' | b')' | b'\\' | b'|'
+        )
+    })
+}
+
 /// Reparse a single in-place paragraph line after `replace` was overwritten
-/// with `new_len` bytes. Returns `None` when the change can affect block
-/// structure; the caller must then run `parse_document`.
+/// with `inserted`. Returns `None` when the change can affect block
+/// structure or cross-line inline markers; the caller must then run
+/// `parse_document`.
 pub fn try_incremental_parse(
     markdown: &str,
     previous: &ParsedDocument,
     replace: std::ops::Range<usize>,
-    new_len: usize,
+    inserted: &str,
+    deleted: &str,
 ) -> Option<ParsedDocument> {
     if replace.start > replace.end {
         return None;
     }
+    let new_len = inserted.len();
     let old_len = replace.end - replace.start;
     if markdown.len() < replace.start + new_len {
+        return None;
+    }
+    // Emphasis, links, and HTML can pair across a soft break inside one
+    // CommonMark paragraph. A single-line reparse would miss that, so any
+    // edit that adds or removes a marker character falls back.
+    if bytes_have_inline_markup(inserted) || bytes_have_inline_markup(deleted) {
         return None;
     }
     let idx = previous.line_index_at(replace.start)?;
@@ -3404,11 +3422,6 @@ pub fn try_incremental_parse(
         inline_pairs: all_pairs,
         code_blocks,
     };
-    debug_assert_eq!(
-        result,
-        parse_document(markdown),
-        "incremental parse diverged from parse_document"
-    );
     Some(result)
 }
 
@@ -3449,6 +3462,49 @@ mod tests {
                 .unwrap_or(pair.open_delim.start);
             assert_eq!(pair.group_close_end, naive_close);
             assert_eq!(pair.group_open_start, naive_open);
+        }
+    }
+
+    fn assert_incremental_matches_full(
+        prev_md: &str,
+        range: std::ops::Range<usize>,
+        inserted: &str,
+    ) {
+        let deleted = prev_md[range.clone()].to_string();
+        let mut next = prev_md.to_string();
+        next.replace_range(range.clone(), inserted);
+        let prev = parse_document(prev_md);
+        let full = parse_document(&next);
+        if let Some(inc) = try_incremental_parse(&next, &prev, range, inserted, &deleted) {
+            assert_eq!(
+                inc, full,
+                "incremental diverged on {prev_md:?} + {inserted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_parse_bails_or_matches_on_cross_line_emphasis() {
+        for md in ["# Hea=\nd*\nb**", "ế# Head ***b**\n-😀 item *i*"] {
+            let prev = parse_document(md);
+            for pos in 0..=md.len() {
+                if !md.is_char_boundary(pos) {
+                    continue;
+                }
+                assert_incremental_matches_full(md, pos..pos, "*");
+                assert_incremental_matches_full(md, pos..pos, "x");
+                if pos < md.len() {
+                    let end = pos + md[pos..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                    if md.is_char_boundary(end) {
+                        assert_incremental_matches_full(md, pos..end, "");
+                    }
+                }
+            }
+            for pair in &prev.inline_pairs {
+                if pair.kind == InlineTagKind::Italic || pair.kind == InlineTagKind::Bold {
+                    assert_incremental_matches_full(md, pair.inner.start..pair.inner.start, "*");
+                }
+            }
         }
     }
 

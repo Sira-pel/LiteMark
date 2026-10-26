@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -252,7 +253,7 @@ impl DocumentTab {
             return;
         }
         let undo_caret = self.next_undo_caret.take().unwrap_or(range.end);
-        let mut edit = DiffEdit::new(range.start, deleted, new_text.to_string());
+        let mut edit = DiffEdit::new(range.start, deleted.clone(), new_text.to_string());
         edit.undo_caret = undo_caret;
         if opens_span_group {
             self.history.push_span_opening(edit);
@@ -261,7 +262,6 @@ impl DocumentTab {
         }
         let cursor_at = range.start + new_text.len();
         let old_range = range.clone();
-        let new_len = new_text.len();
         let prev_parse = self.cached_parse.take().and_then(|(rev, doc)| {
             if rev == self.revision {
                 Some(doc)
@@ -273,7 +273,9 @@ impl DocumentTab {
         let cursor = snap_off_ending_interior(&self.content, cursor_at);
         self.revision = self.revision.wrapping_add(1);
         if let Some(prev) = prev_parse {
-            if let Some(inc) = try_incremental_parse(&self.content, &prev, old_range, new_len) {
+            if let Some(inc) =
+                try_incremental_parse(&self.content, &prev, old_range, new_text, &deleted)
+            {
                 self.cached_parse = Some((self.revision, Arc::new(inc)));
             }
         }
@@ -1351,7 +1353,7 @@ impl DocumentTab {
 
             let mut candidate_ranges: Vec<Range<usize>> = Vec::new();
 
-            for pline in &parsed.lines {
+            for pline in parsed.lines_overlapping(range.clone()) {
                 let line_start = range.start.max(pline.source.start);
                 let line_end = range.end.min(pline.source.end);
                 if line_start >= line_end {
@@ -1450,13 +1452,7 @@ impl DocumentTab {
                             .last()
                             .map(|r| r.end)
                             .unwrap_or(candidate_ranges[0].end);
-                    let has_pairs = nearby_pair_refs(&parsed, combined.clone())
-                        .iter()
-                        .any(|p| {
-                            p.kind != InlineTagKind::Link
-                                && p.open_delim.start < combined.end
-                                && span_close_end(&parsed, p) > combined.start
-                        });
+                    let has_pairs = range_has_non_link_pairs(&parsed, combined.clone());
                     // Combine across lines only when rewriting existing spans
                     // (m5). Plain select-all still wraps each line separately.
                     if has_pairs {
@@ -1525,16 +1521,12 @@ impl DocumentTab {
                             .iter()
                             .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
                             .collect();
-                        let segs: Vec<StyledSegment> = parsed
+                        let segs: Vec<&StyledSegment> = parsed
                             .lines_overlapping(replace_start..replace_end)
                             .iter()
-                            .flat_map(|l| l.styled_segments.iter().cloned())
+                            .flat_map(|l| l.styled_segments.iter())
                             .collect();
-                        let local_pairs: Vec<InlinePair> =
-                            nearby_pair_refs(&parsed, replace_start..replace_end)
-                                .into_iter()
-                                .cloned()
-                                .collect();
+                        let local_pairs = nearby_pair_refs(&parsed, replace_start..replace_end);
                         collect_rewrite_slices(
                             &self.content,
                             &local_pairs,
@@ -2386,15 +2378,12 @@ impl DocumentTab {
             .iter()
             .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
             .collect();
-        let segs: Vec<StyledSegment> = parsed
+        let segs: Vec<&StyledSegment> = parsed
             .lines_overlapping(replace_start..replace_end)
             .iter()
-            .flat_map(|l| l.styled_segments.iter().cloned())
+            .flat_map(|l| l.styled_segments.iter())
             .collect();
-        let local_pairs: Vec<InlinePair> = nearby_pair_refs(&parsed, replace_start..replace_end)
-            .into_iter()
-            .cloned()
-            .collect();
+        let local_pairs = nearby_pair_refs(&parsed, replace_start..replace_end);
         let slices = collect_rewrite_slices(
             &self.content,
             &local_pairs,
@@ -4073,6 +4062,16 @@ fn nearby_pair_refs(parsed: &ParsedDocument, range: Range<usize>) -> Vec<&Inline
         .collect()
 }
 
+fn range_has_non_link_pairs(parsed: &ParsedDocument, range: Range<usize>) -> bool {
+    parsed.lines_near(range.clone()).iter().any(|line| {
+        line.inline_pairs.iter().any(|p| {
+            p.kind != InlineTagKind::Link
+                && p.open_delim.start < range.end
+                && span_close_end(parsed, p) > range.start
+        })
+    })
+}
+
 fn line_pair_refs(parsed: &ParsedDocument, offset: usize) -> &[InlinePair] {
     parsed
         .line_at_offset(offset)
@@ -4080,38 +4079,63 @@ fn line_pair_refs(parsed: &ParsedDocument, offset: usize) -> &[InlinePair] {
         .unwrap_or(&[])
 }
 
-fn collect_group_pairs(
+fn pair_id(p: &InlinePair) -> (usize, usize, InlineTagKind) {
+    (p.open_delim.start, p.close_delim.end, p.kind)
+}
+
+/// Connected component of overlapping non-link pairs on one line. Pairs on
+/// different lines have disjoint source ranges, so a document-wide expansion
+/// is the union of per-line expansions.
+fn expand_line_group_pairs<'a>(
+    line: &'a ParsedLine,
     parsed: &ParsedDocument,
     range: Range<usize>,
-) -> Vec<&InlinePair> {
-    let candidates = nearby_pair_refs(parsed, range.clone());
-    let mut group_pairs: Vec<&InlinePair> = candidates
+    group_pairs: &mut Vec<&'a InlinePair>,
+    seen: &mut HashSet<(usize, usize, InlineTagKind)>,
+) {
+    let mut cands: Vec<&InlinePair> = line
+        .inline_pairs
         .iter()
-        .copied()
-        .filter(|p| {
-            p.kind != InlineTagKind::Link
-                && p.open_delim.start < range.end
-                && span_close_end(parsed, p) > range.start
-        })
+        .filter(|p| p.kind != InlineTagKind::Link)
         .collect();
-    let mut expanded = true;
-    while expanded {
-        expanded = false;
-        for p in &candidates {
-            if p.kind == InlineTagKind::Link
-                || group_pairs.iter().any(|g| std::ptr::eq(*g, *p))
-            {
-                continue;
-            }
-            let touches = group_pairs.iter().any(|g| {
-                p.open_delim.start < span_close_end(parsed, g)
-                    && span_close_end(parsed, p) > g.open_delim.start
-            });
-            if touches {
-                group_pairs.push(p);
-                expanded = true;
+    if cands.is_empty() {
+        return;
+    }
+    cands.sort_by_key(|p| (p.open_delim.start, span_close_end(parsed, p)));
+    let mut lo = range.start;
+    let mut hi = range.end.max(range.start);
+    loop {
+        let lim = cands.partition_point(|p| p.open_delim.start < hi);
+        let mut nlo = lo;
+        let mut nhi = hi;
+        for p in &cands[..lim] {
+            let close = span_close_end(parsed, p);
+            if close > nlo {
+                nlo = nlo.min(p.open_delim.start);
+                nhi = nhi.max(close);
             }
         }
+        if nlo == lo && nhi == hi {
+            break;
+        }
+        lo = nlo;
+        hi = nhi;
+    }
+    group_pairs.reserve(cands.len());
+    let lim = cands.partition_point(|p| p.open_delim.start < hi);
+    for p in cands[..lim].iter().copied() {
+        if span_close_end(parsed, p) > lo && seen.insert(pair_id(p)) {
+            group_pairs.push(p);
+        }
+    }
+}
+
+fn collect_group_pairs(parsed: &ParsedDocument, range: Range<usize>) -> Vec<&InlinePair> {
+    let lines = parsed.lines_near(range.clone());
+    let mut group_pairs = Vec::with_capacity(lines.iter().map(|l| l.inline_pairs.len()).sum());
+    let mut seen = HashSet::with_capacity(group_pairs.capacity());
+    for line in lines {
+        expand_line_group_pairs(line, parsed, range.clone(), &mut group_pairs, &mut seen);
     }
     group_pairs
 }
@@ -4121,15 +4145,19 @@ fn add_contained_pairs<'a>(
     replace: Range<usize>,
     group_pairs: &mut Vec<&'a InlinePair>,
 ) {
-    for p in nearby_pair_refs(parsed, replace.clone()) {
-        if p.kind == InlineTagKind::Link {
-            continue;
-        }
-        if p.open_delim.start >= replace.start
-            && span_close_end(parsed, p) <= replace.end
-            && !group_pairs.iter().any(|g| std::ptr::eq(*g, p))
-        {
-            group_pairs.push(p);
+    let mut seen: HashSet<(usize, usize, InlineTagKind)> =
+        group_pairs.iter().copied().map(pair_id).collect();
+    for line in parsed.lines_near(replace.clone()) {
+        for p in &line.inline_pairs {
+            if p.kind == InlineTagKind::Link {
+                continue;
+            }
+            if p.open_delim.start >= replace.start
+                && span_close_end(parsed, p) <= replace.end
+                && seen.insert(pair_id(p))
+            {
+                group_pairs.push(p);
+            }
         }
     }
 }
@@ -4324,7 +4352,7 @@ fn append_work_slice(dest: &mut WorkSlice, src: &WorkSlice) {
 }
 
 fn merge_work_slices(slices: &[WorkSlice]) -> Vec<WorkSlice> {
-    let mut merged: Vec<WorkSlice> = Vec::new();
+    let mut merged: Vec<WorkSlice> = Vec::with_capacity(slices.len());
     for s in slices {
         if s.text.is_empty() {
             continue;
@@ -4397,28 +4425,32 @@ fn peel_flanking_whitespace(slices: Vec<WorkSlice>) -> Vec<WorkSlice> {
     merge_work_slices(&out)
 }
 
+fn can_coalesce_ws_triple(left: &WorkSlice, mid: &WorkSlice, right: &WorkSlice) -> bool {
+    let mid_ws = !mid.text.is_empty() && mid.text.chars().all(char::is_whitespace);
+    let flags_match = left.flags == right.flags && left.flags.any_set();
+    let mid_ok = mid.flags == FormatFlags::default() || mid.flags == left.flags;
+    mid_ws && flags_match && mid_ok
+}
+
 /// `[bold "aa"] [plain " "] [bold "bb"]` becomes one span so turning a
 /// format back on at a neighbor merges instead of writing `**aa**** bb**`.
-fn coalesce_ws_between_matching(mut slices: Vec<WorkSlice>) -> Vec<WorkSlice> {
-    let mut i = 0;
-    while i + 2 < slices.len() {
-        let mid_ws =
-            !slices[i + 1].text.is_empty() && slices[i + 1].text.chars().all(char::is_whitespace);
-        let flags_match = slices[i].flags == slices[i + 2].flags && slices[i].flags.any_set();
-        let mid_ok =
-            slices[i + 1].flags == FormatFlags::default() || slices[i + 1].flags == slices[i].flags;
-        if mid_ws && flags_match && mid_ok {
-            let mid = slices[i + 1].clone();
-            let right = slices[i + 2].clone();
-            append_work_slice(&mut slices[i], &mid);
-            append_work_slice(&mut slices[i], &right);
-            slices.remove(i + 2);
-            slices.remove(i + 1);
-            continue;
+fn coalesce_ws_between_matching(slices: Vec<WorkSlice>) -> Vec<WorkSlice> {
+    let mut out: Vec<WorkSlice> = Vec::with_capacity(slices.len());
+    for s in slices {
+        out.push(s);
+        while out.len() >= 3 {
+            let n = out.len();
+            if !can_coalesce_ws_triple(&out[n - 3], &out[n - 2], &out[n - 1]) {
+                break;
+            }
+            let right = out.pop().unwrap();
+            let mid = out.pop().unwrap();
+            let left = out.last_mut().unwrap();
+            append_work_slice(left, &mid);
+            append_work_slice(left, &right);
         }
-        i += 1;
     }
-    slices
+    out
 }
 
 fn map_work_flags(
@@ -4921,20 +4953,91 @@ fn apply_toggle(flags: &mut FormatFlags, kind: InlineTagKind, on: bool) {
     }
 }
 
-fn flags_at_pos(pairs: &[InlinePair], segs: &[StyledSegment], pos: usize) -> FormatFlags {
-    if let Some(seg) = segs
-        .iter()
-        .find(|s| s.source.start <= pos && pos < s.source.end)
-    {
-        return segment_flags(seg);
+fn segment_flags_at(segs: &[&StyledSegment], pos: usize) -> Option<FormatFlags> {
+    let i = segs.partition_point(|s| s.source.start <= pos);
+    if i == 0 {
+        return None;
     }
-    let mut flags = FormatFlags::default();
-    for p in pairs {
-        if pos >= p.open_delim.start && pos < p.close_delim.end {
-            apply_toggle(&mut flags, p.kind, true);
+    let s = segs[i - 1];
+    if pos < s.source.end {
+        Some(segment_flags(s))
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct FlagCounts {
+    bold: u16,
+    italic: u16,
+    underline: u16,
+    strike: u16,
+    code: u16,
+}
+
+impl FlagCounts {
+    fn apply(&mut self, kind: InlineTagKind, open: bool) {
+        let slot = match kind {
+            InlineTagKind::Bold => &mut self.bold,
+            InlineTagKind::Italic => &mut self.italic,
+            InlineTagKind::Underline => &mut self.underline,
+            InlineTagKind::Strike => &mut self.strike,
+            InlineTagKind::Code => &mut self.code,
+            InlineTagKind::Link => return,
+        };
+        if open {
+            *slot = slot.saturating_add(1);
+        } else {
+            *slot = slot.saturating_sub(1);
         }
     }
-    flags
+
+    fn flags(self) -> FormatFlags {
+        FormatFlags {
+            bold: self.bold > 0,
+            italic: self.italic > 0,
+            underline: self.underline > 0,
+            strike: self.strike > 0,
+            code: self.code > 0,
+        }
+    }
+}
+
+/// Open/close events sorted by position so flags at successive offsets are O(1)
+/// amortized. Closes (`-1`) sort before opens (`1`) at the same byte because
+/// `pos < close.end` and `pos >= open.start`.
+struct FlagSweep {
+    events: Vec<(usize, i8, InlineTagKind)>,
+    i: usize,
+    counts: FlagCounts,
+}
+
+impl FlagSweep {
+    fn new(pairs: &[&InlinePair]) -> Self {
+        let mut events = Vec::with_capacity(pairs.len() * 2);
+        for p in pairs {
+            if p.kind == InlineTagKind::Link {
+                continue;
+            }
+            events.push((p.open_delim.start, 1, p.kind));
+            events.push((p.close_delim.end, -1, p.kind));
+        }
+        events.sort_unstable_by_key(|e| (e.0, e.1));
+        Self {
+            events,
+            i: 0,
+            counts: FlagCounts::default(),
+        }
+    }
+
+    fn flags_at(&mut self, pos: usize) -> FormatFlags {
+        while self.i < self.events.len() && self.events[self.i].0 <= pos {
+            let (_, delta, kind) = self.events[self.i];
+            self.counts.apply(kind, delta > 0);
+            self.i += 1;
+        }
+        self.counts.flags()
+    }
 }
 
 /// Openers and closers of every non-link span the caret sits in, merged into
@@ -4985,17 +5088,56 @@ fn merge_adjacent_ranges(mut rs: Vec<Range<usize>>) -> Vec<Range<usize>> {
     out
 }
 
-fn pos_in_link_markup(pair: &InlinePair, pos: usize) -> bool {
-    (pos >= pair.open_delim.start && pos < pair.inner.start)
-        || (pos >= pair.inner.end && pos < pair.close_delim.end)
+fn merge_skip_ranges(mut rs: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    rs.retain(|r| r.end > r.start);
+    if rs.len() <= 1 {
+        return rs;
+    }
+    rs.sort_by_key(|r| (r.start, r.end));
+    let mut out: Vec<Range<usize>> = Vec::with_capacity(rs.len());
+    for r in rs {
+        if let Some(last) = out.last_mut() {
+            if r.start <= last.end {
+                last.end = last.end.max(r.end);
+                continue;
+            }
+        }
+        out.push(r);
+    }
+    out
 }
 
 fn skip_end_at(skips: &[Range<usize>], pos: usize) -> Option<usize> {
-    skips
-        .iter()
-        .filter(|r| pos >= r.start && pos < r.end)
-        .map(|r| r.end)
-        .max()
+    let i = skips.partition_point(|r| r.start <= pos);
+    if i == 0 {
+        return None;
+    }
+    let r = &skips[i - 1];
+    if pos < r.end {
+        Some(r.end)
+    } else {
+        None
+    }
+}
+
+fn selected_link_markup_ranges(pairs: &[&InlinePair], p_range: Range<usize>) -> Vec<Range<usize>> {
+    let mut rs = Vec::new();
+    for p in pairs {
+        if p.kind != InlineTagKind::Link
+            || p.inner.start < p_range.start
+            || p.inner.end > p_range.end
+            || p.inner.end <= p.inner.start
+        {
+            continue;
+        }
+        if p.open_delim.start < p.inner.start {
+            rs.push(p.open_delim.start..p.inner.start);
+        }
+        if p.inner.end < p.close_delim.end {
+            rs.push(p.inner.end..p.close_delim.end);
+        }
+    }
+    merge_skip_ranges(rs)
 }
 
 /// Rebuild a source range from styled segments **and** the hidden markdown
@@ -5003,17 +5145,26 @@ fn skip_end_at(skips: &[Range<usize>], pos: usize) -> Option<usize> {
 /// delimiter runs in `skip` (the emphasis markers being rewritten).
 fn collect_rewrite_slices(
     content: &str,
-    pairs: &[InlinePair],
-    segs: &[StyledSegment],
+    pairs: &[&InlinePair],
+    segs: &[&StyledSegment],
     replace: Range<usize>,
     p_range: Range<usize>,
     skip: &[Range<usize>],
     toggle: Option<(InlineTagKind, bool)>,
 ) -> Vec<StyledSlice> {
-    let mut bounds = vec![replace.start, replace.end];
+    let skip = merge_skip_ranges(skip.to_vec());
+    let mut segs = segs.to_vec();
+    segs.sort_by_key(|s| (s.source.start, s.source.end));
+    let mut sweep = FlagSweep::new(pairs);
+    let link_markup = selected_link_markup_ranges(pairs, p_range.clone());
+    let mut bounds = Vec::with_capacity(
+        8 + skip.len() * 2 + segs.len() * 2 + replace.end.saturating_sub(replace.start) / 4,
+    );
+    bounds.push(replace.start);
+    bounds.push(replace.end);
     bounds.push(p_range.start.clamp(replace.start, replace.end));
     bounds.push(p_range.end.clamp(replace.start, replace.end));
-    for r in skip {
+    for r in &skip {
         if r.start > replace.start && r.start < replace.end {
             bounds.push(r.start);
         }
@@ -5021,7 +5172,7 @@ fn collect_rewrite_slices(
             bounds.push(r.end);
         }
     }
-    for seg in segs {
+    for seg in &segs {
         let raw = segment_raw_range(content, &seg.source);
         if raw.start > replace.start && raw.start < replace.end {
             bounds.push(raw.start);
@@ -5035,6 +5186,10 @@ fn collect_rewrite_slices(
     // flags are coalesced again when wrapping.
     let mut pos = replace.start;
     while pos < replace.end {
+        if let Some(end) = skip_end_at(&skip, pos) {
+            pos = end.max(pos + 1);
+            continue;
+        }
         let ch = match content[pos..].chars().next() {
             Some(c) => c,
             None => break,
@@ -5054,31 +5209,25 @@ fn collect_rewrite_slices(
     bounds.sort_unstable();
     bounds.dedup();
 
-    let mut slices = Vec::new();
+    let turning_off = toggle.is_some_and(|(_, on)| !on);
+    let mut slices: Vec<StyledSlice> = Vec::with_capacity(bounds.len().saturating_sub(1));
     for w in bounds.windows(2) {
         let a = w[0];
         let b = w[1];
-        if a >= b || skip_end_at(skip, a).is_some() {
+        if a >= b || skip_end_at(&skip, a).is_some() {
             continue;
         }
-        let text = content[a..b].to_string();
-        let is_break = text == "\n";
-        let is_ws = !is_break && text.chars().all(char::is_whitespace);
+        let piece = &content[a..b];
+        let is_break = piece == "\n";
+        let is_ws = !is_break && piece.chars().all(char::is_whitespace);
         let is_sel = a < p_range.end && b > p_range.start;
         let mut flags = if is_break {
             FormatFlags::default()
         } else {
-            flags_at_pos(pairs, segs, a)
+            let swept = sweep.flags_at(a);
+            segment_flags_at(&segs, a).unwrap_or(swept)
         };
-        let turning_off = toggle.is_some_and(|(_, on)| !on);
-        let in_selected_link_markup = turning_off
-            && pairs.iter().any(|p| {
-                p.kind == InlineTagKind::Link
-                    && p.inner.start >= p_range.start
-                    && p.inner.end <= p_range.end
-                    && p.inner.end > p.inner.start
-                    && pos_in_link_markup(p, a)
-            });
+        let in_selected_link_markup = turning_off && skip_end_at(&link_markup, a).is_some();
         // Turning a format on skips whitespace so flanking spaces stay
         // outside `*`/`**`/`~~`. Turning one off must still clear it from
         // selected spaces, or `**RAM** **usage**` becomes `RAM** **usage`.
@@ -5087,8 +5236,14 @@ fn collect_rewrite_slices(
                 apply_toggle(&mut flags, kind, on);
             }
         }
+        if let Some(last) = slices.last_mut() {
+            if last.flags == flags && last.is_selected == is_sel && !is_break && last.text != "\n" {
+                last.text.push_str(piece);
+                continue;
+            }
+        }
         slices.push(StyledSlice {
-            text,
+            text: piece.to_string(),
             flags,
             is_selected: is_sel,
         });
@@ -11203,6 +11358,22 @@ mod tests {
     }
 
     #[test]
+    fn format_toggle_selection_is_deterministic() {
+        let content = mixed_perf_doc(24);
+        let mut end = content.len() / 3;
+        while end > 0 && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        let apply = || {
+            let mut doc = DocumentTab::new("p".into(), "p.md".into(), content.clone(), None, None);
+            doc.caret.range = 0..end;
+            doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+            snapshot(&doc)
+        };
+        assert_eq!(apply(), apply());
+    }
+
+    #[test]
     #[ignore]
     fn format_toggle_perf_bench() {
         fn median_ms(mut v: Vec<u128>) -> f64 {
@@ -11228,6 +11399,7 @@ mod tests {
             let mut type_times = Vec::new();
             let mut toggle_times = Vec::new();
             let mut undo_times = Vec::new();
+            let mut sel_times = Vec::new();
             for _ in 0..5 {
                 let mut doc = DocumentTab::new(
                     "b".into(),
@@ -11262,13 +11434,31 @@ mod tests {
                 let t = std::time::Instant::now();
                 doc.undo();
                 undo_times.push(t.elapsed().as_micros());
+
+                let mut doc = DocumentTab::new(
+                    "b".into(),
+                    "b.md".into(),
+                    content.clone(),
+                    None,
+                    None,
+                );
+                let mut end = content.len() / 3;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                doc.caret.range = 0..end;
+                let _ = doc.parsed();
+                let t = std::time::Instant::now();
+                doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+                sel_times.push(t.elapsed().as_micros());
             }
             eprintln!(
-                "n={n} parse={:.2}ms type={:.2}ms ctrlb_type={:.2}ms undo={:.2}ms",
+                "n={n} parse={:.2}ms type={:.2}ms ctrlb_type={:.2}ms undo={:.2}ms sel_italic={:.2}ms",
                 parse_ms,
                 median_ms(type_times) / 1000.0,
                 median_ms(toggle_times) / 1000.0,
-                median_ms(undo_times) / 1000.0
+                median_ms(undo_times) / 1000.0,
+                median_ms(sel_times) / 1000.0
             );
         }
     }
@@ -11289,6 +11479,24 @@ mod tests {
         i
     }
 
+    fn mixed_fuzz_doc() -> String {
+        [
+            "# Head\n\n",
+            "A multi-line\nparagraph with *em*\nand more words.\n\n",
+            "Setext title\n===\n\n",
+            "Another title\n---\n\n",
+            "- list **item**\n  lazy continuation *here*\n\n",
+            "> quote line\nlazy quote *i*\n\n",
+            "```\ncode\n```\n\n",
+            "| a | b |\n| --- | --- |\n| **c** | d |\n\n",
+            "[ref]: http://x\n\n",
+            "<div>\nhtml\n</div>\n\n",
+            "# Hea=\nd*\nb**\n\n",
+            "ế# Head ***b**\n-😀 item *i*\n",
+        ]
+        .concat()
+    }
+
     #[test]
     fn incremental_parse_matches_full_on_random_edits() {
         let mut rng = 0xC0FF_EE00_u64;
@@ -11296,44 +11504,58 @@ mod tests {
             rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
             rng
         };
-        let mut content = mixed_perf_doc(24);
-        content.push_str("- a\n- b\n\n```\ncode\n```\n\n<div>\nhtml\n</div>\n\n[ref]: http://x\n");
+        let tokens = [
+            "x", "Q", " ", "*", "**", "_", "~", "`", "#", "> ", "-", "=", "|", "😀", "<", ">", "[",
+            "]", "(", ")", "\\", "a*", "*b",
+        ];
+        let mut content = mixed_fuzz_doc();
         let mut prev = parse_document(&content);
         let mut hits = 0usize;
-        for step in 0..180 {
+        const EDITS: usize = 20_000;
+        for step in 0..EDITS {
             if content.is_empty() {
                 content.push('x');
                 prev = parse_document(&content);
                 continue;
             }
             let start = prev_char_boundary(&content, (next() as usize) % content.len());
-            let kind = (next() % 6) as u32;
+            let kind = (next() % 8) as u32;
             let (range, insert): (Range<usize>, &str) = match kind {
-                0 => (start..start, "x"),
-                1 => (start..start, "Q"),
-                2 => {
-                    let end = next_char_boundary(&content, start.saturating_add(1));
+                0..=2 => {
+                    let tok = tokens[(next() as usize) % tokens.len()];
+                    (start..start, tok)
+                }
+                3 | 4 => {
+                    let end = next_char_boundary(
+                        &content,
+                        start.saturating_add(1 + (next() as usize % 3)),
+                    );
                     (start..end, "")
                 }
-                3 => (start..start, "**"),
-                4 => (start..start, " "),
-                _ => (start..start, "😀"),
+                5 => (start..start, "x"),
+                _ => {
+                    let end = next_char_boundary(&content, start.saturating_add(1));
+                    let tok = tokens[(next() as usize) % tokens.len()];
+                    (start..end, tok)
+                }
             };
             if !content.is_char_boundary(range.start) || !content.is_char_boundary(range.end) {
                 continue;
             }
+            let deleted = content[range.clone()].to_string();
             content.replace_range(range.clone(), insert);
             let full = parse_document(&content);
-            if let Some(inc) = try_incremental_parse(&content, &prev, range, insert.len()) {
+            if let Some(inc) = try_incremental_parse(&content, &prev, range, insert, &deleted) {
                 assert_eq!(inc, full, "incremental diverged at step {step}");
                 hits += 1;
             }
             prev = full;
         }
         assert!(
-            hits > 20,
-            "expected incremental hits on paragraph edits, got {hits}"
+            hits > 100,
+            "expected incremental hits on paragraph letter edits, got {hits} / {EDITS}"
         );
+        eprintln!("incremental_fuzz edits={EDITS} hits={hits}");
     }
 
     #[test]
