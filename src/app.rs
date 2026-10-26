@@ -3436,6 +3436,9 @@ impl Render for LiteMarkApp {
             field.set_colors(text_color, placeholder_color, field_bg, field_border);
         });
 
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
+            tab.ensure_stats();
+        }
         let active_tab = self.active_tab().cloned().unwrap_or_else(|| {
             DocumentTab::new(
                 "tab-1".to_string(),

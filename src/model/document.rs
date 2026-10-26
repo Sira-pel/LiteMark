@@ -128,6 +128,7 @@ pub struct DocumentTab {
     pub marked_range: Option<Range<usize>>,
     pub revision: u64,
     cached_parse: Option<(u64, Arc<ParsedDocument>)>,
+    stats_revision: Option<u64>,
     history: UndoHistory,
     /// Set right before the edit that wraps freshly typed text into a new
     /// formatted span, so that edit and the typing after it share one undo
@@ -171,6 +172,7 @@ impl DocumentTab {
             marked_range: None,
             revision: 1,
             cached_parse: None,
+            stats_revision: Some(1),
             history: UndoHistory::default(),
             next_edit_opens_span_group: false,
             next_undo_caret: None,
@@ -278,7 +280,6 @@ impl DocumentTab {
         self.caret.move_to(cursor.min(self.content.len()));
         self.marked_range = None;
         self.is_modified = true;
-        self.refresh_stats();
         self.refresh_cursor();
     }
 
@@ -3655,6 +3656,16 @@ impl DocumentTab {
         self.char_count = stats.chars;
         self.line_count = stats.lines;
         self.reading_time_min = stats.reading_time_min;
+        self.stats_revision = Some(self.revision);
+    }
+
+    /// Compute word/char/line stats only when a reader (the status bar) needs
+    /// them, keyed by document revision so edits themselves skip the scan.
+    pub fn ensure_stats(&mut self) {
+        if self.stats_revision == Some(self.revision) {
+            return;
+        }
+        self.refresh_stats();
     }
 
     pub fn refresh_cursor(&mut self) {
@@ -3699,7 +3710,6 @@ impl DocumentTab {
         self.caret.clamp(&self.content);
         self.marked_range = None;
         self.is_modified = true;
-        self.refresh_stats();
         self.refresh_cursor();
     }
 
@@ -11326,6 +11336,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compute_stats_is_lazy_until_ensure_stats() {
+        let mut doc = DocumentTab::new(
+            "s".into(),
+            "s.md".into(),
+            "one two".into(),
+            None,
+            None,
+        );
+        assert_eq!(doc.word_count, 2);
+        doc.insert_text_in_mode(doc.content.len()..doc.content.len(), " three four", ViewMode::Raw);
+        let before = compute_stats(&doc.content);
+        assert_eq!(
+            doc.word_count, 2,
+            "stats must stay stale until the status bar reads them"
+        );
+        doc.ensure_stats();
+        assert_eq!(doc.word_count, before.words);
+        assert_eq!(doc.char_count, before.chars);
+        assert_eq!(doc.line_count, before.lines);
+        assert_eq!(doc.reading_time_min, before.reading_time_min);
+        doc.ensure_stats();
+        assert_eq!(doc.word_count, before.words);
+    }
 }
 
 #[cfg(test)]
