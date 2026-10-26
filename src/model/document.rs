@@ -4557,6 +4557,157 @@ fn slice_has_edge_ws(s: &WorkSlice) -> bool {
     s.text.starts_with(char::is_whitespace) || s.text.ends_with(char::is_whitespace)
 }
 
+fn is_ws_slice(s: &WorkSlice) -> bool {
+    !s.text.is_empty() && s.text.chars().all(char::is_whitespace)
+}
+
+fn peel_shared_run(slices: &[WorkSlice], mut i: usize, mut j: usize) -> (usize, usize) {
+    while j > i && is_ws_slice(&slices[j]) {
+        j -= 1;
+    }
+    while i < j && is_ws_slice(&slices[i]) {
+        i += 1;
+    }
+    (i, j)
+}
+
+fn shared_run_collides(
+    slices: &[WorkSlice],
+    orig_i: usize,
+    orig_j: usize,
+    prefix: &str,
+    suffix: &str,
+) -> bool {
+    let left_collide = orig_i > 0 && {
+        let prev_close = wrap_delimiters(&slices[orig_i - 1].flags).1;
+        !prev_close.is_empty()
+            && !prefix.is_empty()
+            && prev_close.chars().next_back() == prefix.chars().next()
+    };
+    let right_collide = orig_j + 1 < slices.len() && {
+        let next_open = wrap_delimiters(&slices[orig_j + 1].flags).0;
+        !suffix.is_empty()
+            && !next_open.is_empty()
+            && suffix.chars().next_back() == next_open.chars().next()
+    };
+    left_collide || right_collide
+}
+
+fn shared_flag_runs(slices: &[WorkSlice], kind: SharedKind) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < slices.len() {
+        if !flag_of(&slices[i], kind) {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j + 1 < slices.len() && flag_of(&slices[j + 1], kind) {
+            j += 1;
+        }
+        if j > i && j - i + 1 < slices.len() {
+            runs.push((i, j));
+        }
+        i = j + 1;
+    }
+    runs
+}
+
+/// Wrap every run of `kind` left-to-right. Recursing only into each interior
+/// (and the gaps) is equivalent to peeling the longest run repeatedly when
+/// those runs do not nest, and is linear in the number of slices.
+fn render_shared_kind_runs(
+    slices: &[WorkSlice],
+    kind: SharedKind,
+    sel_range: &mut Option<Range<usize>>,
+    offset: usize,
+    glued_left: bool,
+    include_wraps_in_sel: bool,
+) -> Option<String> {
+    let runs = shared_flag_runs(slices, kind);
+    if runs.is_empty() {
+        return None;
+    }
+    let (prefix, suffix) = wrap_for_shared(kind);
+    let mut wrapped_any = false;
+    let mut out = String::new();
+    let mut pos = 0usize;
+    let mut at = offset;
+    let mut glued = glued_left;
+    for &(orig_i, orig_j) in &runs {
+        let (i, j) = peel_shared_run(slices, orig_i, orig_j);
+        if !(j > i && (i > 0 || j + 1 < slices.len()))
+            || shared_run_collides(slices, orig_i, orig_j, &prefix, &suffix)
+        {
+            continue;
+        }
+        wrapped_any = true;
+        if orig_i > pos {
+            let gap = render_work_slices(
+                &slices[pos..orig_i],
+                sel_range,
+                at,
+                glued,
+                include_wraps_in_sel,
+            );
+            out.push_str(&gap);
+            at += gap.len();
+        }
+        if i > orig_i {
+            let mut peeled = slices[orig_i..i].to_vec();
+            for s in &mut peeled {
+                s.flags = clear_shared(s.flags, kind);
+            }
+            let gap = render_work_slices(
+                &peeled,
+                sel_range,
+                at,
+                glued && orig_i == pos,
+                include_wraps_in_sel,
+            );
+            out.push_str(&gap);
+            at += gap.len();
+        }
+        let inner = map_work_flags(&slices[i..=j], |f| clear_shared(f, kind));
+        let mid = render_work_slices(
+            &inner,
+            sel_range,
+            at + prefix.len(),
+            false,
+            include_wraps_in_sel,
+        );
+        out.push_str(&prefix);
+        out.push_str(&mid);
+        out.push_str(&suffix);
+        at += prefix.len() + mid.len() + suffix.len();
+        if orig_j > j {
+            let mut peeled = slices[j + 1..=orig_j].to_vec();
+            for s in &mut peeled {
+                s.flags = clear_shared(s.flags, kind);
+            }
+            let gap = render_work_slices(&peeled, sel_range, at, false, include_wraps_in_sel);
+            out.push_str(&gap);
+            at += gap.len();
+        }
+        pos = orig_j + 1;
+        glued = false;
+    }
+    if !wrapped_any {
+        return None;
+    }
+    if pos < slices.len() {
+        let rest = render_work_slices(
+            &slices[pos..],
+            sel_range,
+            at,
+            glued,
+            include_wraps_in_sel,
+        );
+        out.push_str(&rest);
+    }
+    Some(out)
+}
+
 fn render_work_slices(
     slices: &[WorkSlice],
     sel_range: &mut Option<Range<usize>>,
@@ -4569,6 +4720,43 @@ fn render_work_slices(
     // must still wrap spaces, which is valid as long as the opener/closer
     // sit against non-space at the ends.
     let merged = coalesce_ws_between_matching(merge_work_slices(slices));
+
+    // Standalone newlines never carry a format, so a shared-flag wrap cannot
+    // include them. Rendering each side separately matches the recursive
+    // longest-run walk and is linear in the number of lines.
+    if merged.iter().any(|s| s.text == "\n") {
+        let mut out = String::new();
+        let mut start = 0usize;
+        let mut at = offset;
+        let mut first = true;
+        for idx in 0..merged.len() {
+            if merged[idx].text != "\n" {
+                continue;
+            }
+            let chunk = render_work_slices(
+                &merged[start..idx],
+                sel_range,
+                at,
+                first && glued_left,
+                include_wraps_in_sel,
+            );
+            out.push_str(&chunk);
+            mark_work_sel(sel_range, at + chunk.len(), &merged[idx]);
+            out.push('\n');
+            at += chunk.len() + 1;
+            start = idx + 1;
+            first = false;
+        }
+        let chunk = render_work_slices(
+            &merged[start..],
+            sel_range,
+            at,
+            first && glued_left,
+            include_wraps_in_sel,
+        );
+        out.push_str(&chunk);
+        return out;
+    }
 
     if merged.is_empty() {
         return String::new();
@@ -4712,71 +4900,16 @@ fn render_work_slices(
         }
     }
 
-    if let Some((kind, mut i, mut j)) = longest_shared_flag_run(&merged) {
-        let ws = |s: &WorkSlice| !s.text.is_empty() && s.text.chars().all(char::is_whitespace);
-        let orig_i = i;
-        let orig_j = j;
-        while j > i && ws(&merged[j]) {
-            j -= 1;
-        }
-        while i < j && ws(&merged[i]) {
-            i += 1;
-        }
-        if j > i && (i > 0 || j + 1 < merged.len()) {
-            let (prefix, suffix) = wrap_for_shared(kind);
-            // Collide against the slices that stay outside the original run,
-            // not the whitespace just peeled off (that whitespace loses this
-            // flag and will not wrap).
-            let left_collide = orig_i > 0 && {
-                let prev_close = wrap_delimiters(&merged[orig_i - 1].flags).1;
-                !prev_close.is_empty()
-                    && !prefix.is_empty()
-                    && prev_close.chars().next_back() == prefix.chars().next()
-            };
-            let right_collide = orig_j + 1 < merged.len() && {
-                let next_open = wrap_delimiters(&merged[orig_j + 1].flags).0;
-                !suffix.is_empty()
-                    && !next_open.is_empty()
-                    && suffix.chars().next_back() == next_open.chars().next()
-            };
-            // Skip a wrap whose new markers would sit against a neighbor's
-            // `*`/`**` and form `*a***`; peel + alternate delimiters instead.
-            if !left_collide && !right_collide {
-                // Whitespace peeled out of the wrap must lose that flag, or a
-                // trailing space stays `** **now` instead of `** …** now`.
-                let mut work = merged.clone();
-                for s in &mut work[orig_i..i] {
-                    s.flags = clear_shared(s.flags, kind);
-                }
-                if orig_j < work.len() {
-                    for s in &mut work[j + 1..=orig_j] {
-                        s.flags = clear_shared(s.flags, kind);
-                    }
-                }
-                let left = render_work_slices(
-                    &work[..i],
-                    sel_range,
-                    offset,
-                    glued_left,
-                    include_wraps_in_sel,
-                );
-                let inner = map_work_flags(&work[i..=j], |f| clear_shared(f, kind));
-                let mid = render_work_slices(
-                    &inner,
-                    sel_range,
-                    offset + left.len() + prefix.len(),
-                    false,
-                    include_wraps_in_sel,
-                );
-                let right = render_work_slices(
-                    &work[j + 1..],
-                    sel_range,
-                    offset + left.len() + prefix.len() + mid.len() + suffix.len(),
-                    false,
-                    include_wraps_in_sel,
-                );
-                return format!("{left}{prefix}{mid}{suffix}{right}");
-            }
+    if let Some((kind, _, _)) = longest_shared_flag_run(&merged) {
+        if let Some(out) = render_shared_kind_runs(
+            &merged,
+            kind,
+            sel_range,
+            offset,
+            glued_left,
+            include_wraps_in_sel,
+        ) {
+            return out;
         }
     }
 
