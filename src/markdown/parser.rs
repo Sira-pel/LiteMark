@@ -3275,16 +3275,9 @@ fn content_line_extent(markdown: &str, pos: usize) -> std::ops::Range<usize> {
     start..end
 }
 
-fn kind_can_span_blocks(kind: &LineKind) -> bool {
-    matches!(
-        kind,
-        LineKind::ListItem { .. }
-            | LineKind::Blockquote
-            | LineKind::CodeFence { .. }
-            | LineKind::CodeLine
-            | LineKind::TableRow { .. }
-            | LineKind::TableDelimiter
-    )
+fn is_setext_underline(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && (t.bytes().all(|b| b == b'=') || t.bytes().all(|b| b == b'-'))
 }
 
 fn line_may_change_block_kind(line: &str) -> bool {
@@ -3299,6 +3292,7 @@ fn line_may_change_block_kind(line: &str) -> bool {
         || trimmed.starts_with("```")
         || trimmed.starts_with("~~~")
         || exact_thematic_break(line, 0)
+        || is_setext_underline(trimmed)
         || is_list_marker_line(trimmed)
         || accepted_list_marker(line, 0).is_some()
         || is_html_block_start(trimmed)
@@ -3312,13 +3306,38 @@ fn line_may_change_block_kind(line: &str) -> bool {
     false
 }
 
-fn bytes_have_inline_markup(s: &str) -> bool {
+fn bytes_have_structural_or_markup(s: &str) -> bool {
     s.bytes().any(|b| {
         matches!(
             b,
             b'*' | b'_' | b'~' | b'`' | b'<' | b'>' | b'[' | b']' | b'(' | b')' | b'\\' | b'|'
+                | b'=' | b'-' | b'#'
         )
     })
+}
+
+fn adjacent_source_line_is_blank(markdown: &str, line: std::ops::Range<usize>, after: bool) -> bool {
+    let bytes = markdown.as_bytes();
+    if after {
+        let mut p = line.end;
+        if p < bytes.len() && bytes[p] == b'\r' {
+            p += 1;
+        }
+        if p < bytes.len() && bytes[p] == b'\n' {
+            p += 1;
+        }
+        if p >= bytes.len() {
+            return true;
+        }
+        markdown[content_line_extent(markdown, p)].trim().is_empty()
+    } else {
+        if line.start == 0 {
+            return true;
+        }
+        markdown[content_line_extent(markdown, line.start - 1)]
+            .trim()
+            .is_empty()
+    }
 }
 
 /// Reparse a single in-place paragraph line after `replace` was overwritten
@@ -3340,10 +3359,10 @@ pub fn try_incremental_parse(
     if markdown.len() < replace.start + new_len {
         return None;
     }
-    // Emphasis, links, and HTML can pair across a soft break inside one
-    // CommonMark paragraph. A single-line reparse would miss that, so any
-    // edit that adds or removes a marker character falls back.
-    if bytes_have_inline_markup(inserted) || bytes_have_inline_markup(deleted) {
+    // Emphasis, links, HTML, setext underlines, ATX markers, and thematic
+    // dashes can change block or inline structure, including on a neighbor
+    // line. A single-line reparse would miss that, so those edits fall back.
+    if bytes_have_structural_or_markup(inserted) || bytes_have_structural_or_markup(deleted) {
         return None;
     }
     let idx = previous.line_index_at(replace.start)?;
@@ -3354,15 +3373,24 @@ pub fn try_incremental_parse(
     if replace.end > old_line.source.end {
         return None;
     }
-    if idx > 0 && kind_can_span_blocks(&previous.lines[idx - 1].kind) {
+    // Lists, quotes, tables, headings, fences, and setext all depend on
+    // adjacent non-blank lines. Only an isolated paragraph is safe to patch.
+    if idx > 0 && previous.lines[idx - 1].kind != LineKind::Empty {
         return None;
     }
-    if idx + 1 < previous.lines.len() && kind_can_span_blocks(&previous.lines[idx + 1].kind) {
+    if idx + 1 < previous.lines.len() && previous.lines[idx + 1].kind != LineKind::Empty {
         return None;
     }
     for (open, close) in &previous.code_blocks {
         if replace.start >= open.start && replace.start <= close.end {
             return None;
+        }
+    }
+    for line in &previous.lines {
+        if let LineKind::TableRow { table_source, .. } = &line.kind {
+            if replace.start >= table_source.start && replace.start <= table_source.end {
+                return None;
+            }
         }
     }
     let delta = new_len as isize - old_len as isize;
@@ -3376,6 +3404,11 @@ pub fn try_incremental_parse(
     }
     let new_text = &markdown[new_extent.clone()];
     if line_may_change_block_kind(new_text) {
+        return None;
+    }
+    if !adjacent_source_line_is_blank(markdown, new_extent.clone(), false)
+        || !adjacent_source_line_is_blank(markdown, new_extent.clone(), true)
+    {
         return None;
     }
 
@@ -3480,6 +3513,36 @@ mod tests {
                 inc, full,
                 "incremental diverged on {prev_md:?} + {inserted:?}"
             );
+        }
+    }
+
+    #[test]
+    fn incremental_parse_bails_on_setext_table_and_list_neighbors() {
+        let isolated = "\nhello world\n\n";
+        let pos = isolated.find('w').unwrap();
+        let mut next = isolated.to_string();
+        next.replace_range(pos..pos, "x");
+        let prev = parse_document(isolated);
+        let full = parse_document(&next);
+        let inc = try_incremental_parse(&next, &prev, pos..pos, "x", "");
+        assert_eq!(inc.as_ref(), Some(&full));
+
+        for (md, insert) in [
+            ("title\n===\n\n", "="),
+            ("title\n---\n\n", "-"),
+            ("hello\n\n", "="),
+            ("hello\n\n", "-"),
+            ("hello\n\n", "#"),
+            ("| a | b |\n| --- | --- |\n| c | d |\n\npara\n", "x"),
+            ("- item\nlazy\n\n", "x"),
+            ("> quote\nlazy\n\n", "x"),
+        ] {
+            for pos in 0..=md.len() {
+                if !md.is_char_boundary(pos) {
+                    continue;
+                }
+                assert_incremental_matches_full(md, pos..pos, insert);
+            }
         }
     }
 
