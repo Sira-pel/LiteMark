@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    accepted_list_marker, parse_document, split_table_cells, try_incremental_parse,
+    accepted_list_marker, parse_document, split_table_cells,
     unescaped_pipe_offsets, InlinePair, InlineTagKind, LineKind, ParsedDocument, ParsedLine,
     StyledSegment, TableColumnAlign,
 };
@@ -261,24 +261,9 @@ impl DocumentTab {
             self.history.push(edit);
         }
         let cursor_at = range.start + new_text.len();
-        let old_range = range.clone();
-        let prev_parse = self.cached_parse.take().and_then(|(rev, doc)| {
-            if rev == self.revision {
-                Some(doc)
-            } else {
-                None
-            }
-        });
         self.content.replace_range(range, new_text);
         let cursor = snap_off_ending_interior(&self.content, cursor_at);
         self.revision = self.revision.wrapping_add(1);
-        if let Some(prev) = prev_parse {
-            if let Some(inc) =
-                try_incremental_parse(&self.content, &prev, old_range, new_text, &deleted)
-            {
-                self.cached_parse = Some((self.revision, Arc::new(inc)));
-            }
-        }
         self.caret.move_to(cursor.min(self.content.len()));
         self.marked_range = None;
         self.is_modified = true;
@@ -11376,186 +11361,97 @@ mod tests {
     #[test]
     #[ignore]
     fn format_toggle_perf_bench() {
-        fn median_ms(mut v: Vec<u128>) -> f64 {
-            v.sort();
-            let n = v.len();
-            if n % 2 == 1 {
-                v[n / 2] as f64
-            } else {
-                (v[n / 2 - 1] + v[n / 2]) as f64 / 2.0
-            }
-        }
-        for n in [100usize, 1000, 5000] {
-            let content = PERF_LINE.repeat(n);
-            let parse_ms = {
-                let mut times = Vec::new();
-                for _ in 0..5 {
-                    let t = std::time::Instant::now();
-                    let _ = parse_document(&content);
-                    times.push(t.elapsed().as_micros());
+        let builder = std::thread::Builder::new().stack_size(32 * 1024 * 1024);
+        let handle = builder
+            .spawn(|| {
+                fn median_ms(mut v: Vec<u128>) -> f64 {
+                    v.sort();
+                    let n = v.len();
+                    if n % 2 == 1 {
+                        v[n / 2] as f64
+                    } else {
+                        (v[n / 2 - 1] + v[n / 2]) as f64 / 2.0
+                    }
                 }
-                median_ms(times) / 1000.0
-            };
-            let mut type_times = Vec::new();
-            let mut toggle_times = Vec::new();
-            let mut undo_times = Vec::new();
-            let mut sel_times = Vec::new();
-            for _ in 0..5 {
-                let mut doc = DocumentTab::new(
-                    "b".into(),
-                    "b.md".into(),
-                    content.clone(),
-                    None,
-                    None,
-                );
-                let mid = doc.content.len() / 2;
-                doc.place(mid, false);
-                let _ = doc.parsed();
-                let t = std::time::Instant::now();
-                let range = doc.selection_range();
-                doc.insert_text_in_mode(range, "x", ViewMode::Wysiwyg);
-                type_times.push(t.elapsed().as_micros());
+                for n in [100usize, 1000, 5000] {
+                    let content = PERF_LINE.repeat(n);
+                    let parse_ms = {
+                        let mut times = Vec::new();
+                        for _ in 0..5 {
+                            let t = std::time::Instant::now();
+                            let _ = parse_document(&content);
+                            times.push(t.elapsed().as_micros());
+                        }
+                        median_ms(times) / 1000.0
+                    };
+                    let mut type_times = Vec::new();
+                    let mut toggle_times = Vec::new();
+                    let mut undo_times = Vec::new();
+                    let mut sel_times = Vec::new();
+                    for _ in 0..5 {
+                        let mut doc = DocumentTab::new(
+                            "b".into(),
+                            "b.md".into(),
+                            content.clone(),
+                            None,
+                            None,
+                        );
+                        let mid = doc.content.len() / 2;
+                        doc.place(mid, false);
+                        let _ = doc.parsed();
+                        let t = std::time::Instant::now();
+                        let range = doc.selection_range();
+                        doc.insert_text_in_mode(range, "x", ViewMode::Wysiwyg);
+                        type_times.push(t.elapsed().as_micros());
 
-                let mut doc = DocumentTab::new(
-                    "b".into(),
-                    "b.md".into(),
-                    content.clone(),
-                    None,
-                    None,
-                );
-                let mid = doc.content.len() / 2;
-                doc.place(mid, false);
-                let _ = doc.parsed();
-                let t = std::time::Instant::now();
-                doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
-                let range = doc.selection_range();
-                doc.insert_text_in_mode(range, "x", ViewMode::Wysiwyg);
-                toggle_times.push(t.elapsed().as_micros());
-                let t = std::time::Instant::now();
-                doc.undo();
-                undo_times.push(t.elapsed().as_micros());
+                        let mut doc = DocumentTab::new(
+                            "b".into(),
+                            "b.md".into(),
+                            content.clone(),
+                            None,
+                            None,
+                        );
+                        let mid = doc.content.len() / 2;
+                        doc.place(mid, false);
+                        let _ = doc.parsed();
+                        let t = std::time::Instant::now();
+                        doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
+                        let range = doc.selection_range();
+                        doc.insert_text_in_mode(range, "x", ViewMode::Wysiwyg);
+                        toggle_times.push(t.elapsed().as_micros());
+                        let t = std::time::Instant::now();
+                        doc.undo();
+                        undo_times.push(t.elapsed().as_micros());
 
-                let mut doc = DocumentTab::new(
-                    "b".into(),
-                    "b.md".into(),
-                    content.clone(),
-                    None,
-                    None,
-                );
-                let mut end = content.len() / 3;
-                while end > 0 && !content.is_char_boundary(end) {
-                    end -= 1;
-                }
-                doc.caret.range = 0..end;
-                let _ = doc.parsed();
-                let t = std::time::Instant::now();
-                doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
-                sel_times.push(t.elapsed().as_micros());
-            }
-            eprintln!(
-                "n={n} parse={:.2}ms type={:.2}ms ctrlb_type={:.2}ms undo={:.2}ms sel_italic={:.2}ms",
-                parse_ms,
-                median_ms(type_times) / 1000.0,
-                median_ms(toggle_times) / 1000.0,
-                median_ms(undo_times) / 1000.0,
-                median_ms(sel_times) / 1000.0
-            );
-        }
-    }
-
-    fn next_char_boundary(s: &str, mut i: usize) -> usize {
-        i = i.min(s.len());
-        while i < s.len() && !s.is_char_boundary(i) {
-            i += 1;
-        }
-        i
-    }
-
-    fn prev_char_boundary(s: &str, mut i: usize) -> usize {
-        i = i.min(s.len());
-        while i > 0 && !s.is_char_boundary(i) {
-            i -= 1;
-        }
-        i
-    }
-
-    fn mixed_fuzz_doc() -> String {
-        [
-            "# Head\n\n",
-            "A multi-line\nparagraph with *em*\nand more words.\n\n",
-            "Setext title\n===\n\n",
-            "Another title\n---\n\n",
-            "- list **item**\n  lazy continuation *here*\n\n",
-            "> quote line\nlazy quote *i*\n\n",
-            "```\ncode\n```\n\n",
-            "| a | b |\n| --- | --- |\n| **c** | d |\n\n",
-            "[ref]: http://x\n\n",
-            "<div>\nhtml\n</div>\n\n",
-            "# Hea=\nd*\nb**\n\n",
-            "ế# Head ***b**\n-😀 item *i*\n",
-        ]
-        .concat()
-    }
-
-    #[test]
-    fn incremental_parse_matches_full_on_random_edits() {
-        let mut rng = 0xC0FF_EE00_u64;
-        let mut next = || {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-            rng
-        };
-        let tokens = [
-            "x", "Q", " ", "*", "**", "_", "~", "`", "#", "> ", "-", "=", "|", "😀", "<", ">", "[",
-            "]", "(", ")", "\\", "a*", "*b",
-        ];
-        let mut content = mixed_fuzz_doc();
-        let mut prev = parse_document(&content);
-        let mut hits = 0usize;
-        const EDITS: usize = 20_000;
-        for step in 0..EDITS {
-            if content.is_empty() {
-                content.push('x');
-                prev = parse_document(&content);
-                continue;
-            }
-            let start = prev_char_boundary(&content, (next() as usize) % content.len());
-            let kind = (next() % 8) as u32;
-            let (range, insert): (Range<usize>, &str) = match kind {
-                0..=2 => {
-                    let tok = tokens[(next() as usize) % tokens.len()];
-                    (start..start, tok)
-                }
-                3 | 4 => {
-                    let end = next_char_boundary(
-                        &content,
-                        start.saturating_add(1 + (next() as usize % 3)),
+                        let mut doc = DocumentTab::new(
+                            "b".into(),
+                            "b.md".into(),
+                            content.clone(),
+                            None,
+                            None,
+                        );
+                        let mut end = content.len() / 3;
+                        while end > 0 && !content.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        doc.caret.range = 0..end;
+                        let _ = doc.parsed();
+                        let t = std::time::Instant::now();
+                        doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
+                        sel_times.push(t.elapsed().as_micros());
+                    }
+                    eprintln!(
+                        "n={n} parse={:.2}ms type={:.2}ms ctrlb_type={:.2}ms undo={:.2}ms sel_italic={:.2}ms",
+                        parse_ms,
+                        median_ms(type_times) / 1000.0,
+                        median_ms(toggle_times) / 1000.0,
+                        median_ms(undo_times) / 1000.0,
+                        median_ms(sel_times) / 1000.0
                     );
-                    (start..end, "")
                 }
-                5 => (start..start, "x"),
-                _ => {
-                    let end = next_char_boundary(&content, start.saturating_add(1));
-                    let tok = tokens[(next() as usize) % tokens.len()];
-                    (start..end, tok)
-                }
-            };
-            if !content.is_char_boundary(range.start) || !content.is_char_boundary(range.end) {
-                continue;
-            }
-            let deleted = content[range.clone()].to_string();
-            content.replace_range(range.clone(), insert);
-            let full = parse_document(&content);
-            if let Some(inc) = try_incremental_parse(&content, &prev, range, insert, &deleted) {
-                assert_eq!(inc, full, "incremental diverged at step {step}");
-                hits += 1;
-            }
-            prev = full;
-        }
-        assert!(
-            hits > 100,
-            "expected incremental hits on paragraph letter edits, got {hits} / {EDITS}"
-        );
-        eprintln!("incremental_fuzz edits={EDITS} hits={hits}");
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 
     #[test]
@@ -11615,9 +11511,20 @@ mod diff_probe {
         let cmds = ["bold", "italic", "underline", "strike", "code", "link"];
         let mut out = String::new();
         let mut bad = 0usize;
+        let base_seed: u64 = std::env::var("DIFF_SEED")
+            .ok()
+            .and_then(|s| {
+                let s = s.trim();
+                if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    u64::from_str_radix(hex, 16).ok()
+                } else {
+                    s.parse().ok()
+                }
+            })
+            .unwrap_or(0x9E3779B97F4A7C15);
         for (si, seed) in seeds.iter().enumerate() {
             for run in 0..150u64 {
-                let mut r = R(0x9E3779B97F4A7C15 ^ (si as u64 * 1000 + run + 1));
+                let mut r = R(base_seed ^ (si as u64 * 1000 + run + 1));
                 let mut t = DocumentTab::new("a".into(), "a.md".into(), seed.repeat(3), None, None);
                 for step in 0..60 {
                     let len = t.content.len();
