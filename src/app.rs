@@ -29,6 +29,8 @@ pub(crate) struct OptimisticClose {
     prev_selected: Option<SidebarTarget>,
 }
 
+type BulkReport = Rc<RefCell<BulkTrashReport>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultiSelection {
     pub anchor: SidebarTarget,
@@ -1303,20 +1305,12 @@ impl LiteMarkApp {
 
     /// Extend the selection from its anchor to `to` over the visible rows.
     fn extend_selection_to(&mut self, to: SidebarTarget) {
-        let targets = self.sidebar_visible_targets();
         let anchor = self
             .active_multi()
             .map(|m| m.anchor.clone())
             .or_else(|| self.selected_target.clone())
             .unwrap_or_else(|| to.clone());
-        let pos = |t: &SidebarTarget| targets.iter().position(|x| x == t);
-        let (Some(a), Some(b)) = (pos(&anchor), pos(&to)) else {
-            self.selected_target = Some(to);
-            self.multi_selection = None;
-            self.sidebar_keyboard = true;
-            return;
-        };
-        let items = targets[a.min(b)..=a.max(b)].to_vec();
+        let (anchor, items) = extend_selection(&self.sidebar_visible_targets(), &anchor, &to);
         self.multi_selection = (items.len() > 1).then(|| MultiSelection {
             anchor,
             cursor: to.clone(),
@@ -1329,80 +1323,46 @@ impl LiteMarkApp {
     /// Shift+Up/Down: grow or shrink the range by one visible row.
     fn sidebar_extend_selection(&mut self, delta: i32) {
         let targets = self.sidebar_visible_targets();
-        if targets.is_empty() {
-            return;
+        if let Some(next) = step_cursor(&targets, self.selected_target.as_ref(), delta) {
+            self.extend_selection_to(targets[next].clone());
         }
-        let next = match self
-            .selected_target
-            .as_ref()
-            .and_then(|c| targets.iter().position(|t| t == c))
-        {
-            Some(pos) => (pos as i32 + delta).clamp(0, targets.len() as i32 - 1) as usize,
-            None if delta < 0 => targets.len() - 1,
-            None => 0,
-        };
-        self.extend_selection_to(targets[next].clone());
     }
 
     /// Ask before trashing every Shift-selected row. Rows inside a selected
     /// folder go with it; modified notes must be saved or closed first.
     fn request_trash_many(&mut self, items: Vec<SidebarTarget>) {
-        let folder_paths: Vec<PathBuf> = items
-            .iter()
-            .filter_map(|t| match t {
-                SidebarTarget::Folder(id) => self
-                    .workspace
-                    .folders
-                    .iter()
-                    .find(|f| &f.id == id)
-                    .map(|f| f.path.clone()),
-                SidebarTarget::File(_) => None,
-            })
-            .collect();
-        let path_of = |t: &SidebarTarget| match t {
-            SidebarTarget::Folder(id) => self
-                .workspace
-                .folders
-                .iter()
-                .find(|f| &f.id == id)
-                .map(|f| f.path.clone()),
-            SidebarTarget::File(id) => self
-                .workspace
-                .files
-                .iter()
-                .find(|f| &f.id == id)
-                .map(|f| f.path.clone()),
-        };
-        let targets: Vec<SidebarTarget> = items
+        let rows: Vec<(SidebarTarget, PathBuf, bool)> = items
             .into_iter()
-            .filter(|t| {
-                let Some(path) = path_of(t) else {
-                    return false;
+            .filter_map(|t| {
+                let (path, is_folder) = match &t {
+                    SidebarTarget::Folder(id) => {
+                        (self.workspace.folders.iter().find(|f| &f.id == id)?.path.clone(), true)
+                    }
+                    SidebarTarget::File(id) => {
+                        (self.workspace.files.iter().find(|f| &f.id == id)?.path.clone(), false)
+                    }
                 };
-                !folder_paths
-                    .iter()
-                    .any(|folder| path != *folder && path.starts_with(folder))
+                Some((t, path, is_folder))
             })
             .collect();
-        let paths: Vec<PathBuf> = targets.iter().filter_map(path_of).collect();
-        if self.tabs.iter().any(|tab| {
-            tab.is_modified
-                && tab
-                    .file_path
-                    .as_ref()
-                    .is_some_and(|tp| paths.iter().any(|p| tp.starts_with(p)))
-        }) {
-            self.show_error("Save or close modified notes before moving several items to the Trash.");
-            return;
-        }
-        match targets.len() {
-            0 => {}
-            1 => match targets.into_iter().next() {
-                Some(SidebarTarget::File(id)) => self.request_trash_file(id),
-                Some(SidebarTarget::Folder(id)) => self.request_trash_folder(id),
-                None => {}
+        let modified: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.is_modified)
+            .filter_map(|tab| tab.file_path.clone())
+            .collect();
+        match plan_bulk_trash(&rows, &modified) {
+            BulkTrashPlan::Nothing => {}
+            BulkTrashPlan::ModifiedOpen => self.show_error(
+                "Save or close modified notes before moving several items to the Trash.",
+            ),
+            BulkTrashPlan::Trash(mut targets) => match targets.len() {
+                1 => match targets.remove(0) {
+                    SidebarTarget::File(id) => self.request_trash_file(id),
+                    SidebarTarget::Folder(id) => self.request_trash_folder(id),
+                },
+                _ => self.show_prompt(Prompt::DeleteMany { targets }),
             },
-            _ => self.show_prompt(Prompt::DeleteMany { targets }),
         }
     }
 
@@ -2210,6 +2170,10 @@ impl LiteMarkApp {
     }
 
     fn trash_file(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.trash_file_in(id, cx, None);
+    }
+
+    fn trash_file_in(&mut self, id: &str, cx: &mut Context<Self>, bulk: Option<BulkReport>) {
         let Some(file) = self
             .workspace
             .files
@@ -2240,19 +2204,44 @@ impl LiteMarkApp {
             .spawn(async move { move_to_trash(&path) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => this.rescan_workspace(),
-                Err(err) => {
-                    this.restore_optimistic_close(closed, cx);
-                    this.rescan_workspace();
-                    this.show_error(err);
-                }
-            });
+            let _ = this.update(cx, |this, cx| this.finish_trash(result, closed, bulk, cx));
         })
         .detach();
     }
 
     fn trash_folder(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.trash_folder_in(id, cx, None);
+    }
+
+    /// Settle one background trash: rescan, undo the optimistic close on
+    /// failure, and report. A bulk trash shows a single message at the end.
+    fn finish_trash(
+        &mut self,
+        result: Result<(), String>,
+        closed: OptimisticClose,
+        bulk: Option<BulkReport>,
+        cx: &mut Context<Self>,
+    ) {
+        let failed = result.clone().err();
+        if failed.is_some() {
+            self.restore_optimistic_close(closed, cx);
+        }
+        self.rescan_workspace();
+        match bulk {
+            Some(report) => {
+                if let Some(message) = report.borrow_mut().record(result) {
+                    self.show_error(message);
+                }
+            }
+            None => {
+                if let Some(err) = failed {
+                    self.show_error(err);
+                }
+            }
+        }
+    }
+
+    fn trash_folder_in(&mut self, id: &str, cx: &mut Context<Self>, bulk: Option<BulkReport>) {
         let Some(folder) = self
             .workspace
             .folders
@@ -2287,14 +2276,7 @@ impl LiteMarkApp {
             .spawn(async move { move_to_trash(&prefix) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => this.rescan_workspace(),
-                Err(err) => {
-                    this.restore_optimistic_close(closed, cx);
-                    this.rescan_workspace();
-                    this.show_error(err);
-                }
-            });
+            let _ = this.update(cx, |this, cx| this.finish_trash(result, closed, bulk, cx));
         })
         .detach();
     }
@@ -2698,10 +2680,16 @@ impl LiteMarkApp {
             Prompt::DeleteMany { targets } => {
                 if choice == "Trash" {
                     self.multi_selection = None;
+                    let report: BulkReport =
+                        Rc::new(RefCell::new(BulkTrashReport::new(targets.len())));
                     for target in targets {
                         match target {
-                            SidebarTarget::File(id) => self.trash_file(&id, cx),
-                            SidebarTarget::Folder(id) => self.trash_folder(&id, cx),
+                            SidebarTarget::File(id) => {
+                                self.trash_file_in(&id, cx, Some(report.clone()))
+                            }
+                            SidebarTarget::Folder(id) => {
+                                self.trash_folder_in(&id, cx, Some(report.clone()))
+                            }
                         }
                     }
                 }
@@ -2969,6 +2957,10 @@ impl LiteMarkApp {
     ) {
         // Clicking the editor hands keyboard focus back from the sidebar.
         self.sidebar_keyboard = false;
+        // A click anywhere but a Shift+click ends a multi-selection.
+        if !window.modifiers().shift {
+            self.multi_selection = None;
+        }
         if self.input_blocked() || window.default_prevented() {
             return;
         }
@@ -4769,7 +4761,11 @@ impl Render for LiteMarkApp {
                 {
                     return;
                 }
-                if let Some(items) = this.active_multi().map(|m| m.items.clone()) {
+                if let Some(items) = this
+                    .active_multi()
+                    .filter(|_| this.sidebar_keyboard)
+                    .map(|m| m.items.clone())
+                {
                     this.request_trash_many(items);
                     cx.notify();
                     return;
@@ -5492,6 +5488,8 @@ impl Render for LiteMarkApp {
                     this.show_pdf_modal = false;
                 } else if this.show_find_replace {
                     this.show_find_replace = false;
+                } else if this.active_multi().is_some() {
+                    this.multi_selection = None;
                 } else if this.zen_mode {
                     this.handle_exit_zen();
                 }
