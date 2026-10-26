@@ -54,6 +54,28 @@ pub struct PaintRow {
     pub cells: Vec<PaintCell>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TableColGeom {
+    pub header_bounds: Bounds<Pixels>,
+    pub align: TableColumnAlign,
+    pub anchor: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct TableRowGeom {
+    pub index: usize,
+    pub bounds: Bounds<Pixels>,
+    pub anchors: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TableGeom {
+    pub source: Range<usize>,
+    pub bounds: Bounds<Pixels>,
+    pub columns: Vec<TableColGeom>,
+    pub rows: Vec<TableRowGeom>,
+}
+
 #[derive(Clone, Default)]
 pub struct TableWidthCache {
     pub entries: std::collections::HashMap<Range<usize>, (u64, Pixels, Vec<Pixels>)>,
@@ -67,6 +89,7 @@ pub struct EditorPaint {
     pub rows: Vec<PaintRow>,
     pub bounds: Option<Bounds<Pixels>>,
     pub table_width_cache: TableWidthCache,
+    pub tables: Vec<TableGeom>,
 }
 
 impl Default for EditorPaint {
@@ -78,6 +101,7 @@ impl Default for EditorPaint {
             rows: Vec::new(),
             bounds: None,
             table_width_cache: TableWidthCache::default(),
+            tables: Vec::new(),
         }
     }
 }
@@ -777,6 +801,8 @@ pub struct EditorElement<V: 'static> {
     pub gutter_bg: Hsla,
     pub font_family: SharedString,
     pub mono_font_family: SharedString,
+    pub table_hover: Option<super::table_chrome::TableHover>,
+    pub table_drag: Option<super::table_chrome::TableDrag>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -829,6 +855,7 @@ pub struct Prepaint {
     wrap_cols: usize,
     x_offset: Pixels,
     table_width_cache: TableWidthCache,
+    tables: Vec<TableGeom>,
 }
 
 impl<V: EntityInputHandler> Element for EditorElement<V> {
@@ -1073,6 +1100,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 wrap_cols,
                 x_offset,
                 table_width_cache,
+                tables: Vec::new(),
             };
         }
 
@@ -1082,6 +1110,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut bg_quads = Vec::new();
         let mut quads = Vec::new();
         let mut strike_quads = Vec::new();
+        let mut tables: Vec<TableGeom> = Vec::new();
         let mut cursor = None;
         let base_x = bounds.left() + gutter + x_offset;
         let mut cur_y = bounds.top() + px(16.0);
@@ -1491,6 +1520,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     .first()
                     .map(|c| c.shaped.clone())
                     .unwrap_or_else(|| sample.clone());
+                super::table_chrome::record_table_row(
+                    &mut tables,
+                    table_source.clone(),
+                    is_header,
+                    alignments,
+                    Bounds::new(point(base_x, cur_y), size(table_w, row_height)),
+                    &paint_cells,
+                );
                 rows.push(PaintRow {
                     line_index: line_idx,
                     byte_start: parsed_line.source.start,
@@ -1860,6 +1897,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             wrap_cols,
             x_offset,
             table_width_cache,
+            tables,
         }
     }
 
@@ -1934,7 +1972,20 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 paint.wrap_cols = usize::MAX;
             }
             paint.table_width_cache = std::mem::take(&mut prepaint.table_width_cache);
+            paint.tables = std::mem::take(&mut prepaint.tables);
         }
+        super::table_chrome::paint(
+            window,
+            &self.paint.borrow().tables,
+            self.table_hover.as_ref(),
+            self.table_drag.as_ref(),
+            super::table_chrome::TableChromePaint {
+                surface: self.surface_bg,
+                border: self.border_color,
+                muted: self.muted_color,
+                ink: self.text_color,
+            },
+        );
         if wrap_changed && self.word_wrap {
             let entity = self.entity.clone();
             window.defer(cx, move |_, cx| {
@@ -2655,6 +2706,7 @@ mod tests {
             rows: vec![row_0, row_1],
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(400.0), px(100.0)))),
             table_width_cache: TableWidthCache::default(),
+            tables: Vec::new(),
         };
 
         let mut caret = Caret::default();
@@ -2745,6 +2797,7 @@ mod tests {
             rows: vec![row],
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)))),
             table_width_cache: TableWidthCache::default(),
+            tables: Vec::new(),
         };
 
         // Click on Line 0 (y = 10px)
@@ -2810,6 +2863,7 @@ mod tests {
             rows: vec![row],
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)))),
             table_width_cache: TableWidthCache::default(),
+            tables: Vec::new(),
         };
 
         let mut caret = Caret::default();
@@ -2900,6 +2954,7 @@ mod tests {
             rows: vec![row],
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(112.0)))),
             table_width_cache: TableWidthCache::default(),
+            tables: Vec::new(),
         };
 
         // Click in Cell 1 on Line 1 at y = 35px (Line 0 is 0..28px, Line 1 is 28..56px)
@@ -3093,6 +3148,7 @@ mod tests {
             rows: vec![row],
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(28.0)))),
             table_width_cache: TableWidthCache::default(),
+            tables: Vec::new(),
         };
 
         let mut caret = Caret::default();

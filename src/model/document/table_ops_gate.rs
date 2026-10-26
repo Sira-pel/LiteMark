@@ -270,11 +270,13 @@ fn run_op(doc: &mut DocumentTab, op: &str, arg: &str) -> Result<(), String> {
         "delete-col" => doc.table_delete_col(),
         "move-row" => {
             let index: usize = arg.parse().map_err(|_| format!("bad move-row {arg}"))?;
-            doc.table_move_row(index);
+            let pos = doc.cursor_offset();
+            doc.table_move_row_at(pos, index);
         }
         "move-col" => {
             let index: usize = arg.parse().map_err(|_| format!("bad move-col {arg}"))?;
-            doc.table_move_col(index);
+            let pos = doc.cursor_offset();
+            doc.table_move_col_at(pos, index);
         }
         "align-left" => doc.table_align_column(TableColumnAlign::Left),
         "align-center" => doc.table_align_column(TableColumnAlign::Center),

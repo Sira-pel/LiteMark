@@ -52,6 +52,11 @@ pub mod sz {
     pub const R_SM: Pixels = px(4.);
     pub const R_MD: Pixels = px(6.);
     pub const R_LG: Pixels = px(8.);
+    /// Height of a table hover pill. The grip dots are a quarter of it.
+    pub const TABLE_PILL: Pixels = px(16.);
+    pub const TABLE_DOT: Pixels = px(2.);
+    /// Hairline shared with the table rules.
+    pub const STROKE: Pixels = px(1.);
     #[allow(dead_code)]
     pub const BODY: f32 = 17.;
     pub const MEASURE_FALLBACK: Pixels = px(672.);
