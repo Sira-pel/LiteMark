@@ -115,22 +115,25 @@ fn top_level_rows<T>(items: &[(T, PathBuf, bool)]) -> Vec<&(T, PathBuf, bool)> {
         .collect()
 }
 
-/// Drops selected folders that show a row the selection skipped. Trashing a
-/// folder takes everything inside it, so such a folder stays and only its
-/// selected rows go. Collapsed folders show no children and count as whole.
+/// Drops selected folders that were opened up and only partly selected: some
+/// row inside is selected, but a visible one is not. Moving or trashing the
+/// folder would take the skipped row too, so the folder stays and only its
+/// selected rows go. A folder with nothing selected inside is taken whole.
 pub fn without_partial_folders<T: Clone>(
     items: &[(T, PathBuf, bool)],
     visible: &[PathBuf],
 ) -> Vec<(T, PathBuf, bool)> {
+    let selected = |path: &PathBuf| items.iter().any(|(_, p, _)| p == path);
     items
         .iter()
         .filter(|(_, folder, is_folder)| {
-            !*is_folder
-                || visible.iter().all(|row| {
-                    row == folder
-                        || !row.starts_with(folder)
-                        || items.iter().any(|(_, path, _)| path == row)
-                })
+            if !*is_folder {
+                return true;
+            }
+            let inside = |row: &&PathBuf| *row != folder && row.starts_with(folder);
+            let any_selected = items.iter().any(|(_, p, _)| p != folder && p.starts_with(folder));
+            let any_skipped = visible.iter().filter(inside).any(|row| !selected(row));
+            !(any_selected && any_skipped)
         })
         .cloned()
         .collect()
@@ -240,6 +243,8 @@ mod tests {
         let collapsed = vec![p("/w/dir")];
         let only_folder = vec![(1, p("/w/dir"), true)];
         assert_eq!(without_partial_folders(&only_folder, &collapsed), only_folder);
+        let expanded = vec![p("/w/dir"), p("/w/dir/a.md")];
+        assert_eq!(without_partial_folders(&only_folder, &expanded), only_folder);
     }
 
     #[test]

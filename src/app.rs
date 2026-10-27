@@ -1607,17 +1607,13 @@ impl LiteMarkApp {
                 Some((t, path, is_folder))
             })
             .collect();
-        // A folder with an unselected row showing stays; only its selected rows go.
+        // A partly selected folder stays; only its selected rows go.
         let visible: Vec<PathBuf> = self
             .sidebar_visible_targets()
             .iter()
             .filter_map(|t| self.target_path(t))
             .collect();
         let rows = without_partial_folders(&rows, &visible);
-        if rows.is_empty() {
-            self.show_error("Select every note in a folder to move the folder to the Trash.");
-            return;
-        }
         let modified: Vec<PathBuf> = self
             .tabs
             .iter()
@@ -1899,6 +1895,13 @@ impl LiteMarkApp {
                 Some((t, path, is_folder))
             })
             .collect();
+        // A folder with a skipped row showing stays put; only its selected rows move.
+        let visible: Vec<PathBuf> = self
+            .sidebar_visible_targets()
+            .iter()
+            .filter_map(&path_of)
+            .collect();
+        let rows = without_partial_folders(&rows, &visible);
         let dest_is_target = |t: &SidebarTarget| {
             matches!((t, &folder_id), (SidebarTarget::Folder(id), Some(dest)) if id == dest)
         };
