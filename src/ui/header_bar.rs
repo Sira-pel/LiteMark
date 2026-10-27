@@ -306,13 +306,14 @@ where
                                         }),
                                 )
                         }))
-                        // "+" button: 28x28 at y 6-34, 4px after last tab
+                        // "+" button: 28x28 centered on the tabs (32px, flush to the
+                        // bottom of the bar), 4px after the last tab
                         .child({
                             let nt = on_new_tab.clone();
                             div()
                                 .flex()
                                 .items_center()
-                                .h_full()
+                                .h(sz::TAB_H)
                                 .flex_shrink_0()
                                 .child(
                                     div()
