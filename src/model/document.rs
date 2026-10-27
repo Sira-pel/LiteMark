@@ -11708,4 +11708,21 @@ mod heading_format_tests {
         );
         assert_eq!(run("## Title", 3..8, &["bold"], ViewMode::Wysiwyg), "## **Title**");
     }
+
+    #[test]
+    fn bold_on_a_word_in_the_welcome_heading_only_wraps_that_word() {
+        let src = "# Welcome to LiteMark\n\nBody\n";
+        assert_eq!(
+            run(src, 13..21, &["bold"], ViewMode::Wysiwyg),
+            "# Welcome to **LiteMark**\n\nBody\n"
+        );
+        assert_eq!(
+            run(src, 10..12, &["bold"], ViewMode::Wysiwyg),
+            "# Welcome **to** LiteMark\n\nBody\n"
+        );
+        assert_eq!(
+            run(src, 13..21, &["bold", "underline"], ViewMode::Wysiwyg),
+            "# Welcome to <u>**LiteMark**</u>\n\nBody\n"
+        );
+    }
 }
