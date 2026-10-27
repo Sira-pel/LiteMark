@@ -4,6 +4,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 pub fn render_shortcuts_modal<FClose>(
+    max_h: Pixels,
     focus_handle: FocusHandle,
     on_close: FClose,
     theme: &Theme,
@@ -71,7 +72,7 @@ where
                 .flex_col()
                 .w(px(520.0))
                 .max_w_full()
-                .max_h_full()
+                .max_h(max_h)
                 .rounded(px(12.0))
                 .bg(theme.bg_modal)
                 .border_1()

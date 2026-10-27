@@ -5015,6 +5015,7 @@ impl Render for LiteMarkApp {
                             point,
                             anchor_corner: anchor,
                             width,
+                            max_width: window.viewport_size().width - px(16.0),
                             items,
                             focus_handle: self.menu_focus_handle.clone(),
                             selected_index: self.menu_selected_ix,
@@ -6179,6 +6180,7 @@ impl Render for LiteMarkApp {
             // Modals
             .when(self.show_shortcuts_modal, |s| {
                 s.child(render_shortcuts_modal(
+                    (window.viewport_size().height - px(32.0)).min(px(560.0)),
                     self.prompt_focus_handle.clone(),
                     on_close_shortcuts.clone(),
                     &theme,

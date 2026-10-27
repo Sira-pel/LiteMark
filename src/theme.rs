@@ -207,3 +207,17 @@ impl Theme {
 pub fn sidebar_width(window_width: Pixels) -> Pixels {
     (window_width * 0.45).clamp(sz::SIDEBAR_MIN_W, sz::SIDEBAR_W)
 }
+
+#[cfg(test)]
+mod sidebar_width_tests {
+    use super::{sidebar_width, sz};
+    use gpui::px;
+
+    #[test]
+    fn sidebar_width_shrinks_with_window_within_bounds() {
+        assert_eq!(sidebar_width(px(1600.0)), sz::SIDEBAR_W);
+        assert_eq!(sidebar_width(px(400.0)), sz::SIDEBAR_MIN_W);
+        let mid = sidebar_width(px(480.0));
+        assert!(mid > sz::SIDEBAR_MIN_W && mid < sz::SIDEBAR_W);
+    }
+}

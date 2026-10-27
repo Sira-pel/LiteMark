@@ -170,6 +170,9 @@ pub fn calculate_submenu_y_offset(items: &[MenuItem], sub_ix: usize) -> Pixels {
     y_offset
 }
 
+/// Upper bound for a content-sized menu; longer labels truncate.
+const MENU_MAX_W: f32 = 360.0;
+
 /// Width a menu needs to show its widest row without clipping: check/icon
 /// column, label, hint chip and shortcut, plus row and panel padding.
 pub fn content_width(items: &[MenuItem]) -> Pixels {
@@ -190,7 +193,7 @@ pub fn content_width(items: &[MenuItem]) -> Pixels {
             label + hint + shortcut + chevron + gaps + 24.0 + 12.0
         })
         .fold(0.0_f32, f32::max);
-    px(icon_col + widest + 8.0)
+    px((icon_col + widest + 8.0).min(MENU_MAX_W))
 }
 
 pub fn calculate_submenu_width(item: &MenuItem) -> Pixels {
@@ -210,6 +213,8 @@ where
     pub point: Point<Pixels>,
     pub anchor_corner: Corner,
     pub width: Pixels,
+    /// Widest the menu may grow (the window width less a margin).
+    pub max_width: Pixels,
     pub items: Vec<MenuItem>,
     pub focus_handle: FocusHandle,
     pub selected_index: Option<usize>,
@@ -405,7 +410,8 @@ where
     let point = props.point;
     let anchor_corner = props.anchor_corner;
     let items = props.items;
-    let width = props.width.max(content_width(&items));
+    let max_width = props.max_width;
+    let width = props.width.max(content_width(&items)).min(max_width);
     let selected_index = props.selected_index;
     let open_submenu_ix = props.open_submenu_ix;
     let focus_handle = props.focus_handle;
@@ -416,7 +422,7 @@ where
         if let Some(item) = items.get(sub_ix) {
             if let MenuItemKind::Submenu(ref sub_items) = item.kind {
                 let y_offset = calculate_submenu_y_offset(&items, sub_ix);
-                let sub_w = calculate_submenu_width(item);
+                let sub_w = calculate_submenu_width(item).min(max_width);
                 let is_right_anchored = matches!(
                     anchor_corner,
                     Corner::TopRight | Corner::BottomRight
@@ -941,7 +947,7 @@ mod tests {
         ]);
         let width = calculate_submenu_width(&sub);
         assert!(width >= px(160.0));
-        assert!(width <= px(400.0));
+        assert!(width <= px(360.0));
     }
 
     #[test]
@@ -1001,5 +1007,20 @@ mod tests {
         assert!(labels.contains(&"Paste"));
         assert!(labels.contains(&"Select all"));
     }
-}
 
+    #[test]
+    fn test_content_width_fits_hint_and_shortcut_and_is_capped() {
+        use super::content_width;
+        let plain = vec![MenuItem::action("Copy", None, None, |_, _| {})];
+        let rich = vec![MenuItem::disabled_action("Line numbers", Some("Ctrl+Shift+L"), Some("Raw only"))];
+        assert!(content_width(&rich) > content_width(&plain));
+        assert!(content_width(&rich) >= px(12.0 * 7.5 + 8.0 * 6.5 + 12.0 * 7.0));
+        let long = vec![MenuItem::action(
+            "An absurdly long label that keeps going and going and going and going",
+            None,
+            None,
+            |_, _| {},
+        )];
+        assert_eq!(content_width(&long), px(360.0));
+    }
+}
