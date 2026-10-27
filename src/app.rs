@@ -3948,6 +3948,22 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_heading = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    if this.open_menu == Some(MenuId::Heading) {
+                        this.open_menu = None;
+                    } else {
+                        this.open_menu = Some(MenuId::Heading);
+                        this.menu_selected_ix = None;
+                        this.menu_open_submenu_ix = None;
+                    }
+                    cx.notify();
+                });
+            }
+        };
+
         let on_toggle_overflow = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -4638,12 +4654,21 @@ impl Render for LiteMarkApp {
                         items,
                     )
                 }
+                MenuId::Heading => (
+                    Point::new(
+                        px(heading_button_left(f32::from(window.viewport_size().width))),
+                        px(76.0),
+                    ),
+                    Corner::TopLeft,
+                    px(190.0),
+                    build_heading_menu_items(on_format.clone(), on_close_menu.clone()),
+                ),
                 MenuId::Overflow => {
                     let overflow_x = if is_narrow {
                         (window.viewport_size().width / 2.0 + px(128.0))
                             .min(window.viewport_size().width - px(8.0))
                     } else {
-                        (window.viewport_size().width / 2.0 + px(270.0))
+                        (window.viewport_size().width / 2.0 + px(wide_center_width() / 2.0))
                             .min(window.viewport_size().width - px(8.0))
                     };
                     (
@@ -5579,6 +5604,7 @@ impl Render for LiteMarkApp {
                         FormattingToolbarProps {
                             active_formats,
                             show_overflow_menu: self.open_menu == Some(MenuId::Overflow),
+                            show_heading_menu: self.open_menu == Some(MenuId::Heading),
                             show_table_menu: self.open_menu == Some(MenuId::Table),
                             is_narrow,
                             menu_bar_element,
@@ -5588,6 +5614,7 @@ impl Render for LiteMarkApp {
                             on_insert_link: on_insert_link.clone(),
                             on_toggle_find: on_toggle_find.clone(),
                             on_toggle_overflow: on_toggle_overflow.clone(),
+                            on_toggle_heading: on_toggle_heading.clone(),
                         },
                         &theme,
                     ))
