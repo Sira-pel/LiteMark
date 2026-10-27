@@ -109,9 +109,9 @@ where
                 .when(props.match_case, |d| d.bg(theme.row_active))
                 .hover(|h| h.bg(theme.bg_hover))
                 .tooltip({
-                    let th = theme.clone();
+                    let th = *theme;
                     move |_, cx| {
-                        cx.new(|_| SimpleTooltip::new("Match case", th.clone())).into()
+                        cx.new(|_| SimpleTooltip::new("Match case", th)).into()
                     }
                 })
                 .on_click(move |_, _, cx| toggle(cx))
