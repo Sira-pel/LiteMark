@@ -821,6 +821,8 @@ pub struct Prepaint {
     rows: Vec<PaintRow>,
     numbers: Vec<(Point<Pixels>, Pixels, ShapedLine)>,
     decor_lines: Vec<(Point<Pixels>, Pixels, ShapedLine)>,
+    /// Checkmarks painted over checked task boxes: bounds and color.
+    check_icons: Vec<(Bounds<Pixels>, Hsla)>,
     bg_quads: Vec<PaintQuad>,
     quads: Vec<PaintQuad>,
     strike_quads: Vec<PaintQuad>,
@@ -1061,6 +1063,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 rows,
                 numbers,
                 decor_lines: Vec::new(),
+                check_icons: Vec::new(),
                 bg_quads: Vec::new(),
                 quads,
                 strike_quads: Vec::new(),
@@ -1076,6 +1079,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         // WYSIWYG mode prepaint
         let mut rows = Vec::with_capacity(self.parsed.lines.len());
         let mut decor_lines = Vec::new();
+        let mut check_icons: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
         let mut bg_quads = Vec::new();
         let mut quads = Vec::new();
         let mut strike_quads = Vec::new();
@@ -1645,14 +1649,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             };
                             bg_quads.push(q);
                             if checked {
-                                let inner_sz = px(6.0);
-                                let inner_bounds = Bounds::new(
-                                    point(box_x + px(4.0), box_y + px(4.0)),
-                                    size(inner_sz, inner_sz),
-                                );
-                                let mut check_dot = fill(inner_bounds, gpui::white());
-                                check_dot.corner_radii = Corners::all(px(1.5));
-                                bg_quads.push(check_dot);
+                                let icon_sz = box_sz + px(2.0);
+                                check_icons.push((
+                                    Bounds::new(
+                                        point(box_x - px(1.0), box_y - px(1.0)),
+                                        size(icon_sz, icon_sz),
+                                    ),
+                                    check_mark_color(self.link_color),
+                                ));
                             }
                             if let Some(src_range) = checkbox_source.clone().or_else(|| {
                                 find_task_bracket_range(&self.content, &parsed_line.source)
@@ -1848,6 +1852,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             rows,
             numbers: Vec::new(),
             decor_lines,
+            check_icons,
             bg_quads,
             quads,
             strike_quads,
@@ -1889,6 +1894,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
         for quad in prepaint.quads.drain(..) {
             window.paint_quad(quad);
+        }
+        for (icon_bounds, color) in prepaint.check_icons.drain(..) {
+            let _ = window.paint_svg(
+                icon_bounds,
+                "icons/check.svg".into(),
+                TransformationMatrix::default(),
+                color,
+                cx,
+            );
         }
         for (origin, lh, shaped) in prepaint.numbers.drain(..) {
             let _ = shaped.paint(origin, lh, window, cx);
@@ -1946,6 +1960,16 @@ impl<V: EntityInputHandler> IntoElement for EditorElement<V> {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+/// Checkmark color that contrasts with the checked box's fill: a dark mark on
+/// a light fill (dark theme) and a white one on a dark fill (light theme).
+fn check_mark_color(fill: Hsla) -> Hsla {
+    if fill.l > 0.55 {
+        hsla(0.0, 0.0, 0.08, 1.0)
+    } else {
+        gpui::white()
     }
 }
 
@@ -3375,5 +3399,13 @@ mod tests {
             assert!(size(3) >= px(base) * 1.3, "base {base} h3 vs body");
             assert!(size(4) > px(base), "base {base} h4 vs body");
         }
+    }
+    #[test]
+    fn checkmark_contrasts_with_the_checked_box_fill() {
+        use gpui::hsla;
+        let on_light_fill = super::check_mark_color(hsla(0.0, 0.0, 0.9, 1.0));
+        let on_dark_fill = super::check_mark_color(hsla(0.0, 0.0, 0.07, 1.0));
+        assert!(on_light_fill.l < 0.2, "dark mark on the dark theme's light fill");
+        assert!(on_dark_fill.l > 0.9, "white mark on the light theme's dark fill");
     }
 }
