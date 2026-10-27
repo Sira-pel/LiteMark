@@ -116,6 +116,8 @@ pub struct Theme {
     pub header_hover: Rgba,
     /// Hint chip text in menus (e.g. the current font size).
     pub menu_hint: Rgba,
+    /// Table grid, code fence, rule and gutter lines in the editor.
+    pub border_block: Rgba,
 }
 
 impl Theme {
@@ -173,6 +175,7 @@ impl Theme {
                 bg_code: rgb(0x292929),
                 header_hover: rgb(0x2a2a2a),
                 menu_hint: rgb(0x6e6e6e),
+                border_block: rgb(0x4a4a4a),
             }
         } else {
             Self {
@@ -222,6 +225,7 @@ impl Theme {
                 bg_code: rgb(0xe4e4e4),
                 header_hover: rgb(0xc8c8c8),
                 menu_hint: rgb(0x767676),
+                border_block: rgb(0xb0b0b0),
             }
         }
     }
