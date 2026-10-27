@@ -6028,15 +6028,28 @@ impl Render for LiteMarkApp {
                                 // On narrow windows the sidebar floats over the
                                 // editor as a drawer instead of squeezing it.
                                 if window_width < px(600.0) {
+                                    let close = on_toggle_sidebar.clone();
                                     s.child(deferred(
                                         div()
                                             .absolute()
                                             .top_0()
                                             .left_0()
-                                            .h_full()
-                                            .occlude()
-                                            .shadow_2xl()
-                                            .child(sidebar),
+                                            .size_full()
+                                            // A click on the editor beside the drawer closes it.
+                                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                close(cx);
+                                            })
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .occlude()
+                                                    .shadow_2xl()
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation()
+                                                    })
+                                                    .child(sidebar),
+                                            ),
                                     ))
                                 } else {
                                     s.child(sidebar)
