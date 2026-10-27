@@ -8,6 +8,10 @@ fn default_word_wrap() -> bool {
     true
 }
 
+fn default_check_for_updates() -> bool {
+    true
+}
+
 fn default_base_font_size() -> f32 {
     17.0
 }
@@ -42,6 +46,15 @@ pub struct EditorSettings {
     /// Workspace folders used before, most recent first (never the current one).
     #[serde(default)]
     pub recent_folders: Vec<PathBuf>,
+    /// Look for a newer release on GitHub at startup (at most once a day).
+    #[serde(default = "default_check_for_updates")]
+    pub check_for_updates: bool,
+    /// Unix seconds of the last update check.
+    #[serde(default)]
+    pub last_update_check: Option<u64>,
+    /// Release version whose notice the user closed.
+    #[serde(default)]
+    pub dismissed_update: Option<String>,
 }
 
 impl Default for EditorSettings {
@@ -57,6 +70,9 @@ impl Default for EditorSettings {
             base_font_size: 17.0,
             content_alignment: ContentAlignment::Centered,
             recent_folders: Vec::new(),
+            check_for_updates: true,
+            last_update_check: None,
+            dismissed_update: None,
         }
     }
 }
@@ -122,6 +138,14 @@ mod tests {
         let custom = r#"{"content_alignment": "Left"}"#;
         let parsed_custom: EditorSettings = serde_json::from_str(custom).expect("deserialize custom");
         assert_eq!(parsed_custom.content_alignment, ContentAlignment::Left);
+    }
+
+    #[test]
+    fn update_checks_default_on_for_old_settings_files() {
+        let parsed: EditorSettings = serde_json::from_str("{}").expect("deserialize");
+        assert!(parsed.check_for_updates);
+        assert_eq!(parsed.last_update_check, None);
+        assert_eq!(parsed.dismissed_update, None);
     }
 
     #[test]

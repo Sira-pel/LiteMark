@@ -52,6 +52,7 @@ where
         .child(render_icon("settings", 16.0, if is_open { theme.text_strong } else { theme.text_muted }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_settings_menu_items(
     current_theme: ThemeMode,
     base_font_size: f32,
@@ -59,6 +60,8 @@ pub fn build_settings_menu_items(
     on_set_font_size: impl Fn(f32, &mut App) + 'static + Clone,
     on_open_help: impl Fn(&mut App) + 'static + Clone,
     on_open_about: impl Fn(&mut App) + 'static + Clone,
+    check_for_updates: bool,
+    on_toggle_update_checks: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
     let t_dark = on_set_theme.clone();
     let t_light = on_set_theme.clone();
@@ -104,6 +107,11 @@ pub fn build_settings_menu_items(
             action: std::sync::Arc::new(|_, _| {}),
         },
         MenuItem::divider(),
+        MenuItem::check("Check for updates", check_for_updates, None, {
+            let t = on_toggle_update_checks.clone();
+            move |_, cx| t(cx)
+        }),
+        MenuItem::divider(),
         MenuItem::action("Help & shortcuts", None, Some("F1"), {
             let h = on_open_help.clone();
             move |_, cx| h(cx)
@@ -130,6 +138,8 @@ mod tests {
             |_, _| {},
             |_| {},
             |_| {},
+            true,
+            |_| {},
         );
 
         let font_item = items.iter().find(|i| i.label == "Font size").expect("Font size menu item exists");
@@ -154,6 +164,24 @@ mod tests {
             assert!(matches!(checked_15.kind, MenuItemKind::Radio(false)));
         } else {
             panic!("Expected submenu for Font size");
+        }
+    }
+
+    #[test]
+    fn update_check_item_reflects_the_setting() {
+        for enabled in [true, false] {
+            let items = build_settings_menu_items(
+                ThemeMode::YaruDark,
+                17.0,
+                |_, _| {},
+                |_, _| {},
+                |_| {},
+                |_| {},
+                enabled,
+                |_| {},
+            );
+            let item = items.iter().find(|i| i.label == "Check for updates").expect("item exists");
+            assert!(matches!(item.kind, MenuItemKind::Check(c) if c == enabled));
         }
     }
 }
