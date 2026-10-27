@@ -83,3 +83,22 @@ jobs:
 
       - name: Format-toggle gate
         run: .cursor/skills/verify-litemark/scripts/format-toggle-gate.sh
+
+  # Compile check on Windows and macOS. Not required to pass yet: the port is
+  # in progress, so a failure here shows what is left without blocking merges.
+  check-cross-platform:
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check

@@ -3383,7 +3383,7 @@ impl LiteMarkApp {
             && self.settings.view_mode == ViewMode::Wysiwyg
         {
             if let Some(url) = clicked_link {
-                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                cx.open_url(&url);
                 return;
             }
         }
@@ -4833,11 +4833,15 @@ impl Render for LiteMarkApp {
         let on_open_external_pdf = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
-                    if let Some(ref path) = this.active_tab().and_then(|t| t.file_path.clone()) {
-                        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-                    }
-                });
+                let path = view
+                    .read_with(cx, |this, _| {
+                        this.active_tab().and_then(|t| t.file_path.clone())
+                    })
+                    .ok()
+                    .flatten();
+                if let Some(path) = path {
+                    cx.open_with_system(&path);
+                }
             }
         };
 
@@ -5460,7 +5464,7 @@ impl Render for LiteMarkApp {
                         if let Some(ref path) =
                             this.active_tab().and_then(|t| t.file_path.clone())
                         {
-                            let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+                            cx.open_with_system(path);
                         }
                     } else {
                         this.show_pdf_modal = false;
