@@ -31,6 +31,15 @@ pub(crate) struct OptimisticClose {
 
 /// Shared state for one bulk trash: the result counter and the selection to
 /// put back (once, after the last row finishes) if anything failed.
+/// Result of moving or copying one dropped row.
+enum DropOutcome {
+    /// Carries the single-item toast text.
+    Done(String),
+    /// Nothing to do (already in that folder, dropped on itself).
+    Skipped,
+    Failed(String),
+}
+
 struct BulkTrash {
     report: RefCell<BulkTrashReport>,
     prev_selected: Option<SidebarTarget>,
@@ -1733,10 +1742,10 @@ impl LiteMarkApp {
         let dest_is_target = |t: &SidebarTarget| {
             matches!((t, &folder_id), (SidebarTarget::Folder(id), Some(dest)) if id == dest)
         };
-        let moving: Vec<SidebarTarget> = match plan_bulk_trash(&rows, &[]) {
-            BulkTrashPlan::Trash(list) => list.into_iter().filter(|t| !dest_is_target(t)).collect(),
-            _ => Vec::new(),
-        };
+        let moving: Vec<SidebarTarget> = top_level_targets(&rows)
+            .into_iter()
+            .filter(|t| !dest_is_target(t))
+            .collect();
         if moving.is_empty() {
             return;
         }
@@ -1755,15 +1764,27 @@ impl LiteMarkApp {
                 .map(str::to_string),
         }
         .unwrap_or_else(|| "the workspace root".into());
-        let count = moving.len();
         self.error_message = None;
         self.multi_selection = None;
+        let (mut done, mut failed) = (0usize, 0usize);
+        let mut last_error = None;
         for target in moving {
-            self.handle_drop_item(target, folder_id.clone(), copy, cx);
+            match self.drop_one(target, folder_id.clone(), copy) {
+                DropOutcome::Done(_) => done += 1,
+                DropOutcome::Skipped => {}
+                DropOutcome::Failed(err) => {
+                    failed += 1;
+                    last_error = Some(err);
+                }
+            }
         }
-        if self.error_message.is_none() {
-            let verb = if copy { "Copied" } else { "Moved" };
-            self.show_toast(format!("{verb} {count} items to {dest_name}"), cx);
+        let verb = if copy { "Copied" } else { "Moved" };
+        match last_error {
+            None if done > 0 => {
+                self.show_toast(format!("{verb} {done} items to {dest_name}"), cx)
+            }
+            None => {}
+            Some(err) => self.show_error(format!("{verb} {done}, {failed} failed: {err}")),
         }
     }
 
@@ -1774,9 +1795,22 @@ impl LiteMarkApp {
         copy: bool,
         cx: &mut Context<Self>,
     ) {
+        match self.drop_one(target, folder_id, copy) {
+            DropOutcome::Done(message) => self.show_toast(message, cx),
+            DropOutcome::Skipped => {}
+            DropOutcome::Failed(err) => self.show_error(err),
+        }
+    }
+
+    fn drop_one(
+        &mut self,
+        target: SidebarTarget,
+        folder_id: Option<String>,
+        copy: bool,
+    ) -> DropOutcome {
         match target {
-            SidebarTarget::File(id) => self.move_or_copy_note(&id, folder_id, copy, cx),
-            SidebarTarget::Folder(id) => self.move_or_copy_folder(&id, folder_id, copy, cx),
+            SidebarTarget::File(id) => self.move_or_copy_note(&id, folder_id, copy),
+            SidebarTarget::Folder(id) => self.move_or_copy_folder(&id, folder_id, copy),
         }
     }
 
@@ -1785,8 +1819,7 @@ impl LiteMarkApp {
         file_id: &str,
         folder_id: Option<String>,
         copy: bool,
-        cx: &mut Context<Self>,
-    ) {
+    ) -> DropOutcome {
         let (dest_name, dest_path) = if let Some(dest_id) = folder_id {
             let Some((name, path)) = self
                 .workspace
@@ -1795,8 +1828,7 @@ impl LiteMarkApp {
                 .find(|f| f.id == dest_id)
                 .map(|f| (f.name.clone(), f.path.clone()))
             else {
-                self.show_error("That folder is no longer available.");
-                return;
+                return DropOutcome::Failed("That folder is no longer available.".into());
             };
             (name, path)
         } else {
@@ -1815,11 +1847,10 @@ impl LiteMarkApp {
             .find(|f| f.id == file_id)
             .cloned()
         else {
-            self.show_error("That note is no longer in the folder.");
-            return;
+            return DropOutcome::Failed("That note is no longer in the folder.".into());
         };
         if file.path.parent() == Some(dest_path.as_path()) {
-            return; // already in that folder
+            return DropOutcome::Skipped;
         }
         if copy {
             let result = read_note(&file.path).and_then(|content| {
@@ -1841,19 +1872,19 @@ impl LiteMarkApp {
                         .unwrap_or(file.name.as_str())
                         .to_string();
                     self.open_loaded_tab(display, String::new(), Some(new_path), new_file_id);
-                    self.show_toast(format!("Copied {} to {dest_name}", file.name), cx);
+                    DropOutcome::Done(format!("Copied {} to {dest_name}", file.name))
                 }
-                Err(err) => self.show_error(format!("Couldn't copy note: {err}")),
+                Err(err) => DropOutcome::Failed(format!("Couldn't copy note: {err}")),
             }
         } else {
             match move_note(&file.path, &dest_path) {
                 Ok(new_path) if new_path != file.path => {
                     self.retarget_open_tabs(&file.path, &new_path);
                     self.rescan_workspace();
-                    self.show_toast(format!("Moved {} to {dest_name}", file.name), cx);
+                    DropOutcome::Done(format!("Moved {} to {dest_name}", file.name))
                 }
-                Ok(_) => {}
-                Err(err) => self.show_error(format!("Couldn't move note: {err}")),
+                Ok(_) => DropOutcome::Skipped,
+                Err(err) => DropOutcome::Failed(format!("Couldn't move note: {err}")),
             }
         }
     }
@@ -1863,8 +1894,7 @@ impl LiteMarkApp {
         folder_id: &str,
         dest_folder_id: Option<String>,
         copy: bool,
-        cx: &mut Context<Self>,
-    ) {
+    ) -> DropOutcome {
         let Some((name, src)) = self
             .workspace
             .folders
@@ -1872,12 +1902,11 @@ impl LiteMarkApp {
             .find(|f| f.id == folder_id)
             .map(|f| (f.name.clone(), f.path.clone()))
         else {
-            self.show_error("That folder is no longer available.");
-            return;
+            return DropOutcome::Failed("That folder is no longer available.".into());
         };
         let (dest_name, dest_path) = if let Some(dest_id) = dest_folder_id {
             if dest_id == folder_id {
-                return; // dropped on itself
+                return DropOutcome::Skipped;
             }
             let Some((dname, dpath)) = self
                 .workspace
@@ -1886,8 +1915,7 @@ impl LiteMarkApp {
                 .find(|f| f.id == dest_id)
                 .map(|f| (f.name.clone(), f.path.clone()))
             else {
-                self.show_error("That folder is no longer available.");
-                return;
+                return DropOutcome::Failed("That folder is no longer available.".into());
             };
             (dname, dpath)
         } else {
@@ -1902,29 +1930,28 @@ impl LiteMarkApp {
         // Never move/copy a folder into its own descendant (or itself) —
         // that would create a cycle on disk.
         if dest_path.starts_with(&src) {
-            self.show_error("Can't move a folder into itself.");
-            return;
+            return DropOutcome::Failed("Can't move a folder into itself.".into());
         }
         if src.parent() == Some(dest_path.as_path()) {
-            return; // already in that folder
+            return DropOutcome::Skipped;
         }
         if copy {
             match copy_folder(&src, &dest_path) {
                 Ok(_) => {
                     self.rescan_workspace();
-                    self.show_toast(format!("Copied {name} to {dest_name}"), cx);
+                    DropOutcome::Done(format!("Copied {name} to {dest_name}"))
                 }
-                Err(err) => self.show_error(format!("Couldn't copy folder: {err}")),
+                Err(err) => DropOutcome::Failed(format!("Couldn't copy folder: {err}")),
             }
         } else {
             match move_folder(&src, &dest_path) {
                 Ok(new_path) if new_path != src => {
                     self.retarget_open_tabs(&src, &new_path);
                     self.rescan_workspace();
-                    self.show_toast(format!("Moved {name} to {dest_name}"), cx);
+                    DropOutcome::Done(format!("Moved {name} to {dest_name}"))
                 }
-                Ok(_) => {}
-                Err(err) => self.show_error(format!("Couldn't move folder: {err}")),
+                Ok(_) => DropOutcome::Skipped,
+                Err(err) => DropOutcome::Failed(format!("Couldn't move folder: {err}")),
             }
         }
     }

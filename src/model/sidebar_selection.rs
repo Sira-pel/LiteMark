@@ -58,6 +58,31 @@ pub enum BulkTrashPlan<T> {
     Trash(Vec<T>),
 }
 
+/// Rows not inside another selected folder; a folder carries its children.
+fn top_level_rows<T>(items: &[(T, PathBuf, bool)]) -> Vec<&(T, PathBuf, bool)> {
+    let folder_paths: Vec<&Path> = items
+        .iter()
+        .filter(|(_, _, is_folder)| *is_folder)
+        .map(|(_, path, _)| path.as_path())
+        .collect();
+    items
+        .iter()
+        .filter(|(_, path, _)| {
+            !folder_paths
+                .iter()
+                .any(|folder| path.as_path() != *folder && path.starts_with(folder))
+        })
+        .collect()
+}
+
+/// `top_level_rows` for callers (such as moving) that only need the rows.
+pub fn top_level_targets<T: Clone>(items: &[(T, PathBuf, bool)]) -> Vec<T> {
+    top_level_rows(items)
+        .into_iter()
+        .map(|(t, _, _)| t.clone())
+        .collect()
+}
+
 /// `items` are `(row, path)` for rows still in the workspace; `folders`
 /// marks which of them are folders. `modified_paths` are open notes with
 /// unsaved changes.
@@ -65,19 +90,7 @@ pub fn plan_bulk_trash<T: Clone>(
     items: &[(T, PathBuf, bool)],
     modified_paths: &[PathBuf],
 ) -> BulkTrashPlan<T> {
-    let folder_paths: Vec<&Path> = items
-        .iter()
-        .filter(|(_, _, is_folder)| *is_folder)
-        .map(|(_, path, _)| path.as_path())
-        .collect();
-    let kept: Vec<&(T, PathBuf, bool)> = items
-        .iter()
-        .filter(|(_, path, _)| {
-            !folder_paths
-                .iter()
-                .any(|folder| path.as_path() != *folder && path.starts_with(folder))
-        })
-        .collect();
+    let kept = top_level_rows(items);
     if kept.is_empty() {
         return BulkTrashPlan::Nothing;
     }
@@ -194,6 +207,16 @@ mod tests {
             plan_bulk_trash(&items, &[]),
             BulkTrashPlan::Trash(vec!["dir", "out"])
         );
+    }
+
+    #[test]
+    fn top_level_targets_drop_rows_inside_a_selected_folder() {
+        let items = [
+            item("dir", "/w/dir", true),
+            item("in", "/w/dir/in.md", false),
+            item("out", "/w/out.md", false),
+        ];
+        assert_eq!(top_level_targets(&items), vec!["dir", "out"]);
     }
 
     #[test]
