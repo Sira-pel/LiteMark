@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use super::document::FileType;
 
 #[allow(dead_code)]
@@ -32,12 +32,24 @@ pub struct WorkspaceDirectory {
     pub files: Vec<WorkspaceFile>,
 }
 
+/// Default notes folder under `base`: an existing `Notes` folder keeps being
+/// used so earlier installs don't lose their notes; fresh installs get `LiteMark`.
+pub fn default_notes_dir(base: &Path) -> PathBuf {
+    let legacy = base.join("Notes");
+    if legacy.is_dir() {
+        legacy
+    } else {
+        base.join("LiteMark")
+    }
+}
+
 impl Default for WorkspaceDirectory {
     fn default() -> Self {
         let home = dirs::document_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
-        let notes = home.join("LiteMark");
+        let notes = default_notes_dir(&home);
+        let name = notes.file_name().and_then(|n| n.to_str()).unwrap_or("LiteMark");
         Self {
-            folder_name: "~/Documents/LiteMark".to_string(),
+            folder_name: format!("~/Documents/{name}"),
             folder_path: notes,
             is_linked_to_local_disk: true,
             folders: Vec::new(),
@@ -70,6 +82,17 @@ mod tests {
             file_type: FileType::Markdown,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn default_notes_dir_keeps_an_existing_notes_folder() {
+        let base = std::env::temp_dir().join(format!("litemark-default-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        assert_eq!(default_notes_dir(&base), base.join("LiteMark"));
+        std::fs::create_dir(base.join("Notes")).unwrap();
+        assert_eq!(default_notes_dir(&base), base.join("Notes"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
