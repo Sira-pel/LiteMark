@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod document;
 pub mod session;
 pub mod sidebar_selection;

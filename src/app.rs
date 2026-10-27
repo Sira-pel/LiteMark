@@ -3,6 +3,7 @@ use crate::markdown::{export_stem, parse_document, render_export, TableColumnAli
 use crate::model::text_ops::{
     home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
 };
+use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
@@ -986,11 +987,7 @@ impl LiteMarkApp {
             return None;
         }
         let visible = tab.selected_visible_text();
-        Some(if visible == markdown {
-            ClipboardItem::new_string(markdown)
-        } else {
-            ClipboardItem::new_string_with_metadata(visible, markdown)
-        })
+        Some(clipboard_item(visible, markdown))
     }
 
     pub fn handle_cut(&mut self, cx: &mut App) {
@@ -1018,18 +1015,17 @@ impl LiteMarkApp {
     pub fn handle_paste(&mut self, cx: &mut App) {
         if let Some(item) = cx.read_from_clipboard() {
             // A copy from a Markdown tab carries its source as metadata.
-            let markdown = item.metadata().cloned().filter(|_| {
-                self.active_tab()
-                    .is_some_and(|tab| tab.file_type == FileType::Markdown)
-            });
-            if let Some(text) = markdown.or_else(|| item.text()) {
+            let into_markdown = self
+                .active_tab()
+                .is_some_and(|tab| tab.file_type == FileType::Markdown);
+            if let Some(text) = paste_text(&item, into_markdown) {
                 if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
                     self.show_error("PDF files are read-only.");
                     return;
                 }
                 if let Some(tab) = self.active_tab_mut() {
                     let range = tab.selection_range();
-                    tab.edit(range, text.as_ref());
+                    tab.edit(range, &text);
                 }
                 self.refresh_find();
             }
