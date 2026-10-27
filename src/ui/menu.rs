@@ -365,7 +365,7 @@ where
                                     .border_1()
                                     .border_color(theme.border_surface)
                                     .text_size(px(11.0))
-                                    .text_color(theme.menu_disabled)
+                                    .text_color(theme.menu_hint)
                                     .child(hint)
                             )
                         })

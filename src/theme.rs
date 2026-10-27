@@ -114,6 +114,8 @@ pub struct Theme {
     pub bg_code: Rgba,
     /// Hover fill for header-bar buttons (window controls, new tab, settings).
     pub header_hover: Rgba,
+    /// Hint chip text in menus (e.g. the current font size).
+    pub menu_hint: Rgba,
 }
 
 impl Theme {
@@ -170,6 +172,7 @@ impl Theme {
                 bg_inset: rgb(0x191919),
                 bg_code: rgb(0x292929),
                 header_hover: rgb(0x2a2a2a),
+                menu_hint: rgb(0x6e6e6e),
             }
         } else {
             Self {
@@ -190,25 +193,25 @@ impl Theme {
                 border_surface: rgb(0xcacaca),
                 text_primary: rgb(0x2e2e2e),
                 text_muted: rgb(0x5e5e5e),
-                selection_bg: rgba(0x0000001a),
+                selection_bg: rgba(0x0000002e),
                 close_hover: rgb(0xcf2b35),
                 text_hi: rgb(0x262626),
                 text_strong: rgb(0x2b2b2b),
-                text_faint: rgb(0x858585),
+                text_faint: rgb(0x6f6f6f),
                 row_text: rgb(0x3d3d3d),
-                row_active: rgb(0xd6d6d6),
-                row_hover: rgb(0xdedede),
+                row_active: rgb(0xcdcdcd),
+                row_hover: rgb(0xd8d8d8),
                 row_multi: rgb(0xe1edf8),
                 row_multi_border: rgb(0xa9c6e4),
                 tile_hover: rgb(0xd8d8d8),
-                menu_bg: rgb(0xefefef),
+                menu_bg: rgb(0xf7f7f7),
                 wc_glyph: rgb(0x4a4a4a),
                 h1: rgb(0x1f1f1f),
                 h2: rgb(0x262626),
                 code_text: rgb(0x2e2e2e),
                 pill_border: rgb(0xcccccc),
                 pill_text: rgb(0x555555),
-                placeholder: rgb(0x888888),
+                placeholder: rgb(0x6f6f6f),
                 menu_text: rgb(0x383838),
                 menu_shortcut: rgb(0x767676),
                 menu_disabled: rgb(0xa8a8a8),
@@ -218,6 +221,7 @@ impl Theme {
                 bg_inset: rgb(0xe6e6e6),
                 bg_code: rgb(0xe4e4e4),
                 header_hover: rgb(0xc8c8c8),
+                menu_hint: rgb(0x767676),
             }
         }
     }
