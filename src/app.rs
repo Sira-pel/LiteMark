@@ -3,6 +3,7 @@ use crate::markdown::{export_stem, parse_document, render_export, TableColumnAli
 use crate::model::text_ops::{
     home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
 };
+use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
@@ -976,15 +977,24 @@ impl LiteMarkApp {
         self.settings.save();
     }
 
-    pub fn handle_cut(&mut self, cx: &mut App) {
-        let text = self
-            .active_tab()
-            .map(|tab| tab.selected_text())
-            .unwrap_or_default();
-        if text.is_empty() {
-            return;
+    /// Clipboard item for the active selection. Other apps get the text as
+    /// the WYSIWYG view shows it; the Markdown source rides along as metadata
+    /// so a paste back into a Markdown tab keeps the formatting.
+    fn selection_clipboard_item(&mut self) -> Option<ClipboardItem> {
+        let tab = self.active_tab_mut()?;
+        let markdown = tab.selected_text();
+        if markdown.is_empty() {
+            return None;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let visible = tab.selected_visible_text();
+        Some(clipboard_item(visible, markdown))
+    }
+
+    pub fn handle_cut(&mut self, cx: &mut App) {
+        let Some(item) = self.selection_clipboard_item() else {
+            return;
+        };
+        cx.write_to_clipboard(item);
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
             self.show_error("PDF files are read-only.");
             return;
@@ -997,24 +1007,25 @@ impl LiteMarkApp {
     }
 
     pub fn handle_copy(&mut self, cx: &mut App) {
-        if let Some(tab) = self.active_tab() {
-            let text = tab.selected_text();
-            if !text.is_empty() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
+        if let Some(item) = self.selection_clipboard_item() {
+            cx.write_to_clipboard(item);
         }
     }
 
     pub fn handle_paste(&mut self, cx: &mut App) {
         if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
+            // A copy from a Markdown tab carries its source as metadata.
+            let into_markdown = self
+                .active_tab()
+                .is_some_and(|tab| tab.file_type == FileType::Markdown);
+            if let Some(text) = paste_text(&item, into_markdown) {
                 if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
                     self.show_error("PDF files are read-only.");
                     return;
                 }
                 if let Some(tab) = self.active_tab_mut() {
                     let range = tab.selection_range();
-                    tab.edit(range, text.as_ref());
+                    tab.edit(range, &text);
                 }
                 self.refresh_find();
             }
