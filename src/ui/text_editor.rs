@@ -773,6 +773,7 @@ pub struct EditorElement<V: 'static> {
     pub selection_color: Hsla,
     pub find_color: Hsla,
     pub cursor_color: Hsla,
+    pub active_find_color: Hsla,
     pub gutter_color: Hsla,
     pub gutter_bg: Hsla,
     pub font_family: SharedString,
@@ -820,6 +821,8 @@ pub struct Prepaint {
     rows: Vec<PaintRow>,
     numbers: Vec<(Point<Pixels>, Pixels, ShapedLine)>,
     decor_lines: Vec<(Point<Pixels>, Pixels, ShapedLine)>,
+    /// Checkmarks painted over checked task boxes: bounds and color.
+    check_icons: Vec<(Bounds<Pixels>, Hsla)>,
     bg_quads: Vec<PaintQuad>,
     quads: Vec<PaintQuad>,
     strike_quads: Vec<PaintQuad>,
@@ -945,16 +948,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     SharedString::from(self.content[start..end].to_string())
                 };
                 let display_len = if start == end { 0 } else { slice.len() };
-                let is_heading = slice.starts_with("# ")
-                    || slice.starts_with("## ")
-                    || slice.starts_with("### ");
                 let runs = raw_line_runs(
                     display_len.max(slice.len()),
                     start,
                     self.marked.clone(),
                     base_font.clone(),
                     self.text_color,
-                    is_heading,
                 );
                 let shaped =
                     window
@@ -979,7 +978,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 );
                 for (hit_index, hit) in self.find_hits.iter().enumerate() {
                     let color = if self.active_find == Some(hit_index) {
-                        self.cursor_color
+                        self.active_find_color
                     } else {
                         self.find_color
                     };
@@ -1064,6 +1063,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 rows,
                 numbers,
                 decor_lines: Vec::new(),
+                check_icons: Vec::new(),
                 bg_quads: Vec::new(),
                 quads,
                 strike_quads: Vec::new(),
@@ -1079,6 +1079,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         // WYSIWYG mode prepaint
         let mut rows = Vec::with_capacity(self.parsed.lines.len());
         let mut decor_lines = Vec::new();
+        let mut check_icons: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
         let mut bg_quads = Vec::new();
         let mut quads = Vec::new();
         let mut strike_quads = Vec::new();
@@ -1361,7 +1362,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         );
                         for (hit_index, hit) in self.find_hits.iter().enumerate() {
                             let color = if self.active_find == Some(hit_index) {
-                                self.cursor_color
+                                self.active_find_color
                             } else {
                                 self.find_color
                             };
@@ -1648,14 +1649,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             };
                             bg_quads.push(q);
                             if checked {
-                                let inner_sz = px(6.0);
-                                let inner_bounds = Bounds::new(
-                                    point(box_x + px(4.0), box_y + px(4.0)),
-                                    size(inner_sz, inner_sz),
-                                );
-                                let mut check_dot = fill(inner_bounds, gpui::white());
-                                check_dot.corner_radii = Corners::all(px(1.5));
-                                bg_quads.push(check_dot);
+                                let icon_sz = box_sz + px(2.0);
+                                check_icons.push((
+                                    Bounds::new(
+                                        point(box_x - px(1.0), box_y - px(1.0)),
+                                        size(icon_sz, icon_sz),
+                                    ),
+                                    check_mark_color(self.link_color),
+                                ));
                             }
                             if let Some(src_range) = checkbox_source.clone().or_else(|| {
                                 find_task_bracket_range(&self.content, &parsed_line.source)
@@ -1739,7 +1740,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 );
                 for (hit_index, hit) in self.find_hits.iter().enumerate() {
                     let color = if self.active_find == Some(hit_index) {
-                        self.cursor_color
+                        self.active_find_color
                     } else {
                         self.find_color
                     };
@@ -1851,6 +1852,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             rows,
             numbers: Vec::new(),
             decor_lines,
+            check_icons,
             bg_quads,
             quads,
             strike_quads,
@@ -1892,6 +1894,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
         for quad in prepaint.quads.drain(..) {
             window.paint_quad(quad);
+        }
+        for (icon_bounds, color) in prepaint.check_icons.drain(..) {
+            let _ = window.paint_svg(
+                icon_bounds,
+                "icons/check.svg".into(),
+                TransformationMatrix::default(),
+                color,
+                cx,
+            );
         }
         for (origin, lh, shaped) in prepaint.numbers.drain(..) {
             let _ = shaped.paint(origin, lh, window, cx);
@@ -1952,26 +1963,39 @@ impl<V: EntityInputHandler> IntoElement for EditorElement<V> {
     }
 }
 
+/// Checkmark color that contrasts with the checked box's fill: a dark mark on
+/// a light fill (dark theme) and a white one on a dark fill (light theme).
+fn check_mark_color(fill: Hsla) -> Hsla {
+    if fill.l > 0.55 {
+        hsla(0.0, 0.0, 0.08, 1.0)
+    } else {
+        gpui::white()
+    }
+}
+
 fn wysiwyg_line_metrics(
     kind: &LineKind,
     base_font_size: Pixels,
 ) -> (Pixels, Pixels, Pixels, Pixels) {
     match kind {
+        // Each level is a clear step above body text at every zoom, since
+        // headings no longer get an automatic bold. The gap above scales with
+        // the font so sections stay separated when zoomed.
         LineKind::Heading { level: 1 } => {
-            let fs = base_font_size * 1.7;
-            (fs, fs * 1.45, px(8.0), px(0.0))
+            let fs = base_font_size * 2.0;
+            (fs, fs * 1.4, base_font_size * 0.7, px(0.0))
         }
         LineKind::Heading { level: 2 } => {
-            let fs = base_font_size * 1.4;
-            (fs, fs * 1.45, px(6.0), px(0.0))
+            let fs = base_font_size * 1.6;
+            (fs, fs * 1.4, base_font_size * 0.55, px(0.0))
         }
         LineKind::Heading { level: 3 } => {
-            let fs = base_font_size * 1.2;
-            (fs, fs * 1.45, px(4.0), px(0.0))
+            let fs = base_font_size * 1.35;
+            (fs, fs * 1.45, base_font_size * 0.4, px(0.0))
         }
         LineKind::Heading { .. } => {
-            let fs = base_font_size * 1.08;
-            (fs, fs * 1.5, px(2.0), px(0.0))
+            let fs = base_font_size * 1.15;
+            (fs, fs * 1.5, base_font_size * 0.2, px(0.0))
         }
         LineKind::ListItem { indent_cols, .. } => (
             base_font_size,
@@ -2041,6 +2065,29 @@ fn collect_line_links(line: &ParsedLine) -> Vec<(Range<usize>, String)> {
     links
 }
 
+/// GPUI merges neighbouring runs into the first run's font whenever color,
+/// underline and strikethrough match, without comparing the fonts. Bold or
+/// italic text that keeps its neighbours' color (headings do) would then draw
+/// in the first run's weight. Give such a run an imperceptibly different alpha
+/// so the font change survives.
+fn keep_font_changes_distinct(runs: &mut [TextRun]) {
+    for i in 1..runs.len() {
+        let (before, rest) = runs.split_at_mut(i);
+        let (prev, cur) = (&before[i - 1], &mut rest[0]);
+        if prev.font != cur.font
+            && prev.color == cur.color
+            && prev.underline == cur.underline
+            && prev.strikethrough == cur.strikethrough
+        {
+            cur.color.a = if cur.color.a > 0.5 {
+                cur.color.a - 0.004
+            } else {
+                cur.color.a + 0.004
+            };
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn wysiwyg_slice_runs(
     parsed_line: &ParsedLine,
@@ -2054,9 +2101,9 @@ fn wysiwyg_slice_runs(
 ) -> Vec<TextRun> {
     let slice_len = display_slice.end.saturating_sub(display_slice.start);
     let (default_weight, default_color, use_mono) = match &parsed_line.kind {
-        LineKind::Heading { level: 1 } => (FontWeight::BOLD, colors.h1_color, false),
-        LineKind::Heading { level: 2 } => (FontWeight::BOLD, colors.h2_color, false),
-        LineKind::Heading { .. } => (FontWeight::BOLD, colors.strong_color, false),
+        LineKind::Heading { level: 1 } => (FontWeight::NORMAL, colors.h1_color, false),
+        LineKind::Heading { level: 2 } => (FontWeight::NORMAL, colors.h2_color, false),
+        LineKind::Heading { .. } => (FontWeight::NORMAL, colors.strong_color, false),
         LineKind::CodeLine | LineKind::CodeFence { .. } => {
             (FontWeight::NORMAL, colors.code_color, true)
         }
@@ -2161,6 +2208,7 @@ fn wysiwyg_slice_runs(
     }
 
     runs.retain(|r| r.len > 0);
+    keep_font_changes_distinct(&mut runs);
     runs
 }
 
@@ -2257,6 +2305,7 @@ fn wysiwyg_cell_runs(
     }
 
     runs.retain(|r| r.len > 0);
+    keep_font_changes_distinct(&mut runs);
     runs
 }
 
@@ -2427,13 +2476,9 @@ fn raw_line_runs(
     len: usize,
     line_start: usize,
     marked: Option<Range<usize>>,
-    mut font: Font,
+    font: Font,
     color: Hsla,
-    is_heading: bool,
 ) -> Vec<TextRun> {
-    if is_heading {
-        font.weight = FontWeight::BOLD;
-    }
     let base = TextRun {
         len,
         font,
@@ -3232,5 +3277,135 @@ mod tests {
         for run in &runs_bq {
             assert_eq!(run.color, colors.muted_color);
         }
+    }
+    #[test]
+    fn headings_are_not_bold_unless_the_user_adds_it() {
+        use gpui::{font, hsla, FontStyle, FontWeight};
+        let colors = super::EditorColors {
+            text_color: hsla(0.0, 0.0, 0.8, 1.0),
+            strong_color: hsla(0.0, 0.0, 1.0, 1.0),
+            muted_color: hsla(0.0, 0.0, 0.5, 1.0),
+            h1_color: hsla(0.1, 0.8, 0.5, 1.0),
+            h2_color: hsla(0.2, 0.8, 0.5, 1.0),
+            code_color: hsla(0.3, 0.8, 0.5, 1.0),
+            code_bg: hsla(0.4, 0.8, 0.5, 1.0),
+            link_color: hsla(0.5, 0.8, 0.5, 1.0),
+            border_color: hsla(0.6, 0.8, 0.5, 1.0),
+        };
+        let (base, mono) = (font("Ubuntu"), font("Ubuntu Mono"));
+        let runs_for = |src: &str| {
+            let doc = parse_document(src);
+            let line = &doc.lines[0];
+            super::wysiwyg_slice_runs(
+                line,
+                0..line.display_text.len(),
+                line.display_text.len(),
+                &line.offset_map,
+                None,
+                &base,
+                &mono,
+                &colors,
+            )
+        };
+
+        let plain = runs_for("# Hello world");
+        assert!(plain.iter().all(|r| r.font.weight == FontWeight::NORMAL));
+
+        let mixed = runs_for("# Hello **world** and *more*");
+        assert_eq!(mixed[0].font.weight, FontWeight::NORMAL);
+        assert_eq!(mixed[1].font.weight, FontWeight::BOLD);
+        assert_eq!(mixed[2].font.weight, FontWeight::NORMAL);
+        assert_eq!(mixed[3].font.style, FontStyle::Italic);
+
+        let all_bold = runs_for("## **Hello world**");
+        assert!(all_bold.iter().all(|r| r.font.weight == FontWeight::BOLD));
+    }
+    /// GPUI merges neighbouring runs into the first one's font when color,
+    /// underline and strikethrough match. Any two neighbours with different
+    /// fonts must therefore differ in one of them, or the whole line draws in
+    /// the first run's weight.
+    #[test]
+    fn neighbouring_runs_with_different_fonts_are_never_mergeable() {
+        use gpui::{font, hsla};
+        let colors = super::EditorColors {
+            text_color: hsla(0.0, 0.0, 0.8, 1.0),
+            strong_color: hsla(0.0, 0.0, 1.0, 1.0),
+            muted_color: hsla(0.0, 0.0, 0.5, 1.0),
+            h1_color: hsla(0.1, 0.8, 0.5, 1.0),
+            h2_color: hsla(0.2, 0.8, 0.5, 1.0),
+            code_color: hsla(0.3, 0.8, 0.5, 1.0),
+            code_bg: hsla(0.4, 0.8, 0.5, 1.0),
+            link_color: hsla(0.5, 0.8, 0.5, 1.0),
+            border_color: hsla(0.6, 0.8, 0.5, 1.0),
+        };
+        let (base, mono) = (font("Ubuntu"), font("Ubuntu Mono"));
+        let sources = [
+            "# **Welcome** to LiteMark",
+            "# Welcome to **LiteMark**",
+            "# Welcome **to** LiteMark",
+            "# *Welcome* to LiteMark",
+            "# **Welcome** to *LiteMark*",
+            "## **Welcome** to LiteMark",
+            "### **Welcome** to LiteMark",
+            "#### **Welcome** to LiteMark",
+            "**Welcome** to LiteMark",
+            "> **Welcome** to LiteMark",
+            "- **Welcome** to LiteMark",
+        ];
+        for src in sources {
+            let doc = parse_document(src);
+            let line = &doc.lines[0];
+            let runs = super::wysiwyg_slice_runs(
+                line,
+                0..line.display_text.len(),
+                line.display_text.len(),
+                &line.offset_map,
+                None,
+                &base,
+                &mono,
+                &colors,
+            );
+            assert!(runs.len() > 1, "{src}: expected mixed runs");
+            for pair in runs.windows(2) {
+                if pair[0].font != pair[1].font {
+                    assert!(
+                        pair[0].color != pair[1].color
+                            || pair[0].underline != pair[1].underline
+                            || pair[0].strikethrough != pair[1].strikethrough,
+                        "{src}: GPUI would merge runs {:?} and {:?}",
+                        pair[0].font.weight,
+                        pair[1].font.weight
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn heading_sizes_step_clearly_above_body_text_at_every_zoom() {
+        use crate::markdown::LineKind;
+        for base in [14.0_f32, 16.0, 24.0] {
+            let size = |level: u8| {
+                super::wysiwyg_line_metrics(&LineKind::Heading { level }, px(base)).0
+            };
+            let gap = |level: u8| {
+                super::wysiwyg_line_metrics(&LineKind::Heading { level }, px(base)).2
+            };
+            // Strictly decreasing, and each at least 10% above the next level.
+            for level in 1..4u8 {
+                assert!(size(level) >= size(level + 1) * 1.1, "base {base} h{level}");
+                assert!(gap(level) > gap(level + 1), "base {base} h{level} gap");
+            }
+            // H3 stays at least 30% above body text.
+            assert!(size(3) >= px(base) * 1.3, "base {base} h3 vs body");
+            assert!(size(4) > px(base), "base {base} h4 vs body");
+        }
+    }
+    #[test]
+    fn checkmark_contrasts_with_the_checked_box_fill() {
+        use gpui::hsla;
+        let on_light_fill = super::check_mark_color(hsla(0.0, 0.0, 0.9, 1.0));
+        let on_dark_fill = super::check_mark_color(hsla(0.0, 0.0, 0.07, 1.0));
+        assert!(on_light_fill.l < 0.2, "dark mark on the dark theme's light fill");
+        assert!(on_dark_fill.l > 0.9, "white mark on the light theme's dark fill");
     }
 }

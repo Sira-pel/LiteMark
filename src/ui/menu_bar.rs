@@ -13,6 +13,7 @@ pub enum MenuId {
     View,
     Settings,
     Overflow,
+    Heading,
     Table,
     Hamburger,
 }
