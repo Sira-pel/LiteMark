@@ -3286,7 +3286,7 @@ impl LiteMarkApp {
         // Shift+click, ends a multi-selection. A press inside the sidebar keeps
         // it: that press may be the start of dragging the whole selection, and
         // clicking a row clears it itself.
-        let in_sidebar = self.show_sidebar && event.position.x < sz::SIDEBAR_W;
+        let in_sidebar = self.show_sidebar && event.position.x < crate::theme::sidebar_width(window.viewport_size().width);
         if !window.modifiers().shift && !in_sidebar {
             self.multi_selection = None;
             self.selected_target = None;
@@ -5983,6 +5983,7 @@ impl Render for LiteMarkApp {
                                 s.child(render_sidebar(
                                     SidebarProps {
                                         workspace: self.workspace.clone(),
+                                        width: crate::theme::sidebar_width(window_width),
                                         selected_file_id: match &self.selected_target {
                                             Some(SidebarTarget::File(id)) => Some(id.clone()),
                                             _ => None,

@@ -170,19 +170,32 @@ pub fn calculate_submenu_y_offset(items: &[MenuItem], sub_ix: usize) -> Pixels {
     y_offset
 }
 
+/// Width a menu needs to show its widest row without clipping: check/icon
+/// column, label, hint chip and shortcut, plus row and panel padding.
+pub fn content_width(items: &[MenuItem]) -> Pixels {
+    let has_icons_or_checks = items.iter().any(|it| {
+        it.icon.is_some() || matches!(it.kind, MenuItemKind::Check(_) | MenuItemKind::Radio(_))
+    });
+    let icon_col = if has_icons_or_checks { 24.0 } else { 0.0 };
+    let widest = items
+        .iter()
+        .filter(|it| !matches!(it.kind, MenuItemKind::Divider | MenuItemKind::Heading))
+        .map(|it| {
+            let label = it.label.chars().count() as f32 * 7.5;
+            let hint = it.hint.map_or(0.0, |h| h.chars().count() as f32 * 6.5 + 18.0);
+            let shortcut = it.shortcut.map_or(0.0, |s| s.chars().count() as f32 * 7.0);
+            let chevron = if matches!(it.kind, MenuItemKind::Submenu(_)) { 20.0 } else { 0.0 };
+            let gaps = if hint > 0.0 && shortcut > 0.0 { 8.0 } else { 0.0 };
+            // 24 = row px(12) * 2, 12 = gap between left and right sides
+            label + hint + shortcut + chevron + gaps + 24.0 + 12.0
+        })
+        .fold(0.0_f32, f32::max);
+    px(icon_col + widest + 8.0)
+}
+
 pub fn calculate_submenu_width(item: &MenuItem) -> Pixels {
     if let MenuItemKind::Submenu(ref sub_items) = item.kind {
-        let max_label_len = sub_items.iter().map(|it| it.label.chars().count()).max().unwrap_or(0);
-        let has_hints_or_shortcuts = sub_items.iter().any(|it| it.hint.is_some() || it.shortcut.is_some());
-        let has_icons_or_checks = sub_items.iter().any(|it| it.icon.is_some() || matches!(it.kind, MenuItemKind::Check(_) | MenuItemKind::Radio(_)));
-
-        let padding = px(24.0);
-        let icon_col = if has_icons_or_checks { px(24.0) } else { px(0.0) };
-        let text_w = px(max_label_len as f32 * 7.5);
-        let extra_col = if has_hints_or_shortcuts { px(70.0) } else { px(0.0) };
-
-        let calculated = padding + icon_col + text_w + extra_col;
-        calculated.max(px(160.0)).min(px(320.0))
+        content_width(sub_items).max(px(160.0))
     } else {
         px(200.0)
     }
@@ -304,6 +317,7 @@ where
                         .flex()
                         .items_center()
                         .gap(px(8.0))
+                        .min_w_0()
                         .when(has_checks, |s| {
                             s.child(
                                 div()
@@ -319,7 +333,7 @@ where
                         .when_some(item.icon, |s, icon| {
                             s.child(render_icon(icon, 14.0, if is_disabled { theme.menu_disabled } else { theme.text_muted }))
                         })
-                        .child(item.label);
+                        .child(div().truncate().child(item.label));
 
                     row = row.child(left_side);
 
@@ -390,8 +404,8 @@ where
     let cls = props.on_close.clone();
     let point = props.point;
     let anchor_corner = props.anchor_corner;
-    let width = props.width;
     let items = props.items;
+    let width = props.width.max(content_width(&items));
     let selected_index = props.selected_index;
     let open_submenu_ix = props.open_submenu_ix;
     let focus_handle = props.focus_handle;
@@ -927,7 +941,7 @@ mod tests {
         ]);
         let width = calculate_submenu_width(&sub);
         assert!(width >= px(160.0));
-        assert!(width <= px(320.0));
+        assert!(width <= px(400.0));
     }
 
     #[test]

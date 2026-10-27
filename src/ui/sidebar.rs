@@ -229,6 +229,7 @@ pub struct SidebarProps<
     FBlank: Fn(&mut App) + 'static + Clone,
 {
     pub workspace: WorkspaceDirectory,
+    pub width: Pixels,
     pub selected_file_id: Option<String>,
     pub selected_folder_id: Option<String>,
     pub focus_handle: FocusHandle,
@@ -372,7 +373,7 @@ where
         .track_focus(&focus_handle)
         .flex()
         .flex_col()
-        .w(sz::SIDEBAR_W)
+        .w(props.width)
         .h_full()
         .bg(theme.bg_sidebar)
         .border_r_1()

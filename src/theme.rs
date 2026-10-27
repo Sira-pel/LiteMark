@@ -48,6 +48,7 @@ pub mod sz {
     pub const TOOLBAR: Pixels = px(40.);
     pub const STATUS: Pixels = px(28.);
     pub const SIDEBAR_W: Pixels = px(304.);
+    pub const SIDEBAR_MIN_W: Pixels = px(200.);
     pub const ROW_H: Pixels = px(32.);
     pub const R_SM: Pixels = px(4.);
     pub const R_MD: Pixels = px(6.);
@@ -199,4 +200,10 @@ impl Theme {
 
     pub const FONT_PROSE: &'static str = "Ubuntu";
     pub const FONT_MONO: &'static str = "Ubuntu Mono";
+}
+
+/// Sidebar width for a window: the full width when there is room, shrinking
+/// on narrow windows so the editor keeps at least ~55% of the space.
+pub fn sidebar_width(window_width: Pixels) -> Pixels {
+    (window_width * 0.45).clamp(sz::SIDEBAR_MIN_W, sz::SIDEBAR_W)
 }
