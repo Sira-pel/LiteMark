@@ -249,11 +249,18 @@ pub enum TextInput {
     Replace,
     Rename,
     Create,
+    Search,
 }
 
 /// Printable keys and editing actions reach the document only while the editor owns input.
 pub fn document_accepts_keystrokes(owner: TextInput) -> bool {
     owner == TextInput::Editor
+}
+
+/// Sidebar keyboard mode ends once a text field other than the editor is claimed,
+/// otherwise typing and Select All would keep going to the sidebar.
+pub fn sidebar_keyboard_after_claim(was_on: bool, claimed: TextInput) -> bool {
+    was_on && claimed == TextInput::Editor
 }
 
 /// Undo and redo always edit the document, including while Replace is focused.
@@ -299,6 +306,21 @@ pub fn file_dialog_block_reason(probe: PortalProbe) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claiming_a_text_field_ends_sidebar_keyboard_mode() {
+        for field in [
+            TextInput::Search,
+            TextInput::Find,
+            TextInput::Replace,
+            TextInput::Rename,
+            TextInput::Create,
+        ] {
+            assert!(!sidebar_keyboard_after_claim(true, field));
+        }
+        assert!(sidebar_keyboard_after_claim(true, TextInput::Editor));
+        assert!(!sidebar_keyboard_after_claim(false, TextInput::Search));
+    }
 
     #[test]
     fn tab_ids_stay_unique_after_a_close_and_click_activates_the_new_tab() {

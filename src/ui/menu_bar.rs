@@ -164,7 +164,7 @@ pub fn build_file_menu_items(
             let f = on_new_note.clone();
             move |_, cx| f(cx)
         }),
-        MenuItem::action("New folder", None, None, {
+        MenuItem::action("New folder", None, Some("Ctrl+Shift+N"), {
             let f = on_new_folder.clone();
             move |_, cx| f(cx)
         }),

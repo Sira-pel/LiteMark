@@ -50,7 +50,7 @@ fn main() {
 pub fn get_or_create_notes_dir() -> PathBuf {
     let base = dirs::document_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
-    let notes = base.join("Notes");
+    let notes = crate::model::workspace::default_notes_dir(&base);
     let _ = fs::create_dir_all(&notes);
     notes
 }

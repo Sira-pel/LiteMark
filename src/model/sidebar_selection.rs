@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use super::workspace::{WorkspaceFile, WorkspaceFolder};
+
 /// Rows from `anchor` to `to` inclusive, in tree order. Falls back to just
 /// `to` when either row is not visible.
 pub fn extend_selection<T: Clone + PartialEq>(rows: &[T], anchor: &T, to: &T) -> (T, Vec<T>) {
@@ -30,6 +32,39 @@ pub fn step_cursor<T: PartialEq>(rows: &[T], cursor: Option<&T>, delta: i32) -> 
     )
 }
 
+/// Notes whose name contains `query` (case-insensitive), in workspace order.
+pub fn sidebar_search_matches<'a>(
+    files: &'a [WorkspaceFile],
+    query: &str,
+) -> Vec<&'a WorkspaceFile> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    files
+        .iter()
+        .filter(|f| {
+            let stem = f.path.file_stem().and_then(|s| s.to_str());
+            stem.unwrap_or(&f.name).to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+/// Folders whose name contains `query` (case-insensitive), in workspace order.
+pub fn sidebar_folder_search_matches<'a>(
+    folders: &'a [WorkspaceFolder],
+    query: &str,
+) -> Vec<&'a WorkspaceFolder> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    folders
+        .iter()
+        .filter(|f| f.name.to_lowercase().contains(&query))
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BulkTrashPlan<T> {
     /// Nothing selected is still in the workspace.
@@ -41,6 +76,31 @@ pub enum BulkTrashPlan<T> {
     Trash(Vec<T>),
 }
 
+/// Rows not inside another selected folder; a folder carries its children.
+fn top_level_rows<T>(items: &[(T, PathBuf, bool)]) -> Vec<&(T, PathBuf, bool)> {
+    let folder_paths: Vec<&Path> = items
+        .iter()
+        .filter(|(_, _, is_folder)| *is_folder)
+        .map(|(_, path, _)| path.as_path())
+        .collect();
+    items
+        .iter()
+        .filter(|(_, path, _)| {
+            !folder_paths
+                .iter()
+                .any(|folder| path.as_path() != *folder && path.starts_with(folder))
+        })
+        .collect()
+}
+
+/// `top_level_rows` for callers (such as moving) that only need the rows.
+pub fn top_level_targets<T: Clone>(items: &[(T, PathBuf, bool)]) -> Vec<T> {
+    top_level_rows(items)
+        .into_iter()
+        .map(|(t, _, _)| t.clone())
+        .collect()
+}
+
 /// `items` are `(row, path)` for rows still in the workspace; `folders`
 /// marks which of them are folders. `modified_paths` are open notes with
 /// unsaved changes.
@@ -48,19 +108,7 @@ pub fn plan_bulk_trash<T: Clone>(
     items: &[(T, PathBuf, bool)],
     modified_paths: &[PathBuf],
 ) -> BulkTrashPlan<T> {
-    let folder_paths: Vec<&Path> = items
-        .iter()
-        .filter(|(_, _, is_folder)| *is_folder)
-        .map(|(_, path, _)| path.as_path())
-        .collect();
-    let kept: Vec<&(T, PathBuf, bool)> = items
-        .iter()
-        .filter(|(_, path, _)| {
-            !folder_paths
-                .iter()
-                .any(|folder| path.as_path() != *folder && path.starts_with(folder))
-        })
-        .collect();
+    let kept = top_level_rows(items);
     if kept.is_empty() {
         return BulkTrashPlan::Nothing;
     }
@@ -180,6 +228,16 @@ mod tests {
     }
 
     #[test]
+    fn top_level_targets_drop_rows_inside_a_selected_folder() {
+        let items = [
+            item("dir", "/w/dir", true),
+            item("in", "/w/dir/in.md", false),
+            item("out", "/w/out.md", false),
+        ];
+        assert_eq!(top_level_targets(&items), vec!["dir", "out"]);
+    }
+
+    #[test]
     fn bulk_trash_keeps_sibling_with_shared_name_prefix() {
         let items = [
             item("dir", "/w/dir", true),
@@ -271,5 +329,69 @@ mod tests {
             r.record(Err("busy".into())),
             Some("Moved 3 of 5 to the Trash. permission denied".into())
         );
+    }
+
+    fn note(name: &str) -> WorkspaceFile {
+        WorkspaceFile {
+            id: format!("file-{name}"),
+            name: name.into(),
+            folder_id: None,
+            path: PathBuf::from(name),
+            file_type: super::super::document::FileType::Markdown,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn search_matches_names_case_insensitively_in_order() {
+        let files = [
+            note("Welcome.md"),
+            note("Untitled.md"),
+            note("Untitled 2.md"),
+        ];
+        let hits: Vec<&str> = sidebar_search_matches(&files, "UNTIT")
+            .into_iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(hits, ["Untitled.md", "Untitled 2.md"]);
+    }
+
+    #[test]
+    fn search_ignores_the_file_extension() {
+        let files = [note("Welcome.md")];
+        assert!(sidebar_search_matches(&files, "md").is_empty());
+        assert_eq!(sidebar_search_matches(&files, "come").len(), 1);
+    }
+
+    #[test]
+    fn blank_or_unmatched_search_returns_nothing() {
+        let files = [note("Welcome.md")];
+        assert!(sidebar_search_matches(&files, "").is_empty());
+        assert!(sidebar_search_matches(&files, "   ").is_empty());
+        assert!(sidebar_search_matches(&files, "zzz").is_empty());
+    }
+
+    #[test]
+    fn search_trims_surrounding_spaces() {
+        let files = [note("Welcome.md")];
+        assert_eq!(sidebar_search_matches(&files, "  welcome ").len(), 1);
+    }
+
+    #[test]
+    fn folder_search_matches_names_case_insensitively() {
+        let folder = |name: &str| WorkspaceFolder {
+            id: name.into(),
+            name: name.into(),
+            parent_id: None,
+            path: PathBuf::from(name),
+            is_open: false,
+        };
+        let folders = [folder("Projects"), folder("Journal")];
+        let hits: Vec<&str> = sidebar_folder_search_matches(&folders, " PROJ ")
+            .into_iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(hits, ["Projects"]);
+        assert!(sidebar_folder_search_matches(&folders, "").is_empty());
     }
 }
