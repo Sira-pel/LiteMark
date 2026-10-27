@@ -277,7 +277,9 @@ pub fn focus_if_changed(previous: Option<FocusSlot>, next: FocusSlot) -> bool {
     previous != Some(next)
 }
 
+/// Only Linux probes the desktop portal; other systems always report `Ready`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum PortalProbe {
     Ready,
     NotOwned,
