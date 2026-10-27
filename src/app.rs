@@ -5981,7 +5981,7 @@ impl Render for LiteMarkApp {
                             .relative()
                             .overflow_hidden()
                             .when(self.show_sidebar, |s| {
-                                s.child(render_sidebar(
+                                let sidebar = render_sidebar(
                                     SidebarProps {
                                         workspace: self.workspace.clone(),
                                         width: crate::theme::sidebar_width(window_width),
@@ -6024,7 +6024,23 @@ impl Render for LiteMarkApp {
                                             .unwrap_or_default(),
                                     },
                                     &theme,
-                                ))
+                                );
+                                // On narrow windows the sidebar floats over the
+                                // editor as a drawer instead of squeezing it.
+                                if window_width < px(600.0) {
+                                    s.child(deferred(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .left_0()
+                                            .h_full()
+                                            .occlude()
+                                            .shadow_2xl()
+                                            .child(sidebar),
+                                    ))
+                                } else {
+                                    s.child(sidebar)
+                                }
                             })
                             .child(render_editor(
                                 EditorProps {

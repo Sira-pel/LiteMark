@@ -170,6 +170,14 @@ pub fn calculate_submenu_y_offset(items: &[MenuItem], sub_ix: usize) -> Pixels {
     y_offset
 }
 
+/// Gap kept between a popup and the window edges; the bottom also clears the status bar.
+const POPUP_MARGIN: Edges<Pixels> = Edges {
+    top: px(8.0),
+    right: px(8.0),
+    bottom: px(36.0),
+    left: px(8.0),
+};
+
 /// Upper bound for a content-sized menu; longer labels truncate.
 const MENU_MAX_W: f32 = 360.0;
 
@@ -438,7 +446,7 @@ where
                     anchored()
                         .position(sub_point)
                         .anchor(sub_anchor)
-                        .snap_to_window()
+                        .snap_to_window_with_margin(POPUP_MARGIN)
                         .child(
                             div()
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -484,7 +492,7 @@ where
                 anchored()
                     .position(point)
                     .anchor(anchor_corner)
-                    .snap_to_window()
+                    .snap_to_window_with_margin(POPUP_MARGIN)
                     .child(
                         div()
                             .track_focus(&focus_handle)
@@ -652,7 +660,7 @@ where
                 anchored()
                     .position(position)
                     .anchor(Corner::TopLeft)
-                    .snap_to_window()
+                    .snap_to_window_with_margin(POPUP_MARGIN)
                     .child(
                         div()
                             .track_focus(&focus_handle)
@@ -759,7 +767,7 @@ where
             anchored()
                 .position(sub_point)
                 .anchor(Corner::TopLeft)
-                .snap_to_window()
+                .snap_to_window_with_margin(POPUP_MARGIN)
                 .child(
                     div()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -798,7 +806,7 @@ where
                 anchored()
                     .position(point)
                     .anchor(Corner::TopLeft)
-                    .snap_to_window()
+                    .snap_to_window_with_margin(POPUP_MARGIN)
                     .child(
                         div()
                             .id("table-picker-menu")

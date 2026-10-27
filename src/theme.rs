@@ -48,7 +48,7 @@ pub mod sz {
     pub const TOOLBAR: Pixels = px(40.);
     pub const STATUS: Pixels = px(28.);
     pub const SIDEBAR_W: Pixels = px(304.);
-    pub const SIDEBAR_MIN_W: Pixels = px(200.);
+    pub const SIDEBAR_MIN_W: Pixels = px(170.);
     pub const ROW_H: Pixels = px(32.);
     pub const R_SM: Pixels = px(4.);
     pub const R_MD: Pixels = px(6.);
@@ -216,7 +216,7 @@ mod sidebar_width_tests {
     #[test]
     fn sidebar_width_shrinks_with_window_within_bounds() {
         assert_eq!(sidebar_width(px(1600.0)), sz::SIDEBAR_W);
-        assert_eq!(sidebar_width(px(400.0)), sz::SIDEBAR_MIN_W);
+        assert_eq!(sidebar_width(px(300.0)), sz::SIDEBAR_MIN_W);
         let mid = sidebar_width(px(480.0));
         assert!(mid > sz::SIDEBAR_MIN_W && mid < sz::SIDEBAR_W);
     }
