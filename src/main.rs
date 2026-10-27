@@ -74,6 +74,7 @@ fn main() {
                 KeyBinding::new("ctrl-s", SaveFile, None),
                 KeyBinding::new("ctrl-o", OpenFile, None),
                 KeyBinding::new("ctrl-n", NewNote, None),
+                KeyBinding::new("ctrl-shift-n", NewFolder, None),
                 KeyBinding::new("ctrl-t", NewTab, None),
                 KeyBinding::new("ctrl-delete", DeleteNote, None),
                 // Sidebar tree navigation
