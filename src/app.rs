@@ -1532,23 +1532,26 @@ impl LiteMarkApp {
     }
 
     /// Ctrl/Cmd+click: add `target` to the selection, or drop it if already in.
+    /// With nothing selected the open note counts as the starting selection.
     fn toggle_selection(&mut self, target: SidebarTarget) {
-        let mut items = match self.active_multi() {
+        let multi = self.active_multi().cloned();
+        let items = match &multi {
             Some(m) => m.items.clone(),
-            None => self.selected_target.iter().cloned().collect(),
+            None => self
+                .selected_target
+                .clone()
+                .or_else(|| {
+                    self.active_tab()
+                        .and_then(|tab| tab.workspace_file_id.clone())
+                        .map(SidebarTarget::File)
+                })
+                .into_iter()
+                .collect(),
         };
-        let anchor = self.active_multi().map(|m| m.anchor.clone());
-        if let Some(i) = items.iter().position(|t| *t == target) {
-            items.remove(i);
-        } else {
-            items.push(target.clone());
-        }
-        let cursor = if items.contains(&target) { target } else { items.last().cloned().unwrap_or(target) };
-        self.selected_target = items.last().map(|_| cursor.clone());
-        self.multi_selection = (items.len() > 1).then(|| MultiSelection {
-            anchor: anchor.filter(|a| items.contains(a)).unwrap_or_else(|| cursor.clone()),
-            cursor,
-            items,
+        let toggled = toggle_row(items, multi.map(|m| m.anchor), target);
+        self.selected_target = toggled.as_ref().map(|(_, cursor, _)| cursor.clone());
+        self.multi_selection = toggled.and_then(|(anchor, cursor, items)| {
+            (items.len() > 1).then_some(MultiSelection { anchor, cursor, items })
         });
         self.sidebar_keyboard = true;
     }
@@ -6091,15 +6094,13 @@ impl Render for LiteMarkApp {
                                     SidebarProps {
                                         workspace: self.workspace.clone(),
                                         width: crate::theme::sidebar_width(window_width),
-                                        // With no selection of its own, the sidebar
-                                        // still marks the note open in the editor.
                                         selected_file_id: match &self.selected_target {
                                             Some(SidebarTarget::File(id)) => Some(id.clone()),
-                                            None => self
-                                                .active_tab()
-                                                .and_then(|tab| tab.workspace_file_id.clone()),
                                             _ => None,
                                         },
+                                        open_file_id: self
+                                            .active_tab()
+                                            .and_then(|tab| tab.workspace_file_id.clone()),
                                         selected_folder_id: match &self.selected_target {
                                             Some(SidebarTarget::Folder(id)) => {
                                                 Some(id.clone())

@@ -16,6 +16,28 @@ pub fn extend_selection<T: Clone + PartialEq>(rows: &[T], anchor: &T, to: &T) ->
     }
 }
 
+/// Ctrl+click: add `target` to `items`, or drop it if present. Returns
+/// `(anchor, cursor, items)`, or `None` once nothing is left. The cursor is the
+/// clicked row, or the last remaining one after a removal; the anchor stays
+/// unless it was the row removed.
+pub fn toggle_row<T: Clone + PartialEq>(
+    mut items: Vec<T>,
+    anchor: Option<T>,
+    target: T,
+) -> Option<(T, T, Vec<T>)> {
+    match items.iter().position(|t| *t == target) {
+        Some(i) => {
+            items.remove(i);
+        }
+        None => items.push(target.clone()),
+    }
+    let cursor = if items.contains(&target) { target } else { items.last()?.clone() };
+    let anchor = anchor
+        .filter(|a| items.contains(a))
+        .unwrap_or_else(|| cursor.clone());
+    Some((anchor, cursor, items))
+}
+
 /// Row index one step from `cursor` (clamped, no wrap). With no cursor,
 /// Up starts at the last row and Down at the first.
 pub fn step_cursor<T: PartialEq>(rows: &[T], cursor: Option<&T>, delta: i32) -> Option<usize> {
@@ -174,6 +196,35 @@ mod tests {
 
     fn rows() -> Vec<&'static str> {
         vec!["a", "b", "c", "d", "e"]
+    }
+
+    #[test]
+    fn toggle_adds_a_row_and_moves_the_cursor_to_it() {
+        let got = toggle_row(vec!["a"], Some("a"), "c");
+        assert_eq!(got, Some(("a", "c", vec!["a", "c"])));
+    }
+
+    #[test]
+    fn toggle_removes_a_middle_row() {
+        let got = toggle_row(vec!["a", "b", "c"], Some("a"), "b");
+        assert_eq!(got, Some(("a", "c", vec!["a", "c"])));
+    }
+
+    #[test]
+    fn toggle_down_to_one_row_keeps_that_row() {
+        let got = toggle_row(vec!["a", "b"], Some("a"), "b");
+        assert_eq!(got, Some(("a", "a", vec!["a"])));
+    }
+
+    #[test]
+    fn toggle_removing_the_anchor_re_anchors_on_the_cursor() {
+        let got = toggle_row(vec!["a", "b", "c"], Some("a"), "a");
+        assert_eq!(got, Some(("c", "c", vec!["b", "c"])));
+    }
+
+    #[test]
+    fn toggle_removing_the_last_row_clears_the_selection() {
+        assert_eq!(toggle_row(vec!["a"], None, "a"), None);
     }
 
     #[test]

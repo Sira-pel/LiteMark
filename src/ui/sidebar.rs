@@ -33,6 +33,12 @@ fn drag_payload(
     }
 }
 
+/// Ctrl on Linux and Windows, Cmd on macOS (Super+click is the window
+/// manager's on many Linux desktops).
+fn toggle_modifier(m: Modifiers) -> bool {
+    if cfg!(target_os = "macos") { m.platform } else { m.control }
+}
+
 /// Thin vertical guide line that joins nested rows under their folder.
 /// `left` is measured from the row's own left edge.
 fn tree_guide(theme: &Theme, left: f32) -> Div {
@@ -241,6 +247,8 @@ pub struct SidebarProps<
     pub workspace: WorkspaceDirectory,
     pub width: Pixels,
     pub selected_file_id: Option<String>,
+    /// Note open in the editor; gets a quieter mark than the selection.
+    pub open_file_id: Option<String>,
     pub selected_folder_id: Option<String>,
     pub focus_handle: FocusHandle,
     /// Workspace ids of tabs with unsaved changes (drives the dot).
@@ -341,6 +349,7 @@ where
     let dragging = props.dragging;
     let focus_handle = props.focus_handle;
     let selected_file_id = props.selected_file_id;
+    let open_file_id = props.open_file_id;
     let selected_folder_id = props.selected_folder_id;
     let modified_ids = props.modified_file_ids;
 
@@ -677,7 +686,7 @@ where
                                                 let m = window.modifiers();
                                                 if m.shift {
                                                     range(SidebarTarget::Folder(fid.clone()), cx);
-                                                } else if m.control || m.platform {
+                                                } else if toggle_modifier(m) {
                                                     toggle_sel(SidebarTarget::Folder(fid.clone()), cx);
                                                 } else {
                                                     toggle(fid.clone(), cx);
@@ -852,6 +861,9 @@ where
                                     let in_multi = multi_ids.contains(&file.id);
                                     let is_active = !in_multi
                                         && selected_file_id.as_deref() == Some(&file.id);
+                                    let is_open = !in_multi
+                                        && !is_active
+                                        && open_file_id.as_deref() == Some(&file.id);
                                     let display_name = file
                                         .name
                                         .strip_suffix(".md")
@@ -900,10 +912,12 @@ where
                                             theme.row_multi
                                         } else if is_active {
                                             theme.row_active
+                                        } else if is_open {
+                                            theme.row_hover
                                         } else {
                                             rgba(0x00000000)
                                         })
-                                        .text_color(if is_active || in_multi {
+                                        .text_color(if is_active || is_open || in_multi {
                                             theme.text_strong
                                         } else {
                                             theme.row_text
@@ -921,7 +935,7 @@ where
                                             let m = window.modifiers();
                                             if m.shift {
                                                 range(SidebarTarget::File(file_clone.id.clone()), cx);
-                                            } else if m.control || m.platform {
+                                            } else if toggle_modifier(m) {
                                                 toggle_sel(SidebarTarget::File(file_clone.id.clone()), cx);
                                             } else {
                                                 sel(file_clone.clone(), cx);
@@ -993,7 +1007,7 @@ where
                                                 .child(
                                                     div()
                                                         .text_size(px(13.0))
-                                                        .font_weight(if is_active {
+                                                        .font_weight(if is_active || is_open {
                                                             FontWeight::MEDIUM
                                                         } else {
                                                             FontWeight::NORMAL
