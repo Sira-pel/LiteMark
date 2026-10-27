@@ -707,6 +707,18 @@ impl LiteMarkApp {
                 other => tab.apply_format_in_mode(other, mode),
             }
         }
+        if std::env::var_os("LITEMARK_DEBUG_FORMAT").is_some() {
+            if let Some(tab) = self.active_tab() {
+                let at = tab.selection_range().start.min(tab.content.len());
+                let line_start = tab.content[..at].rfind('\n').map_or(0, |i| i + 1);
+                let line_end = tab.content[at..].find('\n').map_or(tab.content.len(), |i| at + i);
+                eprintln!(
+                    "[format] after {cmd}: caret={:?} line={:?}",
+                    tab.caret.range,
+                    &tab.content[line_start..line_end]
+                );
+            }
+        }
         self.refresh_find();
     }
 
