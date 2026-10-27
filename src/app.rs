@@ -140,6 +140,7 @@ pub struct LiteMarkApp {
     pub selecting: bool,
     pub zoom_epoch: u64,
     pub toast_epoch: u64,
+    pub available_update: Option<ReleaseInfo>,
     pub pending_find_focus: bool,
     pub pending_rename_focus: bool,
     pub sidebar_menu: Option<SidebarMenu>,
@@ -392,7 +393,7 @@ impl LiteMarkApp {
 
         let initial_selected = initial_tab.workspace_file_id.clone();
 
-        Self {
+        let app = Self {
             tabs: vec![initial_tab],
             active_tab_id: first_id,
             selected_target: initial_selected.map(SidebarTarget::File),
@@ -443,6 +444,7 @@ impl LiteMarkApp {
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
+            available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
             sidebar_menu: None,
@@ -460,7 +462,50 @@ impl LiteMarkApp {
             table_picker_size: (2, 2),
             editor_context_menu: None,
             title_drag_armed: Rc::new(Cell::new(false)),
+        };
+        app.start_update_check(cx);
+        app
+    }
+
+    /// Look for a newer release in the background, at most once a day.
+    /// Offline or failed checks are silent and retried on the next launch.
+    fn start_update_check(&self, cx: &mut Context<Self>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if !self.settings.check_for_updates
+            || !check_is_due(self.settings.last_update_check, now)
+        {
+            return;
         }
+        cx.spawn(async move |this, cx| {
+            let release = cx
+                .background_executor()
+                .spawn(async { fetch_latest_release() })
+                .await;
+            let Some(release) = release else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.settings.last_update_check = Some(now);
+                this.settings.save();
+                let dismissed = this.settings.dismissed_update.as_deref() == Some(&release.version);
+                if is_newer(current_version(), &release.version) && !dismissed {
+                    this.available_update = Some(release);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn handle_toggle_update_checks(&mut self) {
+        self.settings.check_for_updates = !self.settings.check_for_updates;
+        if !self.settings.check_for_updates {
+            self.available_update = None;
+        }
+        self.settings.save();
     }
 
     /// Enter in the search box: select the first match and move keyboard
@@ -4183,6 +4228,16 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_update_checks = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_toggle_update_checks();
+                    cx.notify();
+                });
+            }
+        };
+
         let on_open_about = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -4908,6 +4963,8 @@ impl Render for LiteMarkApp {
                         on_set_font_size.clone(),
                         on_open_shortcuts.clone(),
                         on_open_about.clone(),
+                        self.settings.check_for_updates,
+                        on_toggle_update_checks.clone(),
                     ),
                 ),
                 MenuId::Hamburger => {
@@ -6146,6 +6203,69 @@ impl Render for LiteMarkApp {
                             .child(kbd_badge("Esc", &theme))
                     })
             })
+            // Update notice
+            .when_some(
+                self.available_update.clone().filter(|_| !self.zen_mode),
+                |s, release| {
+                    let url = release.url.clone();
+                    let version = release.version.clone();
+                    let view = cx.entity();
+                    s.child(
+                        div()
+                            .absolute()
+                            .bottom(px(84.0))
+                            .right(px(24.0))
+                            .px(px(14.0))
+                            .py(px(8.0))
+                            .rounded(px(8.0))
+                            .bg(theme.bg_surface)
+                            .border_1()
+                            .border_color(theme.border_primary)
+                            .shadow_2xl()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_primary)
+                            .child(format!("LiteMark {} is available", release.version))
+                            .child(
+                                div()
+                                    .id("update-download")
+                                    .px(px(8.0))
+                                    .py(px(3.0))
+                                    .rounded(px(5.0))
+                                    .cursor_pointer()
+                                    .text_color(theme.text_strong)
+                                    .bg(theme.bg_active)
+                                    .hover(|h| h.bg(theme.bg_hover))
+                                    .on_click(move |_, _, cx| cx.open_url(&url))
+                                    .child("Download"),
+                            )
+                            .child(
+                                div()
+                                    .id("update-dismiss")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(20.0))
+                                    .h(px(20.0))
+                                    .rounded(px(5.0))
+                                    .cursor_pointer()
+                                    .hover(|h| h.bg(theme.bg_hover))
+                                    .on_click(move |_, _, cx| {
+                                        let version = version.clone();
+                                        view.update(cx, |this, cx| {
+                                            this.settings.dismissed_update = Some(version);
+                                            this.settings.save();
+                                            this.available_update = None;
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(render_icon("x", 14.0, theme.text_muted)),
+                            ),
+                    )
+                },
+            )
             // Save Toast Notification
             .when_some(self.saved_toast.clone(), |s, toast| {
                 s.child(

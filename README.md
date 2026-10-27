@@ -15,18 +15,38 @@ LiteMark is a native Markdown and text editor for Linux. It edits Markdown and p
 - Tabs, undo and redo, zoom, word wrap, centered or left-aligned text, dark / light / system theme, and zen mode.
 - Settings are stored in the user config directory as `litemark/settings.json`.
 
+## Updates and network use
+
+LiteMark works fully offline. The only network request it makes is an optional update check:
+
+- On startup, in the background, it asks the GitHub Releases API for the latest version. It checks at most once every 24 hours.
+- If a newer version exists, a small notice appears with a Download button that opens the release page. Closing the notice hides it for that version.
+- Nothing is downloaded or installed automatically, and no notes, settings, or identifiers are sent.
+- If you are offline, or GitHub cannot be reached, nothing is shown.
+- Turn it off in the settings menu (gear icon) by unchecking "Check for updates", or set `"check_for_updates": false` in `settings.json`.
+
 ## Screenshots
 
 _Placeholder. Screenshots are not in the repository yet._
 
 ## Install from a .deb
 
-The packaging script builds an amd64 package. `dpkg-dev` must be installed so the script can run `dpkg-shlibdeps`.
+Download the latest `litemark_<version>_amd64.deb` from the [Releases page](https://github.com/Sira-pel/LiteMark/releases/latest), then install it:
+
+```bash
+sudo apt install ./litemark_<version>_amd64.deb
+```
+
+To update, download and install the newer `.deb` the same way. Your notes and settings are kept.
+
+### Build the .deb yourself
+
+The packaging script builds an amd64 package. `dpkg-dev` must be installed so the script can run `dpkg-shlibdeps`. The version comes from `Cargo.toml`.
 
 ```bash
 sudo apt install -y dpkg-dev
 bash scripts/build-deb.sh
-sudo apt install ./build/litemark_1.0.0_amd64.deb
+sudo apt install ./build/litemark_*_amd64.deb
 ```
 
 The package recommends `xdg-desktop-portal` and a GTK or GNOME portal backend. Open and save dialogs use that portal.
@@ -86,6 +106,20 @@ cargo run --release
 - PDF export is not implemented.
 - Opening a PDF extracts its text. The original pages are not drawn.
 - `scripts/build-deb.sh` produces an amd64 package.
+- Updates are not installed automatically; the app only tells you when a new release is out.
+- Packages for Windows and macOS are not available yet.
+
+## Releasing
+
+1. Set `version` in `Cargo.toml` and commit it.
+2. Tag the commit and push the tag:
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+The [release workflow](.github/workflows/release.yml) checks that the tag matches `Cargo.toml`, builds the `.deb`, and publishes a GitHub Release with the package and a SHA-256 checksum attached.
 
 ## License
 
