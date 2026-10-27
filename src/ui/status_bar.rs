@@ -12,11 +12,9 @@ where
     FToggleMode: Fn(&mut App) + 'static + Clone,
 {
     pub line: usize,
-    pub col: usize,
     pub words: usize,
     pub chars: usize,
-    pub lines: usize,
-    pub reading_time_min: usize,
+    pub width: Pixels,
     pub zoom_level: usize,
     pub view_mode: ViewMode,
     pub on_zoom_in: FZoomIn,
@@ -39,6 +37,10 @@ where
     let on_zoom_out = props.on_zoom_out;
     let on_reset_zoom = props.on_reset_zoom;
     let on_toggle_mode = props.on_toggle_mode;
+    // Drop the least important items first as the window narrows.
+    let show_encoding = props.width >= px(560.0);
+    let show_chars = props.width >= px(460.0);
+    let show_words = props.width >= px(340.0);
 
     div()
         .flex()
@@ -59,31 +61,15 @@ where
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .child(format!("Ln {}, Col {}", props.line, props.col))
-                .child(
-                    div()
-                        .text_color(theme.text_faint)
-                        .child("·")
-                )
-                .child(format!("{}w", props.words))
-                .child(
-                    div()
-                        .text_color(theme.text_faint)
-                        .child("·")
-                )
-                .child(format!("{} lines", props.lines))
-                .child(
-                    div()
-                        .text_color(theme.text_faint)
-                        .child("·")
-                )
-                .child(format!("{} chars", props.chars))
-                .child(
-                    div()
-                        .text_color(theme.text_faint)
-                        .child("·")
-                )
-                .child(format!("~{}m read", props.reading_time_min))
+                .child(format!("Ln {}", props.line))
+                .when(show_chars, |d| {
+                    d.child(div().text_color(theme.text_faint).child("·"))
+                        .child(format!("{} chars", props.chars))
+                })
+                .when(show_words, |d| {
+                    d.child(div().text_color(theme.text_faint).child("·"))
+                        .child(format!("{} words", props.words))
+                })
         )
         // Right controls
         .child(
@@ -137,18 +123,12 @@ where
                                 .child(render_icon("zoom-in", 12.0, theme.text_muted))
                         })
                 )
-                .child(
-                    div()
-                        .text_color(theme.text_faint)
-                        .child("·")
-                )
-                .child("UTF-8")
-                .child(
-                    div()
-                        .text_color(theme.text_faint)
-                        .child("·")
-                )
-                .child("LF")
+                .when(show_encoding, |d| {
+                    d.child(div().text_color(theme.text_faint).child("·"))
+                        .child("UTF-8")
+                        .child(div().text_color(theme.text_faint).child("·"))
+                        .child("LF")
+                })
                 .child(
                     div()
                         .text_color(theme.text_faint)

@@ -5794,6 +5794,63 @@ mod tests {
     use crate::ui::{move_vertical_visual, EditorPaint, PaintRow};
     use gpui::{point, px, ShapedLine};
 
+    fn find_doc(source: &str) -> DocumentTab {
+        DocumentTab::new("t".into(), "t.md".into(), source.to_string(), None, None)
+    }
+
+    #[test]
+    fn find_walks_every_match_selects_it_and_wraps() {
+        let mut doc = find_doc("one cat, two Cat, three cat");
+        assert_eq!(doc.find_hit_ranges("cat", false).len(), 3);
+        assert_eq!(doc.find_hit_ranges("cat", true).len(), 2);
+
+        let mut index = None;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            index = doc.select_match("cat", false, index, true);
+            seen.push(index.unwrap());
+            assert_eq!(doc.selected_text().to_lowercase(), "cat");
+        }
+        assert_eq!(seen, vec![0, 1, 2, 0]);
+
+        let back = doc.select_match("cat", false, Some(0), false);
+        assert_eq!(back, Some(2));
+    }
+
+    #[test]
+    fn find_with_no_match_selects_nothing() {
+        let mut doc = find_doc("hello");
+        assert!(doc.find_hit_ranges("zzz", false).is_empty());
+        assert_eq!(doc.select_match("zzz", false, None, true), None);
+        assert_eq!(doc.selected_text(), "");
+    }
+
+    #[test]
+    fn replace_current_replaces_one_and_moves_on() {
+        let mut doc = find_doc("cat and cat and cat");
+        let idx = doc.select_match("cat", false, None, true);
+        let next = doc.replace_current_match("cat", "dog", false, idx);
+        assert_eq!(doc.content, "dog and cat and cat");
+        assert_eq!(next, Some(0));
+        assert_eq!(doc.selected_text(), "cat");
+    }
+
+    #[test]
+    fn replace_all_respects_case() {
+        let mut doc = find_doc("cat Cat cat");
+        assert!(doc.replace_every_match("cat", "dog", true));
+        assert_eq!(doc.content, "dog Cat dog");
+        assert!(!doc.replace_every_match("zzz", "x", true));
+    }
+
+    #[test]
+    fn find_handles_multibyte_text() {
+        let mut doc = find_doc("héllo wörld héllo");
+        assert_eq!(doc.find_hit_ranges("HÉLLO", false).len(), 2);
+        assert!(doc.replace_every_match("héllo", "x", true));
+        assert_eq!(doc.content, "x wörld x");
+    }
+
     #[test]
     fn enter_with_selection_leaving_a_table_cell_does_not_panic() {
         let source = "| a | b |\n| --- | --- |\n| hello | world |";

@@ -773,6 +773,7 @@ pub struct EditorElement<V: 'static> {
     pub selection_color: Hsla,
     pub find_color: Hsla,
     pub cursor_color: Hsla,
+    pub active_find_color: Hsla,
     pub gutter_color: Hsla,
     pub gutter_bg: Hsla,
     pub font_family: SharedString,
@@ -979,7 +980,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 );
                 for (hit_index, hit) in self.find_hits.iter().enumerate() {
                     let color = if self.active_find == Some(hit_index) {
-                        self.cursor_color
+                        self.active_find_color
                     } else {
                         self.find_color
                     };
@@ -1361,7 +1362,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         );
                         for (hit_index, hit) in self.find_hits.iter().enumerate() {
                             let color = if self.active_find == Some(hit_index) {
-                                self.cursor_color
+                                self.active_find_color
                             } else {
                                 self.find_color
                             };
@@ -1739,7 +1740,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 );
                 for (hit_index, hit) in self.find_hits.iter().enumerate() {
                     let color = if self.active_find == Some(hit_index) {
-                        self.cursor_color
+                        self.active_find_color
                     } else {
                         self.find_color
                     };

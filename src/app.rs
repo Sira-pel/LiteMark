@@ -89,6 +89,7 @@ pub struct LiteMarkApp {
     pub settings: EditorSettings,
     pub show_sidebar: bool,
     pub show_find_replace: bool,
+    pub show_replace_row: bool,
     pub show_shortcuts_modal: bool,
     pub show_pdf_modal: bool,
     pub show_about_modal: bool,
@@ -128,6 +129,7 @@ pub struct LiteMarkApp {
     pub save_as_tab: Option<String>,
     pub pending_after_save: Option<PendingAfterSave>,
     pub editor_paint: Rc<RefCell<EditorPaint>>,
+    pub editor_scroll: ScrollHandle,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
     pub find_hits: Vec<Range<usize>>,
@@ -399,6 +401,7 @@ impl LiteMarkApp {
             settings,
             show_sidebar: true,
             show_find_replace: false,
+            show_replace_row: false,
             show_shortcuts_modal: false,
             show_pdf_modal: false,
             show_about_modal: false,
@@ -429,6 +432,7 @@ impl LiteMarkApp {
             save_as_tab: None,
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
+            editor_scroll: ScrollHandle::new(),
             find_field,
             replace_field,
             find_hits: Vec::new(),
@@ -1131,7 +1135,7 @@ impl LiteMarkApp {
         if self.find_term.is_empty() {
             String::new()
         } else if self.find_hits.is_empty() {
-            "No matches".into()
+            "No results".into()
         } else if let Some(index) = self.find_index {
             format!("{} of {}", index + 1, self.find_hits.len())
         } else {
@@ -1161,7 +1165,38 @@ impl LiteMarkApp {
         self.refresh_find();
         if index.is_none() {
             self.not_found = true;
+        } else {
+            self.scroll_selection_into_view();
         }
+    }
+
+    /// Scrolls the editor so the row holding the selection start is visible.
+    /// Uses the geometry from the last paint, which is still valid after a
+    /// find step because the content did not change.
+    fn scroll_selection_into_view(&mut self) {
+        let Some(start) = self.active_tab().map(|tab| tab.selection_range().start) else {
+            return;
+        };
+        let paint = self.editor_paint.borrow();
+        let Some(row) = paint
+            .rows
+            .iter()
+            .rev()
+            .find(|row| row.byte_start <= start)
+            .or_else(|| paint.rows.first())
+        else {
+            return;
+        };
+        let view = self.editor_scroll.bounds();
+        let Some(delta) =
+            scroll_delta_for_row(row.origin.y, row.line_height, view.top(), view.size.height)
+        else {
+            return;
+        };
+        let offset = self.editor_scroll.offset();
+        let max = self.editor_scroll.max_offset().height;
+        let y = (offset.y - delta).clamp(-max, px(0.0));
+        self.editor_scroll.set_offset(point(offset.x, y));
     }
 
     fn replace_current(&mut self) {
@@ -1178,6 +1213,9 @@ impl LiteMarkApp {
             .and_then(|tab| tab.replace_current_match(&term, &replacement, case, current));
         self.find_index = index;
         self.refresh_find();
+        if index.is_some() {
+            self.scroll_selection_into_view();
+        }
     }
 
     fn replace_all_matches(&mut self) {
@@ -3438,8 +3476,9 @@ impl LiteMarkApp {
             border_color: theme.border_subtle.into(),
             link_color: theme.text_hi.into(),
             selection_color: theme.selection_bg.into(),
-            find_color: theme.text_hi.into(),
+            find_color: find_match_color(theme.mode.is_dark(), false),
             cursor_color: theme.text_strong.into(),
+            active_find_color: find_match_color(theme.mode.is_dark(), true),
             gutter_color: theme.text_muted.into(),
             gutter_bg: theme.bg_sidebar.into(),
             font_family,
@@ -3883,11 +3922,8 @@ impl Render for LiteMarkApp {
 
         let active_formats = active_tab.active_formats;
         let stats_line = active_tab.cursor_line;
-        let stats_col = active_tab.cursor_col;
         let stats_words = active_tab.word_count;
         let stats_chars = active_tab.char_count;
-        let stats_lines = active_tab.line_count;
-        let stats_read = active_tab.reading_time_min;
         let active_tab_has_pdf = active_tab.file_type == FileType::Pdf;
         let pdf_page_count = active_tab.pdf_page_count;
         let is_max = window.is_maximized();
@@ -4115,6 +4151,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = true;
+                    this.show_replace_row = true;
                     this.pending_find_focus = true;
                     this.open_menu = None;
                     cx.notify();
@@ -4414,6 +4451,16 @@ impl Render for LiteMarkApp {
                     this.match_case = !this.match_case;
                     this.find_index = None;
                     this.refresh_find();
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_toggle_replace = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.show_replace_row = !this.show_replace_row;
                     cx.notify();
                 });
             }
@@ -5209,6 +5256,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &OpenReplace, _window, cx| {
                 this.show_find_replace = true;
+                this.show_replace_row = true;
                 this.pending_find_focus = true;
                 cx.notify();
             }))
@@ -5912,6 +5960,9 @@ impl Render for LiteMarkApp {
                                 on_replace_all: on_replace_all.clone(),
                                 on_close: on_find_close.clone(),
                                 on_toggle_case: on_toggle_case.clone(),
+                                show_replace: self.show_replace_row,
+                                width: window_width,
+                                on_toggle_replace: on_toggle_replace.clone(),
                             },
                             &theme,
                         ))
@@ -5973,6 +6024,7 @@ impl Render for LiteMarkApp {
                                 EditorProps {
                                     zoom_level: self.settings.zoom_level,
                                     show_zoom_hud: self.show_zoom_hud,
+                                    scroll: self.editor_scroll.clone(),
                                     editor_element: self.editor_surface(
                                         cx,
                                         &theme,
@@ -6038,11 +6090,9 @@ impl Render for LiteMarkApp {
                     .child(render_status_bar(
                         StatusBarProps {
                             line: stats_line,
-                            col: stats_col,
                             words: stats_words,
                             chars: stats_chars,
-                            lines: stats_lines,
-                            reading_time_min: stats_read,
+                            width: window_width,
                             zoom_level: self.settings.zoom_level,
                             view_mode: self.settings.view_mode,
                             on_zoom_in: on_zoom_in.clone(),
@@ -6061,6 +6111,7 @@ impl Render for LiteMarkApp {
                         EditorProps {
                             zoom_level: self.settings.zoom_level,
                             show_zoom_hud: self.show_zoom_hud,
+                            scroll: self.editor_scroll.clone(),
                             editor_element: self.editor_surface(cx, &theme, false),
                         },
                         &theme,
@@ -6319,4 +6370,16 @@ impl Render for LiteMarkApp {
                 },
             )
     }
+}
+
+/// Translucent amber wash painted behind find matches, so the text on top
+/// keeps its own color and stays readable. The current match is stronger.
+fn find_match_color(dark: bool, active: bool) -> Hsla {
+    let color = match (dark, active) {
+        (false, false) => rgba(0xffd54f73),
+        (false, true) => rgba(0xff9800a6),
+        (true, false) => rgba(0xe6a70033),
+        (true, true) => rgba(0xf59e0b6b),
+    };
+    color.into()
 }
