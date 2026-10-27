@@ -808,11 +808,20 @@ impl<V: 'static> EditorElement<V> {
         }
     }
 
-    fn gutter(&self) -> Pixels {
-        if self.show_line_numbers && self.view_mode == ViewMode::Raw {
-            px(52.0)
+    fn numbered(&self) -> bool {
+        self.show_line_numbers && self.view_mode == ViewMode::Raw
+    }
+
+    /// `(gutter_box, text_left)`: the painted line-number column, sized to
+    /// the widest number, and where text starts. Without numbers the box is
+    /// empty and text keeps a fixed left margin.
+    fn gutter(&self, char_width: Pixels, line_count: usize, pad: Pixels) -> (Pixels, Pixels) {
+        if self.numbered() {
+            let digits = line_count.max(1).ilog10() as f32 + 1.0;
+            let gutter_box = pad * 2.0 + char_width * digits.max(2.0);
+            (gutter_box, gutter_box + pad)
         } else {
-            px(24.0)
+            (px(0.0), px(24.0))
         }
     }
 }
@@ -831,7 +840,19 @@ pub struct Prepaint {
     total_height: Pixels,
     wrap_cols: usize,
     x_offset: Pixels,
+    /// Width of the painted line-number column (zero when numbers are off).
+    gutter_box: Pixels,
     table_width_cache: TableWidthCache,
+}
+
+/// Space on each side of a line number inside the gutter, and between the
+/// gutter's divider and the text. Halved when the editor pane is narrow.
+fn gutter_pad(editor_width: Pixels) -> Pixels {
+    if editor_width < px(400.0) {
+        px(6.0)
+    } else {
+        px(12.0)
+    }
 }
 
 impl<V: EntityInputHandler> Element for EditorElement<V> {
@@ -916,7 +937,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             None,
         );
         let char_width = sample.width.max(px(1.0));
-        let gutter = self.gutter();
+        // The parse is cached per revision, so this is O(1) per redraw.
+        let line_count = self.parsed.lines.len();
+        let inset = gutter_pad(bounds.size.width);
+        let (gutter_box, gutter) = self.gutter(char_width, line_count, inset);
         let available_width = (bounds.size.width - gutter - px(48.0)).max(px(32.0));
         let (content_width, x_offset) = if self.centered {
             let max_w = self.max_measure.unwrap_or(available_width).min(available_width);
@@ -938,10 +962,24 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             let rows_src = visual_rows(&self.content, wrap_cols);
             let mut rows = Vec::with_capacity(rows_src.len());
             let mut numbers = Vec::new();
+            let mut bg_quads = Vec::new();
             let mut quads = Vec::new();
             let mut cursor = None;
+            let mut line_number = 0usize;
+            let caret_line = (self.numbered() && self.selection.is_empty())
+                .then(|| logical_line_number(&self.content, self.selection.start));
+            let current_line_color = Hsla {
+                a: self.selection_color.a * 0.35,
+                ..self.selection_color
+            };
 
             for (index, (start, end)) in rows_src.iter().copied().enumerate() {
+                let at_line_start = index == 0
+                    || self.content.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\n');
+                if at_line_start {
+                    line_number += 1;
+                }
+                let is_current_line = caret_line == Some(line_number);
                 let slice = if start == end {
                     SharedString::from(" ")
                 } else {
@@ -1016,32 +1054,46 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         self.cursor_color,
                     ));
                 }
-                let line_number = logical_line_number(&self.content, start);
-                if self.show_line_numbers {
-                    let at_line_start = start == 0
-                        || self.content.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\n');
-                    if at_line_start {
-                        let label: SharedString = format!("{line_number}").into();
-                        let num_run = TextRun {
-                            len: label.len(),
-                            font: base_font.clone(),
-                            color: self.gutter_color,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        };
-                        let shaped_num = window.text_system().shape_line(
-                            label,
-                            self.font_size,
-                            &[num_run],
-                            None,
-                        );
-                        numbers.push((
-                            point(bounds.left() + x_offset + px(8.0), origin.y),
-                            base_line_height,
-                            shaped_num,
-                        ));
-                    }
+                if is_current_line {
+                    bg_quads.push(fill(
+                        Bounds::new(
+                            point(bounds.left() + x_offset, origin.y),
+                            // Left-aligned text runs to the pane's edge; a
+                            // centred column keeps the band under the text.
+                            size(
+                                if self.centered {
+                                    gutter + content_width
+                                } else {
+                                    bounds.size.width - x_offset
+                                },
+                                base_line_height,
+                            ),
+                        ),
+                        current_line_color,
+                    ));
+                }
+                // Wrapped continuation rows get no number.
+                if self.numbered() && at_line_start {
+                    let label: SharedString = format!("{line_number}").into();
+                    let num_run = TextRun {
+                        len: label.len(),
+                        font: base_font.clone(),
+                        color: if is_current_line {
+                            self.text_color
+                        } else {
+                            self.gutter_color
+                        },
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let shaped_num =
+                        window
+                            .text_system()
+                            .shape_line(label, self.font_size, &[num_run], None);
+                    // Right-aligned against the gutter's inner edge.
+                    let number_x = bounds.left() + x_offset + gutter_box - inset - shaped_num.width;
+                    numbers.push((point(number_x, origin.y), base_line_height, shaped_num));
                 }
                 rows.push(PaintRow {
                     line_index: line_number.saturating_sub(1),
@@ -1064,7 +1116,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 numbers,
                 decor_lines: Vec::new(),
                 check_icons: Vec::new(),
-                bg_quads: Vec::new(),
+                bg_quads,
                 quads,
                 strike_quads: Vec::new(),
                 cursor,
@@ -1072,6 +1124,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 total_height,
                 wrap_cols,
                 x_offset,
+                gutter_box,
                 table_width_cache,
             };
         }
@@ -1861,6 +1914,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             total_height,
             wrap_cols,
             x_offset,
+            gutter_box,
             table_width_cache,
         }
     }
@@ -1880,13 +1934,27 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             ElementInputHandler::new(bounds, self.entity.clone()),
             cx,
         );
-        if self.show_line_numbers && self.view_mode == ViewMode::Raw {
+        if self.numbered() {
+            // Run to the bottom of the window even when the text is short;
+            // the scroll container clips whatever lies past the editor pane.
+            let height = bounds
+                .size
+                .height
+                .max(window.viewport_size().height - bounds.origin.y);
+            let left = bounds.origin.x + prepaint.x_offset;
             window.paint_quad(fill(
                 Bounds::new(
-                    point(bounds.origin.x + prepaint.x_offset, bounds.origin.y),
-                    size(self.gutter(), bounds.size.height),
+                    point(left, bounds.origin.y),
+                    size(prepaint.gutter_box, height),
                 ),
                 self.gutter_bg,
+            ));
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(left + prepaint.gutter_box - px(1.0), bounds.origin.y),
+                    size(px(1.0), height),
+                ),
+                self.border_color,
             ));
         }
         for quad in prepaint.bg_quads.drain(..) {
