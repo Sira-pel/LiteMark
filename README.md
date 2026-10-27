@@ -1,6 +1,6 @@
 # LiteMark
 
-LiteMark is a native Markdown and text editor for Linux. It edits Markdown and plain text in a raw view or a WYSIWYG view, and stores notes in a folder (by default `~/Documents/Notes`).
+LiteMark is a native Markdown and text editor for Linux. It is in **beta** (0.x): it works, but it has had little testing outside the author's machine, so keep backups of important notes and please report bugs. It edits Markdown and plain text in a raw view or a WYSIWYG view, and stores notes in a folder (by default `~/Documents/Notes`).
 
 ## Features
 
@@ -111,12 +111,14 @@ cargo run --release
 
 ## Releasing
 
+Use plain `0.x.y` versions while in beta. Do not tick GitHub's "pre-release" box: the in-app update check only sees the latest non-pre-release. The update check ignores `-beta` style suffixes, so avoid them in version numbers.
+
 1. Set `version` in `Cargo.toml` and commit it.
 2. Tag the commit and push the tag:
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v0.9.1
+git push origin v0.9.1
 ```
 
 The [release workflow](.github/workflows/release.yml) checks that the tag matches `Cargo.toml`, builds the `.deb`, and publishes a GitHub Release with the package and a SHA-256 checksum attached.

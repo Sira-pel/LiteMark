@@ -109,7 +109,7 @@ Installed-Size: $INSTALLED_SIZE
 Maintainer: LiteMark Team <support@litemark.app>
 Depends: $DEPENDS
 Recommends: $RECOMMENDS
-Description: Native Markdown and text editor for Linux
+Description: Native Markdown and text editor for Linux (beta)
  LiteMark edits Markdown and plain text on Linux. It keeps a notes
  folder, and includes raw and WYSIWYG views, find and replace, table
  editing, HTML/Markdown/plain-text export, PDF text import, and atomic saves.

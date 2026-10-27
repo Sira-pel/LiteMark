@@ -444,7 +444,7 @@ where
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.text_muted)
-                                .child(format!("Version {}", version))
+                                .child(format!("Version {} (beta)", version))
                         )
                         .child(
                             div()
