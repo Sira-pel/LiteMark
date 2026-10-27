@@ -1314,6 +1314,69 @@ impl ParsedDocument {
         let span = self.overlapping_line_span(range, 1);
         &self.lines[span]
     }
+
+    /// The text of `range` as the WYSIWYG view shows it: inline markers,
+    /// block prefixes, fence lines and rules are dropped, and list items get
+    /// a plain bullet back. Tables are copied as their Markdown source.
+    pub fn visible_text(&self, content: &str, range: std::ops::Range<usize>) -> String {
+        let mut out = String::new();
+        // A line counts while the range touches its text or its line ending.
+        let first = self.lines.partition_point(|l| l.source.end < range.start);
+        let last = self.lines.partition_point(|l| l.source.start < range.end);
+        for index in first..last.max(first) {
+            let line = &self.lines[index];
+            let next_start = self
+                .lines
+                .get(index + 1)
+                .map(|next| next.source.start)
+                .unwrap_or(content.len());
+            let clip_end = range.end.min(line.source.end);
+            let clip = range.start.max(line.source.start).min(clip_end)..clip_end;
+            let ending = &content[range.start.clamp(line.source.end, next_start)
+                ..range.end.clamp(line.source.end, next_start)];
+            match &line.kind {
+                LineKind::CodeFence { .. } | LineKind::HorizontalRule => continue,
+                LineKind::TableRow { .. } | LineKind::TableDelimiter => {
+                    out.push_str(&content[clip]);
+                }
+                kind => {
+                    if let LineKind::ListItem {
+                        ordered,
+                        number,
+                        task,
+                        indent_cols,
+                        ..
+                    } = kind
+                    {
+                        if clip.start <= line.prefix_range.end {
+                            out.push_str(&" ".repeat(*indent_cols));
+                            match (task, ordered) {
+                                (Some(true), _) => out.push_str("☑ "),
+                                (Some(false), _) => out.push_str("☐ "),
+                                (None, true) => out.push_str(&format!("{number}. ")),
+                                (None, false) => out.push_str("• "),
+                            }
+                        }
+                    }
+                    let mut cursor = clip.start;
+                    for hidden in &line.hidden_ranges {
+                        if hidden.end <= cursor || hidden.start >= clip.end {
+                            continue;
+                        }
+                        if hidden.start > cursor {
+                            out.push_str(&content[cursor..hidden.start]);
+                        }
+                        cursor = cursor.max(hidden.end);
+                    }
+                    if cursor < clip.end {
+                        out.push_str(&content[cursor..clip.end]);
+                    }
+                }
+            }
+            out.push_str(ending);
+        }
+        out
+    }
 }
 
 fn merge_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {

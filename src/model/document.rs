@@ -3685,6 +3685,19 @@ impl DocumentTab {
         self.content.get(range).unwrap_or("").to_string()
     }
 
+    /// The selection as the WYSIWYG view shows it, without Markdown markers.
+    /// Raw mode and non-Markdown files get the source text unchanged.
+    pub fn selected_visible_text(&mut self) -> String {
+        if self.view_mode != ViewMode::Wysiwyg || self.file_type != FileType::Markdown {
+            return self.selected_text();
+        }
+        let range = self.selection_range();
+        if range.is_empty() {
+            return String::new();
+        }
+        self.parsed().visible_text(&self.content, range)
+    }
+
     pub fn find_hit_ranges(&self, term: &str, match_case: bool) -> Vec<Range<usize>> {
         find_matches(&self.content, term, match_case)
     }
@@ -6141,6 +6154,57 @@ mod tests {
         doc.caret.move_to(2);
         doc.move_line_up();
         assert_eq!(doc.content, "First line\nSecond line\nThird line");
+    }
+
+    fn visible_copy(text: &str, range: Range<usize>) -> String {
+        let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), text.into(), None, None);
+        doc.caret.move_to(range.start);
+        doc.caret.select_to(range.end);
+        doc.selected_visible_text()
+    }
+
+    #[test]
+    fn visible_copy_drops_inline_markers() {
+        let text = "**bold** and *it* `code` [link](https://x.y) \\*";
+        assert_eq!(visible_copy(text, 0..text.len()), "bold and it code link *");
+        // Selection inside a bold span: "a **bold** b", "bo" is 4..6.
+        assert_eq!(visible_copy("a **bold** b", 3..6), "bo");
+    }
+
+    #[test]
+    fn visible_copy_rewrites_block_prefixes() {
+        let text =
+            "# Title\n> quote\n- a\n  - nested\n- [x] done\n- [ ] todo\n3. three\n\n---\nend";
+        assert_eq!(
+            visible_copy(text, 0..text.len()),
+            "Title\nquote\n• a\n  • nested\n☑ done\n☐ todo\n3. three\n\nend"
+        );
+        // Starting mid item text: no bullet.
+        assert_eq!(visible_copy("- apple", 3..7), "pple");
+        // Starting on the previous line's newline keeps it.
+        assert_eq!(visible_copy("x\n# y", 1..5), "\ny");
+    }
+
+    #[test]
+    fn visible_copy_skips_fences_and_keeps_tables() {
+        let text = "```rs\nlet x = 1;\n```\nafter";
+        assert_eq!(visible_copy(text, 0..text.len()), "let x = 1;\nafter");
+        let table = "| a | **b** |\n|---|---|\n| 1 | 2 |";
+        assert_eq!(visible_copy(table, 0..table.len()), table);
+    }
+
+    #[test]
+    fn visible_copy_is_source_in_raw_mode_and_plain_text() {
+        let text = "**bold**";
+        let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), text.into(), None, None);
+        doc.view_mode = ViewMode::Raw;
+        doc.caret.move_to(0);
+        doc.caret.select_to(text.len());
+        assert_eq!(doc.selected_visible_text(), text);
+        let mut doc = DocumentTab::new("tab-1".into(), "Doc.txt".into(), text.into(), None, None);
+        doc.caret.move_to(0);
+        doc.caret.select_to(text.len());
+        assert_eq!(doc.selected_visible_text(), text);
     }
 
     #[test]
