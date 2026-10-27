@@ -1531,6 +1531,31 @@ impl LiteMarkApp {
         self.sidebar_keyboard = true;
     }
 
+    /// Ctrl/Cmd+click: add `target` to the selection, or drop it if already in.
+    /// With nothing selected the open note counts as the starting selection.
+    fn toggle_selection(&mut self, target: SidebarTarget) {
+        let multi = self.active_multi().cloned();
+        let items = match &multi {
+            Some(m) => m.items.clone(),
+            None => self
+                .selected_target
+                .clone()
+                .or_else(|| {
+                    self.active_tab()
+                        .and_then(|tab| tab.workspace_file_id.clone())
+                        .map(SidebarTarget::File)
+                })
+                .into_iter()
+                .collect(),
+        };
+        let toggled = toggle_row(items, multi.map(|m| m.anchor), target);
+        self.selected_target = toggled.as_ref().map(|(_, cursor, _)| cursor.clone());
+        self.multi_selection = toggled.and_then(|(anchor, cursor, items)| {
+            (items.len() > 1).then_some(MultiSelection { anchor, cursor, items })
+        });
+        self.sidebar_keyboard = true;
+    }
+
     /// Ctrl+A in the sidebar: select every visible row.
     fn sidebar_select_all(&mut self) {
         let targets = self.sidebar_visible_targets();
@@ -1554,6 +1579,17 @@ impl LiteMarkApp {
         }
     }
 
+    fn target_path(&self, target: &SidebarTarget) -> Option<PathBuf> {
+        match target {
+            SidebarTarget::Folder(id) => {
+                self.workspace.folders.iter().find(|f| &f.id == id).map(|f| f.path.clone())
+            }
+            SidebarTarget::File(id) => {
+                self.workspace.files.iter().find(|f| &f.id == id).map(|f| f.path.clone())
+            }
+        }
+    }
+
     /// Ask before trashing every Shift-selected row. Rows inside a selected
     /// folder go with it; modified notes must be saved or closed first.
     fn request_trash_many(&mut self, items: Vec<SidebarTarget>) {
@@ -1571,6 +1607,13 @@ impl LiteMarkApp {
                 Some((t, path, is_folder))
             })
             .collect();
+        // A partly selected folder stays; only its selected rows go.
+        let visible: Vec<PathBuf> = self
+            .sidebar_visible_targets()
+            .iter()
+            .filter_map(|t| self.target_path(t))
+            .collect();
+        let rows = without_partial_folders(&rows, &visible);
         let modified: Vec<PathBuf> = self
             .tabs
             .iter()
@@ -1852,6 +1895,13 @@ impl LiteMarkApp {
                 Some((t, path, is_folder))
             })
             .collect();
+        // A folder with a skipped row showing stays put; only its selected rows move.
+        let visible: Vec<PathBuf> = self
+            .sidebar_visible_targets()
+            .iter()
+            .filter_map(&path_of)
+            .collect();
+        let rows = without_partial_folders(&rows, &visible);
         let dest_is_target = |t: &SidebarTarget| {
             matches!((t, &folder_id), (SidebarTarget::Folder(id), Some(dest)) if id == dest)
         };
@@ -4581,6 +4631,16 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_select = {
+            let view = view.clone();
+            move |target: SidebarTarget, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.toggle_selection(target);
+                    cx.notify();
+                });
+            }
+        };
+
         let on_blank_click = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -6067,6 +6127,9 @@ impl Render for LiteMarkApp {
                                             Some(SidebarTarget::File(id)) => Some(id.clone()),
                                             _ => None,
                                         },
+                                        open_file_id: self
+                                            .active_tab()
+                                            .and_then(|tab| tab.workspace_file_id.clone()),
                                         selected_folder_id: match &self.selected_target {
                                             Some(SidebarTarget::Folder(id)) => {
                                                 Some(id.clone())
@@ -6091,10 +6154,12 @@ impl Render for LiteMarkApp {
                                         on_delete_folder: on_delete_folder.clone(),
                                         on_toggle_folder: on_toggle_folder.clone(),
                                         on_workspace_menu: on_toggle_workspace_menu.clone(),
+                                        workspace_menu_open: self.workspace_menu_open,
                                         on_close: on_toggle_sidebar.clone(),
                                         on_context_menu: on_sidebar_context.clone(),
                                         on_drop_item: on_drop_item.clone(),
                                         on_range_select: on_range_select.clone(),
+                                        on_toggle_select: on_toggle_select.clone(),
                                         on_blank_click: on_blank_click.clone(),
                                         multi_targets: self
                                             .active_multi()

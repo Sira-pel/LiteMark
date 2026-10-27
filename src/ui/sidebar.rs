@@ -33,6 +33,12 @@ fn drag_payload(
     }
 }
 
+/// Ctrl on Linux and Windows, Cmd on macOS (Super+click is the window
+/// manager's on many Linux desktops).
+fn toggle_modifier(m: Modifiers) -> bool {
+    if cfg!(target_os = "macos") { m.platform } else { m.control }
+}
+
 /// Thin vertical guide line that joins nested rows under their folder.
 /// `left` is measured from the row's own left edge.
 fn tree_guide(theme: &Theme, left: f32) -> Div {
@@ -65,34 +71,42 @@ pub struct DragItemGhost {
     theme: Theme,
     is_folder: bool,
     name: SharedString,
+    /// Where the row was grabbed, relative to its origin. GPUI places the
+    /// ghost at cursor minus this, so it's added back to keep the chip by the pointer.
+    grab_offset: Point<Pixels>,
 }
 
 impl Render for DragItemGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(10.0))
-            .py(px(5.0))
-            .rounded(sz::R_MD)
-            .bg(theme.menu_bg)
-            .border_1()
-            .border_color(theme.border_surface)
-            .shadow_lg()
-            .opacity(0.9)
-            .child(render_icon(
-                if self.is_folder { "folder" } else { "file-text" },
-                13.0,
-                theme.text_muted,
-            ))
+            .pl(self.grab_offset.x + px(12.0))
+            .pt(self.grab_offset.y + px(12.0))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_primary)
-                    .truncate()
-                    .child(self.name.clone()),
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(10.0))
+                    .py(px(5.0))
+                    .rounded(sz::R_MD)
+                    .bg(theme.menu_bg)
+                    .border_1()
+                    .border_color(theme.border_surface)
+                    .shadow_lg()
+                    .opacity(0.9)
+                    .child(render_icon(
+                        if self.is_folder { "folder" } else { "file-text" },
+                        13.0,
+                        theme.text_muted,
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.text_primary)
+                            .truncate()
+                            .child(self.name.clone()),
+                    ),
             )
     }
 }
@@ -214,6 +228,7 @@ pub struct SidebarProps<
     FContext,
     FDropItem,
     FRange,
+    FToggle,
     FBlank,
 > where
     FSelect: Fn(WorkspaceFile, &mut App) + 'static + Clone,
@@ -226,11 +241,14 @@ pub struct SidebarProps<
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(Vec<SidebarTarget>, Option<String>, bool, &mut App) + 'static + Clone,
     FRange: Fn(SidebarTarget, &mut App) + 'static + Clone,
+    FToggle: Fn(SidebarTarget, &mut App) + 'static + Clone,
     FBlank: Fn(&mut App) + 'static + Clone,
 {
     pub workspace: WorkspaceDirectory,
     pub width: Pixels,
     pub selected_file_id: Option<String>,
+    /// Note open in the editor; gets a quieter mark than the selection.
+    pub open_file_id: Option<String>,
     pub selected_folder_id: Option<String>,
     pub focus_handle: FocusHandle,
     /// Workspace ids of tabs with unsaved changes (drives the dot).
@@ -246,11 +264,15 @@ pub struct SidebarProps<
     pub on_delete_folder: FDeleteFolder,
     pub on_toggle_folder: FToggleFolder,
     pub on_workspace_menu: FWorkspaceMenu,
+    /// Drives the pressed look and chevron direction of the title button.
+    pub workspace_menu_open: bool,
     pub on_close: FClose,
     pub on_context_menu: FContext,
     pub on_drop_item: FDropItem,
     /// Shift+click: extend the selection from the anchor to this row.
     pub on_range_select: FRange,
+    /// Ctrl/Cmd+click: add or remove one row without touching the rest.
+    pub on_toggle_select: FToggle,
     /// Click on empty space in the list: drops the selection.
     pub on_blank_click: FBlank,
     /// Ids of every row in a multi-selection (empty for a single selection).
@@ -268,6 +290,7 @@ pub fn render_sidebar<
     FContext,
     FDropItem,
     FRange,
+    FToggle,
     FBlank,
 >(
     props: SidebarProps<
@@ -281,6 +304,7 @@ pub fn render_sidebar<
         FContext,
         FDropItem,
         FRange,
+        FToggle,
         FBlank,
     >,
     theme: &Theme,
@@ -296,6 +320,7 @@ where
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(Vec<SidebarTarget>, Option<String>, bool, &mut App) + 'static + Clone,
     FRange: Fn(SidebarTarget, &mut App) + 'static + Clone,
+    FToggle: Fn(SidebarTarget, &mut App) + 'static + Clone,
     FBlank: Fn(&mut App) + 'static + Clone,
 {
     let on_select = props.on_select_file;
@@ -304,9 +329,11 @@ where
     let on_delete_folder = props.on_delete_folder;
     let on_toggle_folder = props.on_toggle_folder;
     let on_workspace_menu = props.on_workspace_menu;
+    let workspace_menu_open = props.workspace_menu_open;
     let on_context = props.on_context_menu;
     let on_drop_item = props.on_drop_item;
     let on_range_select = props.on_range_select;
+    let on_toggle_select = props.on_toggle_select;
     let on_blank_click = props.on_blank_click;
     let multi_ids: std::collections::HashSet<String> = props
         .multi_targets
@@ -322,6 +349,7 @@ where
     let dragging = props.dragging;
     let focus_handle = props.focus_handle;
     let selected_file_id = props.selected_file_id;
+    let open_file_id = props.open_file_id;
     let selected_folder_id = props.selected_folder_id;
     let modified_ids = props.modified_file_ids;
 
@@ -393,12 +421,19 @@ where
                     div()
                         .id("sb-header-dir")
                         .flex()
-                        .flex_1()
+                        .flex_shrink()
                         .min_w_0()
                         .overflow_hidden()
                         .items_center()
                         .mr(px(8.0))
+                        .ml(px(-8.0))
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
                         .cursor_pointer()
+                        .when(workspace_menu_open, |d| d.bg(theme.bg_active))
+                        .hover(|h| h.bg(theme.bg_hover))
+                        .active(|a| a.bg(theme.bg_active))
                         // Mouse-down (not click) so the window's own
                         // click-away handler doesn't close the menu first.
                         .on_mouse_down(MouseButton::Left, {
@@ -412,7 +447,6 @@ where
                             div()
                                 .flex()
                                 .flex_col()
-                                .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
                                 .child(
@@ -428,7 +462,11 @@ where
                                                 .truncate()
                                                 .child(workspace_title.clone()),
                                         )
-                                        .child(render_icon("chevron-down", 12.0, theme.text_muted)),
+                                        .child(render_icon(
+                                            if workspace_menu_open { "chevron-up" } else { "chevron-down" },
+                                            12.0,
+                                            theme.text_primary,
+                                        )),
                                 )
                                 .child(
                                     div()
@@ -601,6 +639,7 @@ where
                                     let is_selected = !in_multi
                                         && selected_folder_id.as_deref() == Some(&folder_id);
                                     let range = on_range_select.clone();
+                                    let toggle_sel = on_toggle_select.clone();
                                     let create = on_begin_create.clone();
                                     let delete = on_delete_folder.clone();
                                     let on_context = on_context.clone();
@@ -644,8 +683,11 @@ where
                                             let fid = folder_id.clone();
                                             move |_, window, cx| {
                                                 cx.stop_propagation();
-                                                if window.modifiers().shift {
+                                                let m = window.modifiers();
+                                                if m.shift {
                                                     range(SidebarTarget::Folder(fid.clone()), cx);
+                                                } else if toggle_modifier(m) {
+                                                    toggle_sel(SidebarTarget::Folder(fid.clone()), cx);
                                                 } else {
                                                     toggle(fid.clone(), cx);
                                                 }
@@ -681,7 +723,7 @@ where
                                             ),
                                             {
                                                 let theme = *theme;
-                                                move |value, _point, _window, cx| {
+                                                move |value, point, _window, cx| {
                                                     cx.new(|_| DragItemGhost {
                                                         theme,
                                                         is_folder: matches!(
@@ -689,6 +731,7 @@ where
                                                             [SidebarTarget::Folder(_)]
                                                         ),
                                                         name: value.name.clone().into(),
+                                                        grab_offset: point,
                                                     })
                                                 }
                                             },
@@ -818,12 +861,16 @@ where
                                     let in_multi = multi_ids.contains(&file.id);
                                     let is_active = !in_multi
                                         && selected_file_id.as_deref() == Some(&file.id);
+                                    let is_open = !in_multi
+                                        && !is_active
+                                        && open_file_id.as_deref() == Some(&file.id);
                                     let display_name = file
                                         .name
                                         .strip_suffix(".md")
                                         .unwrap_or(file.name.as_str())
                                         .to_string();
                                     let range = on_range_select.clone();
+                                    let toggle_sel = on_toggle_select.clone();
                                     let is_modified =
                                         modified_ids.contains(&file.id);
                                     let file_clone = file.clone();
@@ -865,10 +912,12 @@ where
                                             theme.row_multi
                                         } else if is_active {
                                             theme.row_active
+                                        } else if is_open {
+                                            theme.row_hover
                                         } else {
                                             rgba(0x00000000)
                                         })
-                                        .text_color(if is_active || in_multi {
+                                        .text_color(if is_active || is_open || in_multi {
                                             theme.text_strong
                                         } else {
                                             theme.row_text
@@ -883,8 +932,11 @@ where
                                         })
                                         .on_click(move |_, window, cx| {
                                             cx.stop_propagation();
-                                            if window.modifiers().shift {
+                                            let m = window.modifiers();
+                                            if m.shift {
                                                 range(SidebarTarget::File(file_clone.id.clone()), cx);
+                                            } else if toggle_modifier(m) {
+                                                toggle_sel(SidebarTarget::File(file_clone.id.clone()), cx);
                                             } else {
                                                 sel(file_clone.clone(), cx);
                                             }
@@ -909,7 +961,7 @@ where
                                             ),
                                             {
                                                 let theme = *theme;
-                                                move |value, _point, _window, cx| {
+                                                move |value, point, _window, cx| {
                                                     cx.new(|_| DragItemGhost {
                                                         theme,
                                                         is_folder: matches!(
@@ -917,6 +969,7 @@ where
                                                             [SidebarTarget::Folder(_)]
                                                         ),
                                                         name: value.name.clone().into(),
+                                                        grab_offset: point,
                                                     })
                                                 }
                                             },
@@ -954,7 +1007,7 @@ where
                                                 .child(
                                                     div()
                                                         .text_size(px(13.0))
-                                                        .font_weight(if is_active {
+                                                        .font_weight(if is_active || is_open {
                                                             FontWeight::MEDIUM
                                                         } else {
                                                             FontWeight::NORMAL

@@ -16,6 +16,28 @@ pub fn extend_selection<T: Clone + PartialEq>(rows: &[T], anchor: &T, to: &T) ->
     }
 }
 
+/// Ctrl+click: add `target` to `items`, or drop it if present. Returns
+/// `(anchor, cursor, items)`, or `None` once nothing is left. The cursor is the
+/// clicked row, or the last remaining one after a removal; the anchor stays
+/// unless it was the row removed.
+pub fn toggle_row<T: Clone + PartialEq>(
+    mut items: Vec<T>,
+    anchor: Option<T>,
+    target: T,
+) -> Option<(T, T, Vec<T>)> {
+    match items.iter().position(|t| *t == target) {
+        Some(i) => {
+            items.remove(i);
+        }
+        None => items.push(target.clone()),
+    }
+    let cursor = if items.contains(&target) { target } else { items.last()?.clone() };
+    let anchor = anchor
+        .filter(|a| items.contains(a))
+        .unwrap_or_else(|| cursor.clone());
+    Some((anchor, cursor, items))
+}
+
 /// Row index one step from `cursor` (clamped, no wrap). With no cursor,
 /// Up starts at the last row and Down at the first.
 pub fn step_cursor<T: PartialEq>(rows: &[T], cursor: Option<&T>, delta: i32) -> Option<usize> {
@@ -90,6 +112,30 @@ fn top_level_rows<T>(items: &[(T, PathBuf, bool)]) -> Vec<&(T, PathBuf, bool)> {
                 .iter()
                 .any(|folder| path.as_path() != *folder && path.starts_with(folder))
         })
+        .collect()
+}
+
+/// Drops selected folders that were opened up and only partly selected: some
+/// row inside is selected, but a visible one is not. Moving or trashing the
+/// folder would take the skipped row too, so the folder stays and only its
+/// selected rows go. A folder with nothing selected inside is taken whole.
+pub fn without_partial_folders<T: Clone>(
+    items: &[(T, PathBuf, bool)],
+    visible: &[PathBuf],
+) -> Vec<(T, PathBuf, bool)> {
+    let selected = |path: &PathBuf| items.iter().any(|(_, p, _)| p == path);
+    items
+        .iter()
+        .filter(|(_, folder, is_folder)| {
+            if !*is_folder {
+                return true;
+            }
+            let inside = |row: &&PathBuf| *row != folder && row.starts_with(folder);
+            let any_selected = items.iter().any(|(_, p, _)| p != folder && p.starts_with(folder));
+            let any_skipped = visible.iter().filter(inside).any(|row| !selected(row));
+            !(any_selected && any_skipped)
+        })
+        .cloned()
         .collect()
 }
 
@@ -174,6 +220,60 @@ mod tests {
 
     fn rows() -> Vec<&'static str> {
         vec!["a", "b", "c", "d", "e"]
+    }
+
+    #[test]
+    fn partial_folder_is_dropped_but_its_selected_rows_stay() {
+        let p = |s: &str| PathBuf::from(s);
+        let items = vec![
+            (1, p("/w/dir"), true),
+            (2, p("/w/dir/a.md"), false),
+        ];
+        let visible = vec![p("/w/dir"), p("/w/dir/a.md"), p("/w/dir/b.md")];
+        let got = without_partial_folders(&items, &visible);
+        assert_eq!(got, vec![(2, p("/w/dir/a.md"), false)]);
+    }
+
+    #[test]
+    fn fully_selected_or_collapsed_folder_stays_whole() {
+        let p = |s: &str| PathBuf::from(s);
+        let items = vec![(1, p("/w/dir"), true), (2, p("/w/dir/a.md"), false)];
+        let all = vec![p("/w/dir"), p("/w/dir/a.md")];
+        assert_eq!(without_partial_folders(&items, &all), items);
+        let collapsed = vec![p("/w/dir")];
+        let only_folder = vec![(1, p("/w/dir"), true)];
+        assert_eq!(without_partial_folders(&only_folder, &collapsed), only_folder);
+        let expanded = vec![p("/w/dir"), p("/w/dir/a.md")];
+        assert_eq!(without_partial_folders(&only_folder, &expanded), only_folder);
+    }
+
+    #[test]
+    fn toggle_adds_a_row_and_moves_the_cursor_to_it() {
+        let got = toggle_row(vec!["a"], Some("a"), "c");
+        assert_eq!(got, Some(("a", "c", vec!["a", "c"])));
+    }
+
+    #[test]
+    fn toggle_removes_a_middle_row() {
+        let got = toggle_row(vec!["a", "b", "c"], Some("a"), "b");
+        assert_eq!(got, Some(("a", "c", vec!["a", "c"])));
+    }
+
+    #[test]
+    fn toggle_down_to_one_row_keeps_that_row() {
+        let got = toggle_row(vec!["a", "b"], Some("a"), "b");
+        assert_eq!(got, Some(("a", "a", vec!["a"])));
+    }
+
+    #[test]
+    fn toggle_removing_the_anchor_re_anchors_on_the_cursor() {
+        let got = toggle_row(vec!["a", "b", "c"], Some("a"), "a");
+        assert_eq!(got, Some(("c", "c", vec!["b", "c"])));
+    }
+
+    #[test]
+    fn toggle_removing_the_last_row_clears_the_selection() {
+        assert_eq!(toggle_row(vec!["a"], None, "a"), None);
     }
 
     #[test]
