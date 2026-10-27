@@ -1143,17 +1143,6 @@ impl DocumentTab {
         if let Some((tag_kind, prefix, suffix, placeholder)) = inline_spec {
             let mut range = self.selection_range();
             let parsed = self.parsed();
-            if std::env::var_os("LITEMARK_DEBUG_FORMAT").is_some() {
-                let sel_text = self.content.get(range.clone()).unwrap_or("<bad range>");
-                let line = parsed
-                    .line_at_offset(range.start)
-                    .map(|l| format!("kind={:?} source={:?} prefix={:?}", l.kind, l.source, l.prefix_range))
-                    .unwrap_or_default();
-                eprintln!(
-                    "[format] cmd={cmd} mode={mode:?} tab_mode={:?} caret={:?} reversed={} selected={sel_text:?} {line}",
-                    self.view_mode, self.caret.range, self.caret.reversed
-                );
-            }
 
             // If selection is empty, check if cursor is on/inside a word or enclosed by raw delimiters
             if range.is_empty() {

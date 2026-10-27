@@ -946,16 +946,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     SharedString::from(self.content[start..end].to_string())
                 };
                 let display_len = if start == end { 0 } else { slice.len() };
-                let is_heading = slice.starts_with("# ")
-                    || slice.starts_with("## ")
-                    || slice.starts_with("### ");
                 let runs = raw_line_runs(
                     display_len.max(slice.len()),
                     start,
                     self.marked.clone(),
                     base_font.clone(),
                     self.text_color,
-                    is_heading,
                 );
                 let shaped =
                     window
@@ -2042,6 +2038,29 @@ fn collect_line_links(line: &ParsedLine) -> Vec<(Range<usize>, String)> {
     links
 }
 
+/// GPUI merges neighbouring runs into the first run's font whenever color,
+/// underline and strikethrough match, without comparing the fonts. Bold or
+/// italic text that keeps its neighbours' color (headings do) would then draw
+/// in the first run's weight. Give such a run an imperceptibly different alpha
+/// so the font change survives.
+fn keep_font_changes_distinct(runs: &mut [TextRun]) {
+    for i in 1..runs.len() {
+        let (before, rest) = runs.split_at_mut(i);
+        let (prev, cur) = (&before[i - 1], &mut rest[0]);
+        if prev.font != cur.font
+            && prev.color == cur.color
+            && prev.underline == cur.underline
+            && prev.strikethrough == cur.strikethrough
+        {
+            cur.color.a = if cur.color.a > 0.5 {
+                cur.color.a - 0.004
+            } else {
+                cur.color.a + 0.004
+            };
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn wysiwyg_slice_runs(
     parsed_line: &ParsedLine,
@@ -2162,6 +2181,7 @@ fn wysiwyg_slice_runs(
     }
 
     runs.retain(|r| r.len > 0);
+    keep_font_changes_distinct(&mut runs);
     runs
 }
 
@@ -2258,6 +2278,7 @@ fn wysiwyg_cell_runs(
     }
 
     runs.retain(|r| r.len > 0);
+    keep_font_changes_distinct(&mut runs);
     runs
 }
 
@@ -2428,13 +2449,9 @@ fn raw_line_runs(
     len: usize,
     line_start: usize,
     marked: Option<Range<usize>>,
-    mut font: Font,
+    font: Font,
     color: Hsla,
-    is_heading: bool,
 ) -> Vec<TextRun> {
-    if is_heading {
-        font.weight = FontWeight::BOLD;
-    }
     let base = TextRun {
         len,
         font,
@@ -3275,5 +3292,65 @@ mod tests {
 
         let all_bold = runs_for("## **Hello world**");
         assert!(all_bold.iter().all(|r| r.font.weight == FontWeight::BOLD));
+    }
+    /// GPUI merges neighbouring runs into the first one's font when color,
+    /// underline and strikethrough match. Any two neighbours with different
+    /// fonts must therefore differ in one of them, or the whole line draws in
+    /// the first run's weight.
+    #[test]
+    fn neighbouring_runs_with_different_fonts_are_never_mergeable() {
+        use gpui::{font, hsla};
+        let colors = super::EditorColors {
+            text_color: hsla(0.0, 0.0, 0.8, 1.0),
+            strong_color: hsla(0.0, 0.0, 1.0, 1.0),
+            muted_color: hsla(0.0, 0.0, 0.5, 1.0),
+            h1_color: hsla(0.1, 0.8, 0.5, 1.0),
+            h2_color: hsla(0.2, 0.8, 0.5, 1.0),
+            code_color: hsla(0.3, 0.8, 0.5, 1.0),
+            code_bg: hsla(0.4, 0.8, 0.5, 1.0),
+            link_color: hsla(0.5, 0.8, 0.5, 1.0),
+            border_color: hsla(0.6, 0.8, 0.5, 1.0),
+        };
+        let (base, mono) = (font("Ubuntu"), font("Ubuntu Mono"));
+        let sources = [
+            "# **Welcome** to LiteMark",
+            "# Welcome to **LiteMark**",
+            "# Welcome **to** LiteMark",
+            "# *Welcome* to LiteMark",
+            "# **Welcome** to *LiteMark*",
+            "## **Welcome** to LiteMark",
+            "### **Welcome** to LiteMark",
+            "#### **Welcome** to LiteMark",
+            "**Welcome** to LiteMark",
+            "> **Welcome** to LiteMark",
+            "- **Welcome** to LiteMark",
+        ];
+        for src in sources {
+            let doc = parse_document(src);
+            let line = &doc.lines[0];
+            let runs = super::wysiwyg_slice_runs(
+                line,
+                0..line.display_text.len(),
+                line.display_text.len(),
+                &line.offset_map,
+                None,
+                &base,
+                &mono,
+                &colors,
+            );
+            assert!(runs.len() > 1, "{src}: expected mixed runs");
+            for pair in runs.windows(2) {
+                if pair[0].font != pair[1].font {
+                    assert!(
+                        pair[0].color != pair[1].color
+                            || pair[0].underline != pair[1].underline
+                            || pair[0].strikethrough != pair[1].strikethrough,
+                        "{src}: GPUI would merge runs {:?} and {:?}",
+                        pair[0].font.weight,
+                        pair[1].font.weight
+                    );
+                }
+            }
+        }
     }
 }
