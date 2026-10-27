@@ -3297,7 +3297,7 @@ impl LiteMarkApp {
         // Shift+click, ends a multi-selection. A press inside the sidebar keeps
         // it: that press may be the start of dragging the whole selection, and
         // clicking a row clears it itself.
-        let in_sidebar = self.show_sidebar && event.position.x < sz::SIDEBAR_W;
+        let in_sidebar = self.show_sidebar && event.position.x < crate::theme::sidebar_width(window.viewport_size().width);
         if !window.modifiers().shift && !in_sidebar {
             self.multi_selection = None;
             self.selected_target = None;
@@ -5026,6 +5026,7 @@ impl Render for LiteMarkApp {
                             point,
                             anchor_corner: anchor,
                             width,
+                            max_width: window.viewport_size().width - px(16.0),
                             items,
                             focus_handle: self.menu_focus_handle.clone(),
                             selected_index: self.menu_selected_ix,
@@ -5872,7 +5873,7 @@ impl Render for LiteMarkApp {
                     cx.notify();
                 }),
             )
-            .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
+            .on_action(cx.listener(|this, _: &CloseModal, window, cx| {
                 if this.editor_context_menu.is_some() {
                     this.editor_context_menu = None;
                 } else if this.workspace_menu_open {
@@ -5912,6 +5913,12 @@ impl Render for LiteMarkApp {
                     this.multi_selection = None;
                     this.selected_target = None;
                     this.sidebar_keyboard = false;
+                } else if this.show_sidebar
+                    && !this.zen_mode
+                    && window.viewport_size().width < px(600.0)
+                {
+                    // The sidebar is a drawer on narrow windows.
+                    this.show_sidebar = false;
                 } else if this.zen_mode {
                     this.handle_exit_zen();
                 }
@@ -5991,9 +5998,10 @@ impl Render for LiteMarkApp {
                             .relative()
                             .overflow_hidden()
                             .when(self.show_sidebar, |s| {
-                                s.child(render_sidebar(
+                                let sidebar = render_sidebar(
                                     SidebarProps {
                                         workspace: self.workspace.clone(),
+                                        width: crate::theme::sidebar_width(window_width),
                                         selected_file_id: match &self.selected_target {
                                             Some(SidebarTarget::File(id)) => Some(id.clone()),
                                             _ => None,
@@ -6033,7 +6041,36 @@ impl Render for LiteMarkApp {
                                             .unwrap_or_default(),
                                     },
                                     &theme,
-                                ))
+                                );
+                                // On narrow windows the sidebar floats over the
+                                // editor as a drawer instead of squeezing it.
+                                if window_width < px(600.0) {
+                                    let close = on_toggle_sidebar.clone();
+                                    s.child(deferred(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .left_0()
+                                            .size_full()
+                                            // A click on the editor beside the drawer closes it.
+                                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                close(cx);
+                                            })
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .occlude()
+                                                    .shadow_2xl()
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation()
+                                                    })
+                                                    .child(sidebar),
+                                            ),
+                                    ))
+                                } else {
+                                    s.child(sidebar)
+                                }
                             })
                             .child(render_editor(
                                 EditorProps {
@@ -6189,6 +6226,7 @@ impl Render for LiteMarkApp {
             // Modals
             .when(self.show_shortcuts_modal, |s| {
                 s.child(render_shortcuts_modal(
+                    (window.viewport_size().height - px(32.0)).min(px(560.0)),
                     self.prompt_focus_handle.clone(),
                     on_close_shortcuts.clone(),
                     &theme,

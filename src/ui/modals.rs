@@ -4,6 +4,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 pub fn render_shortcuts_modal<FClose>(
+    max_h: Pixels,
     focus_handle: FocusHandle,
     on_close: FClose,
     theme: &Theme,
@@ -70,7 +71,8 @@ where
                 .flex()
                 .flex_col()
                 .w(px(520.0))
-                .max_h(px(560.0))
+                .max_w_full()
+                .max_h(max_h)
                 .rounded(px(12.0))
                 .bg(theme.bg_modal)
                 .border_1()
@@ -215,6 +217,7 @@ where
                 .flex()
                 .flex_col()
                 .w(px(560.0))
+                .max_w_full()
                 .rounded(px(12.0))
                 .bg(theme.bg_modal)
                 .border_1()
@@ -237,10 +240,13 @@ where
                             div()
                                 .flex()
                                 .items_center()
+                                .min_w_0()
                                 .gap(px(8.0))
                                 .child(render_icon("file-text", 18.0, theme.text_muted))
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .truncate()
                                         .font_weight(FontWeight::BOLD)
                                         .text_size(px(14.0))
                                         .text_color(theme.text_primary)
@@ -368,6 +374,7 @@ where
                 .flex()
                 .flex_col()
                 .w(px(420.0))
+                .max_w_full()
                 .rounded(px(12.0))
                 .bg(theme.bg_modal)
                 .border_1()
@@ -518,6 +525,7 @@ where
                 .flex()
                 .flex_col()
                 .w(px(420.0))
+                .max_w_full()
                 .rounded(px(12.0))
                 .bg(theme.bg_modal)
                 .border_1()
