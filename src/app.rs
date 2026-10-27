@@ -3926,7 +3926,7 @@ impl Render for LiteMarkApp {
         let stats_chars = active_tab.char_count;
         let stats_selection = {
             let text = active_tab.selected_text();
-            (!text.is_empty()).then(|| (text.chars().count(), text.split_whitespace().count()))
+            (!text.is_empty()).then(|| text.split_whitespace().count())
         };
         let active_tab_has_pdf = active_tab.file_type == FileType::Pdf;
         let pdf_page_count = active_tab.pdf_page_count;
@@ -6096,7 +6096,7 @@ impl Render for LiteMarkApp {
                             line: stats_line,
                             words: stats_words,
                             chars: stats_chars,
-                            selection: stats_selection,
+                            selected_words: stats_selection,
                             width: window_width,
                             zoom_level: self.settings.zoom_level,
                             view_mode: self.settings.view_mode,
