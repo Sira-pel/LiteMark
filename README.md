@@ -125,4 +125,4 @@ The [release workflow](.github/workflows/release.yml) checks that the tag matche
 
 ## License
 
-MIT. See [Cargo.toml](Cargo.toml).
+MIT. See [LICENSE](LICENSE). Bundled fonts and dependencies keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

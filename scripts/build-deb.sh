@@ -27,6 +27,7 @@ mkdir -p "$STAGING_DIR/DEBIAN"
 mkdir -p "$STAGING_DIR/usr/bin"
 mkdir -p "$STAGING_DIR/usr/share/applications"
 mkdir -p "$STAGING_DIR/usr/share/icons"
+mkdir -p "$STAGING_DIR/usr/share/doc/$PACKAGE_NAME"
 mkdir -p "$OUTPUT_DIR"
 
 # 1. Copy native binary to /usr/bin/litemark
@@ -39,6 +40,27 @@ echo "🎨 Installing application icons..."
 cp -a "$ROOT_DIR/assets/icons/hicolor" "$STAGING_DIR/usr/share/icons/hicolor"
 find "$STAGING_DIR/usr/share/icons/hicolor" -type d -exec chmod 755 {} +
 find "$STAGING_DIR/usr/share/icons/hicolor" -type f -exec chmod 644 {} +
+
+# Debian copyright file plus the license texts
+echo "Installing license files..."
+cat << 'EOF' > "$STAGING_DIR/usr/share/doc/$PACKAGE_NAME/copyright"
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: LiteMark
+Source: https://github.com/Sira-pel/LiteMark
+
+Files: *
+Copyright: 2026 LiteMark Contributors
+License: MIT
+ The full text is in /usr/share/doc/litemark/LICENSE.
+
+Files: usr/share/doc/litemark/THIRD_PARTY_NOTICES.md
+Copyright: 2011 Canonical Ltd. (bundled Ubuntu fonts)
+License: Ubuntu-font-1.0
+ See /usr/share/doc/litemark/THIRD_PARTY_NOTICES.md.
+EOF
+cp "$ROOT_DIR/LICENSE" "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$STAGING_DIR/usr/share/doc/$PACKAGE_NAME/"
+chmod 644 "$STAGING_DIR/usr/share/doc/$PACKAGE_NAME/"*
+chmod 755 "$STAGING_DIR/usr/share/doc" "$STAGING_DIR/usr/share/doc/$PACKAGE_NAME"
 
 # 3. Create desktop launcher
 echo "🖥️ Generating desktop launcher..."
