@@ -11,6 +11,7 @@ actions!(
         OpenFile,
         NewTab,
         NewNote,
+        NewFolder,
         DeleteNote,
         SidebarCollapse,
         SidebarExpand,

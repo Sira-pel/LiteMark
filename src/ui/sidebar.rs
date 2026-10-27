@@ -4,7 +4,7 @@ use crate::model::{WorkspaceDirectory, WorkspaceFile};
 use crate::theme::{sz, Theme};
 use gpui::prelude::*;
 use gpui::*;
-use crate::model::sidebar_search_matches;
+use crate::model::{sidebar_folder_search_matches, sidebar_search_matches};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarTarget {
@@ -214,6 +214,7 @@ pub struct SidebarProps<
     FContext,
     FDropItem,
     FRange,
+    FBlank,
 > where
     FSelect: Fn(WorkspaceFile, &mut App) + 'static + Clone,
     FBeginCreate: Fn(Option<String>, bool, &mut App) + 'static + Clone,
@@ -225,6 +226,7 @@ pub struct SidebarProps<
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(Vec<SidebarTarget>, Option<String>, bool, &mut App) + 'static + Clone,
     FRange: Fn(SidebarTarget, &mut App) + 'static + Clone,
+    FBlank: Fn(&mut App) + 'static + Clone,
 {
     pub workspace: WorkspaceDirectory,
     pub selected_file_id: Option<String>,
@@ -248,6 +250,8 @@ pub struct SidebarProps<
     pub on_drop_item: FDropItem,
     /// Shift+click: extend the selection from the anchor to this row.
     pub on_range_select: FRange,
+    /// Click on empty space in the list: drops the selection.
+    pub on_blank_click: FBlank,
     /// Ids of every row in a multi-selection (empty for a single selection).
     pub multi_targets: Vec<SidebarTarget>,
 }
@@ -263,6 +267,7 @@ pub fn render_sidebar<
     FContext,
     FDropItem,
     FRange,
+    FBlank,
 >(
     props: SidebarProps<
         FSelect,
@@ -275,6 +280,7 @@ pub fn render_sidebar<
         FContext,
         FDropItem,
         FRange,
+        FBlank,
     >,
     theme: &Theme,
 ) -> impl IntoElement
@@ -289,6 +295,7 @@ where
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(Vec<SidebarTarget>, Option<String>, bool, &mut App) + 'static + Clone,
     FRange: Fn(SidebarTarget, &mut App) + 'static + Clone,
+    FBlank: Fn(&mut App) + 'static + Clone,
 {
     let on_select = props.on_select_file;
     let on_begin_create = props.on_begin_create;
@@ -299,6 +306,7 @@ where
     let on_context = props.on_context_menu;
     let on_drop_item = props.on_drop_item;
     let on_range_select = props.on_range_select;
+    let on_blank_click = props.on_blank_click;
     let multi_ids: std::collections::HashSet<String> = props
         .multi_targets
         .iter()
@@ -320,11 +328,15 @@ where
     let is_searching = !props.search_query.trim().is_empty();
 
     let tree_items: Vec<SidebarTreeItem> = if is_searching {
-        sidebar_search_matches(&props.workspace.files, &props.search_query)
+        let folders = sidebar_folder_search_matches(&props.workspace.folders, &props.search_query)
             .into_iter()
             .cloned()
-            .map(|file| SidebarTreeItem::File { file, depth: 0 })
-            .collect()
+            .map(|folder| SidebarTreeItem::Folder { folder, depth: 0 });
+        let files = sidebar_search_matches(&props.workspace.files, &props.search_query)
+            .into_iter()
+            .cloned()
+            .map(|file| SidebarTreeItem::File { file, depth: 0 });
+        folders.chain(files).collect()
     } else {
         build_sidebar_tree(
             &props.workspace.folders,
@@ -449,7 +461,7 @@ where
                             icon_button(
                                 "sb-add-folder",
                                 "folder-plus",
-                                "New Folder",
+                                "New Folder (Ctrl+Shift+N)",
                                 false,
                                 theme,
                                 move |_, _, cx| bc(None, true, cx),
@@ -479,6 +491,7 @@ where
         .child(
             div()
                 .id("sb-files-scroll")
+                .on_click(move |_, _, cx| on_blank_click(cx))
                 .flex_1()
                 .overflow_y_scroll()
                 .p(px(6.0))
@@ -629,6 +642,7 @@ where
                                         .on_click({
                                             let fid = folder_id.clone();
                                             move |_, window, cx| {
+                                                cx.stop_propagation();
                                                 if window.modifiers().shift {
                                                     range(SidebarTarget::Folder(fid.clone()), cx);
                                                 } else {
@@ -867,6 +881,7 @@ where
                                             s.child(tree_guide(theme, 14.0 + (depth as f32 - 1.0) * 14.0 - inset))
                                         })
                                         .on_click(move |_, window, cx| {
+                                            cx.stop_propagation();
                                             if window.modifiers().shift {
                                                 range(SidebarTarget::File(file_clone.id.clone()), cx);
                                             } else {

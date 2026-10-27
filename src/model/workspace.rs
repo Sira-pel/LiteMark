@@ -35,9 +35,9 @@ pub struct WorkspaceDirectory {
 impl Default for WorkspaceDirectory {
     fn default() -> Self {
         let home = dirs::document_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
-        let notes = home.join("Notes");
+        let notes = home.join("LiteMark");
         Self {
-            folder_name: "~/Documents/Notes".to_string(),
+            folder_name: "~/Documents/LiteMark".to_string(),
             folder_path: notes,
             is_linked_to_local_disk: true,
             folders: Vec::new(),

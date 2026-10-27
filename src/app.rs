@@ -484,6 +484,7 @@ impl LiteMarkApp {
     fn claim_field(&mut self, which: TextInput, cx: &mut Context<Self>) {
         self.field_focus = which;
         self.field_owns_keys = !document_accepts_keystrokes(which);
+        self.sidebar_keyboard = sidebar_keyboard_after_claim(self.sidebar_keyboard, which);
         if which == TextInput::Editor {
             self.applied_focus = None;
         }
@@ -749,6 +750,15 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_sidebar(&mut self) {
         self.show_sidebar = !self.show_sidebar;
+        if !self.show_sidebar {
+            // Hand input back to the editor; the sidebar can no longer take it.
+            self.sidebar_keyboard = false;
+            if self.field_focus == TextInput::Search {
+                self.field_focus = TextInput::Editor;
+                self.field_owns_keys = false;
+            }
+            self.applied_focus = None;
+        }
     }
 
     #[allow(dead_code)]
@@ -851,8 +861,13 @@ impl LiteMarkApp {
         }
     }
 
+    /// New folder goes inside the selected folder, else at the workspace root.
     pub fn handle_new_folder(&mut self, cx: &mut Context<Self>) {
-        self.begin_create(None, true, cx);
+        let parent = match &self.selected_target {
+            Some(SidebarTarget::Folder(id)) => Some(id.clone()),
+            _ => None,
+        };
+        self.begin_create(parent, true, cx);
     }
 
     /// Start inline creation of a note or folder in the sidebar tree.
@@ -1373,10 +1388,14 @@ impl LiteMarkApp {
     /// Flatten the visible sidebar tree into selection targets, in row order.
     fn sidebar_visible_targets(&self) -> Vec<SidebarTarget> {
         if !self.search_query.trim().is_empty() {
-            return sidebar_search_matches(&self.workspace.files, &self.search_query)
+            let folders =
+                sidebar_folder_search_matches(&self.workspace.folders, &self.search_query)
+                    .into_iter()
+                    .map(|folder| SidebarTarget::Folder(folder.id.clone()));
+            let files = sidebar_search_matches(&self.workspace.files, &self.search_query)
                 .into_iter()
-                .map(|file| SidebarTarget::File(file.id.clone()))
-                .collect();
+                .map(|file| SidebarTarget::File(file.id.clone()));
+            return folders.chain(files).collect();
         }
         build_sidebar_tree(
             &self.workspace.folders,
@@ -1769,7 +1788,7 @@ impl LiteMarkApp {
         let (mut done, mut failed) = (0usize, 0usize);
         let mut last_error = None;
         for target in moving {
-            match self.drop_one(target, folder_id.clone(), copy) {
+            match self.drop_one(target, folder_id.clone(), copy, false) {
                 DropOutcome::Done(_) => done += 1,
                 DropOutcome::Skipped => {}
                 DropOutcome::Failed(err) => {
@@ -1796,7 +1815,7 @@ impl LiteMarkApp {
         copy: bool,
         cx: &mut Context<Self>,
     ) {
-        match self.drop_one(target, folder_id, copy) {
+        match self.drop_one(target, folder_id, copy, true) {
             DropOutcome::Done(message) => self.show_toast(message, cx),
             DropOutcome::Skipped => {}
             DropOutcome::Failed(err) => self.show_error(err),
@@ -1808,9 +1827,10 @@ impl LiteMarkApp {
         target: SidebarTarget,
         folder_id: Option<String>,
         copy: bool,
+        open_copy: bool,
     ) -> DropOutcome {
         match target {
-            SidebarTarget::File(id) => self.move_or_copy_note(&id, folder_id, copy),
+            SidebarTarget::File(id) => self.move_or_copy_note(&id, folder_id, copy, open_copy),
             SidebarTarget::Folder(id) => self.move_or_copy_folder(&id, folder_id, copy),
         }
     }
@@ -1820,6 +1840,7 @@ impl LiteMarkApp {
         file_id: &str,
         folder_id: Option<String>,
         copy: bool,
+        open_copy: bool,
     ) -> DropOutcome {
         let (dest_name, dest_path) = if let Some(dest_id) = folder_id {
             let Some((name, path)) = self
@@ -1861,18 +1882,20 @@ impl LiteMarkApp {
             match result {
                 Ok(new_path) => {
                     self.rescan_workspace();
-                    let new_file_id = self
-                        .workspace
-                        .files
-                        .iter()
-                        .find(|f| f.path == new_path)
-                        .map(|f| f.id.clone());
-                    let display = new_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(file.name.as_str())
-                        .to_string();
-                    self.open_loaded_tab(display, String::new(), Some(new_path), new_file_id);
+                    if open_copy {
+                        let new_file_id = self
+                            .workspace
+                            .files
+                            .iter()
+                            .find(|f| f.path == new_path)
+                            .map(|f| f.id.clone());
+                        let display = new_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(file.name.as_str())
+                            .to_string();
+                        self.open_loaded_tab(display, String::new(), Some(new_path), new_file_id);
+                    }
                     DropOutcome::Done(format!("Copied {} to {dest_name}", file.name))
                 }
                 Err(err) => DropOutcome::Failed(format!("Couldn't copy note: {err}")),
@@ -3216,6 +3239,11 @@ impl LiteMarkApp {
         // Clicking the editor hands keyboard focus back from the sidebar.
         self.sidebar_keyboard = false;
         self.workspace_menu_open = false;
+        // The inline create row stops its own presses, so any press that gets
+        // here is a click away from it.
+        if self.create_draft.is_some() {
+            self.cancel_create(cx);
+        }
         // A click outside the sidebar, or a plain click that isn't a
         // Shift+click, ends a multi-selection. A press inside the sidebar keeps
         // it: that press may be the start of dragging the whole selection, and
@@ -3223,6 +3251,7 @@ impl LiteMarkApp {
         let in_sidebar = self.show_sidebar && event.position.x < sz::SIDEBAR_W;
         if !window.modifiers().shift && !in_sidebar {
             self.multi_selection = None;
+            self.selected_target = None;
         }
         if self.input_blocked() || window.default_prevented() {
             return;
@@ -4419,6 +4448,18 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_blank_click = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.multi_selection = None;
+                    this.selected_target = None;
+                    this.sidebar_keyboard = false;
+                    cx.notify();
+                });
+            }
+        };
+
         let on_begin_create = {
             let view = view.clone();
             move |parent_id: Option<String>, is_folder: bool, cx: &mut App| {
@@ -5026,6 +5067,10 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &NewNote, _window, cx| {
                 this.begin_create(None, false, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &NewFolder, _window, cx| {
+                this.handle_new_folder(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &DeleteNote, _window, cx| {
@@ -5775,8 +5820,10 @@ impl Render for LiteMarkApp {
                     this.show_find_replace = false;
                 } else if this.field_focus == TextInput::Search || !this.search_query.is_empty() {
                     this.clear_search(cx);
-                } else if this.active_multi().is_some() {
+                } else if this.active_multi().is_some() || this.selected_target.is_some() {
                     this.multi_selection = None;
+                    this.selected_target = None;
+                    this.sidebar_keyboard = false;
                 } else if this.zen_mode {
                     this.handle_exit_zen();
                 }
@@ -5886,6 +5933,7 @@ impl Render for LiteMarkApp {
                                         on_context_menu: on_sidebar_context.clone(),
                                         on_drop_item: on_drop_item.clone(),
                                         on_range_select: on_range_select.clone(),
+                                        on_blank_click: on_blank_click.clone(),
                                         multi_targets: self
                                             .active_multi()
                                             .map(|m| m.items.clone())

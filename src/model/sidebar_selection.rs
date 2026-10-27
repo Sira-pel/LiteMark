@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::workspace::WorkspaceFile;
+use super::workspace::{WorkspaceFile, WorkspaceFolder};
 
 /// Rows from `anchor` to `to` inclusive, in tree order. Falls back to just
 /// `to` when either row is not visible.
@@ -42,6 +42,24 @@ pub fn sidebar_search_matches<'a>(
         return Vec::new();
     }
     files
+        .iter()
+        .filter(|f| {
+            let stem = f.path.file_stem().and_then(|s| s.to_str());
+            stem.unwrap_or(&f.name).to_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+/// Folders whose name contains `query` (case-insensitive), in workspace order.
+pub fn sidebar_folder_search_matches<'a>(
+    folders: &'a [WorkspaceFolder],
+    query: &str,
+) -> Vec<&'a WorkspaceFolder> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    folders
         .iter()
         .filter(|f| f.name.to_lowercase().contains(&query))
         .collect()
@@ -339,6 +357,13 @@ mod tests {
     }
 
     #[test]
+    fn search_ignores_the_file_extension() {
+        let files = [note("Welcome.md")];
+        assert!(sidebar_search_matches(&files, "md").is_empty());
+        assert_eq!(sidebar_search_matches(&files, "come").len(), 1);
+    }
+
+    #[test]
     fn blank_or_unmatched_search_returns_nothing() {
         let files = [note("Welcome.md")];
         assert!(sidebar_search_matches(&files, "").is_empty());
@@ -350,5 +375,23 @@ mod tests {
     fn search_trims_surrounding_spaces() {
         let files = [note("Welcome.md")];
         assert_eq!(sidebar_search_matches(&files, "  welcome ").len(), 1);
+    }
+
+    #[test]
+    fn folder_search_matches_names_case_insensitively() {
+        let folder = |name: &str| WorkspaceFolder {
+            id: name.into(),
+            name: name.into(),
+            parent_id: None,
+            path: PathBuf::from(name),
+            is_open: false,
+        };
+        let folders = [folder("Projects"), folder("Journal")];
+        let hits: Vec<&str> = sidebar_folder_search_matches(&folders, " PROJ ")
+            .into_iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(hits, ["Projects"]);
+        assert!(sidebar_folder_search_matches(&folders, "").is_empty());
     }
 }
