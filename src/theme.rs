@@ -85,6 +85,10 @@ pub struct Theme {
     pub row_text: Rgba,
     pub row_active: Rgba,
     pub row_hover: Rgba,
+    /// Rows in a Shift/Ctrl+A multi-selection: a cool tint that reads apart
+    /// from the neutral open-note highlight in both themes.
+    pub row_multi: Rgba,
+    pub row_multi_border: Rgba,
     pub tile_hover: Rgba,
     pub menu_bg: Rgba,
     pub wc_glyph: Rgba,
@@ -133,6 +137,8 @@ impl Theme {
                 row_text: rgb(0xa8a8a8),
                 row_active: rgb(0x2c2c2c),
                 row_hover: rgb(0x242424),
+                row_multi: rgb(0x1f2a36),
+                row_multi_border: rgb(0x34506b),
                 tile_hover: rgb(0x2a2a2a),
                 menu_bg: rgb(0x262626),
                 wc_glyph: rgb(0xb0b0b0),
@@ -173,6 +179,8 @@ impl Theme {
                 row_text: rgb(0x444444),
                 row_active: rgb(0xe0e0e0),
                 row_hover: rgb(0xeeeeee),
+                row_multi: rgb(0xe1edf8),
+                row_multi_border: rgb(0xa9c6e4),
                 tile_hover: rgb(0xe4e4e4),
                 menu_bg: rgb(0xffffff),
                 wc_glyph: rgb(0x4a4a4a),

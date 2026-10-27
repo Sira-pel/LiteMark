@@ -249,6 +249,7 @@ pub enum TextInput {
     Replace,
     Rename,
     Create,
+    Search,
 }
 
 /// Printable keys and editing actions reach the document only while the editor owns input.

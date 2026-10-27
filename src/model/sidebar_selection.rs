@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use super::workspace::WorkspaceFile;
+
 /// Rows from `anchor` to `to` inclusive, in tree order. Falls back to just
 /// `to` when either row is not visible.
 pub fn extend_selection<T: Clone + PartialEq>(rows: &[T], anchor: &T, to: &T) -> (T, Vec<T>) {
@@ -28,6 +30,21 @@ pub fn step_cursor<T: PartialEq>(rows: &[T], cursor: Option<&T>, delta: i32) -> 
             None => 0,
         },
     )
+}
+
+/// Notes whose name contains `query` (case-insensitive), in workspace order.
+pub fn sidebar_search_matches<'a>(
+    files: &'a [WorkspaceFile],
+    query: &str,
+) -> Vec<&'a WorkspaceFile> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    files
+        .iter()
+        .filter(|f| f.name.to_lowercase().contains(&query))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,5 +288,44 @@ mod tests {
             r.record(Err("busy".into())),
             Some("Moved 3 of 5 to the Trash. permission denied".into())
         );
+    }
+
+    fn note(name: &str) -> WorkspaceFile {
+        WorkspaceFile {
+            id: format!("file-{name}"),
+            name: name.into(),
+            folder_id: None,
+            path: PathBuf::from(name),
+            file_type: super::super::document::FileType::Markdown,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn search_matches_names_case_insensitively_in_order() {
+        let files = [
+            note("Welcome.md"),
+            note("Untitled.md"),
+            note("Untitled 2.md"),
+        ];
+        let hits: Vec<&str> = sidebar_search_matches(&files, "UNTIT")
+            .into_iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(hits, ["Untitled.md", "Untitled 2.md"]);
+    }
+
+    #[test]
+    fn blank_or_unmatched_search_returns_nothing() {
+        let files = [note("Welcome.md")];
+        assert!(sidebar_search_matches(&files, "").is_empty());
+        assert!(sidebar_search_matches(&files, "   ").is_empty());
+        assert!(sidebar_search_matches(&files, "zzz").is_empty());
+    }
+
+    #[test]
+    fn search_trims_surrounding_spaces() {
+        let files = [note("Welcome.md")];
+        assert_eq!(sidebar_search_matches(&files, "  welcome ").len(), 1);
     }
 }
