@@ -209,7 +209,7 @@ pub struct SidebarProps<
     FDeleteFile,
     FDeleteFolder,
     FToggleFolder,
-    FChooseDir,
+    FWorkspaceMenu,
     FClose,
     FContext,
     FDropItem,
@@ -220,7 +220,7 @@ pub struct SidebarProps<
     FDeleteFile: Fn(String, &mut App) + 'static + Clone,
     FDeleteFolder: Fn(String, &mut App) + 'static + Clone,
     FToggleFolder: Fn(String, &mut App) + 'static + Clone,
-    FChooseDir: Fn(&mut App) + 'static + Clone,
+    FWorkspaceMenu: Fn(&mut App) + 'static + Clone,
     FClose: Fn(&mut App) + 'static + Clone,
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(Vec<SidebarTarget>, Option<String>, bool, &mut App) + 'static + Clone,
@@ -242,7 +242,7 @@ pub struct SidebarProps<
     pub on_delete_file: FDeleteFile,
     pub on_delete_folder: FDeleteFolder,
     pub on_toggle_folder: FToggleFolder,
-    pub on_choose_dir: FChooseDir,
+    pub on_workspace_menu: FWorkspaceMenu,
     pub on_close: FClose,
     pub on_context_menu: FContext,
     pub on_drop_item: FDropItem,
@@ -258,7 +258,7 @@ pub fn render_sidebar<
     FDeleteFile,
     FDeleteFolder,
     FToggleFolder,
-    FChooseDir,
+    FWorkspaceMenu,
     FClose,
     FContext,
     FDropItem,
@@ -270,7 +270,7 @@ pub fn render_sidebar<
         FDeleteFile,
         FDeleteFolder,
         FToggleFolder,
-        FChooseDir,
+        FWorkspaceMenu,
         FClose,
         FContext,
         FDropItem,
@@ -284,7 +284,7 @@ where
     FDeleteFile: Fn(String, &mut App) + 'static + Clone,
     FDeleteFolder: Fn(String, &mut App) + 'static + Clone,
     FToggleFolder: Fn(String, &mut App) + 'static + Clone,
-    FChooseDir: Fn(&mut App) + 'static + Clone,
+    FWorkspaceMenu: Fn(&mut App) + 'static + Clone,
     FClose: Fn(&mut App) + 'static + Clone,
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(Vec<SidebarTarget>, Option<String>, bool, &mut App) + 'static + Clone,
@@ -295,7 +295,7 @@ where
     let on_delete_file = props.on_delete_file;
     let on_delete_folder = props.on_delete_folder;
     let on_toggle_folder = props.on_toggle_folder;
-    let on_choose_dir = props.on_choose_dir;
+    let on_workspace_menu = props.on_workspace_menu;
     let on_context = props.on_context_menu;
     let on_drop_item = props.on_drop_item;
     let on_range_select = props.on_range_select;
@@ -386,9 +386,14 @@ where
                         .items_center()
                         .mr(px(8.0))
                         .cursor_pointer()
-                        .on_click({
-                            let cd = on_choose_dir.clone();
-                            move |_, _, cx| cd(cx)
+                        // Mouse-down (not click) so the window's own
+                        // click-away handler doesn't close the menu first.
+                        .on_mouse_down(MouseButton::Left, {
+                            let toggle = on_workspace_menu.clone();
+                            move |_, _, cx| {
+                                cx.stop_propagation();
+                                toggle(cx)
+                            }
                         })
                         .child(
                             div()
@@ -990,6 +995,129 @@ where
                                 }
                             }
                         })),
+                ),
+        )
+}
+
+/// Dropdown under the sidebar header: current folder, recent folders and a
+/// "Choose folder" entry. Click outside to dismiss.
+pub fn render_workspace_menu<FPick, FChoose, FDismiss>(
+    current_path: String,
+    recents: Vec<(String, std::path::PathBuf)>,
+    on_pick: FPick,
+    on_choose: FChoose,
+    on_dismiss: FDismiss,
+    theme: &Theme,
+) -> impl IntoElement
+where
+    FPick: Fn(std::path::PathBuf, &mut App) + 'static + Clone,
+    FChoose: Fn(&mut App) + 'static + Clone,
+    FDismiss: Fn(&mut App) + 'static + Clone,
+{
+    let dismiss_left = on_dismiss.clone();
+    let dismiss_right = on_dismiss.clone();
+    let row = |id: SharedString| {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(10.0))
+            .h(px(32.0))
+            .rounded(sz::R_SM)
+            .cursor_pointer()
+            .text_size(px(13.0))
+            .text_color(theme.text_primary)
+            .hover(|h| h.bg(theme.bg_hover))
+    };
+    div()
+        .id("workspace-menu-overlay")
+        .absolute()
+        .size_full()
+        .top_0()
+        .left_0()
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            dismiss_left(cx);
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            dismiss_right(cx);
+            cx.stop_propagation();
+        })
+        .child(
+            div()
+                .absolute()
+                .left(px(10.0))
+                .top(px(54.0))
+                .w(px(284.0))
+                .p(px(6.0))
+                .rounded(sz::R_MD)
+                .bg(theme.menu_bg)
+                .border_1()
+                .border_color(theme.border_surface)
+                .shadow_lg()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .px(px(10.0))
+                        .pt(px(4.0))
+                        .pb(px(8.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child("Current folder"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_primary)
+                                .truncate()
+                                .child(current_path),
+                        ),
+                )
+                .when(!recents.is_empty(), |s| {
+                    s.child(div().h(px(1.0)).bg(theme.border_subtle).mb(px(4.0)))
+                        .child(
+                            div()
+                                .px(px(10.0))
+                                .py(px(2.0))
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child("Recent"),
+                        )
+                        .children(recents.into_iter().enumerate().map(|(ix, (name, path))| {
+                            let pick = on_pick.clone();
+                            let target = path.clone();
+                            row(SharedString::from(format!("workspace-recent-{ix}")))
+                                .on_click(move |_, _, cx| pick(target.clone(), cx))
+                                .child(render_icon("folder", 14.0, theme.text_muted))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .child(div().truncate().child(name))
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(theme.text_muted)
+                                                .truncate()
+                                                .child(path.display().to_string()),
+                                        ),
+                                )
+                        }))
+                })
+                .child(div().h(px(1.0)).bg(theme.border_subtle).my(px(4.0)))
+                .child(
+                    row(SharedString::from("workspace-choose"))
+                        .on_click(move |_, _, cx| on_choose(cx))
+                        .child(render_icon("folder-open", 14.0, theme.text_muted))
+                        .child("Choose folder..."),
                 ),
         )
 }

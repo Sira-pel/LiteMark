@@ -132,6 +132,7 @@ pub struct LiteMarkApp {
     pub pending_find_focus: bool,
     pub pending_rename_focus: bool,
     pub sidebar_menu: Option<SidebarMenu>,
+    pub workspace_menu_open: bool,
     pub rename_target: Option<SidebarTarget>,
     pub rename_value: String,
     pub rename_field: Entity<LineField>,
@@ -432,6 +433,7 @@ impl LiteMarkApp {
             pending_find_focus: false,
             pending_rename_focus: false,
             sidebar_menu: None,
+            workspace_menu_open: false,
             rename_target: None,
             rename_value: String::new(),
             rename_field,
@@ -1969,7 +1971,11 @@ impl LiteMarkApp {
                 Err(err) => self.show_error(format!("Couldn't copy note: {err}")),
             }
         }
+        let left = self.workspace.folder_path.clone();
         self.workspace = scan_workspace_dir(&new_dir);
+        self.settings.remember_folders(&left, &new_dir);
+        self.settings.save();
+        self.workspace_menu_open = false;
         if let Some(new_path) = migrated {
             if let Some(tab) = self.active_tab_mut() {
                 if let Some(name) = new_path.file_name().and_then(|n| n.to_str()) {
@@ -3181,6 +3187,7 @@ impl LiteMarkApp {
     ) {
         // Clicking the editor hands keyboard focus back from the sidebar.
         self.sidebar_keyboard = false;
+        self.workspace_menu_open = false;
         // A click anywhere but a Shift+click ends a multi-selection.
         if !window.modifiers().shift {
             self.multi_selection = None;
@@ -4505,6 +4512,17 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_workspace_menu = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.workspace_menu_open = !this.workspace_menu_open;
+                    this.sidebar_menu = None;
+                    cx.notify();
+                });
+            }
+        };
+
         let on_choose_dir = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -5692,6 +5710,8 @@ impl Render for LiteMarkApp {
             .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
                 if this.editor_context_menu.is_some() {
                     this.editor_context_menu = None;
+                } else if this.workspace_menu_open {
+                    this.workspace_menu_open = false;
                 } else if this.sidebar_menu.is_some() {
                     this.sidebar_menu = None;
                 } else if this.rename_target.is_some() || this.save_as_tab.is_some() {
@@ -5796,6 +5816,7 @@ impl Render for LiteMarkApp {
                             .flex_1()
                             .flex()
                             .size_full()
+                            .relative()
                             .overflow_hidden()
                             .when(self.show_sidebar, |s| {
                                 s.child(render_sidebar(
@@ -5828,7 +5849,7 @@ impl Render for LiteMarkApp {
                                         on_delete_file: on_delete_file.clone(),
                                         on_delete_folder: on_delete_folder.clone(),
                                         on_toggle_folder: on_toggle_folder.clone(),
-                                        on_choose_dir: on_choose_dir.clone(),
+                                        on_workspace_menu: on_toggle_workspace_menu.clone(),
                                         on_close: on_toggle_sidebar.clone(),
                                         on_context_menu: on_sidebar_context.clone(),
                                         on_drop_item: on_drop_item.clone(),
@@ -5852,7 +5873,59 @@ impl Render for LiteMarkApp {
                                     ),
                                 },
                                 &theme,
-                            )),
+                            ))
+                            .when(self.workspace_menu_open && self.show_sidebar, |parent| {
+                let recents: Vec<(String, PathBuf)> = self
+                    .settings
+                    .recent_folders
+                    .iter()
+                    .filter(|p| p.is_dir() && **p != self.workspace.folder_path)
+                    .map(|p| {
+                        let name = p
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Folder")
+                            .to_string();
+                        (name, p.clone())
+                    })
+                    .collect();
+                let view = view.clone();
+                parent.child(render_workspace_menu(
+                    self.workspace.folder_path.display().to_string(),
+                    recents,
+                    {
+                        let view = view.clone();
+                        move |dir: PathBuf, cx: &mut App| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.workspace_menu_open = false;
+                                this.prepare_workspace_switch(dir);
+                                cx.notify();
+                            });
+                        }
+                    },
+                    {
+                        let view = view.clone();
+                        let choose = on_choose_dir.clone();
+                        move |cx: &mut App| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.workspace_menu_open = false;
+                                cx.notify();
+                            });
+                            choose(cx);
+                        }
+                    },
+                    {
+                        let view = view.clone();
+                        move |cx: &mut App| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.workspace_menu_open = false;
+                                cx.notify();
+                            });
+                        }
+                    },
+                    &theme,
+                ))
+            })
                     )
                     // 5. StatusBar
                     .child(render_status_bar(

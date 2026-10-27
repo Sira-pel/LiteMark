@@ -39,6 +39,9 @@ pub struct EditorSettings {
     pub base_font_size: f32,
     #[serde(default)]
     pub content_alignment: ContentAlignment,
+    /// Workspace folders used before, most recent first (never the current one).
+    #[serde(default)]
+    pub recent_folders: Vec<PathBuf>,
 }
 
 impl Default for EditorSettings {
@@ -53,11 +56,25 @@ impl Default for EditorSettings {
             word_wrap: true,
             base_font_size: 17.0,
             content_alignment: ContentAlignment::Centered,
+            recent_folders: Vec::new(),
         }
     }
 }
 
+/// Most recent workspace folders kept in the switcher.
+pub const MAX_RECENT_FOLDERS: usize = 5;
+
 impl EditorSettings {
+    /// Record a workspace switch: the folder just left goes to the front of
+    /// the recent list and the one just entered is removed from it.
+    pub fn remember_folders(&mut self, left: &std::path::Path, entered: &std::path::Path) {
+        self.recent_folders.retain(|p| p != left && p != entered);
+        if left != entered {
+            self.recent_folders.insert(0, left.to_path_buf());
+        }
+        self.recent_folders.truncate(MAX_RECENT_FOLDERS);
+    }
+
     fn config_path() -> Option<PathBuf> {
         let base = dirs::config_dir()?;
         Some(base.join("litemark").join("settings.json"))
@@ -91,6 +108,7 @@ impl EditorSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_content_alignment_serde() {
@@ -105,5 +123,24 @@ mod tests {
         let parsed_custom: EditorSettings = serde_json::from_str(custom).expect("deserialize custom");
         assert_eq!(parsed_custom.content_alignment, ContentAlignment::Left);
     }
-}
 
+    #[test]
+    fn switching_folders_puts_the_old_one_first_without_duplicates() {
+        let mut s = EditorSettings::default();
+        s.remember_folders(Path::new("/a"), Path::new("/b"));
+        s.remember_folders(Path::new("/b"), Path::new("/c"));
+        assert_eq!(s.recent_folders, [PathBuf::from("/b"), PathBuf::from("/a")]);
+        s.remember_folders(Path::new("/c"), Path::new("/a"));
+        assert_eq!(s.recent_folders, [PathBuf::from("/c"), PathBuf::from("/b")]);
+    }
+
+    #[test]
+    fn recent_folders_are_capped() {
+        let mut s = EditorSettings::default();
+        for i in 0..10 {
+            s.remember_folders(Path::new(&format!("/old{i}")), Path::new("/now"));
+        }
+        assert_eq!(s.recent_folders.len(), MAX_RECENT_FOLDERS);
+        assert_eq!(s.recent_folders[0], PathBuf::from("/old9"));
+    }
+}
