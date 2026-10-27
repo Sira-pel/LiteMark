@@ -3234,4 +3234,46 @@ mod tests {
             assert_eq!(run.color, colors.muted_color);
         }
     }
+    #[test]
+    fn headings_are_not_bold_unless_the_user_adds_it() {
+        use gpui::{font, hsla, FontStyle, FontWeight};
+        let colors = super::EditorColors {
+            text_color: hsla(0.0, 0.0, 0.8, 1.0),
+            strong_color: hsla(0.0, 0.0, 1.0, 1.0),
+            muted_color: hsla(0.0, 0.0, 0.5, 1.0),
+            h1_color: hsla(0.1, 0.8, 0.5, 1.0),
+            h2_color: hsla(0.2, 0.8, 0.5, 1.0),
+            code_color: hsla(0.3, 0.8, 0.5, 1.0),
+            code_bg: hsla(0.4, 0.8, 0.5, 1.0),
+            link_color: hsla(0.5, 0.8, 0.5, 1.0),
+            border_color: hsla(0.6, 0.8, 0.5, 1.0),
+        };
+        let (base, mono) = (font("Ubuntu"), font("Ubuntu Mono"));
+        let runs_for = |src: &str| {
+            let doc = parse_document(src);
+            let line = &doc.lines[0];
+            super::wysiwyg_slice_runs(
+                line,
+                0..line.display_text.len(),
+                line.display_text.len(),
+                &line.offset_map,
+                None,
+                &base,
+                &mono,
+                &colors,
+            )
+        };
+
+        let plain = runs_for("# Hello world");
+        assert!(plain.iter().all(|r| r.font.weight == FontWeight::NORMAL));
+
+        let mixed = runs_for("# Hello **world** and *more*");
+        assert_eq!(mixed[0].font.weight, FontWeight::NORMAL);
+        assert_eq!(mixed[1].font.weight, FontWeight::BOLD);
+        assert_eq!(mixed[2].font.weight, FontWeight::NORMAL);
+        assert_eq!(mixed[3].font.style, FontStyle::Italic);
+
+        let all_bold = runs_for("## **Hello world**");
+        assert!(all_bold.iter().all(|r| r.font.weight == FontWeight::BOLD));
+    }
 }
