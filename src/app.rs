@@ -1579,6 +1579,17 @@ impl LiteMarkApp {
         }
     }
 
+    fn target_path(&self, target: &SidebarTarget) -> Option<PathBuf> {
+        match target {
+            SidebarTarget::Folder(id) => {
+                self.workspace.folders.iter().find(|f| &f.id == id).map(|f| f.path.clone())
+            }
+            SidebarTarget::File(id) => {
+                self.workspace.files.iter().find(|f| &f.id == id).map(|f| f.path.clone())
+            }
+        }
+    }
+
     /// Ask before trashing every Shift-selected row. Rows inside a selected
     /// folder go with it; modified notes must be saved or closed first.
     fn request_trash_many(&mut self, items: Vec<SidebarTarget>) {
@@ -1596,6 +1607,17 @@ impl LiteMarkApp {
                 Some((t, path, is_folder))
             })
             .collect();
+        // A folder with an unselected row showing stays; only its selected rows go.
+        let visible: Vec<PathBuf> = self
+            .sidebar_visible_targets()
+            .iter()
+            .filter_map(|t| self.target_path(t))
+            .collect();
+        let rows = without_partial_folders(&rows, &visible);
+        if rows.is_empty() {
+            self.show_error("Select every note in a folder to move the folder to the Trash.");
+            return;
+        }
         let modified: Vec<PathBuf> = self
             .tabs
             .iter()

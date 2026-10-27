@@ -115,6 +115,27 @@ fn top_level_rows<T>(items: &[(T, PathBuf, bool)]) -> Vec<&(T, PathBuf, bool)> {
         .collect()
 }
 
+/// Drops selected folders that show a row the selection skipped. Trashing a
+/// folder takes everything inside it, so such a folder stays and only its
+/// selected rows go. Collapsed folders show no children and count as whole.
+pub fn without_partial_folders<T: Clone>(
+    items: &[(T, PathBuf, bool)],
+    visible: &[PathBuf],
+) -> Vec<(T, PathBuf, bool)> {
+    items
+        .iter()
+        .filter(|(_, folder, is_folder)| {
+            !*is_folder
+                || visible.iter().all(|row| {
+                    row == folder
+                        || !row.starts_with(folder)
+                        || items.iter().any(|(_, path, _)| path == row)
+                })
+        })
+        .cloned()
+        .collect()
+}
+
 /// `top_level_rows` for callers (such as moving) that only need the rows.
 pub fn top_level_targets<T: Clone>(items: &[(T, PathBuf, bool)]) -> Vec<T> {
     top_level_rows(items)
@@ -196,6 +217,29 @@ mod tests {
 
     fn rows() -> Vec<&'static str> {
         vec!["a", "b", "c", "d", "e"]
+    }
+
+    #[test]
+    fn partial_folder_is_dropped_but_its_selected_rows_stay() {
+        let p = |s: &str| PathBuf::from(s);
+        let items = vec![
+            (1, p("/w/dir"), true),
+            (2, p("/w/dir/a.md"), false),
+        ];
+        let visible = vec![p("/w/dir"), p("/w/dir/a.md"), p("/w/dir/b.md")];
+        let got = without_partial_folders(&items, &visible);
+        assert_eq!(got, vec![(2, p("/w/dir/a.md"), false)]);
+    }
+
+    #[test]
+    fn fully_selected_or_collapsed_folder_stays_whole() {
+        let p = |s: &str| PathBuf::from(s);
+        let items = vec![(1, p("/w/dir"), true), (2, p("/w/dir/a.md"), false)];
+        let all = vec![p("/w/dir"), p("/w/dir/a.md")];
+        assert_eq!(without_partial_folders(&items, &all), items);
+        let collapsed = vec![p("/w/dir")];
+        let only_folder = vec![(1, p("/w/dir"), true)];
+        assert_eq!(without_partial_folders(&only_folder, &collapsed), only_folder);
     }
 
     #[test]
