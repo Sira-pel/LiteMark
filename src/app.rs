@@ -1531,6 +1531,28 @@ impl LiteMarkApp {
         self.sidebar_keyboard = true;
     }
 
+    /// Ctrl/Cmd+click: add `target` to the selection, or drop it if already in.
+    fn toggle_selection(&mut self, target: SidebarTarget) {
+        let mut items = match self.active_multi() {
+            Some(m) => m.items.clone(),
+            None => self.selected_target.iter().cloned().collect(),
+        };
+        let anchor = self.active_multi().map(|m| m.anchor.clone());
+        if let Some(i) = items.iter().position(|t| *t == target) {
+            items.remove(i);
+        } else {
+            items.push(target.clone());
+        }
+        let cursor = if items.contains(&target) { target } else { items.last().cloned().unwrap_or(target) };
+        self.selected_target = items.last().map(|_| cursor.clone());
+        self.multi_selection = (items.len() > 1).then(|| MultiSelection {
+            anchor: anchor.filter(|a| items.contains(a)).unwrap_or_else(|| cursor.clone()),
+            cursor,
+            items,
+        });
+        self.sidebar_keyboard = true;
+    }
+
     /// Ctrl+A in the sidebar: select every visible row.
     fn sidebar_select_all(&mut self) {
         let targets = self.sidebar_visible_targets();
@@ -4581,6 +4603,16 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_select = {
+            let view = view.clone();
+            move |target: SidebarTarget, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.toggle_selection(target);
+                    cx.notify();
+                });
+            }
+        };
+
         let on_blank_click = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -6059,8 +6091,13 @@ impl Render for LiteMarkApp {
                                     SidebarProps {
                                         workspace: self.workspace.clone(),
                                         width: crate::theme::sidebar_width(window_width),
+                                        // With no selection of its own, the sidebar
+                                        // still marks the note open in the editor.
                                         selected_file_id: match &self.selected_target {
                                             Some(SidebarTarget::File(id)) => Some(id.clone()),
+                                            None => self
+                                                .active_tab()
+                                                .and_then(|tab| tab.workspace_file_id.clone()),
                                             _ => None,
                                         },
                                         selected_folder_id: match &self.selected_target {
@@ -6087,10 +6124,12 @@ impl Render for LiteMarkApp {
                                         on_delete_folder: on_delete_folder.clone(),
                                         on_toggle_folder: on_toggle_folder.clone(),
                                         on_workspace_menu: on_toggle_workspace_menu.clone(),
+                                        workspace_menu_open: self.workspace_menu_open,
                                         on_close: on_toggle_sidebar.clone(),
                                         on_context_menu: on_sidebar_context.clone(),
                                         on_drop_item: on_drop_item.clone(),
                                         on_range_select: on_range_select.clone(),
+                                        on_toggle_select: on_toggle_select.clone(),
                                         on_blank_click: on_blank_click.clone(),
                                         multi_targets: self
                                             .active_multi()
