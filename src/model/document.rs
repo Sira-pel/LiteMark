@@ -126,6 +126,9 @@ pub struct DocumentTab {
     pub pending_formats: ActiveFormats,
     pub caret: Caret,
     pub view_mode: ViewMode,
+    /// Set only on the scratch tab used by Clear Formatting: forces inline
+    /// toggles to turn the format off instead of deciding from the selection.
+    force_inline_toggle: Option<bool>,
     pub marked_range: Option<Range<usize>>,
     pub revision: u64,
     cached_parse: Option<(u64, Arc<ParsedDocument>)>,
@@ -170,6 +173,7 @@ impl DocumentTab {
             pending_formats: ActiveFormats::default(),
             caret: Caret::default(),
             view_mode: ViewMode::Wysiwyg,
+            force_inline_toggle: None,
             marked_range: None,
             revision: 1,
             cached_parse: None,
@@ -1423,7 +1427,7 @@ impl DocumentTab {
                                 InlineTagKind::Link => false,
                             })
                     });
-                let should_turn_on = !global_all_have_format;
+                let should_turn_on = self.force_inline_toggle.unwrap_or(!global_all_have_format);
 
                 let mut candidate_results = Vec::new();
                 let in_table = candidate_ranges.iter().any(|r| {
@@ -1838,6 +1842,11 @@ impl DocumentTab {
             return;
         }
 
+        if cmd == "clear" {
+            self.clear_inline_formats(mode);
+            return;
+        }
+
         // 4. Fallback for clear, hr, table
         let range = self.selection_range();
         let selected = self.content[range.clone()].to_string();
@@ -1855,6 +1864,113 @@ impl DocumentTab {
             self.caret.reversed = false;
             self.refresh_cursor();
         }
+    }
+
+    /// True when any text in `range` carries the inline format `kind`.
+    fn range_has_format(&mut self, range: &Range<usize>, kind: InlineTagKind) -> bool {
+        let parsed = self.parsed();
+        parsed.lines_overlapping(range.clone()).iter().any(|line| {
+            line.styled_segments.iter().any(|seg| {
+                seg.source.start < range.end
+                    && seg.source.end > range.start
+                    && match kind {
+                        InlineTagKind::Bold => seg.bold,
+                        InlineTagKind::Italic => seg.italic,
+                        InlineTagKind::Underline => seg.underline,
+                        InlineTagKind::Strike => seg.strike,
+                        InlineTagKind::Code => seg.code,
+                        InlineTagKind::Link => false,
+                    }
+            })
+        })
+    }
+
+    /// Clear Formatting: removes bold, italic, underline, strikethrough and
+    /// code from the selection (or the word at the caret), splitting spans
+    /// that stick out of it. The work happens on a scratch copy and lands as
+    /// one edit, so a single undo restores everything.
+    fn clear_inline_formats(&mut self, mode: ViewMode) {
+        let mut range = self.selection_range();
+        if range.is_empty() {
+            let extent = super::text_ops::word_extent(&self.content, range.start);
+            if extent.is_empty()
+                || !self.content[extent.clone()]
+                    .chars()
+                    .any(|c| c.is_alphanumeric() || c == '_')
+            {
+                return;
+            }
+            range = extent;
+        }
+        let mut tmp = DocumentTab::new(
+            "clear".into(),
+            "clear.md".into(),
+            self.content.clone(),
+            None,
+            None,
+        );
+        tmp.view_mode = mode;
+        tmp.force_inline_toggle = Some(false);
+        tmp.caret.range = range;
+
+        let kinds = [
+            (InlineTagKind::Bold, "bold"),
+            (InlineTagKind::Italic, "italic"),
+            (InlineTagKind::Underline, "underline"),
+            (InlineTagKind::Strike, "strike"),
+            (InlineTagKind::Code, "code"),
+        ];
+        for (kind, cmd) in kinds {
+            let sel = tmp.selection_range();
+            if tmp.range_has_format(&sel, kind) {
+                tmp.apply_format_in_mode(cmd, mode);
+            }
+        }
+
+        // Links and any markers wholly inside the selection.
+        let sel = tmp.selection_range();
+        let selected = tmp.content[sel.clone()].to_string();
+        let flags = line_start_flags(&tmp.content, sel.start, &selected);
+        if let Some(replacement) = format_replacement("clear", &selected, &flags) {
+            if replacement != selected {
+                tmp.edit(sel.clone(), &replacement);
+                tmp.caret.range = sel.start..sel.start + replacement.len();
+            }
+        }
+
+        let (old, new) = (&self.content, &tmp.content);
+        if old == new {
+            return;
+        }
+        let mut prefix = old
+            .bytes()
+            .zip(new.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !old.is_char_boundary(prefix) || !new.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+        let max_suffix = old.len().min(new.len()) - prefix;
+        let mut suffix = old
+            .bytes()
+            .rev()
+            .zip(new.bytes().rev())
+            .take(max_suffix)
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix)
+        {
+            suffix -= 1;
+        }
+        let replacement = new[prefix..new.len() - suffix].to_string();
+        let target = tmp.selection_range();
+        self.edit(prefix..old.len() - suffix, &replacement);
+        let end = floor_boundary(&self.content, target.end);
+        let start = floor_boundary(&self.content, target.start).min(end);
+        self.caret.range = start..end;
+        self.caret.reversed = false;
+        self.pending_formats = ActiveFormats::default();
+        self.refresh_cursor();
     }
 
     fn toggle_block_lines(&mut self, target: BlockFormatTarget) {
@@ -11844,5 +11960,84 @@ mod heading_paragraph_parity_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod clear_formatting_tests {
+    use super::*;
+
+    const M: ViewMode = ViewMode::Wysiwyg;
+
+    fn clear(src: &str, sel: Range<usize>) -> (String, DocumentTab) {
+        let mut d = DocumentTab::new("t".into(), "t.md".into(), src.to_string(), None, None);
+        d.set_view_mode(M);
+        d.caret.range = sel;
+        d.apply_format_in_mode("clear", M);
+        (d.content.clone(), d)
+    }
+
+    const S: &str = "Hello **bold** and *it* and <u>under</u> ~~st~~ `c` end";
+
+    #[test]
+    fn select_all_removes_every_format() {
+        assert_eq!(clear(S, 0..S.len()).0, "Hello bold and it and under st c end");
+    }
+
+    #[test]
+    fn selecting_only_the_visible_word_clears_just_that_word() {
+        let a = S.find("bold").unwrap();
+        assert_eq!(
+            clear(S, a..a + 4).0,
+            "Hello bold and *it* and <u>under</u> ~~st~~ `c` end"
+        );
+    }
+
+    #[test]
+    fn caret_inside_a_formatted_word_clears_that_word() {
+        let a = S.find("bold").unwrap();
+        assert_eq!(
+            clear(S, a + 2..a + 2).0,
+            "Hello bold and *it* and <u>under</u> ~~st~~ `c` end"
+        );
+    }
+
+    #[test]
+    fn selection_ending_inside_a_span_splits_it_without_stray_markers() {
+        let a = S.find("bold").unwrap();
+        assert_eq!(
+            clear(S, 0..a + 2).0,
+            "Hello bo**ld** and *it* and <u>under</u> ~~st~~ `c` end"
+        );
+    }
+
+    #[test]
+    fn stacked_formats_on_one_word_are_all_removed() {
+        let src = "a <u>***word***</u> b";
+        let at = src.find("word").unwrap();
+        assert_eq!(clear(src, at..at + 4).0, "a word b");
+    }
+
+    #[test]
+    fn works_inside_headings_and_lists_and_keeps_the_block_markers() {
+        let h = "# **Welcome** to <u>LiteMark</u>";
+        assert_eq!(clear(h, 4..11).0, "# Welcome to <u>LiteMark</u>");
+        assert_eq!(clear(h, 0..h.len()).0, "# Welcome to LiteMark");
+        let l = "- **item** one\\n- *two*";
+        assert_eq!(clear(l, 0..l.len()).0, "- item one\\n- two");
+    }
+
+    #[test]
+    fn plain_text_and_empty_spots_are_left_alone() {
+        assert_eq!(clear("plain text", 0..5).0, "plain text");
+        assert_eq!(clear("a  b", 2..2).0, "a  b");
+    }
+
+    #[test]
+    fn clearing_is_one_undo_step() {
+        let (cleared, mut d) = clear(S, 0..S.len());
+        assert_ne!(cleared, S);
+        assert!(d.undo());
+        assert_eq!(d.content, S);
     }
 }
