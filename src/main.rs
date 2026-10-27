@@ -218,7 +218,7 @@ fn main() {
                         cx,
                     ))),
                     window_decorations: Some(WindowDecorations::Client),
-                    window_min_size: Some(size(px(360.0), px(360.0))),
+                    window_min_size: Some(size(px(480.0), px(360.0))),
                     app_id: Some("litemark".into()),
                     titlebar: None,
                     ..Default::default()

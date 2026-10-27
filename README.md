@@ -17,7 +17,7 @@ LiteMark is a native Markdown and text editor for Linux. It edits Markdown and p
 
 ## Updates and network use
 
-LiteMark works fully offline. The only network request it makes is an optional update check:
+LiteMark works fully offline. The only network request it makes is the update check. It is on by default, so the app contacts GitHub (api.github.com) on startup unless you turn it off:
 
 - On startup, in the background, it asks the GitHub Releases API for the latest version. It checks at most once every 24 hours.
 - If a newer version exists, a small notice appears with a Download button that opens the release page. Closing the notice hides it for that version.

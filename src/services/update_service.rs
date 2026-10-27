@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+const RELEASE_PAGE_PREFIX: &str = "https://github.com/Sira-pel/LiteMark/releases/";
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Sira-pel/LiteMark/releases/latest";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -43,7 +44,7 @@ fn parse_release(body: &str) -> Option<ReleaseInfo> {
     let tag = json["tag_name"].as_str()?;
     parse_version(tag)?;
     let url = json["html_url"].as_str()?;
-    if !url.starts_with("https://github.com/") {
+    if !url.starts_with(RELEASE_PAGE_PREFIX) {
         return None;
     }
     Some(ReleaseInfo {
@@ -74,10 +75,11 @@ pub fn current_version() -> &'static str {
 }
 
 /// Whether enough time has passed since the last check (unix seconds).
+/// A last check in the future means the clock was changed, so check again.
 pub fn check_is_due(last_check: Option<u64>, now: u64) -> bool {
     match last_check {
-        Some(last) => now.saturating_sub(last) >= CHECK_INTERVAL_SECS,
-        None => true,
+        Some(last) if last <= now => now - last >= CHECK_INTERVAL_SECS,
+        _ => true,
     }
 }
 
@@ -111,12 +113,14 @@ mod tests {
 
     #[test]
     fn ignores_drafts_prereleases_and_foreign_links() {
-        let draft = r#"{"tag_name":"v2.0.0","html_url":"https://github.com/x/y","draft":true}"#;
-        let pre = r#"{"tag_name":"v2.0.0","html_url":"https://github.com/x/y","prerelease":true}"#;
+        let draft = r#"{"tag_name":"v2.0.0","html_url":"https://github.com/Sira-pel/LiteMark/releases/tag/v2.0.0","draft":true}"#;
+        let pre = r#"{"tag_name":"v2.0.0","html_url":"https://github.com/Sira-pel/LiteMark/releases/tag/v2.0.0","prerelease":true}"#;
         let foreign = r#"{"tag_name":"v2.0.0","html_url":"https://evil.example/download"}"#;
         assert_eq!(parse_release(draft), None);
         assert_eq!(parse_release(pre), None);
         assert_eq!(parse_release(foreign), None);
+        let other_repo = r#"{"tag_name":"v2.0.0","html_url":"https://github.com/someone/else/releases/tag/v2.0.0"}"#;
+        assert_eq!(parse_release(other_repo), None);
         assert_eq!(parse_release("not json"), None);
     }
 
@@ -126,6 +130,6 @@ mod tests {
         assert!(!check_is_due(Some(1_000), 1_000 + CHECK_INTERVAL_SECS - 1));
         assert!(check_is_due(Some(1_000), 1_000 + CHECK_INTERVAL_SECS));
         // A clock that moved backwards must not block checks forever.
-        assert!(!check_is_due(Some(5_000), 1_000));
+        assert!(check_is_due(Some(5_000), 1_000));
     }
 }
