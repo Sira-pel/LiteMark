@@ -1954,21 +1954,24 @@ fn wysiwyg_line_metrics(
     base_font_size: Pixels,
 ) -> (Pixels, Pixels, Pixels, Pixels) {
     match kind {
+        // Each level is a clear step above body text at every zoom, since
+        // headings no longer get an automatic bold. The gap above scales with
+        // the font so sections stay separated when zoomed.
         LineKind::Heading { level: 1 } => {
-            let fs = base_font_size * 1.7;
-            (fs, fs * 1.45, px(8.0), px(0.0))
+            let fs = base_font_size * 2.0;
+            (fs, fs * 1.4, base_font_size * 0.7, px(0.0))
         }
         LineKind::Heading { level: 2 } => {
-            let fs = base_font_size * 1.4;
-            (fs, fs * 1.45, px(6.0), px(0.0))
+            let fs = base_font_size * 1.6;
+            (fs, fs * 1.4, base_font_size * 0.55, px(0.0))
         }
         LineKind::Heading { level: 3 } => {
-            let fs = base_font_size * 1.2;
-            (fs, fs * 1.45, px(4.0), px(0.0))
+            let fs = base_font_size * 1.35;
+            (fs, fs * 1.45, base_font_size * 0.4, px(0.0))
         }
         LineKind::Heading { .. } => {
-            let fs = base_font_size * 1.08;
-            (fs, fs * 1.5, px(2.0), px(0.0))
+            let fs = base_font_size * 1.15;
+            (fs, fs * 1.5, base_font_size * 0.2, px(0.0))
         }
         LineKind::ListItem { indent_cols, .. } => (
             base_font_size,
@@ -3351,6 +3354,26 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+    #[test]
+    fn heading_sizes_step_clearly_above_body_text_at_every_zoom() {
+        use crate::markdown::LineKind;
+        for base in [14.0_f32, 16.0, 24.0] {
+            let size = |level: u8| {
+                super::wysiwyg_line_metrics(&LineKind::Heading { level }, px(base)).0
+            };
+            let gap = |level: u8| {
+                super::wysiwyg_line_metrics(&LineKind::Heading { level }, px(base)).2
+            };
+            // Strictly decreasing, and each at least 10% above the next level.
+            for level in 1..4u8 {
+                assert!(size(level) >= size(level + 1) * 1.1, "base {base} h{level}");
+                assert!(gap(level) > gap(level + 1), "base {base} h{level} gap");
+            }
+            // H3 stays at least 30% above body text.
+            assert!(size(3) >= px(base) * 1.3, "base {base} h3 vs body");
+            assert!(size(4) > px(base), "base {base} h4 vs body");
         }
     }
 }
