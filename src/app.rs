@@ -29,8 +29,6 @@ pub(crate) struct OptimisticClose {
     prev_selected: Option<SidebarTarget>,
 }
 
-/// Shared state for one bulk trash: the result counter and the selection to
-/// put back (once, after the last row finishes) if anything failed.
 /// Result of moving or copying one dropped row.
 enum DropOutcome {
     /// Carries the single-item toast text.
@@ -40,6 +38,8 @@ enum DropOutcome {
     Failed(String),
 }
 
+/// Shared state for one bulk trash: the result counter and the selection to
+/// put back (once, after the last row finishes) if anything failed.
 struct BulkTrash {
     report: RefCell<BulkTrashReport>,
     prev_selected: Option<SidebarTarget>,
@@ -1781,7 +1781,8 @@ impl LiteMarkApp {
         let verb = if copy { "Copied" } else { "Moved" };
         match last_error {
             None if done > 0 => {
-                self.show_toast(format!("{verb} {done} items to {dest_name}"), cx)
+                let noun = if done == 1 { "item" } else { "items" };
+                self.show_toast(format!("{verb} {done} {noun} to {dest_name}"), cx)
             }
             None => {}
             Some(err) => self.show_error(format!("{verb} {done}, {failed} failed: {err}")),
