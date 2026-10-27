@@ -5862,7 +5862,7 @@ impl Render for LiteMarkApp {
                     cx.notify();
                 }),
             )
-            .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
+            .on_action(cx.listener(|this, _: &CloseModal, window, cx| {
                 if this.editor_context_menu.is_some() {
                     this.editor_context_menu = None;
                 } else if this.workspace_menu_open {
@@ -5902,6 +5902,12 @@ impl Render for LiteMarkApp {
                     this.multi_selection = None;
                     this.selected_target = None;
                     this.sidebar_keyboard = false;
+                } else if this.show_sidebar
+                    && !this.zen_mode
+                    && window.viewport_size().width < px(600.0)
+                {
+                    // The sidebar is a drawer on narrow windows.
+                    this.show_sidebar = false;
                 } else if this.zen_mode {
                     this.handle_exit_zen();
                 }
