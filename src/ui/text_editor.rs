@@ -937,11 +937,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             None,
         );
         let char_width = sample.width.max(px(1.0));
-        let line_count = if self.numbered() {
-            self.content.bytes().filter(|byte| *byte == b'\n').count() + 1
-        } else {
-            1
-        };
+        // The parse is cached per revision, so this is O(1) per redraw.
+        let line_count = self.parsed.lines.len();
         let inset = gutter_pad(bounds.size.width);
         let (gutter_box, gutter) = self.gutter(char_width, line_count, inset);
         let available_width = (bounds.size.width - gutter - px(48.0)).max(px(32.0));
