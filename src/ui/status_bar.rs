@@ -14,6 +14,8 @@ where
     pub line: usize,
     pub words: usize,
     pub chars: usize,
+    /// (chars, words) in the current selection, when there is one.
+    pub selection: Option<(usize, usize)>,
     pub width: Pixels,
     pub zoom_level: usize,
     pub view_mode: ViewMode,
@@ -64,11 +66,17 @@ where
                 .child(format!("Ln {}", props.line))
                 .when(show_chars, |d| {
                     d.child(div().text_color(theme.text_faint).child("·"))
-                        .child(format!("{} chars", props.chars))
+                        .child(match props.selection {
+                            Some((chars, _)) => format!("{} of {} chars", chars, props.chars),
+                            None => format!("{} chars", props.chars),
+                        })
                 })
                 .when(show_words, |d| {
                     d.child(div().text_color(theme.text_faint).child("·"))
-                        .child(format!("{} words", props.words))
+                        .child(match props.selection {
+                            Some((_, words)) => format!("{} of {} words", words, props.words),
+                            None => format!("{} words", props.words),
+                        })
                 })
         )
         // Right controls
