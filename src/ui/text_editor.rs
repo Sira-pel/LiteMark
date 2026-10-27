@@ -2055,9 +2055,9 @@ fn wysiwyg_slice_runs(
 ) -> Vec<TextRun> {
     let slice_len = display_slice.end.saturating_sub(display_slice.start);
     let (default_weight, default_color, use_mono) = match &parsed_line.kind {
-        LineKind::Heading { level: 1 } => (FontWeight::BOLD, colors.h1_color, false),
-        LineKind::Heading { level: 2 } => (FontWeight::BOLD, colors.h2_color, false),
-        LineKind::Heading { .. } => (FontWeight::BOLD, colors.strong_color, false),
+        LineKind::Heading { level: 1 } => (FontWeight::NORMAL, colors.h1_color, false),
+        LineKind::Heading { level: 2 } => (FontWeight::NORMAL, colors.h2_color, false),
+        LineKind::Heading { .. } => (FontWeight::NORMAL, colors.strong_color, false),
         LineKind::CodeLine | LineKind::CodeFence { .. } => {
             (FontWeight::NORMAL, colors.code_color, true)
         }
