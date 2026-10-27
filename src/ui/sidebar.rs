@@ -999,7 +999,7 @@ where
                                                     "file-text",
                                                     14.0,
                                                     if is_active {
-                                                        rgb(0xc8c8c8)
+                                                        theme.row_icon_active
                                                     } else {
                                                         theme.text_muted
                                                     },

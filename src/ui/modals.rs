@@ -134,11 +134,7 @@ where
                                     .px(px(10.0))
                                     .py(px(6.0))
                                     .rounded(px(6.0))
-                                    .bg(if theme.mode.is_dark() {
-                                        rgb(0x191919)
-                                    } else {
-                                        rgb(0xf9f9f9)
-                                    })
+                                    .bg(theme.bg_inset)
                                     .border_1()
                                     .border_color(theme.border_subtle)
                                     .child(
@@ -588,7 +584,7 @@ where
                                     rgba(0x00000000)
                                 })
                                 .text_color(if primary {
-                                    rgb(0x121212)
+                                    theme.on_primary
                                 } else if is_selected {
                                     theme.text_hi
                                 } else {
