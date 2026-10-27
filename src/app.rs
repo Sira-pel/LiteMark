@@ -3188,8 +3188,12 @@ impl LiteMarkApp {
         // Clicking the editor hands keyboard focus back from the sidebar.
         self.sidebar_keyboard = false;
         self.workspace_menu_open = false;
-        // A click anywhere but a Shift+click ends a multi-selection.
-        if !window.modifiers().shift {
+        // A click outside the sidebar, or a plain click that isn't a
+        // Shift+click, ends a multi-selection. A press inside the sidebar keeps
+        // it: that press may be the start of dragging the whole selection, and
+        // clicking a row clears it itself.
+        let in_sidebar = self.show_sidebar && event.position.x < sz::SIDEBAR_W;
+        if !window.modifiers().shift && !in_sidebar {
             self.multi_selection = None;
         }
         if self.input_blocked() || window.default_prevented() {
