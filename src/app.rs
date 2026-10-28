@@ -139,6 +139,10 @@ pub struct LiteMarkApp {
     pub save_as_tab: Option<String>,
     pub pending_after_save: Option<PendingAfterSave>,
     pub editor_paint: Rc<RefCell<EditorPaint>>,
+    /// The active tab's text as a shared string, keyed by tab id, revision
+    /// and length. Frames and IME queries between edits share this one copy
+    /// instead of cloning the whole document each time.
+    content_snapshot: Option<(String, u64, usize, SharedString)>,
     pub editor_scroll: ScrollHandle,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
@@ -457,6 +461,7 @@ impl LiteMarkApp {
             save_as_tab: None,
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
+            content_snapshot: None,
             editor_scroll: ScrollHandle::new(),
             find_field,
             replace_field,
@@ -573,6 +578,7 @@ impl LiteMarkApp {
             save_as_tab: None,
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
+            content_snapshot: None,
             editor_scroll: ScrollHandle::new(),
             find_field: Self::dummy_line_field(cx, "find-field"),
             replace_field: Self::dummy_line_field(cx, "replace-field"),
@@ -1086,9 +1092,13 @@ impl LiteMarkApp {
         let Some(hover) = self.table_hover.clone() else {
             return;
         };
+        // The cached parse is the one the next frame draws, so this costs no
+        // extra parse per keystroke.
         let next = self
-            .active_tab()
-            .and_then(|tab| retarget_hover(&tab.content, &hover));
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == self.active_tab_id)
+            .and_then(|tab| retarget_hover(&tab.parsed(), &tab.content, &hover));
         self.table_hover = next;
     }
 
@@ -3935,10 +3945,24 @@ impl LiteMarkApp {
         cx.notify();
     }
 
-    fn active_content(&self) -> String {
-        self.active_tab()
-            .map(|tab| tab.content.clone())
-            .unwrap_or_default()
+    fn active_content(&mut self) -> SharedString {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == self.active_tab_id) else {
+            self.content_snapshot = None;
+            return SharedString::default();
+        };
+        if let Some((id, revision, len, text)) = &self.content_snapshot {
+            if *id == tab.id && *revision == tab.revision && *len == tab.content.len() {
+                return text.clone();
+            }
+        }
+        let text = SharedString::new(tab.content.as_str());
+        self.content_snapshot = Some((
+            tab.id.clone(),
+            tab.revision,
+            tab.content.len(),
+            text.clone(),
+        ));
+        text
     }
 
     fn editor_surface(
@@ -3949,21 +3973,15 @@ impl LiteMarkApp {
     ) -> AnyElement {
         let zoom = self.settings.zoom_level as f32 / 100.0;
         let view_mode = self.settings.view_mode;
-        let (content, parsed, selection, marked) = if let Some(tab) = self.active_tab_mut() {
-            let parsed = tab.parsed();
+        let content = self.active_content();
+        let (parsed, selection, marked) = if let Some(tab) = self.active_tab_mut() {
             (
-                tab.content.clone(),
-                parsed,
+                tab.parsed(),
                 tab.selection_range(),
                 tab.marked_range.clone(),
             )
         } else {
-            (
-                String::new(),
-                Arc::new(parse_document("")),
-                0..0,
-                None,
-            )
+            (Arc::new(parse_document("")), 0..0, None)
         };
         let font_family = match view_mode {
             ViewMode::Wysiwyg => Theme::FONT_PROSE.into(),
@@ -3973,7 +3991,7 @@ impl LiteMarkApp {
             entity: cx.entity(),
             focus: self.focus_handle.clone(),
             paint: self.editor_paint.clone(),
-            content: content.into(),
+            content,
             parsed,
             view_mode,
             selection,
@@ -4452,22 +4470,35 @@ impl Render for LiteMarkApp {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.ensure_stats();
         }
-        let active_tab = self.active_tab().cloned().unwrap_or_else(|| {
-            DocumentTab::new(
-                "tab-1".to_string(),
-                "Welcome.md".to_string(),
-                INITIAL_MARKDOWN.to_string(),
-                None,
-                None,
-            )
-        });
+        // Borrow the tab only for the few fields the chrome reads. Cloning it
+        // here copied its whole text and undo history on every frame.
+        let fallback_tab;
+        let active_tab = match self.active_tab() {
+            Some(tab) => tab,
+            None => {
+                fallback_tab = DocumentTab::new(
+                    "tab-1".to_string(),
+                    "Welcome.md".to_string(),
+                    INITIAL_MARKDOWN.to_string(),
+                    None,
+                    None,
+                );
+                &fallback_tab
+            }
+        };
 
+        let active_tab_id = active_tab.id.clone();
+        let active_tab_title = active_tab.title.clone();
+        let active_has_selection = !active_tab.selection_range().is_empty();
         let active_formats = active_tab.active_formats;
         let stats_line = active_tab.cursor_line;
         let stats_words = active_tab.word_count;
         let stats_chars = active_tab.char_count;
         let stats_selection = {
-            let text = active_tab.selected_text();
+            let text = active_tab
+                .content
+                .get(active_tab.selection_range())
+                .unwrap_or("");
             (!text.is_empty()).then(|| text.split_whitespace().count())
         };
         let active_tab_has_pdf = active_tab.file_type == FileType::Pdf;
@@ -4857,7 +4888,7 @@ impl Render for LiteMarkApp {
 
         let on_close_active_tab = {
             let on_close_tab = on_close_tab.clone();
-            let tab_id = active_tab.id.clone();
+            let tab_id = active_tab_id.clone();
             move |cx: &mut App| on_close_tab(tab_id.clone(), cx)
         };
 
@@ -6134,7 +6165,8 @@ impl Render for LiteMarkApp {
                     {
                         return;
                     }
-                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, -1, false, mode) {
+                    let parsed = tab.parsed();
+                    if move_vertical_visual_in(&p, &parsed, &tab.content, &mut tab.caret, -1, false, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
                     } else {
@@ -6155,7 +6187,8 @@ impl Render for LiteMarkApp {
                     {
                         return;
                     }
-                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, 1, false, mode) {
+                    let parsed = tab.parsed();
+                    if move_vertical_visual_in(&p, &parsed, &tab.content, &mut tab.caret, 1, false, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
                     } else {
@@ -6182,7 +6215,8 @@ impl Render for LiteMarkApp {
                 let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
-                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, -1, true, mode) {
+                    let parsed = tab.parsed();
+                    if move_vertical_visual_in(&p, &parsed, &tab.content, &mut tab.caret, -1, true, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
                     } else {
@@ -6197,7 +6231,8 @@ impl Render for LiteMarkApp {
                 let mode = this.settings.view_mode;
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
-                    if move_vertical_visual(&p, &tab.content, &mut tab.caret, 1, true, mode) {
+                    let parsed = tab.parsed();
+                    if move_vertical_visual_in(&p, &parsed, &tab.content, &mut tab.caret, 1, true, mode) {
                         tab.pending_formats = ActiveFormats::default();
                         tab.refresh_cursor();
                     } else {
@@ -6850,7 +6885,7 @@ impl Render for LiteMarkApp {
                 ))
             })
             .when(self.show_pdf_modal, |s| {
-                let title = active_tab.title.clone();
+                let title = active_tab_title.clone();
                 s.child(render_pdf_preview_modal(
                     title,
                     pdf_page_count,
@@ -6934,7 +6969,7 @@ impl Render for LiteMarkApp {
                 ))
             })
             .when_some(self.editor_context_menu.clone(), |parent, menu| {
-                let has_selection = !active_tab.selection_range().is_empty();
+                let has_selection = active_has_selection;
                 let items = if menu.is_table {
                     build_table_context_menu_items(
                         has_selection,

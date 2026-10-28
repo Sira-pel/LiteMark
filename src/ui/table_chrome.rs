@@ -9,8 +9,8 @@
 
 use gpui::{point, px, Bounds, Pixels, Point, Size};
 
-use crate::markdown::TableColumnAlign;
-use crate::model::table_ops::parsed_table_source;
+use crate::markdown::{ParsedDocument, TableColumnAlign};
+use crate::model::table_ops::parsed_table_source_in;
 use crate::model::DocumentTab;
 use crate::theme::sz;
 
@@ -571,9 +571,13 @@ pub fn clear_drag_for_modifier(_drag: Option<TableDrag>) -> Option<TableDrag> {
 }
 
 /// Keep a hover on the table after an edit moves its byte range.
-pub fn retarget_hover(content: &str, hover: &TableHover) -> Option<TableHover> {
+pub fn retarget_hover(
+    parsed: &ParsedDocument,
+    content: &str,
+    hover: &TableHover,
+) -> Option<TableHover> {
     let probe = hover.source.start.min(content.len());
-    let source = parsed_table_source(content, probe)?;
+    let source = parsed_table_source_in(parsed, probe)?;
     Some(TableHover {
         source,
         col: hover.col,
@@ -1331,7 +1335,7 @@ mod tests {
             row: Some(1),
         };
         assert!(doc.apply_table_op_at(26, TableOp::InsertColRight));
-        let next = retarget_hover(&doc.content, &hover).expect("hover");
+        let next = retarget_hover(&doc.parsed(), &doc.content, &hover).expect("hover");
         assert_eq!(next.col, Some(0));
         assert_eq!(next.row, Some(1));
         assert_ne!(next.source.end, hover.source.end);

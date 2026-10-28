@@ -11,8 +11,7 @@ use std::sync::Arc;
 use gpui::*;
 
 use crate::markdown::{
-    parse_document, LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment,
-    TableColumnAlign,
+    LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
 };
 use crate::model::document::visible_line_end;
 use crate::model::text_ops::{visual_rows, Caret};
@@ -109,10 +108,16 @@ impl Default for EditorPaint {
     }
 }
 
-pub fn hash_str(s: &str) -> u64 {
+/// Cache key for a table's measured column widths: they depend on the text
+/// and on the fonts used to draw it. Hashed in place so a redraw does not
+/// copy the table's text.
+fn table_width_key(table_text: &str, font: &str, mono_font: &str, font_size: Pixels) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut hasher);
+    table_text.hash(&mut hasher);
+    font.hash(&mut hasher);
+    mono_font.hash(&mut hasher);
+    f32::from(font_size).to_bits().hash(&mut hasher);
     hasher.finish()
 }
 
@@ -419,8 +424,24 @@ pub fn cell_has_line_in_direction(paint: &EditorPaint, cursor: usize, delta: i32
     false
 }
 
+#[cfg(test)]
 pub fn move_vertical_visual(
     paint: &EditorPaint,
+    content: &str,
+    caret: &mut Caret,
+    delta: i32,
+    extend: bool,
+    mode: ViewMode,
+) -> bool {
+    let parsed = crate::markdown::parse_document(content);
+    move_vertical_visual_in(paint, &parsed, content, caret, delta, extend, mode)
+}
+
+/// Move the caret one visual row up or down. `parsed` is the parse of
+/// `content`; the editor passes its cached one so arrow keys never reparse.
+pub fn move_vertical_visual_in(
+    paint: &EditorPaint,
+    parsed: &ParsedDocument,
     content: &str,
     caret: &mut Caret,
     delta: i32,
@@ -430,7 +451,6 @@ pub fn move_vertical_visual(
     if paint.rows.is_empty() {
         return false;
     }
-    let parsed = parse_document(content);
     let snap = |offset: usize| -> usize {
         let Some(line) = parsed.line_at_offset(offset).filter(|_| !extend) else {
             return offset;
@@ -1056,7 +1076,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     &self.selection,
                     self.selection_color,
                 );
-                for (hit_index, hit) in self.find_hits.iter().enumerate() {
+                for (hit_index, hit) in hits_near(&self.find_hits, start, end) {
                     let color = if self.active_find == Some(hit_index) {
                         self.active_find_color
                     } else {
@@ -1152,7 +1172,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
 
             let total_height = base_line_height * rows.len() as f32 + px(32.0);
-            let table_width_cache = self.paint.borrow().table_width_cache.clone();
+            // Raw mode only carries the cache through to the next frame.
+            let table_width_cache = std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
             return Prepaint {
                 rows,
                 numbers,
@@ -1192,7 +1213,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
         }
 
-        let mut table_width_cache = self.paint.borrow().table_width_cache.clone();
+        let mut table_width_cache = std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
         table_width_cache.entries.retain(|k, _| table_rows.contains_key(k));
 
         let mut table_col_widths: std::collections::HashMap<Range<usize>, Vec<Pixels>> =
@@ -1222,14 +1243,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     .entry(table_source.clone())
                     .or_insert_with(|| {
                         let table_text = self.content.get(table_source.clone()).unwrap_or("");
-                        // The measured widths depend on the text and on the fonts used to draw it.
-                        let table_hash = hash_str(&format!(
-                            "{}\u{0}{}\u{0}{}\u{0}{}",
+                        let table_hash = table_width_key(
                             table_text,
-                            self.font_family,
-                            self.mono_font_family,
-                            f32::from(self.font_size).to_bits()
-                        ));
+                            &self.font_family,
+                            &self.mono_font_family,
+                            self.font_size,
+                        );
                         if let Some((cached_hash, cached_width, widths)) =
                             table_width_cache.entries.get(table_source)
                         {
@@ -1457,7 +1476,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             &self.selection,
                             self.selection_color,
                         );
-                        for (hit_index, hit) in self.find_hits.iter().enumerate() {
+                        for (hit_index, hit) in
+                            hits_near(&self.find_hits, sub_map.line_start, sub_map.line_end)
+                        {
                             let color = if self.active_find == Some(hit_index) {
                                 self.active_find_color
                             } else {
@@ -1843,7 +1864,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     &self.selection,
                     self.selection_color,
                 );
-                for (hit_index, hit) in self.find_hits.iter().enumerate() {
+                for (hit_index, hit) in
+                    hits_near(&self.find_hits, sub_map.line_start, sub_map.line_end)
+                {
                     let color = if self.active_find == Some(hit_index) {
                         self.active_find_color
                     } else {
@@ -2059,7 +2082,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             paint.line_height = prepaint.line_height;
             paint.total_height = prepaint.total_height;
             paint.bounds = Some(bounds);
-            paint.rows = prepaint.rows.clone();
+            // Painting is done with the rows, so hand them over instead of
+            // deep-copying every shaped line each frame.
+            paint.rows = std::mem::take(&mut prepaint.rows);
             if self.word_wrap {
                 paint.wrap_cols = prepaint.wrap_cols;
             } else {
@@ -2640,6 +2665,22 @@ fn raw_line_runs(
     let local_start = marked.start.saturating_sub(line_start).min(len);
     let local_end = marked.end.saturating_sub(line_start).min(len);
     apply_underline_to_runs(vec![base], local_start..local_end, color)
+}
+
+/// Find hits that can paint on a row spanning `row_start..=row_end`, with
+/// their index in `hits`. Hits are sorted and disjoint, so a binary search
+/// skips the rest instead of testing every match on every row.
+fn hits_near(
+    hits: &[Range<usize>],
+    row_start: usize,
+    row_end: usize,
+) -> impl Iterator<Item = (usize, &Range<usize>)> {
+    let first = hits.partition_point(|hit| hit.end <= row_start);
+    hits[first..]
+        .iter()
+        .take_while(move |hit| hit.start <= row_end)
+        .enumerate()
+        .map(move |(i, hit)| (first + i, hit))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3555,5 +3596,28 @@ mod tests {
         let on_dark_fill = super::check_mark_color(hsla(0.0, 0.0, 0.07, 1.0));
         assert!(on_light_fill.l < 0.2, "dark mark on the dark theme's light fill");
         assert!(on_dark_fill.l > 0.9, "white mark on the light theme's dark fill");
+    }
+
+    #[test]
+    fn hits_near_matches_a_scan_of_every_hit() {
+        let content = "aa a\n\naaa ba\na";
+        let hits = crate::model::text_ops::find_matches(content, "a", true);
+        for row_start in 0..=content.len() {
+            for row_end in row_start..=content.len() {
+                let near: Vec<usize> = super::hits_near(&hits, row_start, row_end)
+                    .map(|(i, hit)| {
+                        assert_eq!(&hits[i], hit);
+                        i
+                    })
+                    .collect();
+                let scanned: Vec<usize> = hits
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, h)| h.end > row_start && h.start <= row_end)
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(near, scanned, "row {row_start}..={row_end}");
+            }
+        }
     }
 }

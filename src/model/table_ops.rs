@@ -67,7 +67,9 @@
 use std::ops::Range;
 
 use crate::markdown::parser::{delimiter_alignments, line_breaks_table};
-use crate::markdown::{parse_document, unescaped_pipe_offsets, LineKind, TableColumnAlign};
+use crate::markdown::{
+    parse_document, unescaped_pipe_offsets, LineKind, ParsedDocument, TableColumnAlign,
+};
 
 /// One table edit. The anchor row and column come from the caret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +130,11 @@ impl TablePlan {
 /// that follows the last row. `None` when `pos` is not in a table, which
 /// includes a table written inside a block quote or a list item.
 pub fn parsed_table_source(content: &str, pos: usize) -> Option<Range<usize>> {
-    let parsed = parse_document(content);
+    parsed_table_source_in(&parse_document(content), pos)
+}
+
+/// [`parsed_table_source`] against an existing parse of the content.
+pub fn parsed_table_source_in(parsed: &ParsedDocument, pos: usize) -> Option<Range<usize>> {
     for line in &parsed.lines {
         if let LineKind::TableRow { table_source, .. } = &line.kind {
             if pos >= table_source.start && pos <= table_source.end {

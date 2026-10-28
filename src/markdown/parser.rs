@@ -2910,7 +2910,16 @@ impl ListWalk {
 
 /// The list marker `parse_document` keeps for the line that begins at `line_start`.
 pub fn accepted_list_marker(markdown: &str, line_start: usize) -> Option<ListMarker> {
-    let doc = parse_document(markdown);
+    accepted_list_marker_in(&parse_document(markdown), markdown, line_start)
+}
+
+/// [`accepted_list_marker`] against `doc`, the parse of `markdown`, so
+/// callers that already hold the parse do not pay for another one.
+pub fn accepted_list_marker_in(
+    doc: &ParsedDocument,
+    markdown: &str,
+    line_start: usize,
+) -> Option<ListMarker> {
     let line = doc
         .lines
         .iter()
