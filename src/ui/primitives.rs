@@ -103,7 +103,18 @@ pub fn divider(theme: &Theme) -> impl IntoElement {
         .flex_shrink_0()
 }
 
-pub fn kbd_badge(label: &'static str, theme: &Theme) -> impl IntoElement {
+/// Show command shortcuts as Cmd on macOS. Navigation and deletion chords stay
+/// on Ctrl there, matching the bindings in `main.rs`.
+pub fn display_shortcut(label: &str) -> SharedString {
+    const NAV: [&str; 8] = ["Left", "Right", "Up", "Down", "Home", "End", "Backspace", "Delete"];
+    if cfg!(target_os = "macos") && !NAV.iter().any(|key| label.contains(key)) {
+        label.replace("Ctrl", "Cmd").into()
+    } else {
+        label.to_string().into()
+    }
+}
+
+pub fn kbd_badge(label: &str, theme: &Theme) -> impl IntoElement {
     div()
         .px(px(6.0))
         .py(px(2.0))
@@ -115,5 +126,5 @@ pub fn kbd_badge(label: &'static str, theme: &Theme) -> impl IntoElement {
         .font_family(Theme::FONT_MONO)
         .text_size(px(11.0))
         .font_weight(FontWeight::SEMIBOLD)
-        .child(label)
+        .child(display_shortcut(label))
 }

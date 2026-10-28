@@ -374,7 +374,7 @@ where
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(if is_selected { theme.menu_shortcut_active } else { theme.menu_shortcut })
-                                    .child(sc)
+                                    .child(super::primitives::display_shortcut(sc))
                             )
                         })
                         .when(is_submenu, |s| {

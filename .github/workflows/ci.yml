@@ -54,6 +54,26 @@ jobs:
             echo "Tree is not fmt-clean; skipping cargo fmt --check."
           fi
 
+  # Windows and macOS: the app must at least build and pass its tests there.
+  test-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
   # Own job so a format-toggle failure shows up by itself.
   # The workflow pull_request trigger uses GitHub's default types
   # (opened, synchronize, reopened). This if skips push to main.

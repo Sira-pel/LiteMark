@@ -38,7 +38,7 @@ unsafe extern "C" {
 
 pub const INITIAL_MARKDOWN: &str = r#"# Welcome to LiteMark
 
-LiteMark is a native Markdown and text editor for Linux. Notes start in `~/Documents/Notes`.
+LiteMark is a native Markdown and text editor. Notes start in `~/Documents/Notes`.
 
 ## Formatting
 

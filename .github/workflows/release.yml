@@ -56,3 +56,62 @@ jobs:
             --title "LiteMark ${GITHUB_REF_NAME#v}" \
             --generate-notes \
             build/litemark_*_amd64.deb build/SHA256SUMS
+
+  windows:
+    needs: deb
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc.exe -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Test
+        run: cargo test
+
+      - name: Build the installer
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+
+      - name: Add to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            build/LiteMark-*-windows-x64-setup.exe build/SHA256SUMS-windows.txt
+
+  macos:
+    needs: deb
+    strategy:
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Test
+        run: cargo test
+
+      - name: Build the .dmg
+        run: bash scripts/build-macos.sh
+
+      - name: Add to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            build/LiteMark-*-macos-*.dmg build/SHA256SUMS-macos-*.txt
