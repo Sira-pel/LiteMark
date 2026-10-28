@@ -691,6 +691,7 @@ impl LiteMarkApp {
             self.show_pdf_modal = false;
         } else if self.show_find_replace {
             self.show_find_replace = false;
+            self.refresh_find();
         } else if self.field_focus == TextInput::Search || !self.search_query.is_empty() {
             self.clear_search(cx);
         } else if self.active_multi().is_some() || self.selected_target.is_some() {
@@ -1484,6 +1485,13 @@ impl LiteMarkApp {
     }
 
     fn refresh_find(&mut self) {
+        if !self.show_find_replace {
+            // Don't search a hidden bar; reopening re-runs it.
+            self.find_hits.clear();
+            self.find_index = None;
+            self.not_found = false;
+            return;
+        }
         self.find_hits = self
             .active_tab()
             .map(|tab| tab.find_hit_ranges(&self.find_term, self.match_case))
@@ -3638,13 +3646,7 @@ impl LiteMarkApp {
         match outcome {
             DispatchOutcome::ReadOnly => self.show_error("PDF files are read-only."),
             DispatchOutcome::Applied => {
-                if self.show_find_replace {
-                    self.refresh_find();
-                } else {
-                    // Don't search a hidden bar; reopening re-runs it.
-                    self.find_hits.clear();
-                    self.find_index = None;
-                }
+                self.refresh_find();
             }
             DispatchOutcome::Swallowed | DispatchOutcome::Ignored => {}
         }
@@ -5049,6 +5051,7 @@ impl Render for LiteMarkApp {
                         this.refresh_find();
                         this.pending_find_focus = true;
                     } else {
+                        this.refresh_find();
                         this.pending_find_focus = false;
                         this.applied_focus = None;
                         this.field_owns_keys = false;
@@ -5121,6 +5124,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = false;
+                    this.refresh_find();
                     this.pending_find_focus = false;
                     this.applied_focus = None;
                     this.field_owns_keys = false;
@@ -5826,6 +5830,7 @@ impl Render for LiteMarkApp {
                     this.refresh_find();
                     this.pending_find_focus = true;
                 } else {
+                    this.refresh_find();
                     this.pending_find_focus = false;
                     this.applied_focus = None;
                     this.field_owns_keys = false;
