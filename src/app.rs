@@ -1,4 +1,7 @@
 use crate::actions::*;
+use crate::editor_input::{
+    dispatch_editor_input, swallow_table_drag_input, DispatchOutcome, EditorInput,
+};
 use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
 use crate::model::table_ops::TableOp;
 use crate::model::text_ops::{
@@ -10,8 +13,8 @@ use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
 use crate::ui::table_chrome::{
     action_anchor, clear_drag_for_key, clear_drag_for_modifier, commit_drag_release,
-    drag_gap_if_inside, hit_test, hover_at, next_align, retarget_hover, TableDrag, TableDragKind,
-    TableHitKind,
+    drag_gap_if_inside, hit_test_occupied, hover_at_occupied, next_align, occupied_content,
+    retarget_hover, update_drag_gap, TableDrag, TableDragKind, TableHitKind,
 };
 use crate::ui::MenuItem;
 use crate::ui::*;
@@ -166,6 +169,10 @@ pub struct LiteMarkApp {
     pub editor_context_menu: Option<EditorContextMenu>,
     pub table_hover: Option<crate::ui::table_chrome::TableHover>,
     pub table_drag: Option<crate::ui::table_chrome::TableDrag>,
+    /// True while the mouse button that started a table drag is still held.
+    /// Survives key/modifier cancel of the drag itself so later chords cannot
+    /// edit the note until the button is released.
+    pub table_drag_press_held: bool,
     /// Byte the open table menu should edit. Empty means the caret.
     pub table_action_anchor: Option<usize>,
     title_drag_armed: Rc<Cell<bool>>,
@@ -474,6 +481,7 @@ impl LiteMarkApp {
             editor_context_menu: None,
             table_hover: None,
             table_drag: None,
+            table_drag_press_held: false,
             table_action_anchor: None,
             title_drag_armed: Rc::new(Cell::new(false)),
         };
@@ -746,27 +754,7 @@ impl LiteMarkApp {
     }
 
     pub fn handle_format_cmd(&mut self, cmd: &'static str, _cx: &mut App) {
-        if !command_edits_document(cmd, self.field_focus, self.field_owns_keys) {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) && cmd != "undo" && cmd != "redo"
-        {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        let mode = self.settings.view_mode;
-        if let Some(tab) = self.active_tab_mut() {
-            match cmd {
-                "undo" => {
-                    tab.undo();
-                }
-                "redo" => {
-                    tab.redo();
-                }
-                other => tab.apply_format_in_mode(other, mode),
-            }
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Format(cmd));
     }
 
     pub fn handle_insert_table(&mut self, _cx: &mut App) {
@@ -782,6 +770,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_insert_table_size(&mut self, cols: usize, rows: usize, _cx: &mut App) {
+        if self.block_table_drag_edit() {
+            return;
+        }
         if let Some(tab) = self.active_tab_mut() {
             tab.insert_table_with_size(cols, rows);
         }
@@ -789,6 +780,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_table_edit_action(&mut self, action: &'static str, _cx: &mut App) {
+        if self.block_table_drag_edit() {
+            return;
+        }
         let anchor = self.table_action_anchor.take();
         if let Some(tab) = self.active_tab_mut() {
             match action {
@@ -938,6 +932,7 @@ impl LiteMarkApp {
     pub fn handle_toggle_mode(&mut self) {
         self.table_hover = None;
         self.table_drag = None;
+        self.table_drag_press_held = false;
         self.dismiss_editor_context_menu();
         self.settings.view_mode = self.settings.view_mode.toggle();
         self.active_tab_mut();
@@ -1127,6 +1122,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_cut(&mut self, cx: &mut App) {
+        if self.block_table_drag_edit() {
+            return;
+        }
         let Some(item) = self.selection_clipboard_item() else {
             return;
         };
@@ -1149,6 +1147,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_paste(&mut self, cx: &mut App) {
+        if self.block_table_drag_edit() {
+            return;
+        }
         if let Some(item) = cx.read_from_clipboard() {
             // A copy from a Markdown tab carries its source as metadata.
             let into_markdown = self
@@ -3261,200 +3262,51 @@ impl LiteMarkApp {
     }
 
     fn editor_backspace(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        let mode = self.settings.view_mode;
-        if let Some(tab) = self.active_tab_mut() {
-            tab.smart_backspace_in_mode(mode);
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Backspace);
     }
 
     fn editor_delete(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        let mode = self.settings.view_mode;
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_forward_in_mode(mode);
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Delete);
     }
 
     fn editor_delete_word_left(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_word_left();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::DeleteWordLeft);
     }
 
     fn editor_delete_word_right(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_word_right();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::DeleteWordRight);
     }
 
     fn editor_delete_line_start(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_to_line_start();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::DeleteLineStart);
     }
 
     fn editor_delete_line_end(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_to_line_end();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::DeleteLineEnd);
     }
 
     fn editor_newline(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.smart_newline(false);
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Newline);
     }
 
     fn editor_plain_newline(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.smart_newline(true);
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::PlainNewline);
     }
 
     fn editor_table_row_below(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.table_insert_row_below();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::TableRowBelow);
     }
 
     fn editor_indent(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            if !tab.tab_table_cell(false) {
-                tab.indent();
-            }
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Indent);
     }
 
     fn editor_outdent(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            if !tab.tab_table_cell(true) {
-                tab.outdent();
-            }
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Outdent);
     }
 
     fn editor_move(&mut self, _cx: &mut App, edit: impl FnOnce(&mut DocumentTab)) {
-        if self.table_drag.take().is_some() {
+        if self.block_table_drag_edit() {
             return;
         }
         if !document_accepts_keystrokes(self.field_focus)
@@ -3465,6 +3317,40 @@ impl LiteMarkApp {
         }
         if let Some(tab) = self.active_tab_mut() {
             edit(tab);
+        }
+    }
+
+    fn block_table_drag_edit(&mut self) -> bool {
+        swallow_table_drag_input(&mut self.table_drag, self.table_drag_press_held)
+    }
+
+    fn dispatch_editor_input(&mut self, input: EditorInput) {
+        let id = self.active_tab_id.clone();
+        let field_focus = self.field_focus;
+        let field_owns_keys = self.field_owns_keys;
+        let view_mode = self.settings.view_mode;
+        let blocked = self.input_blocked();
+        let press_held = self.table_drag_press_held;
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            let _ = swallow_table_drag_input(&mut self.table_drag, press_held);
+            return;
+        };
+        let outcome = dispatch_editor_input(
+            &mut crate::editor_input::EditorInputState {
+                tab,
+                drag: &mut self.table_drag,
+                press_held,
+                field_focus,
+                field_owns_keys,
+                view_mode,
+                input_blocked: blocked,
+            },
+            input,
+        );
+        match outcome {
+            DispatchOutcome::ReadOnly => self.show_error("PDF files are read-only."),
+            DispatchOutcome::Applied => self.refresh_find(),
+            DispatchOutcome::Swallowed | DispatchOutcome::Ignored => {}
         }
     }
 
@@ -3490,7 +3376,8 @@ impl LiteMarkApp {
         }
         let hit = {
             let paint = self.editor_paint.borrow();
-            hit_test(&paint.tables, event.position)
+            let occupied = occupied_content(&paint.rows);
+            hit_test_occupied(&paint.tables, event.position, &occupied)
         };
         let Some(hit) = hit else {
             return false;
@@ -3509,23 +3396,27 @@ impl LiteMarkApp {
         match hit.kind {
             TableHitKind::ColGrip => {
                 self.dismiss_editor_context_menu();
+                self.table_drag_press_held = true;
                 self.table_drag = Some(TableDrag {
                     source: hit.source,
                     kind: TableDragKind::Column,
                     from: hit.index,
                     anchor,
                     gap: hit.index,
+                    drop_visible: true,
                 });
             }
             TableHitKind::RowGrip => {
                 self.dismiss_editor_context_menu();
                 if hit.index != 0 {
+                    self.table_drag_press_held = true;
                     self.table_drag = Some(TableDrag {
                         source: hit.source,
                         kind: TableDragKind::Row,
                         from: hit.index,
                         anchor,
                         gap: hit.index,
+                        drop_visible: true,
                     });
                 }
             }
@@ -3576,6 +3467,7 @@ impl LiteMarkApp {
             if self.table_hover.is_some() || self.table_drag.is_some() {
                 self.table_hover = None;
                 self.table_drag = None;
+                self.table_drag_press_held = false;
                 cx.notify();
             }
             return;
@@ -3583,7 +3475,8 @@ impl LiteMarkApp {
         let previous = self.table_hover.clone();
         let hover = {
             let paint = self.editor_paint.borrow();
-            hover_at(&paint.tables, at, previous.as_ref())
+            let occupied = occupied_content(&paint.rows);
+            hover_at_occupied(&paint.tables, at, previous.as_ref(), &occupied)
         };
         if self.table_hover != hover {
             self.table_hover = hover;
@@ -3597,6 +3490,7 @@ impl LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.table_drag_press_held = false;
         if let Some(drag) = self.table_drag.take() {
             let tables = self.editor_paint.borrow().tables.clone();
             let moved = self
@@ -3684,6 +3578,7 @@ impl LiteMarkApp {
         self.sidebar_menu = None;
         self.dismiss_editor_context_menu();
         self.table_drag = None;
+        self.table_drag_press_held = false;
         self.focus_handle.focus(window);
         self.applied_focus = Some(FocusSlot::Editor);
         self.field_focus = TextInput::Editor;
@@ -3714,12 +3609,11 @@ impl LiteMarkApp {
                 let paint = self.editor_paint.borrow();
                 drag_gap_if_inside(&paint.tables, &drag, event.position)
             };
-            if let Some(gap) = gap {
-                if let Some(drag) = self.table_drag.as_mut() {
-                    if drag.gap != gap {
-                        drag.gap = gap;
-                        cx.notify();
-                    }
+            if let Some(drag) = self.table_drag.as_mut() {
+                let before = (drag.gap, drag.drop_visible);
+                update_drag_gap(drag, gap);
+                if (drag.gap, drag.drop_visible) != before {
+                    cx.notify();
                 }
             }
             return;
@@ -3922,10 +3816,10 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.table_drag.is_some() {
+        if self.table_drag.is_some() || self.table_drag_press_held {
             let (drag, insert) = clear_drag_for_key(self.table_drag.take(), "key", text);
             self.table_drag = drag;
-            if insert.is_empty() {
+            if insert.is_empty() || self.table_drag_press_held {
                 window.refresh();
                 cx.notify();
                 return;
@@ -4085,6 +3979,12 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.table_drag.is_some() || self.table_drag_press_held {
+            let _ = swallow_table_drag_input(&mut self.table_drag, self.table_drag_press_held);
+            window.refresh();
+            cx.notify();
+            return;
+        }
         if self.forward_keystroke_to_field(new_text, window, cx) {
             return;
         }
@@ -6222,18 +6122,12 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorMoveLineUp, window, cx| {
-                if let Some(tab) = this.active_tab_mut() {
-                    tab.move_line_up();
-                }
-                this.refresh_find();
+                this.dispatch_editor_input(EditorInput::MoveLineUp);
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorMoveLineDown, window, cx| {
-                if let Some(tab) = this.active_tab_mut() {
-                    tab.move_line_down();
-                }
-                this.refresh_find();
+                this.dispatch_editor_input(EditorInput::MoveLineDown);
                 window.refresh();
                 cx.notify();
             }))
@@ -6268,14 +6162,14 @@ impl Render for LiteMarkApp {
                 }),
             )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if this.table_drag.is_none() {
+                if this.table_drag.is_none() && !this.table_drag_press_held {
                     return;
                 }
                 let typed = event.keystroke.key_char.as_deref().unwrap_or("");
                 let (drag, insert) =
                     clear_drag_for_key(this.table_drag.take(), &event.keystroke.key, typed);
                 this.table_drag = drag;
-                if insert.is_empty() {
+                if insert.is_empty() || this.table_drag_press_held {
                     cx.stop_propagation();
                     cx.notify();
                 }

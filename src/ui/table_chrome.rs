@@ -14,7 +14,7 @@ use crate::model::table_ops::parsed_table_source;
 use crate::model::DocumentTab;
 use crate::theme::sz;
 
-use super::text_editor::{PaintCell, TableGeom};
+use super::text_editor::{PaintCell, PaintRow, TableGeom};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TableDragKind {
@@ -29,6 +29,8 @@ pub struct TableDrag {
     pub from: usize,
     pub anchor: usize,
     pub gap: usize,
+    /// False while the pointer is outside the table so the drop line hides.
+    pub drop_visible: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +118,32 @@ pub fn record_table_row(
         bounds: row_bounds,
         anchors,
     });
+}
+
+fn bounds_overlap(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
+    a.left() < b.right() && b.left() < a.right() && a.top() < b.bottom() && b.top() < a.bottom()
+}
+
+/// Glyph boxes of non-table rows. Chrome must not cover or steal these.
+pub fn occupied_content(rows: &[PaintRow]) -> Vec<Bounds<Pixels>> {
+    rows.iter()
+        .filter(|row| row.cells.is_empty())
+        .map(|row| {
+            Bounds::new(
+                row.origin,
+                Size {
+                    width: row.shaped.width,
+                    height: row.line_height,
+                },
+            )
+        })
+        .collect()
+}
+
+fn chrome_blocked(bounds: Bounds<Pixels>, occupied: &[Bounds<Pixels>]) -> bool {
+    occupied
+        .iter()
+        .any(|content| bounds_overlap(bounds, *content))
 }
 
 fn union_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>) -> Bounds<Pixels> {
@@ -222,11 +250,23 @@ pub fn action_anchor(tables: &[TableGeom], hit: &TableHit, hover: Option<&TableH
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn hit_test(tables: &[TableGeom], point: Point<Pixels>) -> Option<TableHit> {
+    hit_test_occupied(tables, point, &[])
+}
+
+pub fn hit_test_occupied(
+    tables: &[TableGeom],
+    point: Point<Pixels>,
+    occupied: &[Bounds<Pixels>],
+) -> Option<TableHit> {
+    if occupied.iter().any(|content| contains(*content, point)) {
+        return None;
+    }
     for table in tables {
         for (index, column) in table.columns.iter().enumerate() {
             let pill = column_pill_bounds(column.header_bounds);
-            if !contains(pill, point) {
+            if !contains(pill, point) || chrome_blocked(pill, occupied) {
                 continue;
             }
             let kind = if contains(third(pill, 0), point) {
@@ -246,7 +286,7 @@ pub fn hit_test(tables: &[TableGeom], point: Point<Pixels>) -> Option<TableHit> 
         }
         for row in &table.rows {
             let pill = row_pill_bounds(row.bounds);
-            if !contains(pill, point) {
+            if !contains(pill, point) || chrome_blocked(pill, occupied) {
                 continue;
             }
             let kind = if contains(half(pill, 0), point) {
@@ -264,7 +304,7 @@ pub fn hit_test(tables: &[TableGeom], point: Point<Pixels>) -> Option<TableHit> 
             });
         }
         let corner = corner_grip_bounds(table.bounds);
-        if contains(corner, point) {
+        if contains(corner, point) && !chrome_blocked(corner, occupied) {
             let (index, anchor, align) = anchor_at(table, 0, 0);
             return Some(TableHit {
                 source: table.source.clone(),
@@ -350,7 +390,7 @@ pub fn gap_at(tables: &[TableGeom], drag: &TableDrag, point: Point<Pixels>) -> u
     }
 }
 
-/// Gap while the pointer is inside the dragged table. Outside, the indicator stays put.
+/// Gap while the pointer is inside the dragged table. Outside, hide the line.
 pub fn drag_gap_if_inside(
     tables: &[TableGeom],
     drag: &TableDrag,
@@ -361,6 +401,18 @@ pub fn drag_gap_if_inside(
         return None;
     }
     Some(gap_at(tables, drag, at))
+}
+
+/// Update the live drop gap. `None` hides the indicator until the pointer
+/// re-enters the table.
+pub fn update_drag_gap(drag: &mut TableDrag, gap: Option<usize>) {
+    match gap {
+        Some(gap) => {
+            drag.gap = gap;
+            drag.drop_visible = true;
+        }
+        None => drag.drop_visible = false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -439,8 +491,8 @@ pub fn retarget_hover(content: &str, hover: &TableHover) -> Option<TableHover> {
     let source = parsed_table_source(content, probe)?;
     Some(TableHover {
         source,
-        col: hover.col,
-        row: hover.row,
+        col: None,
+        row: None,
     })
 }
 
@@ -451,12 +503,22 @@ pub struct TableHover {
     pub row: Option<usize>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn hover_at(
     tables: &[TableGeom],
     at: Point<Pixels>,
     previous: Option<&TableHover>,
 ) -> Option<TableHover> {
-    if let Some(hit) = hit_test(tables, at) {
+    hover_at_occupied(tables, at, previous, &[])
+}
+
+pub fn hover_at_occupied(
+    tables: &[TableGeom],
+    at: Point<Pixels>,
+    previous: Option<&TableHover>,
+    occupied: &[Bounds<Pixels>],
+) -> Option<TableHover> {
+    if let Some(hit) = hit_test_occupied(tables, at, occupied) {
         let (mut col, mut row) = match hit.kind {
             TableHitKind::ColGrip | TableHitKind::ColAlign | TableHitKind::ColPlus => {
                 (Some(hit.index), None)
@@ -500,6 +562,7 @@ pub fn paint(
     hover: Option<&TableHover>,
     drag: Option<&TableDrag>,
     colors: TableChromePaint,
+    occupied: &[Bounds<Pixels>],
 ) {
     let Some(hover) = hover else {
         if let Some(drag) = drag {
@@ -511,24 +574,26 @@ pub fn paint(
         return;
     };
     if let Some(col) = hover.col.and_then(|index| table.columns.get(index)) {
-        paint_pill(
-            window,
-            column_pill_bounds(col.header_bounds),
-            colors.surface,
-            colors.border,
-        );
         let pill = column_pill_bounds(col.header_bounds);
-        paint_dots(window, third(pill, 0), colors.muted);
-        paint_align(window, third(pill, 1), col.align, colors.muted);
-        paint_plus(window, third(pill, 2), colors.muted);
+        if !chrome_blocked(pill, occupied) {
+            paint_pill(window, pill, colors.surface, colors.border);
+            paint_dots(window, third(pill, 0), colors.muted);
+            paint_align(window, third(pill, 1), col.align, colors.muted);
+            paint_plus(window, third(pill, 2), colors.muted);
+        }
     }
     if let Some(row) = hover.row.and_then(|index| table.rows.get(index)) {
         let pill = row_pill_bounds(row.bounds);
-        paint_pill(window, pill, colors.surface, colors.border);
-        paint_dots(window, half(pill, 0), colors.muted);
-        paint_plus(window, half(pill, 1), colors.muted);
+        if !chrome_blocked(pill, occupied) {
+            paint_pill(window, pill, colors.surface, colors.border);
+            paint_dots(window, half(pill, 0), colors.muted);
+            paint_plus(window, half(pill, 1), colors.muted);
+        }
     }
-    paint_dots(window, corner_grip_bounds(table.bounds), colors.muted);
+    let corner = corner_grip_bounds(table.bounds);
+    if !chrome_blocked(corner, occupied) {
+        paint_dots(window, corner, colors.muted);
+    }
     if let Some(drag) = drag {
         paint_indicator(window, tables, drag, colors.ink);
     }
@@ -572,22 +637,50 @@ fn paint_dots(window: &mut gpui::Window, bounds: Bounds<Pixels>, color: gpui::Hs
     }
 }
 
+fn slot_scale(slot: Bounds<Pixels>, natural: Pixels) -> f32 {
+    let avail: f32 = slot.size.width.into();
+    let need: f32 = natural.into();
+    if need <= 0.0 {
+        1.0
+    } else {
+        (avail / need).clamp(0.0, 1.0)
+    }
+}
+
+fn align_icon_pad(slot: Bounds<Pixels>) -> Pixels {
+    sz::TABLE_ICON_PAD * slot_scale(slot, sz::TABLE_ICON_PAD + sz::TABLE_BAR_LG)
+}
+
+fn align_bar_widths(slot: Bounds<Pixels>) -> [Pixels; 3] {
+    let scale = slot_scale(slot, sz::TABLE_ICON_PAD + sz::TABLE_BAR_LG);
+    [
+        sz::TABLE_BAR_LG * scale,
+        sz::TABLE_BAR_MD * scale,
+        sz::TABLE_BAR_SM * scale,
+    ]
+}
+
+fn plus_arm(slot: Bounds<Pixels>) -> Pixels {
+    sz::TABLE_PLUS_ARM * slot_scale(slot, sz::TABLE_PLUS_ARM)
+}
+
 fn paint_align(
     window: &mut gpui::Window,
     bounds: Bounds<Pixels>,
     align: TableColumnAlign,
     color: gpui::Hsla,
 ) {
-    let widths = [sz::TABLE_BAR_LG, sz::TABLE_BAR_MD, sz::TABLE_BAR_SM];
+    let pad = align_icon_pad(bounds);
+    let widths = align_bar_widths(bounds);
     let thickness = sz::STROKE;
     let gap = sz::TABLE_DOT;
     let block_h = thickness * 3.0 + gap * 2.0;
     let top = bounds.top() + (bounds.size.height - block_h) * 0.5;
     for (index, width) in widths.into_iter().enumerate() {
         let x = match align {
-            TableColumnAlign::Right => bounds.right() - sz::TABLE_ICON_PAD - width,
+            TableColumnAlign::Right => bounds.right() - pad - width,
             TableColumnAlign::Center => bounds.left() + (bounds.size.width - width) * 0.5,
-            TableColumnAlign::Left | TableColumnAlign::None => bounds.left() + sz::TABLE_ICON_PAD,
+            TableColumnAlign::Left | TableColumnAlign::None => bounds.left() + pad,
         };
         let y = top + (thickness + gap) * index as f32;
         window.paint_quad(gpui::fill(
@@ -598,7 +691,7 @@ fn paint_align(
 }
 
 fn paint_plus(window: &mut gpui::Window, bounds: Bounds<Pixels>, color: gpui::Hsla) {
-    let arm = sz::TABLE_PLUS_ARM;
+    let arm = plus_arm(bounds);
     let thickness = sz::STROKE;
     let cx = bounds.left() + bounds.size.width * 0.5;
     let cy = bounds.top() + bounds.size.height * 0.5;
@@ -624,6 +717,9 @@ fn paint_indicator(
     drag: &TableDrag,
     color: gpui::Hsla,
 ) {
+    if !drag.drop_visible {
+        return;
+    }
     let Some(table) = tables.iter().find(|table| table.source == drag.source) else {
         return;
     };
@@ -908,6 +1004,7 @@ mod tests {
             from: 1,
             anchor: 26,
             gap: 1,
+            drop_visible: true,
         }
     }
 
@@ -995,12 +1092,49 @@ mod tests {
         };
         assert!(doc.apply_table_op_at(26, TableOp::InsertColRight));
         let next = retarget_hover(&doc.content, &hover).expect("hover");
-        assert_eq!(next.col, Some(0));
-        assert_eq!(next.row, Some(1));
+        assert_eq!(next.col, None);
+        assert_eq!(next.row, None);
         assert_ne!(next.source.end, hover.source.end);
         assert_eq!(
             next.source,
             parsed_table_source(&doc.content, next.source.start).expect("retarget")
         );
+    }
+
+    #[test]
+    fn column_pill_does_not_hit_content_above_the_table() {
+        let tables = [sample_table()];
+        let pill = column_pill_bounds(tables[0].columns[0].header_bounds);
+        let paragraph = bounds(
+            f32::from(pill.left()),
+            f32::from(pill.top()),
+            f32::from(pill.size.width),
+            f32::from(pill.size.height),
+        );
+        let at = center_of(third(pill, 1));
+        assert!(contains(paragraph, at));
+        assert!(hit_test(&tables, at).is_some());
+        assert!(hit_test_occupied(&tables, at, &[paragraph]).is_none());
+        assert_eq!(hover_at_occupied(&tables, at, None, &[paragraph]), None);
+    }
+
+    #[test]
+    fn drop_indicator_hides_outside_the_table() {
+        let mut drag = row_drag();
+        update_drag_gap(&mut drag, None);
+        assert!(!drag.drop_visible);
+        update_drag_gap(&mut drag, Some(2));
+        assert!(drag.drop_visible);
+        assert_eq!(drag.gap, 2);
+    }
+
+    #[test]
+    fn align_bars_fit_a_narrow_slot() {
+        let slot = bounds(0.0, 0.0, 10.0, 16.0);
+        let pad = align_icon_pad(slot);
+        for width in align_bar_widths(slot) {
+            assert!(pad + width <= slot.size.width);
+        }
+        assert!(plus_arm(slot) <= slot.size.width);
     }
 }

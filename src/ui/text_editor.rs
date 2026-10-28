@@ -2054,6 +2054,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             paint.table_width_cache = std::mem::take(&mut prepaint.table_width_cache);
             paint.tables = std::mem::take(&mut prepaint.tables);
         }
+        let occupied = super::table_chrome::occupied_content(&self.paint.borrow().rows);
         super::table_chrome::paint(
             window,
             &self.paint.borrow().tables,
@@ -2065,6 +2066,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 muted: self.muted_color,
                 ink: self.text_color,
             },
+            &occupied,
         );
         if wrap_changed && self.word_wrap {
             let entity = self.entity.clone();
