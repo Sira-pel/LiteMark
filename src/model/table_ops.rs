@@ -47,9 +47,13 @@
 //! blank line that ends a table. A pipe-less row (example 202's `bar`) stays
 //! byte for byte until a column edit rewrites it. The rewrite then takes the
 //! header's outer pipes, so the line still parses as separate cells. A
-//! rewritten row that would drop an empty edge cell, lose its last pipe, or
-//! pick up four leading spaces (so the parser would not see a table) takes
-//! outer pipes even when the header had none.
+//! rewritten row that would drop an empty edge cell, lose its last pipe,
+//! start a list/heading/quote/fence/html/footnote, or pick up four leading
+//! spaces (so the parser would not see a table) takes outer pipes even when
+//! the header had none. A cell that ends in a backslash is not followed by a
+//! glued pipe (`bar\|`): a padding space keeps the backslash in the cell and
+//! the pipe as a separator so the editor and HTML export both still see a
+//! table.
 //!
 //! Tables inside a block quote or a list item are not tables in this parser
 //! (`>` and a list marker break the block). Ops do not find them, so the
@@ -62,7 +66,7 @@
 
 use std::ops::Range;
 
-use crate::markdown::parser::delimiter_alignments;
+use crate::markdown::parser::{delimiter_alignments, line_breaks_table};
 use crate::markdown::{parse_document, unescaped_pipe_offsets, LineKind, TableColumnAlign};
 
 /// One table edit. The anchor row and column come from the caret.
@@ -803,13 +807,38 @@ fn trim_prefix_space(prefix: &mut String) -> bool {
 
 /// Keep a rewritten row as a table row: empty edge cells need a pipe so they
 /// do not fold into the line edge, a single leftover cell needs a pipe so
-/// the delimiter still matches, and four leading spaces would leave the
-/// table (the parser stops a table at column 4).
+/// the delimiter still matches, a left-edge block starter needs a leading
+/// pipe so `line_breaks_table` does not stop the table, and four leading
+/// spaces would leave the table (the parser stops a table at column 4).
 fn ensure_row(row: &mut Row) {
     if !row.dirty {
         return;
     }
     ensure_parts(&mut row.parts);
+}
+
+fn trailing_backslashes(cell: &str) -> usize {
+    cell.as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+}
+
+fn pipe_follows_cell(parts: &Parts, index: usize) -> bool {
+    index + 1 < parts.cells.len() || (index + 1 == parts.cells.len() && parts.trailing_pipe)
+}
+
+/// A pipe glued to a trailing backslash is cell text in GFM (`\|`) and, when
+/// the run is even, pulldown still treats it as escaped. Pad a space so the
+/// pipe stays a separator. The backslash itself stays; the cell is not
+/// rewritten as `bar\|`.
+fn protect_backslash_edges(parts: &mut Parts) {
+    for index in 0..parts.cells.len() {
+        if pipe_follows_cell(parts, index) && trailing_backslashes(&parts.cells[index]) > 0 {
+            parts.cells[index].push(' ');
+        }
+    }
 }
 
 fn ensure_parts(parts: &mut Parts) {
@@ -830,13 +859,19 @@ fn ensure_parts(parts: &mut Parts) {
             parts.trailing_pipe = true;
         }
     }
+    protect_backslash_edges(parts);
     for _ in 0..8 {
         let joined = join_parts(parts);
         let parsed = split_parts(&joined);
         let indent = line_indent_columns(&joined);
         let pipes = unescaped_pipe_offsets(&joined);
-        if parsed.cells.len() == parts.cells.len() && indent < 4 && !pipes.is_empty() {
+        let breaks = line_breaks_table(&joined);
+        if parsed.cells.len() == parts.cells.len() && indent < 4 && !pipes.is_empty() && !breaks {
             return;
+        }
+        if breaks && !parts.leading_pipe {
+            parts.leading_pipe = true;
+            continue;
         }
         if indent >= 4 {
             if !parts.leading_pipe {
@@ -850,6 +885,7 @@ fn ensure_parts(parts: &mut Parts) {
         if pipes.is_empty() {
             parts.leading_pipe = true;
             parts.trailing_pipe = true;
+            protect_backslash_edges(parts);
             continue;
         }
         if parsed.cells.len() < parts.cells.len() {
@@ -859,6 +895,7 @@ fn ensure_parts(parts: &mut Parts) {
             }
             if !parts.trailing_pipe {
                 parts.trailing_pipe = true;
+                protect_backslash_edges(parts);
                 continue;
             }
         }
@@ -1103,6 +1140,7 @@ fn align_cell(raw: &str, align: TableColumnAlign) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown::markdown_to_html_body;
 
     fn roundtrip(line: &str) {
         assert_eq!(join_parts(&split_parts(line)), line, "roundtrip {line:?}");
@@ -1344,5 +1382,130 @@ mod tests {
         assert_eq!(out, "|a \\| b |\n|---|\n|1 \\| 2 |\n");
         assert_eq!(table_row_count(&out), 2);
         assert_eq!(table_col_count(&out), 1);
+        assert_exported_table(&out);
+    }
+
+    fn assert_exported_table(markdown: &str) {
+        let html = markdown_to_html_body(markdown);
+        assert!(
+            html.contains("<table>"),
+            "export lost the table\nbytes={markdown:?}\nhtml={html}"
+        );
+    }
+
+    fn block_starter_source(indent: &str, mid: &str, nl: &str, eof_nl: bool) -> String {
+        let end = if eof_nl { nl } else { "" };
+        format!("{indent}a | {mid} | c{nl}{indent}---|---|---{nl}{indent}1 | 2 | 3{end}")
+    }
+
+    fn expect_delete_starter(indent: &str, mid: &str, nl: &str, eof_nl: bool) -> String {
+        let end = if eof_nl { nl } else { "" };
+        if indent.is_empty() {
+            format!("| {mid} | c{nl}---|---{nl} 2 | 3{end}")
+        } else {
+            format!("{indent}| {mid} | c{nl}{indent}---|---{nl}{indent}| 2 | 3{end}")
+        }
+    }
+
+    fn expect_move_starter(indent: &str, mid: &str, nl: &str, eof_nl: bool) -> String {
+        let end = if eof_nl { nl } else { "" };
+        if indent.is_empty() {
+            format!("| {mid} |a | c{nl}---|---|---{nl} 2 |1 | 3{end}")
+        } else {
+            format!("{indent}| {mid} |a | c{nl}{indent}---|---|---{nl}{indent}| 2 |1 | 3{end}")
+        }
+    }
+
+    /// Pipe-less left-edge cells that are block starters stay table rows after
+    /// delete/move, including CRLF and a missing final newline. Proof is the
+    /// bytes and HTML export (`<table>`), not only the editor row count.
+    #[test]
+    fn pipe_less_block_starter_edge_stays_a_table() {
+        let mids = [
+            "- item", "+ item", "* item", "# item", "> item", "1. item", "1) item", "```", "<div>",
+            "<script>", "[^1]:",
+        ];
+        let mut failures = Vec::new();
+        for mid in mids {
+            for indent in ["", "   "] {
+                for (nl, eof_nl) in [("\n", true), ("\r\n", true), ("\n", false)] {
+                    let src = block_starter_source(indent, mid, nl, eof_nl);
+                    let cases: [(&str, TableOp, String); 2] = [
+                        (
+                            "delete",
+                            TableOp::DeleteCol,
+                            expect_delete_starter(indent, mid, nl, eof_nl),
+                        ),
+                        (
+                            "move",
+                            TableOp::MoveCol { to_index: 0 },
+                            expect_move_starter(indent, mid, nl, eof_nl),
+                        ),
+                    ];
+                    for (op_name, op, expect) in cases {
+                        let col = if matches!(op, TableOp::MoveCol { .. }) {
+                            1
+                        } else {
+                            0
+                        };
+                        let pos = cell_start(&src, 0, col);
+                        let Some(plan) = plan(&src, pos, op) else {
+                            failures.push(format!(
+                                "{op_name} mid={mid:?} indent={indent:?} refused src={src:?}"
+                            ));
+                            continue;
+                        };
+                        let mut out = src.clone();
+                        out.replace_range(plan.range.clone(), &plan.new_text);
+                        if out != expect {
+                            failures.push(format!(
+                                "{op_name} mid={mid:?} indent={indent:?} bytes\n  got={out:?}\n want={expect:?}"
+                            ));
+                        }
+                        if table_row_count(&out) < 2 {
+                            failures.push(format!(
+                                "{op_name} mid={mid:?} editor rows={} out={out:?}",
+                                table_row_count(&out)
+                            ));
+                        }
+                        let html = markdown_to_html_body(&out);
+                        if !html.contains("<table>") {
+                            failures.push(format!(
+                                "{op_name} mid={mid:?} html lost table out={out:?} html={html}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} block-starter cases failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn pipe_less_odd_backslash_cell_stays_byte_exact() {
+        let src = "foo | bar\\\n---|---\n1 | 2\\\n";
+        let (out, _) = apply(src, 0, 0, TableOp::DeleteCol);
+        assert_eq!(out, "| bar\\ |\n|---|\n| 2\\ |\n");
+        assert!(
+            !out.contains("bar\\|"),
+            "odd backslash was glued to a pipe: {out:?}"
+        );
+        assert_eq!(table_row_count(&out), 2);
+        assert_exported_table(&out);
+    }
+
+    #[test]
+    fn pipe_less_even_backslash_insert_right_exports_as_table() {
+        let src = "foo | bar\\\\\n---|---\n1 | 2\\\\\n";
+        let (out, _) = apply(src, 0, 1, TableOp::InsertColRight);
+        assert_eq!(out, "foo | bar\\\\ | |\n---|---|---\n1 | 2\\\\ | |\n");
+        assert_eq!(table_row_count(&out), 2);
+        assert_eq!(table_col_count(&out), 3);
+        assert_exported_table(&out);
     }
 }

@@ -11,7 +11,7 @@ GFM 0.29 section 4.10 is the source of the bytes. Example 198 is the plain table
 - A new cell copies the neighbour cell's leading and trailing spaces with the text removed. A new delimiter cell copies the hyphen count (at least 3) and the spaces, with no colons.
 - Alignment rewrites only that delimiter cell.
 - The header is row 0. It is not deleted, not moved, and not given a row above it. A body row is not moved to index 0.
-- A rewritten row that would drop an empty edge cell, lose its last pipe, or indent four spaces takes outer pipes even when the header had none, so the line stays a table.
+- A rewritten row that would drop an empty edge cell, lose its last pipe, start a list/heading/quote/fence/html/footnote, or indent four spaces takes outer pipes even when the header had none, so the line stays a table. A cell that ends in a backslash is not followed by a glued pipe.
 - A table inside a block quote or a list item is not a table in this parser, so the bytes stay and the edit does not record an undo step.
 
 ## Sub-features

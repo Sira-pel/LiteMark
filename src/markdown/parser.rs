@@ -943,7 +943,7 @@ fn is_empty_table_row(line: &str) -> bool {
             .all(|byte| matches!(byte, b' ' | b'\t' | 0x0b | 0x0c | b'\r'))
 }
 
-fn line_breaks_table(line: &str) -> bool {
+pub(crate) fn line_breaks_table(line: &str) -> bool {
     if is_blank_line(line) {
         return true;
     }

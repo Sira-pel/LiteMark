@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    accepted_list_marker, parse_document, split_table_cells, unescaped_pipe_offsets, InlinePair,
+    accepted_list_marker, parse_document, unescaped_pipe_offsets, InlinePair,
     InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment, TableColumnAlign,
 };
 
