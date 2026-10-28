@@ -94,7 +94,9 @@ cargo run --release
 
 | Shortcut | Action |
 | --- | --- |
-| Ctrl+N | New tab |
+| Ctrl+N | New note |
+| Ctrl+Shift+N | New folder |
+| Ctrl+T | New tab |
 | Ctrl+O | Open a file |
 | Ctrl+S | Save |
 | Ctrl+Shift+S | Save as |
@@ -112,6 +114,8 @@ cargo run --release
 | Ctrl+Z | Undo |
 | Ctrl+Y or Ctrl+Shift+Z | Redo |
 | Ctrl+\ | Toggle the notes sidebar |
+| Delete | Move the selected note or folder to the Trash (sidebar focused; asks first) |
+| Ctrl+Backspace / Ctrl+Delete | Delete word left / right (editor) |
 | Ctrl+= / Ctrl+- / Ctrl+0 | Zoom in / out / reset |
 | F1 | Shortcuts |
 | F11 | Zen mode |
