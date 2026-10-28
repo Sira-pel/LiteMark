@@ -109,7 +109,7 @@ pub struct LiteMarkApp {
     pub submenu_selected_ix: Option<usize>,
     pub menu_items_cache: Vec<MenuItem>,
     /// Currently highlighted sidebar item (drives row highlight and the
-    /// Ctrl+Delete target). Falls back to the active tab's note when None.
+    /// Delete-key target). Falls back to the active tab's note when None.
     pub selected_target: Option<SidebarTarget>,
     /// Shift-selected range in the sidebar; only honored while
     /// `selected_target` is still its cursor, so any other selection change
@@ -1780,7 +1780,7 @@ impl LiteMarkApp {
         if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.id == folder_id) {
             folder.is_open = !folder.is_open;
         }
-        // Clicking a folder selects it (Ctrl+Delete target) and keeps
+        // Clicking a folder selects it (Delete-key target) and keeps
         // keyboard navigation in the sidebar tree.
         self.multi_selection = None;
         self.selected_target = Some(SidebarTarget::Folder(folder_id.to_string()));
@@ -2517,6 +2517,59 @@ impl LiteMarkApp {
                 }
             } else if let Ok(rest) = path.strip_prefix(old) {
                 tab.file_path = Some(new_path.join(rest));
+            }
+        }
+    }
+
+    /// Trash the sidebar selection (or the active note), asking first.
+    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        // Only act in a normal window state — never while a menu,
+        // modal or naming editor is open.
+        if self.open_menu.is_some()
+            || self.modal_choice_count() > 0
+            || self.rename_target.is_some()
+            || self.create_draft.is_some()
+        {
+            return;
+        }
+        if let Some(items) = self
+            .active_multi()
+            .filter(|_| self.sidebar_keyboard)
+            .map(|m| m.items.clone())
+        {
+            self.request_trash_many(items);
+            cx.notify();
+            return;
+        }
+        // Target whatever is selected in the sidebar (folder or
+        // note); fall back to the active tab's note.
+        let target = self.selected_target.clone().or_else(|| {
+            self.active_tab()
+                .and_then(|tab| tab.workspace_file_id.clone())
+                .map(SidebarTarget::File)
+        });
+        match target {
+            Some(SidebarTarget::Folder(id)) => {
+                self.request_trash_folder(id);
+                cx.notify();
+            }
+            Some(SidebarTarget::File(id)) => {
+                self.request_trash_file(id);
+                cx.notify();
+            }
+            None => {
+                let Some(tab) = self.active_tab() else {
+                    return;
+                };
+                if tab.file_path.is_none() {
+                    self.show_error(
+                        "This note isn't saved yet — press Ctrl+S to name and save it first.",
+                    );
+                } else {
+                    self.show_error(
+                        "This file isn't in the workspace folder, so it can't be trashed here.",
+                    );
+                }
             }
         }
     }
@@ -5750,55 +5803,7 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &DeleteNote, _window, cx| {
-                // Only act in a normal window state — never while a menu,
-                // modal or naming editor is open.
-                if this.open_menu.is_some()
-                    || this.modal_choice_count() > 0
-                    || this.rename_target.is_some()
-                    || this.create_draft.is_some()
-                {
-                    return;
-                }
-                if let Some(items) = this
-                    .active_multi()
-                    .filter(|_| this.sidebar_keyboard)
-                    .map(|m| m.items.clone())
-                {
-                    this.request_trash_many(items);
-                    cx.notify();
-                    return;
-                }
-                // Target whatever is selected in the sidebar (folder or
-                // note); fall back to the active tab's note.
-                let target = this.selected_target.clone().or_else(|| {
-                    this.active_tab()
-                        .and_then(|tab| tab.workspace_file_id.clone())
-                        .map(SidebarTarget::File)
-                });
-                match target {
-                    Some(SidebarTarget::Folder(id)) => {
-                        this.request_trash_folder(id);
-                        cx.notify();
-                    }
-                    Some(SidebarTarget::File(id)) => {
-                        this.request_trash_file(id);
-                        cx.notify();
-                    }
-                    None => {
-                        let Some(tab) = this.active_tab() else {
-                            return;
-                        };
-                        if tab.file_path.is_none() {
-                            this.show_error(
-                                "This note isn't saved yet — press Ctrl+S to name and save it first.",
-                            );
-                        } else {
-                            this.show_error(
-                                "This file isn't in the workspace folder, so it can't be trashed here.",
-                            );
-                        }
-                    }
-                }
+                this.delete_selected(cx);
             }))
             .on_action(cx.listener(|this, _: &CloseActiveTab, _window, cx| {
                 let id = this.active_tab_id.clone();
