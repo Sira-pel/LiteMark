@@ -365,7 +365,7 @@ where
                                     .border_1()
                                     .border_color(theme.border_surface)
                                     .text_size(px(11.0))
-                                    .text_color(theme.menu_disabled)
+                                    .text_color(theme.menu_hint)
                                     .child(hint)
                             )
                         })
@@ -373,7 +373,7 @@ where
                             s.child(
                                 div()
                                     .text_size(px(12.0))
-                                    .text_color(if is_selected { rgb(0xb4b4b4) } else { theme.menu_shortcut })
+                                    .text_color(if is_selected { theme.menu_shortcut_active } else { theme.menu_shortcut })
                                     .child(sc)
                             )
                         })

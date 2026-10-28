@@ -972,7 +972,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let available_width = (bounds.size.width - gutter - px(48.0)).max(px(32.0));
         let (content_width, x_offset) = if self.centered {
             let max_w = self.max_measure.unwrap_or(available_width).min(available_width);
-            let offset = ((available_width - max_w) / 2.0).max(px(0.0));
+            let mut offset = ((available_width - max_w) / 2.0).max(px(0.0));
+            if !self.numbered() {
+                // The text column should sit on the pane's true midpoint, so
+                // both margins match. Keep 24px on the right when narrow.
+                let width = bounds.size.width;
+                let centered = (width - max_w) / 2.0 - gutter;
+                let room = width - px(24.0) - gutter - max_w;
+                offset = centered.min(room).max(px(0.0));
+            }
             (max_w, offset)
         } else {
             (available_width, px(0.0))
@@ -1693,7 +1701,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         let bar_x = base_x + px(4.0);
                         bg_quads.push(fill(
                             Bounds::new(point(bar_x, cur_y), size(px(3.0), row_line_height)),
-                            self.link_color,
+                            self.border_color,
                         ));
                     }
                     LineKind::HorizontalRule => {
