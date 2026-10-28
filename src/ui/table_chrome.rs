@@ -491,8 +491,8 @@ pub fn retarget_hover(content: &str, hover: &TableHover) -> Option<TableHover> {
     let source = parsed_table_source(content, probe)?;
     Some(TableHover {
         source,
-        col: None,
-        row: None,
+        col: hover.col,
+        row: hover.row,
     })
 }
 
@@ -1092,8 +1092,8 @@ mod tests {
         };
         assert!(doc.apply_table_op_at(26, TableOp::InsertColRight));
         let next = retarget_hover(&doc.content, &hover).expect("hover");
-        assert_eq!(next.col, None);
-        assert_eq!(next.row, None);
+        assert_eq!(next.col, Some(0));
+        assert_eq!(next.row, Some(1));
         assert_ne!(next.source.end, hover.source.end);
         assert_eq!(
             next.source,

@@ -8,6 +8,9 @@ license = "MIT"
 
 [dependencies]
 gpui = "=0.2.2"
+
+[dev-dependencies]
+gpui = { version = "=0.2.2", features = ["test-support"] }
 rust-embed = "8.5"
 rfd = "0.15"
 pulldown-cmark = "0.12"
