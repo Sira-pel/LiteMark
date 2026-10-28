@@ -107,7 +107,12 @@ fn main() {
                 KeyBinding::new("secondary-k", InsertLink, None),
                 KeyBinding::new("secondary-shift-c", InsertCodeBlock, None),
                 KeyBinding::new("secondary-shift-s", SaveFileAs, None),
-                KeyBinding::new("secondary-h", OpenReplace, None),
+                // Cmd+H hides the app on macOS.
+                KeyBinding::new(
+                    if cfg!(target_os = "macos") { "cmd-alt-f" } else { "ctrl-h" },
+                    OpenReplace,
+                    None,
+                ),
                 KeyBinding::new("secondary-shift-m", ToggleViewMode, None),
                 KeyBinding::new("secondary-shift-l", ToggleLineNumbers, None),
                 KeyBinding::new("secondary-x", Cut, None),
@@ -170,8 +175,17 @@ fn main() {
                 KeyBinding::new("secondary-enter", EditorTableRowBelow, Some("Editor")),
                 KeyBinding::new("tab", IndentAction, Some("Editor")),
                 KeyBinding::new("shift-tab", OutdentAction, Some("Editor")),
-                KeyBinding::new("ctrl-up", EditorMoveLineUp, Some("Editor")),
-                KeyBinding::new("ctrl-down", EditorMoveLineDown, Some("Editor")),
+                // Ctrl+Up/Down is Mission Control on macOS.
+                KeyBinding::new(
+                    if cfg!(target_os = "macos") { "alt-up" } else { "ctrl-up" },
+                    EditorMoveLineUp,
+                    Some("Editor"),
+                ),
+                KeyBinding::new(
+                    if cfg!(target_os = "macos") { "alt-down" } else { "ctrl-down" },
+                    EditorMoveLineDown,
+                    Some("Editor"),
+                ),
                 KeyBinding::new("secondary-b", ToggleBold, Some("Editor")),
                 KeyBinding::new("secondary-i", ToggleItalic, Some("Editor")),
                 KeyBinding::new("secondary-u", ToggleUnderline, Some("Editor")),

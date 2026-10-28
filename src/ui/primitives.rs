@@ -107,6 +107,13 @@ pub fn divider(theme: &Theme) -> impl IntoElement {
 /// on Ctrl there, matching the bindings in `main.rs`.
 pub fn display_shortcut(label: &str) -> SharedString {
     const NAV: [&str; 8] = ["Left", "Right", "Up", "Down", "Home", "End", "Backspace", "Delete"];
+    if cfg!(target_os = "macos") {
+        match label {
+            "Ctrl + H" | "Ctrl+H" => return "Cmd + Option + F".into(),
+            "Ctrl + Up / Down" => return "Option + Up / Down".into(),
+            _ => {}
+        }
+    }
     if cfg!(target_os = "macos") && !NAV.iter().any(|key| label.contains(key)) {
         label.replace("Ctrl", "Cmd").into()
     } else {
