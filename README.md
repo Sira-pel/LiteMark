@@ -1,6 +1,6 @@
 # LiteMark
 
-LiteMark is a native Markdown and text editor for Linux. It is in **beta** (0.x): it works, but it has had little testing outside the author's machine, so keep backups of important notes and please report bugs. It edits Markdown and plain text in a raw view or a WYSIWYG view, and stores notes in a folder (by default `~/Documents/Notes`).
+LiteMark is a native Markdown and text editor. It is in **beta** (0.x): it works, but it has had little testing outside the author's machine, so keep backups of important notes and please report bugs. It edits Markdown and plain text in a raw view or a WYSIWYG view, and stores notes in a folder (by default `~/Documents/Notes`).
 
 ## Features
 
@@ -29,7 +29,19 @@ LiteMark works fully offline. The only network request it makes is the update ch
 
 _Placeholder. Screenshots are not in the repository yet._
 
-## Install from a .deb
+## Install
+
+Download the package for your system from the [Releases page](https://github.com/Sira-pel/LiteMark/releases/latest). Windows and macOS builds are new and untested by hand; please report problems.
+
+### Windows
+
+Run `LiteMark-<version>-windows-x64-setup.exe`. It installs for your user by default. The installer is not code-signed, so Windows SmartScreen may warn: choose "More info", then "Run anyway".
+
+### macOS
+
+Open `LiteMark-<version>-macos-arm64.dmg` (Apple silicon) or `-macos-x64.dmg` (Intel) and drag LiteMark to Applications. The app is not notarized, so the first time, right-click it and choose Open. On macOS the command shortcuts use Cmd instead of Ctrl.
+
+### Linux (.deb)
 
 Download the latest `litemark_<version>_amd64.deb` from the [Releases page](https://github.com/Sira-pel/LiteMark/releases/latest), then install it:
 
@@ -38,6 +50,11 @@ sudo apt install ./litemark_<version>_amd64.deb
 ```
 
 To update, download and install the newer `.deb` the same way. Your notes and settings are kept.
+
+### Build from this repository
+
+- Windows: `powershell scripts/build-windows.ps1` (needs Rust and Inno Setup 6).
+- macOS: `bash scripts/build-macos.sh` (needs Rust and Xcode command line tools).
 
 ### Build the .deb yourself
 
@@ -106,12 +123,12 @@ cargo run --release
 
 ## Limitations
 
-- Linux only for now.
+- Windows and macOS builds are new. They are built by CI and have had little hands-on testing.
+- The Windows installer and the macOS app are not code-signed or notarized.
 - PDF export is not implemented.
 - Opening a PDF extracts its text. The original pages are not drawn.
 - `scripts/build-deb.sh` produces an amd64 package.
 - Updates are not installed automatically; the app only tells you when a new release is out.
-- Packages for Windows and macOS are not available yet.
 
 ## Releasing
 

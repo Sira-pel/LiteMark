@@ -54,6 +54,46 @@ jobs:
             echo "Tree is not fmt-clean; skipping cargo fmt --check."
           fi
 
+  # Windows and macOS: the app must at least build and pass its tests there.
+  test-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      # Build the installers on every run so a packaging break shows up here,
+      # not on the first tagged release.
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc.exe -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+
+      - name: Build the macOS .dmg
+        if: runner.os == 'macOS'
+        run: bash scripts/build-macos.sh
+
   # Own job so a format-toggle failure shows up by itself.
   # The workflow pull_request trigger uses GitHub's default types
   # (opened, synchronize, reopened). This if skips push to main.

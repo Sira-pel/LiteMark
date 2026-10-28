@@ -458,7 +458,7 @@ where
                                 .text_size(px(13.0))
                                 .text_color(theme.text_primary)
                                 .line_height(relative(1.5))
-                                .child("A native Markdown and text editor for Linux.")
+                                .child("A native Markdown and text editor.")
                         )
                 )
                 // Footer
