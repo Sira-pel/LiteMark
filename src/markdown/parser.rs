@@ -1252,13 +1252,18 @@ pub struct ParsedDocument {
     pub lines: Vec<ParsedLine>,
     /// All hidden byte ranges across the entire document (sorted, non-overlapping)
     pub hidden_ranges: Vec<std::ops::Range<usize>>,
-    /// All inline delimiter pairs across the document
-    pub inline_pairs: Vec<InlinePair>,
     /// Fenced code block ranges `(open_fence_line_range, close_fence_line_range)`
     pub code_blocks: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
 }
 
 impl ParsedDocument {
+    /// Every inline delimiter pair in the document, line by line. Only the
+    /// tests want the flat view; the editor looks pairs up by line.
+    #[cfg(test)]
+    pub fn all_inline_pairs(&self) -> impl Iterator<Item = &InlinePair> {
+        self.lines.iter().flat_map(|l| l.inline_pairs.iter())
+    }
+
     /// Index of the line whose source range contains `offset` (inclusive end,
     /// so a line's terminating newline maps to that line).
     pub fn line_index_at(&self, offset: usize) -> Option<usize> {
@@ -2970,7 +2975,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     let mut lines = Vec::with_capacity(raw_lines.len());
     let mut list_quote_tracker = InListOrQuoteTracker::default();
     let mut all_hidden = Vec::new();
-    let mut all_pairs = Vec::new();
     let mut code_blocks = Vec::new();
 
     let mut open_fence: Option<OpenFence> = None;
@@ -3199,7 +3203,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 }
                 let merged_hidden = merge_ranges(row_hidden);
                 all_hidden.extend(merged_hidden.iter().cloned());
-                all_pairs.extend(row_pairs.iter().cloned());
                 push_line!(ParsedLine {
                     line_index: i,
                     source: line_source.clone(),
@@ -3225,7 +3228,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             list_walk.note_block(line);
             let parsed = atx_line(i, line_source, line, level, content);
             all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-            all_pairs.extend(parsed.inline_pairs.iter().cloned());
             push_line!(parsed);
             continue;
         }
@@ -3266,7 +3268,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         }
         let merged_hidden = merge_ranges(inline_hidden);
         all_hidden.extend(merged_hidden.iter().cloned());
-        all_pairs.extend(inline_pairs.iter().cloned());
 
         let (display_text, offset_map) =
             RowOffsetMap::from_hidden(line, line_start, body_base, &merged_hidden);
@@ -3291,7 +3292,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     ParsedDocument {
         lines,
         hidden_ranges: merge_ranges(all_hidden),
-        inline_pairs: all_pairs,
         code_blocks,
     }
 }
@@ -3313,20 +3313,18 @@ mod tests {
                 .map(|l| l.line_index);
             assert_eq!(binary, linear, "offset {off}");
         }
-        for pair in &parsed.inline_pairs {
+        for pair in parsed.all_inline_pairs() {
             if pair.kind == InlineTagKind::Link {
                 continue;
             }
             let naive_close = parsed
-                .inline_pairs
-                .iter()
+                .all_inline_pairs()
                 .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
                 .map(|p| p.close_delim.end)
                 .max()
                 .unwrap_or(pair.close_delim.end);
             let naive_open = parsed
-                .inline_pairs
-                .iter()
+                .all_inline_pairs()
                 .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
                 .map(|p| p.open_delim.start)
                 .min()

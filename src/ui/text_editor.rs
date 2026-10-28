@@ -14,7 +14,7 @@ use crate::markdown::{
     LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
 };
 use crate::model::document::visible_line_end;
-use crate::model::text_ops::{visual_rows, Caret};
+use crate::model::text_ops::{visual_row_count, visual_rows, Caret};
 use crate::model::ViewMode;
 use crate::theme::sz;
 
@@ -980,15 +980,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let wrapped = if line.display_text.is_empty() {
                     1
                 } else {
-                    visual_rows(&line.display_text, wrap_cols).len().max(1)
+                    visual_row_count(&line.display_text, wrap_cols).max(1)
                 };
                 h += top_gap + line_h * wrapped as f32;
             }
             h.max(paint_borrow.total_height)
         } else {
-            let rows = visual_rows(&self.content, wrap_cols);
+            let rows = visual_row_count(&self.content, wrap_cols);
             let line_height = self.font_size * 1.65;
-            line_height * rows.len() as f32 + px(32.0)
+            line_height * rows as f32 + px(32.0)
         };
         drop(paint_borrow);
 

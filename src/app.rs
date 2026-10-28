@@ -3637,7 +3637,15 @@ impl LiteMarkApp {
         );
         match outcome {
             DispatchOutcome::ReadOnly => self.show_error("PDF files are read-only."),
-            DispatchOutcome::Applied => self.refresh_find(),
+            DispatchOutcome::Applied => {
+                if self.show_find_replace {
+                    self.refresh_find();
+                } else {
+                    // Don't search a hidden bar; reopening re-runs it.
+                    self.find_hits.clear();
+                    self.find_index = None;
+                }
+            }
             DispatchOutcome::Swallowed | DispatchOutcome::Ignored => {}
         }
     }
@@ -4781,6 +4789,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = true;
+                    this.refresh_find();
                     this.show_replace_row = true;
                     this.pending_find_focus = true;
                     this.open_menu = None;
@@ -5037,6 +5046,7 @@ impl Render for LiteMarkApp {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = !this.show_find_replace;
                     if this.show_find_replace {
+                        this.refresh_find();
                         this.pending_find_focus = true;
                     } else {
                         this.pending_find_focus = false;
@@ -5813,6 +5823,7 @@ impl Render for LiteMarkApp {
             .on_action(cx.listener(|this, _: &FindReplace, _window, cx| {
                 this.show_find_replace = !this.show_find_replace;
                 if this.show_find_replace {
+                    this.refresh_find();
                     this.pending_find_focus = true;
                 } else {
                     this.pending_find_focus = false;
@@ -5865,6 +5876,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &OpenReplace, _window, cx| {
                 this.show_find_replace = true;
+                this.refresh_find();
                 this.show_replace_row = true;
                 this.pending_find_focus = true;
                 cx.notify();
@@ -6450,9 +6462,8 @@ impl Render for LiteMarkApp {
                     this.editor_right_mouse_down(event, window, cx);
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.editor_mouse_move(event, cx);
-                window.refresh();
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -6522,7 +6533,15 @@ impl Render for LiteMarkApp {
                     // 1. HeaderBar
                     .child(render_header_bar(
                         HeaderBarProps {
-                            tabs: self.tabs.clone(),
+                            tabs: self
+                                .tabs
+                                .iter()
+                                .map(|t| HeaderTab {
+                                    id: t.id.clone(),
+                                    title: t.title.clone(),
+                                    is_modified: t.is_modified,
+                                })
+                                .collect(),
                             active_tab_id: self.active_tab_id.clone(),
                             is_sidebar_open: self.show_sidebar,
                             is_maximized: is_max,
