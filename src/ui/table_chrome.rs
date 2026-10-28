@@ -7,7 +7,7 @@
 //! the row. Bounds are derived from the painted cell boxes so a click hits
 //! the same rect the frame drew.
 
-use gpui::{point, Bounds, Pixels, Point, Size};
+use gpui::{point, px, Bounds, Pixels, Point, Size};
 
 use crate::markdown::TableColumnAlign;
 use crate::model::table_ops::parsed_table_source;
@@ -101,6 +101,7 @@ pub fn record_table_row(
         tables.push(TableGeom {
             source,
             bounds: row_bounds,
+            viewport: None,
             columns,
             rows: vec![super::text_editor::TableRowGeom {
                 index: 0,
@@ -174,7 +175,10 @@ pub fn column_pill_bounds(header: Bounds<Pixels>) -> Bounds<Pixels> {
         natural
     };
     let left = header.left() + (header.size.width - width) * 0.5;
-    Bounds::new(point(left, header.top() - height), size(width, height))
+    Bounds::new(
+        point(left, header.top() - height - sz::TABLE_GAP),
+        size(width, height),
+    )
 }
 
 pub fn row_pill_bounds(row: Bounds<Pixels>) -> Bounds<Pixels> {
@@ -186,12 +190,88 @@ pub fn row_pill_bounds(row: Bounds<Pixels>) -> Bounds<Pixels> {
         natural_h
     };
     let top = row.top() + (row.size.height - height) * 0.5;
-    Bounds::new(point(row.left() - width, top), size(width, height))
+    Bounds::new(
+        point(row.left() - width - sz::TABLE_GAP, top),
+        size(width, height),
+    )
 }
 
 pub fn corner_grip_bounds(table: Bounds<Pixels>) -> Bounds<Pixels> {
     let side = sz::TABLE_PILL;
-    Bounds::new(point(table.right(), table.top() - side), size(side, side))
+    Bounds::new(
+        point(table.right() + sz::TABLE_GAP, table.top() - side - sz::TABLE_GAP),
+        size(side, side),
+    )
+}
+
+/// Slide a control back inside the visible editor so a table at the edge of
+/// the pane, or one scrolled under the toolbar, keeps its controls on screen.
+fn fit(bounds: Bounds<Pixels>, viewport: Option<Bounds<Pixels>>) -> Bounds<Pixels> {
+    let Some(view) = viewport else {
+        return bounds;
+    };
+    let margin = sz::TABLE_EDGE;
+    let max_left = (view.right() - margin - bounds.size.width).max(view.left() + margin);
+    let max_top = (view.bottom() - margin - bounds.size.height).max(view.top() + margin);
+    let left = bounds.left().max(view.left() + margin).min(max_left);
+    let top = bounds.top().max(view.top() + margin).min(max_top);
+    Bounds::new(point(left, top), bounds.size)
+}
+
+fn column_pill(table: &TableGeom, header: Bounds<Pixels>) -> Bounds<Pixels> {
+    fit(column_pill_bounds(header), table.viewport)
+}
+
+/// Row pill that narrows to the room left of the table instead of covering
+/// its first column. Below two slots of [`sz::TABLE_MIN_SLOT`] it keeps its
+/// width and slides over the table, as [`fit`] does.
+fn row_pill(table: &TableGeom, row: Bounds<Pixels>) -> Bounds<Pixels> {
+    let pill = row_pill_bounds(row);
+    let Some(view) = table.viewport else {
+        return pill;
+    };
+    let room = row.left() - sz::TABLE_GAP - view.left() - sz::TABLE_EDGE;
+    let min_width = sz::TABLE_MIN_SLOT * 2.0;
+    if room >= pill.size.width || room < min_width {
+        return fit(pill, table.viewport);
+    }
+    let left = row.left() - sz::TABLE_GAP - room;
+    fit(
+        Bounds::new(point(left, pill.top()), size(room, pill.size.height)),
+        table.viewport,
+    )
+}
+
+/// Corner grip, or `None` when it would fall outside the editor.
+fn corner_pill(table: &TableGeom) -> Option<Bounds<Pixels>> {
+    let corner = corner_grip_bounds(table.bounds);
+    let inside = table.viewport.is_none_or(|view| {
+        corner.left() >= view.left()
+            && corner.right() <= view.right()
+            && corner.top() >= view.top()
+            && corner.bottom() <= view.bottom()
+    });
+    inside.then_some(corner)
+}
+
+/// Area that picks a column pill: the pill plus the gap down to its header,
+/// so the pointer can cross the gap without the controls disappearing.
+fn column_pill_hit(pill: Bounds<Pixels>, header: Bounds<Pixels>) -> Bounds<Pixels> {
+    let height = (header.top() - pill.top()).max(pill.size.height);
+    Bounds::new(pill.origin, size(pill.size.width, height))
+}
+
+fn row_pill_hit(pill: Bounds<Pixels>, row: Bounds<Pixels>) -> Bounds<Pixels> {
+    let width = (row.left() - pill.left()).max(pill.size.width);
+    Bounds::new(pill.origin, size(width, pill.size.height))
+}
+
+fn corner_hit(corner: Bounds<Pixels>, table: Bounds<Pixels>) -> Bounds<Pixels> {
+    let anchor = Bounds::new(
+        point(table.right() - px(1.0), table.top() - px(1.0)),
+        size(px(1.0), px(1.0)),
+    );
+    union_bounds(corner, anchor)
 }
 
 fn third(bounds: Bounds<Pixels>, index: usize) -> Bounds<Pixels> {
@@ -265,13 +345,14 @@ pub fn hit_test_occupied(
     }
     for table in tables {
         for (index, column) in table.columns.iter().enumerate() {
-            let pill = column_pill_bounds(column.header_bounds);
-            if !contains(pill, point) || chrome_blocked(pill, occupied) {
+            let pill = column_pill(table, column.header_bounds);
+            let area = column_pill_hit(pill, column.header_bounds);
+            if !contains(area, point) || chrome_blocked(pill, occupied) {
                 continue;
             }
-            let kind = if contains(third(pill, 0), point) {
+            let kind = if contains(third(area, 0), point) {
                 TableHitKind::ColGrip
-            } else if contains(third(pill, 1), point) {
+            } else if contains(third(area, 1), point) {
                 TableHitKind::ColAlign
             } else {
                 TableHitKind::ColPlus
@@ -285,10 +366,12 @@ pub fn hit_test_occupied(
             });
         }
         for row in &table.rows {
-            let pill = row_pill_bounds(row.bounds);
-            if !contains(pill, point) || chrome_blocked(pill, occupied) {
+            let pill = row_pill(table, row.bounds);
+            let area = row_pill_hit(pill, row.bounds);
+            if !contains(area, point) || chrome_blocked(pill, occupied) {
                 continue;
             }
+            // Split on the painted pill so the gap beside the table belongs to the plus.
             let kind = if contains(half(pill, 0), point) {
                 TableHitKind::RowGrip
             } else {
@@ -303,8 +386,10 @@ pub fn hit_test_occupied(
                 align: TableColumnAlign::None,
             });
         }
-        let corner = corner_grip_bounds(table.bounds);
-        if contains(corner, point) && !chrome_blocked(corner, occupied) {
+        let corner = corner_pill(table);
+        if corner.is_some_and(|corner| {
+            contains(corner_hit(corner, table.bounds), point) && !chrome_blocked(corner, occupied)
+        }) {
             let (index, anchor, align) = anchor_at(table, 0, 0);
             return Some(TableHit {
                 source: table.source.clone(),
@@ -518,7 +603,22 @@ pub fn hover_at_occupied(
     previous: Option<&TableHover>,
     occupied: &[Bounds<Pixels>],
 ) -> Option<TableHover> {
-    if let Some(hit) = hit_test_occupied(tables, at, occupied) {
+    hover_from_hit(
+        tables,
+        at,
+        previous,
+        hit_test_occupied(tables, at, occupied).as_ref(),
+    )
+}
+
+/// Hover for a pointer position whose control hit was already computed.
+pub fn hover_from_hit(
+    tables: &[TableGeom],
+    at: Point<Pixels>,
+    previous: Option<&TableHover>,
+    hit: Option<&TableHit>,
+) -> Option<TableHover> {
+    if let Some(hit) = hit {
         let (mut col, mut row) = match hit.kind {
             TableHitKind::ColGrip | TableHitKind::ColAlign | TableHitKind::ColPlus => {
                 (Some(hit.index), None)
@@ -535,7 +635,7 @@ pub fn hover_at_occupied(
             }
         }
         return Some(TableHover {
-            source: hit.source,
+            source: hit.source.clone(),
             col,
             row,
         });
@@ -548,12 +648,34 @@ pub fn hover_at_occupied(
     })
 }
 
+/// The control under the pointer, for the hover and pressed highlight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableHot {
+    pub source: std::ops::Range<usize>,
+    pub kind: TableHitKind,
+    pub index: usize,
+}
+
+impl From<&TableHit> for TableHot {
+    fn from(hit: &TableHit) -> Self {
+        Self {
+            source: hit.source.clone(),
+            kind: hit.kind,
+            index: hit.index,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct TableChromePaint {
     pub surface: gpui::Hsla,
     pub border: gpui::Hsla,
     pub muted: gpui::Hsla,
     pub ink: gpui::Hsla,
+    pub hover_fill: gpui::Hsla,
+    pub active_fill: gpui::Hsla,
+    /// Mouse button is down on a table control.
+    pub pressed: bool,
 }
 
 pub fn paint(
@@ -561,6 +683,7 @@ pub fn paint(
     tables: &[TableGeom],
     hover: Option<&TableHover>,
     drag: Option<&TableDrag>,
+    hot: Option<&TableHot>,
     colors: TableChromePaint,
     occupied: &[Bounds<Pixels>],
 ) {
@@ -574,29 +697,80 @@ pub fn paint(
         return;
     };
     if let Some(col) = hover.col.and_then(|index| table.columns.get(index)) {
-        let pill = column_pill_bounds(col.header_bounds);
+        let pill = column_pill(table, col.header_bounds);
         if !chrome_blocked(pill, occupied) {
             paint_pill(window, pill, colors.surface, colors.border);
+            for (slot, kind) in [
+                (0, TableHitKind::ColGrip),
+                (1, TableHitKind::ColAlign),
+                (2, TableHitKind::ColPlus),
+            ] {
+                let fill = button_fill(hot, &table.source, kind, hover.col, &colors);
+                paint_button(window, third(pill, slot), fill);
+            }
             paint_dots(window, third(pill, 0), colors.muted);
             paint_align(window, third(pill, 1), col.align, colors.muted);
             paint_plus(window, third(pill, 2), colors.muted);
         }
     }
     if let Some(row) = hover.row.and_then(|index| table.rows.get(index)) {
-        let pill = row_pill_bounds(row.bounds);
+        let pill = row_pill(table, row.bounds);
         if !chrome_blocked(pill, occupied) {
             paint_pill(window, pill, colors.surface, colors.border);
+            for (slot, kind) in [(0, TableHitKind::RowGrip), (1, TableHitKind::RowPlus)] {
+                let fill = button_fill(hot, &table.source, kind, hover.row, &colors);
+                paint_button(window, half(pill, slot), fill);
+            }
             paint_dots(window, half(pill, 0), colors.muted);
             paint_plus(window, half(pill, 1), colors.muted);
         }
     }
-    let corner = corner_grip_bounds(table.bounds);
-    if !chrome_blocked(corner, occupied) {
+    if let Some(corner) = corner_pill(table).filter(|corner| !chrome_blocked(*corner, occupied)) {
+        let fill = button_fill(hot, &table.source, TableHitKind::Corner, None, &colors);
+        paint_button(window, corner, fill);
         paint_dots(window, corner, colors.muted);
     }
     if let Some(drag) = drag {
         paint_indicator(window, tables, drag, colors.ink);
     }
+}
+
+/// Fill for one control: the pressed tint while the button is down on it, the
+/// hover tint while the pointer is over it, nothing otherwise.
+fn button_fill(
+    hot: Option<&TableHot>,
+    source: &std::ops::Range<usize>,
+    kind: TableHitKind,
+    index: Option<usize>,
+    colors: &TableChromePaint,
+) -> Option<gpui::Hsla> {
+    let hot = hot?;
+    let same_index = index.map_or(kind == TableHitKind::Corner, |index| index == hot.index);
+    if hot.source != *source || hot.kind != kind || !same_index {
+        return None;
+    }
+    Some(if colors.pressed {
+        colors.active_fill
+    } else {
+        colors.hover_fill
+    })
+}
+
+fn paint_button(window: &mut gpui::Window, slot: Bounds<Pixels>, fill: Option<gpui::Hsla>) {
+    let Some(fill) = fill else {
+        return;
+    };
+    let inset = sz::TABLE_BTN_INSET;
+    let bounds = Bounds::new(
+        point(slot.left() + inset, slot.top() + inset),
+        size(
+            slot.size.width - inset * 2.0,
+            slot.size.height - inset * 2.0,
+        ),
+    );
+    let mut quad = gpui::fill(bounds, fill);
+    quad.corner_radii = gpui::Corners::all(sz::R_MD);
+    window.paint_quad(quad);
 }
 
 fn paint_pill(
@@ -777,7 +951,7 @@ mod tests {
     fn column_pill_sits_on_the_header_top_edge() {
         let header = bounds(40.0, 20.0, 80.0, 28.0);
         let pill = column_pill_bounds(header);
-        assert_eq!(pill.bottom(), header.top());
+        assert_eq!(pill.bottom(), header.top() - sz::TABLE_GAP);
         assert!(pill.left() >= header.left());
         assert!(pill.right() <= header.right());
         assert!(!overlaps(pill, header));
@@ -790,7 +964,7 @@ mod tests {
     fn row_pill_sits_on_the_left_edge() {
         let row = bounds(40.0, 20.0, 80.0, 28.0);
         let pill = row_pill_bounds(row);
-        assert_eq!(pill.right(), row.left());
+        assert_eq!(pill.right(), row.left() - sz::TABLE_GAP);
         assert!(pill.top() >= row.top());
         assert!(pill.bottom() <= row.bottom());
         assert!(!overlaps(pill, row));
@@ -803,9 +977,72 @@ mod tests {
     fn corner_grip_sits_on_the_top_right() {
         let table = bounds(10.0, 30.0, 100.0, 40.0);
         let grip = corner_grip_bounds(table);
-        assert_eq!(grip.left(), table.right());
-        assert_eq!(grip.bottom(), table.top());
+        assert_eq!(grip.left(), table.right() + sz::TABLE_GAP);
+        assert_eq!(grip.bottom(), table.top() - sz::TABLE_GAP);
         assert!(!overlaps(grip, table));
+    }
+
+    #[test]
+    fn pill_hit_area_bridges_the_gap_to_the_table() {
+        let header = bounds(40.0, 60.0, 80.0, 28.0);
+        let pill = column_pill_bounds(header);
+        let area = column_pill_hit(pill, header);
+        assert_eq!(area.top(), pill.top());
+        assert_eq!(area.bottom(), header.top());
+        let row = bounds(100.0, 20.0, 80.0, 28.0);
+        let pill = row_pill_bounds(row);
+        let area = row_pill_hit(pill, row);
+        assert_eq!(area.left(), pill.left());
+        assert_eq!(area.right(), row.left());
+    }
+
+    #[test]
+    fn controls_slide_back_inside_the_viewport() {
+        let area = bounds(0.0, 40.0, 400.0, 300.0);
+        let view = Some(area);
+        let margin = sz::TABLE_EDGE;
+        let row = row_pill_bounds(bounds(20.0, 100.0, 200.0, 28.0));
+        assert!(row.left() < area.left());
+        assert_eq!(fit(row, view).left(), margin);
+        let col = column_pill_bounds(bounds(100.0, 50.0, 80.0, 28.0));
+        assert!(col.top() < area.top());
+        assert_eq!(fit(col, view).top(), area.top() + margin);
+        let inside = bounds(100.0, 100.0, 50.0, 28.0);
+        assert_eq!(fit(inside, view), inside);
+        assert_eq!(fit(col, None), col);
+    }
+
+    #[test]
+    fn row_pill_narrows_to_the_room_beside_the_table() {
+        let mut table = sample_table();
+        let row = table.rows[0].bounds;
+        let room = px(40.0);
+        let edge = row.left() - sz::TABLE_GAP - room - sz::TABLE_EDGE;
+        table.viewport = Some(bounds(
+            f32::from(edge),
+            0.0,
+            f32::from(row.right() - edge),
+            400.0,
+        ));
+        let pill = row_pill(&table, row);
+        assert_eq!(pill.size.width, room);
+        assert_eq!(pill.right(), row.left() - sz::TABLE_GAP);
+        assert!(!overlaps(pill, row));
+    }
+
+    #[test]
+    fn row_gap_beside_the_table_belongs_to_the_plus() {
+        let tables = [sample_table()];
+        let row = tables[0].rows[0].bounds;
+        let pill = row_pill_bounds(row);
+        let grip = hit_test(&tables, center_of(half(pill, 0))).expect("grip");
+        assert_eq!(grip.kind, TableHitKind::RowGrip);
+        let in_gap = point(row.left() - sz::TABLE_GAP * 0.5, center_of(pill).y);
+        let plus = hit_test(&tables, in_gap).expect("gap");
+        assert_eq!(plus.kind, TableHitKind::RowPlus);
+        let just_inside_grip = point(half(pill, 0).right() - px(1.0), center_of(pill).y);
+        let still_grip = hit_test(&tables, just_inside_grip).expect("grip edge");
+        assert_eq!(still_grip.kind, TableHitKind::RowGrip);
     }
 
     #[test]
@@ -819,6 +1056,7 @@ mod tests {
 
     fn sample_table() -> TableGeom {
         TableGeom {
+            viewport: None,
             source: 0..80,
             bounds: bounds(100.0, 80.0, 180.0, 48.0),
             columns: vec![
@@ -903,6 +1141,7 @@ mod tests {
     #[test]
     fn narrow_column_pills_do_not_overlap_and_plus_wins() {
         let table = TableGeom {
+            viewport: None,
             source: 0..20,
             bounds: bounds(0.0, 40.0, 64.0, 24.0),
             columns: vec![
@@ -970,6 +1209,7 @@ mod tests {
     /// the row gap is 3 and `final_index(1, 3)` is 2. x=20 is left of the table.
     fn two_body_rows() -> TableGeom {
         TableGeom {
+            viewport: None,
             source: 0..43,
             bounds: bounds(100.0, 0.0, 200.0, 60.0),
             columns: vec![TableColGeom {

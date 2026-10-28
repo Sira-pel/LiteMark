@@ -54,21 +54,30 @@ pub mod sz {
     pub const R_MD: Pixels = px(6.);
     pub const R_LG: Pixels = px(8.);
     /// Short side of a table hover control.
-    pub const TABLE_PILL: Pixels = px(16.);
-    /// Grip dot. An eighth of [`TABLE_PILL`].
-    pub const TABLE_DOT: Pixels = px(2.);
+    pub const TABLE_PILL: Pixels = px(24.);
+    /// Grip dot.
+    pub const TABLE_DOT: Pixels = px(3.);
     /// 1px hairline for table rules and table hover chrome.
     pub const STROKE: Pixels = px(1.);
     /// Longest bar of the alignment mark.
-    pub const TABLE_BAR_LG: Pixels = px(8.);
+    pub const TABLE_BAR_LG: Pixels = px(10.);
     /// Middle bar of the alignment mark.
-    pub const TABLE_BAR_MD: Pixels = px(6.);
+    pub const TABLE_BAR_MD: Pixels = px(8.);
     /// Shortest bar of the alignment mark.
-    pub const TABLE_BAR_SM: Pixels = px(4.);
+    pub const TABLE_BAR_SM: Pixels = px(6.);
     /// Arm length of the hover plus.
-    pub const TABLE_PLUS_ARM: Pixels = px(8.);
+    pub const TABLE_PLUS_ARM: Pixels = px(10.);
     /// Side inset of the alignment mark inside its slot.
-    pub const TABLE_ICON_PAD: Pixels = px(4.);
+    pub const TABLE_ICON_PAD: Pixels = px(5.);
+    /// Narrowest a hover control slot may shrink to before the pill overlaps
+    /// the table instead.
+    pub const TABLE_MIN_SLOT: Pixels = px(16.);
+    /// Space between a table and its hover controls.
+    pub const TABLE_GAP: Pixels = px(6.);
+    /// Closest a table hover control sits to the edge of the editor.
+    pub const TABLE_EDGE: Pixels = px(4.);
+    /// Gap between a table control's highlight and the pill edge.
+    pub const TABLE_BTN_INSET: Pixels = px(3.);
     #[allow(dead_code)]
     pub const BODY: f32 = 17.;
     pub const MEASURE_FALLBACK: Pixels = px(672.);

@@ -56,6 +56,7 @@ fn select_all_word(view: &Entity<LiteMarkApp>, cx: &mut VisualTestContext) {
 
 fn sample_table() -> TableGeom {
     TableGeom {
+        viewport: None,
         source: 0..TABLE.len(),
         bounds: Bounds {
             origin: point(px(100.0), px(80.0)),
