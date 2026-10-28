@@ -132,7 +132,7 @@ where
         .gap(px(8.0))
         .px(px(12.0))
         .py(px(6.0))
-        .bg(theme.bg_surface)
+        .bg(theme.bg_toolbar)
         .border_b_1()
         .border_color(theme.border_primary)
         .text_size(px(12.0))
