@@ -548,12 +548,36 @@ pub fn hover_at_occupied(
     })
 }
 
+/// The control under the pointer, for the hover and pressed highlight.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableHot {
+    pub source: std::ops::Range<usize>,
+    pub kind: TableHitKind,
+    pub index: usize,
+}
+
+pub fn hot_at(
+    tables: &[TableGeom],
+    point: Point<Pixels>,
+    occupied: &[Bounds<Pixels>],
+) -> Option<TableHot> {
+    hit_test_occupied(tables, point, occupied).map(|hit| TableHot {
+        source: hit.source,
+        kind: hit.kind,
+        index: hit.index,
+    })
+}
+
 #[derive(Clone, Copy)]
 pub struct TableChromePaint {
     pub surface: gpui::Hsla,
     pub border: gpui::Hsla,
     pub muted: gpui::Hsla,
     pub ink: gpui::Hsla,
+    pub hover_fill: gpui::Hsla,
+    pub active_fill: gpui::Hsla,
+    /// Mouse button is down on a table control.
+    pub pressed: bool,
 }
 
 pub fn paint(
@@ -561,6 +585,7 @@ pub fn paint(
     tables: &[TableGeom],
     hover: Option<&TableHover>,
     drag: Option<&TableDrag>,
+    hot: Option<&TableHot>,
     colors: TableChromePaint,
     occupied: &[Bounds<Pixels>],
 ) {
@@ -577,6 +602,14 @@ pub fn paint(
         let pill = column_pill_bounds(col.header_bounds);
         if !chrome_blocked(pill, occupied) {
             paint_pill(window, pill, colors.surface, colors.border);
+            for (slot, kind) in [
+                (0, TableHitKind::ColGrip),
+                (1, TableHitKind::ColAlign),
+                (2, TableHitKind::ColPlus),
+            ] {
+                let fill = button_fill(hot, &table.source, kind, hover.col, &colors);
+                paint_button(window, third(pill, slot), fill);
+            }
             paint_dots(window, third(pill, 0), colors.muted);
             paint_align(window, third(pill, 1), col.align, colors.muted);
             paint_plus(window, third(pill, 2), colors.muted);
@@ -586,17 +619,61 @@ pub fn paint(
         let pill = row_pill_bounds(row.bounds);
         if !chrome_blocked(pill, occupied) {
             paint_pill(window, pill, colors.surface, colors.border);
+            for (slot, kind) in [(0, TableHitKind::RowGrip), (1, TableHitKind::RowPlus)] {
+                let fill = button_fill(hot, &table.source, kind, hover.row, &colors);
+                paint_button(window, half(pill, slot), fill);
+            }
             paint_dots(window, half(pill, 0), colors.muted);
             paint_plus(window, half(pill, 1), colors.muted);
         }
     }
     let corner = corner_grip_bounds(table.bounds);
     if !chrome_blocked(corner, occupied) {
+        let fill = button_fill(hot, &table.source, TableHitKind::Corner, None, &colors);
+        paint_button(window, corner, fill);
         paint_dots(window, corner, colors.muted);
     }
     if let Some(drag) = drag {
         paint_indicator(window, tables, drag, colors.ink);
     }
+}
+
+/// Fill for one control: the pressed tint while the button is down on it, the
+/// hover tint while the pointer is over it, nothing otherwise.
+fn button_fill(
+    hot: Option<&TableHot>,
+    source: &std::ops::Range<usize>,
+    kind: TableHitKind,
+    index: Option<usize>,
+    colors: &TableChromePaint,
+) -> Option<gpui::Hsla> {
+    let hot = hot?;
+    let same_index = index.map_or(kind == TableHitKind::Corner, |index| index == hot.index);
+    if hot.source != *source || hot.kind != kind || !same_index {
+        return None;
+    }
+    Some(if colors.pressed {
+        colors.active_fill
+    } else {
+        colors.hover_fill
+    })
+}
+
+fn paint_button(window: &mut gpui::Window, slot: Bounds<Pixels>, fill: Option<gpui::Hsla>) {
+    let Some(fill) = fill else {
+        return;
+    };
+    let inset = sz::TABLE_BTN_INSET;
+    let bounds = Bounds::new(
+        point(slot.left() + inset, slot.top() + inset),
+        size(
+            slot.size.width - inset * 2.0,
+            slot.size.height - inset * 2.0,
+        ),
+    );
+    let mut quad = gpui::fill(bounds, fill);
+    quad.corner_radii = gpui::Corners::all(sz::R_MD);
+    window.paint_quad(quad);
 }
 
 fn paint_pill(

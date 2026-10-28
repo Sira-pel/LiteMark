@@ -805,6 +805,10 @@ pub struct EditorElement<V: 'static> {
     pub mono_font_family: SharedString,
     pub table_hover: Option<super::table_chrome::TableHover>,
     pub table_drag: Option<super::table_chrome::TableDrag>,
+    pub table_hot: Option<super::table_chrome::TableHot>,
+    pub table_pressed: bool,
+    pub table_hover_fill: Hsla,
+    pub table_active_fill: Hsla,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2068,11 +2072,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             &self.paint.borrow().tables,
             self.table_hover.as_ref(),
             self.table_drag.as_ref(),
+            self.table_hot.as_ref(),
             super::table_chrome::TableChromePaint {
                 surface: self.surface_bg,
                 border: self.border_color,
                 muted: self.muted_color,
                 ink: self.text_color,
+                hover_fill: self.table_hover_fill,
+                active_fill: self.table_active_fill,
+                pressed: self.table_pressed,
             },
             &occupied,
         );

@@ -13,7 +13,7 @@ use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
 use crate::ui::table_chrome::{
     action_anchor, clear_drag_for_key, clear_drag_for_modifier, commit_drag_release,
-    drag_gap_if_inside, hit_test_occupied, hover_at_occupied, next_align, occupied_content,
+    drag_gap_if_inside, hit_test_occupied, hot_at, hover_at_occupied, next_align, occupied_content,
     retarget_hover, update_drag_gap, TableDrag, TableDragKind, TableHitKind,
 };
 use crate::ui::MenuItem;
@@ -169,6 +169,8 @@ pub struct LiteMarkApp {
     pub table_picker_size: (usize, usize),
     pub editor_context_menu: Option<EditorContextMenu>,
     pub table_hover: Option<crate::ui::table_chrome::TableHover>,
+    pub table_hot: Option<crate::ui::table_chrome::TableHot>,
+    pub table_pressed: bool,
     pub table_drag: Option<crate::ui::table_chrome::TableDrag>,
     /// True while the mouse button that started a table drag is still held.
     /// Survives a modifier cancel of the visual drag so later chords cannot
@@ -485,6 +487,8 @@ impl LiteMarkApp {
             table_picker_size: (2, 2),
             editor_context_menu: None,
             table_hover: None,
+            table_hot: None,
+            table_pressed: false,
             table_drag: None,
             table_drag_press_held: false,
             table_action_anchor: None,
@@ -599,6 +603,8 @@ impl LiteMarkApp {
             table_picker_size: (2, 2),
             editor_context_menu: None,
             table_hover: None,
+            table_hot: None,
+            table_pressed: false,
             table_drag: None,
             table_drag_press_held: false,
             table_action_anchor: None,
@@ -608,6 +614,7 @@ impl LiteMarkApp {
 
     fn clear_table_drag_press(&mut self) {
         self.table_drag_press_held = false;
+        self.table_pressed = false;
     }
 
     fn handle_window_deactivated(&mut self) {
@@ -635,6 +642,7 @@ impl LiteMarkApp {
             return;
         }
         self.table_drag = None;
+        self.table_hot = None;
         self.clear_table_drag_press();
     }
 
@@ -3675,6 +3683,7 @@ impl LiteMarkApp {
                 });
             }
         }
+        self.table_pressed = true;
         window.refresh();
         cx.notify();
         true
@@ -3682,8 +3691,12 @@ impl LiteMarkApp {
 
     fn track_table_hover(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         if !self.table_chrome_interactive() {
-            if self.table_hover.is_some() || self.table_drag.is_some() {
+            if self.table_hover.is_some()
+                || self.table_drag.is_some()
+                || self.table_hot.is_some()
+            {
                 self.table_hover = None;
+                self.table_hot = None;
                 self.table_drag = None;
                 self.table_drag_press_held = false;
                 cx.notify();
@@ -3696,8 +3709,14 @@ impl LiteMarkApp {
             let occupied = occupied_content(&paint.rows);
             hover_at_occupied(&paint.tables, at, previous.as_ref(), &occupied)
         };
-        if self.table_hover != hover {
+        let hot = {
+            let paint = self.editor_paint.borrow();
+            let occupied = occupied_content(&paint.rows);
+            hot_at(&paint.tables, at, &occupied)
+        };
+        if self.table_hover != hover || self.table_hot != hot {
             self.table_hover = hover;
+            self.table_hot = hot;
             cx.notify();
         }
     }
@@ -3987,6 +4006,10 @@ impl LiteMarkApp {
             mono_font_family: Theme::FONT_MONO.into(),
             table_hover: self.table_hover.clone(),
             table_drag: self.table_drag.clone(),
+            table_hot: self.table_hot.clone(),
+            table_pressed: self.table_pressed,
+            table_hover_fill: theme.bg_hover.into(),
+            table_active_fill: theme.bg_active.into(),
         }
         .into_any_element()
     }
