@@ -2,7 +2,10 @@ use super::*;
 use crate::markdown::TableColumnAlign;
 use crate::ui::table_chrome::column_pill_bounds;
 use crate::ui::{TableColGeom, TableRowGeom};
-use gpui::{ClipboardItem, Entity, TestAppContext, VisualTestContext};
+use gpui::{
+    ClipboardItem, Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    TestAppContext, VisualTestContext,
+};
 
 // `use gpui::*` in this crate re-exports a `test` attribute that is not
 // Rust's `#[test]`. Pin the std one so these stay ordinary unit tests.
@@ -116,6 +119,43 @@ fn load_table_paint(view: &Entity<LiteMarkApp>, cx: &mut VisualTestContext) {
     view.update(cx, |app, _cx| {
         app.editor_paint.borrow_mut().tables = vec![sample_table()];
     });
+}
+
+fn sample_drag() -> TableDrag {
+    TableDrag {
+        source: 0..1,
+        kind: TableDragKind::Row,
+        from: 1,
+        anchor: 0,
+        gap: 1,
+        drop_visible: true,
+    }
+}
+
+fn type_x(view: &Entity<LiteMarkApp>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        view.update(cx, |app, cx| {
+            app.replace_text_in_range(None, "x", window, cx);
+        });
+    });
+}
+
+fn chrome_click(
+    view: &Entity<LiteMarkApp>,
+    cx: &mut VisualTestContext,
+    position: Point<Pixels>,
+) -> bool {
+    let event = MouseDownEvent {
+        button: MouseButton::Left,
+        position,
+        click_count: 1,
+        ..MouseDownEvent::default()
+    };
+    cx.update(|window, cx| {
+        view.update(cx, |app, cx| {
+            app.handle_table_chrome_click(&event, window, cx)
+        })
+    })
 }
 
 fn click_at(
@@ -309,14 +349,7 @@ fn handle_mouse_down_out_clears_press_held() {
     let (view, mut cx) = harness(WORD);
     hold_press(&view, &mut cx);
     view.update(&mut cx, |app, _cx| {
-        app.table_drag = Some(TableDrag {
-            source: 0..1,
-            kind: TableDragKind::Row,
-            from: 1,
-            anchor: 0,
-            gap: 1,
-            drop_visible: true,
-        });
+        app.table_drag = Some(sample_drag());
         app.handle_mouse_down_out();
     });
     view.read_with(&cx, |app, _| {
@@ -368,11 +401,20 @@ fn chrome_align_clears_press_held() {
     hold_press(&view, &mut cx);
     let pill = column_pill_bounds(sample_table().columns[0].header_bounds);
     let width = pill.size.width / 3.0;
-    let at = point(pill.left() + width * 1.5, pill.top() + pill.size.height / 2.0);
-    click_at(&view, &mut cx, at, false);
+    let at = point(
+        pill.left() + width * 1.5,
+        pill.top() + pill.size.height / 2.0,
+    );
+    assert!(
+        chrome_click(&view, &mut cx, at),
+        "ColAlign third must hit handle_table_chrome_click"
+    );
     view.read_with(&cx, |app, _| {
         assert!(!app.table_drag_press_held);
+        assert!(app.table_drag.is_none());
     });
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_ne!(after, TABLE);
 }
 
 #[std_test]
@@ -382,31 +424,156 @@ fn chrome_plus_clears_press_held() {
     hold_press(&view, &mut cx);
     let pill = column_pill_bounds(sample_table().columns[0].header_bounds);
     let width = pill.size.width / 3.0;
-    let at = point(pill.left() + width * 2.5, pill.top() + pill.size.height / 2.0);
-    click_at(&view, &mut cx, at, false);
+    let at = point(
+        pill.left() + width * 2.5,
+        pill.top() + pill.size.height / 2.0,
+    );
+    assert!(
+        chrome_click(&view, &mut cx, at),
+        "ColPlus third must hit handle_table_chrome_click"
+    );
     view.read_with(&cx, |app, _| {
         assert!(!app.table_drag_press_held);
+        assert!(app.table_drag.is_none());
     });
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_ne!(after, TABLE);
 }
 
 #[std_test]
-fn root_wires_each_press_end_path() {
-    let src = include_str!("app.rs");
-    for needle in [
-        ".on_mouse_up_out(",
-        ".on_mouse_down_out(",
-        "observe_window_activation",
-        "this.handle_window_deactivated()",
-        "this.handle_mouse_down_out()",
-        "this.handle_close_modal(window, cx)",
-        "this.editor_mouse_up(event, window, cx)",
-        "self.clear_table_drag_press()",
-    ] {
-        assert!(src.contains(needle), "app.rs lost press-end path {needle}");
-    }
-    let chrome = src.matches("self.clear_table_drag_press()").count();
-    assert!(
-        chrome >= 10,
-        "expected each clear path to call clear_table_drag_press, found {chrome}"
-    );
+fn mouse_move_with_no_button_clears_latch_and_allows_typing() {
+    let (view, mut cx) = harness(WORD);
+    set_caret(&view, &mut cx, WORD.len());
+    hold_press(&view, &mut cx);
+    view.update(&mut cx, |app, cx| {
+        app.table_drag = Some(sample_drag());
+        app.editor_mouse_move(
+            &MouseMoveEvent {
+                position: point(px(10.0), px(10.0)),
+                pressed_button: None,
+                modifiers: Modifiers::default(),
+            },
+            cx,
+        );
+    });
+    view.read_with(&cx, |app, _| {
+        assert!(!app.table_drag_press_held);
+        assert!(app.table_drag.is_none());
+    });
+    type_x(&view, &mut cx);
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_ne!(after, WORD);
+    assert!(after.contains('x'));
+}
+
+#[std_test]
+fn mouse_exit_clears_latch_and_allows_typing() {
+    let (view, mut cx) = harness(WORD);
+    set_caret(&view, &mut cx, WORD.len());
+    hold_press(&view, &mut cx);
+    view.update(&mut cx, |app, _cx| {
+        app.table_drag = Some(sample_drag());
+        app.handle_mouse_exit();
+    });
+    view.read_with(&cx, |app, _| {
+        assert!(!app.table_drag_press_held);
+        assert!(app.table_drag.is_none());
+    });
+    type_x(&view, &mut cx);
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_ne!(after, WORD);
+    assert!(after.contains('x'));
+}
+
+#[std_test]
+fn mouse_move_with_button_pressed_keeps_latch_and_swallows_typing() {
+    let (view, mut cx) = harness(WORD);
+    set_caret(&view, &mut cx, WORD.len());
+    hold_press(&view, &mut cx);
+    view.update(&mut cx, |app, cx| {
+        app.editor_mouse_move(
+            &MouseMoveEvent {
+                position: point(px(10.0), px(10.0)),
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::default(),
+            },
+            cx,
+        );
+    });
+    view.read_with(&cx, |app, _| {
+        assert!(app.table_drag_press_held);
+    });
+    type_x(&view, &mut cx);
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_eq!(after, WORD);
+}
+
+#[std_test]
+fn handle_cut_does_not_edit_while_drag_press_is_held() {
+    let (view, mut cx) = harness(WORD);
+    select_all_word(&view, &mut cx);
+    hold_press(&view, &mut cx);
+    view.update(&mut cx, |app, cx| {
+        app.handle_cut(cx);
+    });
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_eq!(after, WORD);
+}
+
+#[std_test]
+fn handle_cut_edits_when_press_is_not_held() {
+    let (view, mut cx) = harness(WORD);
+    select_all_word(&view, &mut cx);
+    view.update(&mut cx, |app, cx| {
+        app.handle_cut(cx);
+    });
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_ne!(after, WORD);
+}
+
+#[std_test]
+fn handle_insert_table_size_does_not_edit_while_drag_press_is_held() {
+    let (view, mut cx) = harness(WORD);
+    set_caret(&view, &mut cx, WORD.len());
+    hold_press(&view, &mut cx);
+    view.update(&mut cx, |app, cx| {
+        app.handle_insert_table_size(2, 2, cx);
+    });
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_eq!(after, WORD);
+}
+
+#[std_test]
+fn handle_insert_table_size_edits_when_press_is_not_held() {
+    let (view, mut cx) = harness(WORD);
+    set_caret(&view, &mut cx, WORD.len());
+    view.update(&mut cx, |app, cx| {
+        app.handle_insert_table_size(2, 2, cx);
+    });
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_ne!(after, WORD);
+    assert!(after.contains('|'));
+}
+
+#[std_test]
+fn handle_table_edit_action_does_not_edit_while_drag_press_is_held() {
+    let (view, mut cx) = harness(TABLE);
+    set_caret(&view, &mut cx, 2);
+    hold_press(&view, &mut cx);
+    view.update(&mut cx, |app, cx| {
+        app.handle_table_edit_action("row_below", cx);
+    });
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_eq!(after, TABLE);
+}
+
+#[std_test]
+fn handle_table_edit_action_edits_when_press_is_not_held() {
+    let (view, mut cx) = harness(TABLE);
+    set_caret(&view, &mut cx, 2);
+    view.update(&mut cx, |app, cx| {
+        app.handle_table_edit_action("row_below", cx);
+    });
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_ne!(after, TABLE);
 }

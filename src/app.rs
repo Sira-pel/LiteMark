@@ -173,7 +173,8 @@ pub struct LiteMarkApp {
     /// True while the mouse button that started a table drag is still held.
     /// Survives a modifier cancel of the visual drag so later chords cannot
     /// edit the note until that press ends (mouse-up anywhere, next mouse-down,
-    /// focus loss, Escape, right-click, or a non-drag chrome/checkbox click).
+    /// a move with no button, the pointer leaving the window, focus loss,
+    /// Escape, right-click, or a non-drag chrome/checkbox click).
     pub table_drag_press_held: bool,
     /// Byte the open table menu should edit. Empty means the caret.
     pub table_action_anchor: Option<usize>,
@@ -614,6 +615,15 @@ impl LiteMarkApp {
     }
 
     fn handle_mouse_down_out(&mut self) {
+        self.table_drag = None;
+        self.clear_table_drag_press();
+    }
+
+    /// Pointer left the window. Wayland Leave drops `mouse_focused_window`
+    /// so no MouseUp follows; X11 has no pointer grab. Cancel the drag and
+    /// the latch together: a press must not outlive the pointer leaving, and
+    /// a key must not edit while a drag is still running.
+    fn handle_mouse_exit(&mut self) {
         self.table_drag = None;
         self.clear_table_drag_press();
     }
@@ -3803,6 +3813,16 @@ impl LiteMarkApp {
     }
 
     fn editor_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        // A move with no button means the originating press is over. This is
+        // the in-window path that does not depend on MouseUp: Wayland/X11
+        // never deliver that event after a release outside the window.
+        if event.pressed_button.is_none()
+            && (self.table_drag.is_some() || self.table_drag_press_held)
+        {
+            self.table_drag = None;
+            self.clear_table_drag_press();
+            cx.notify();
+        }
         if self.input_blocked() {
             return;
         }
@@ -6375,6 +6395,25 @@ impl Render for LiteMarkApp {
                 this.handle_mouse_down_out();
                 cx.notify();
             }))
+            .child({
+                let view = cx.weak_entity();
+                canvas(
+                    |_, _, _| (),
+                    move |_, (), window, _cx| {
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = view.update(cx, |this, cx| {
+                                this.handle_mouse_exit();
+                                cx.notify();
+                            });
+                        });
+                    },
+                )
+                .absolute()
+                .size_full()
+            })
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if this.table_drag.is_none() && !this.table_drag_press_held {
                     return;
