@@ -13,8 +13,8 @@ use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
 use crate::ui::table_chrome::{
     action_anchor, clear_drag_for_key, clear_drag_for_modifier, commit_drag_release,
-    drag_gap_if_inside, hit_test_occupied, hot_at, hover_at_occupied, next_align, occupied_content,
-    retarget_hover, update_drag_gap, TableDrag, TableDragKind, TableHitKind,
+    drag_gap_if_inside, hit_test_occupied, hover_from_hit, next_align, occupied_content,
+    retarget_hover, update_drag_gap, TableDrag, TableDragKind, TableHitKind, TableHot,
 };
 use crate::ui::MenuItem;
 use crate::ui::*;
@@ -1080,6 +1080,9 @@ impl LiteMarkApp {
     }
 
     fn retarget_table_hover(&mut self) {
+        // The geometry under the pointer changes with the edit; the next move
+        // relights whichever control it lands on.
+        self.table_hot = None;
         let Some(hover) = self.table_hover.clone() else {
             return;
         };
@@ -3704,15 +3707,12 @@ impl LiteMarkApp {
             return;
         }
         let previous = self.table_hover.clone();
-        let hover = {
+        let (hover, hot) = {
             let paint = self.editor_paint.borrow();
             let occupied = occupied_content(&paint.rows);
-            hover_at_occupied(&paint.tables, at, previous.as_ref(), &occupied)
-        };
-        let hot = {
-            let paint = self.editor_paint.borrow();
-            let occupied = occupied_content(&paint.rows);
-            hot_at(&paint.tables, at, &occupied)
+            let hit = hit_test_occupied(&paint.tables, at, &occupied);
+            let hover = hover_from_hit(&paint.tables, at, previous.as_ref(), hit.as_ref());
+            (hover, hit.as_ref().map(TableHot::from))
         };
         if self.table_hover != hover || self.table_hot != hot {
             self.table_hover = hover;

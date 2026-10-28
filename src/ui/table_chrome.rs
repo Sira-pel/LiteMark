@@ -371,7 +371,8 @@ pub fn hit_test_occupied(
             if !contains(area, point) || chrome_blocked(pill, occupied) {
                 continue;
             }
-            let kind = if contains(half(area, 0), point) {
+            // Split on the painted pill so the gap beside the table belongs to the plus.
+            let kind = if contains(half(pill, 0), point) {
                 TableHitKind::RowGrip
             } else {
                 TableHitKind::RowPlus
@@ -602,7 +603,22 @@ pub fn hover_at_occupied(
     previous: Option<&TableHover>,
     occupied: &[Bounds<Pixels>],
 ) -> Option<TableHover> {
-    if let Some(hit) = hit_test_occupied(tables, at, occupied) {
+    hover_from_hit(
+        tables,
+        at,
+        previous,
+        hit_test_occupied(tables, at, occupied).as_ref(),
+    )
+}
+
+/// Hover for a pointer position whose control hit was already computed.
+pub fn hover_from_hit(
+    tables: &[TableGeom],
+    at: Point<Pixels>,
+    previous: Option<&TableHover>,
+    hit: Option<&TableHit>,
+) -> Option<TableHover> {
+    if let Some(hit) = hit {
         let (mut col, mut row) = match hit.kind {
             TableHitKind::ColGrip | TableHitKind::ColAlign | TableHitKind::ColPlus => {
                 (Some(hit.index), None)
@@ -619,7 +635,7 @@ pub fn hover_at_occupied(
             }
         }
         return Some(TableHover {
-            source: hit.source,
+            source: hit.source.clone(),
             col,
             row,
         });
@@ -640,16 +656,14 @@ pub struct TableHot {
     pub index: usize,
 }
 
-pub fn hot_at(
-    tables: &[TableGeom],
-    point: Point<Pixels>,
-    occupied: &[Bounds<Pixels>],
-) -> Option<TableHot> {
-    hit_test_occupied(tables, point, occupied).map(|hit| TableHot {
-        source: hit.source,
-        kind: hit.kind,
-        index: hit.index,
-    })
+impl From<&TableHit> for TableHot {
+    fn from(hit: &TableHit) -> Self {
+        Self {
+            source: hit.source.clone(),
+            kind: hit.kind,
+            index: hit.index,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1014,6 +1028,21 @@ mod tests {
         assert_eq!(pill.size.width, room);
         assert_eq!(pill.right(), row.left() - sz::TABLE_GAP);
         assert!(!overlaps(pill, row));
+    }
+
+    #[test]
+    fn row_gap_beside_the_table_belongs_to_the_plus() {
+        let tables = [sample_table()];
+        let row = tables[0].rows[0].bounds;
+        let pill = row_pill_bounds(row);
+        let grip = hit_test(&tables, center_of(half(pill, 0))).expect("grip");
+        assert_eq!(grip.kind, TableHitKind::RowGrip);
+        let in_gap = point(row.left() - sz::TABLE_GAP * 0.5, center_of(pill).y);
+        let plus = hit_test(&tables, in_gap).expect("gap");
+        assert_eq!(plus.kind, TableHitKind::RowPlus);
+        let just_inside_grip = point(half(pill, 0).right() - px(1.0), center_of(pill).y);
+        let still_grip = hit_test(&tables, just_inside_grip).expect("grip edge");
+        assert_eq!(still_grip.kind, TableHitKind::RowGrip);
     }
 
     #[test]
