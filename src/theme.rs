@@ -53,6 +53,22 @@ pub mod sz {
     pub const R_SM: Pixels = px(4.);
     pub const R_MD: Pixels = px(6.);
     pub const R_LG: Pixels = px(8.);
+    /// Short side of a table hover control.
+    pub const TABLE_PILL: Pixels = px(16.);
+    /// Grip dot. An eighth of [`TABLE_PILL`].
+    pub const TABLE_DOT: Pixels = px(2.);
+    /// 1px hairline for table rules and table hover chrome.
+    pub const STROKE: Pixels = px(1.);
+    /// Longest bar of the alignment mark.
+    pub const TABLE_BAR_LG: Pixels = px(8.);
+    /// Middle bar of the alignment mark.
+    pub const TABLE_BAR_MD: Pixels = px(6.);
+    /// Shortest bar of the alignment mark.
+    pub const TABLE_BAR_SM: Pixels = px(4.);
+    /// Arm length of the hover plus.
+    pub const TABLE_PLUS_ARM: Pixels = px(8.);
+    /// Side inset of the alignment mark inside its slot.
+    pub const TABLE_ICON_PAD: Pixels = px(4.);
     #[allow(dead_code)]
     pub const BODY: f32 = 17.;
     pub const MEASURE_FALLBACK: Pixels = px(672.);

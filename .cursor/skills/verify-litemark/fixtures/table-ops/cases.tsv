@@ -1,4 +1,4 @@
-id	op	source	anchor	arg	expect	caret	editor	pulldown	after
+id	op	source	anchor	arg	expect	caret	editor	pulldown	after	act
 insert-row-above-base	insert-row-above	| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	cell:1:0		| A | B |\n| --- | --- |\n|  |  |\n| d | e |\n| g | h |\n	cell:1:0	align=none,none [A][B]//[][]//[d][e]//[g][h]	align=none,none [A][B]//[][]//[d][e]//[g][h]	
 insert-row-above-header	insert-row-above	| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	cell:0:0		| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	keep	align=none,none [A][B]//[d][e]//[g][h]	align=none,none [A][B]//[d][e]//[g][h]	
 insert-row-above-single	insert-row-above	| A |\n| --- |\n| d |\n| g |\n	cell:1:0		| A |\n| --- |\n|  |\n| d |\n| g |\n	cell:1:0	align=none [A]//[]//[d]//[g]	align=none [A]//[]//[d]//[g]	
@@ -175,3 +175,7 @@ sel-cell-insert-col-right	insert-col-right	| A | B |\n| --- | --- |\n| d | e |\n
 sel-undo-move-col	move-col	| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	sel:26..27	1	| B | A |\n| --- | --- |\n| e | d |\n| h | g |\n	sel:30..31	align=none,none [B][A]//[e][d]//[h][g]	align=none,none [B][A]//[e][d]//[h][g]	
 sel-view-align-left	align-left	| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	sel:26..27		| A | B |\n| :--- | --- |\n| d | e |\n| g | h |\n	sel:27..28	align=left,none [A][B]//[d][e]//[g][h]	align=left,none [A][B]//[d][e]//[g][h]	view
 view-caret-align-left	align-left	| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	cell:1:0		| A | B |\n| :--- | --- |\n| d | e |\n| g | h |\n	cell:1:0	align=left,none [A][B]//[d][e]//[g][h]	align=left,none [A][B]//[d][e]//[g][h]	view
+act-insert-col-right	insert-col-right	| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	cell:2:1		| A |  | B |\n| --- | --- | --- |\n| d |  | e |\n| g |  | h |\n	cell:1:1	align=none,none,none [A][][B]//[d][][e]//[g][][h]	align=none,none,none [A][][B]//[d][][e]//[g][][h]		cell:1:0
+act-sel-insert-col-right	insert-col-right	| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	sel:6..7		| A |  | B |\n| --- | --- | --- |\n| d |  | e |\n| g |  | h |\n	sel:9..10	align=none,none,none [A][][B]//[d][][e]//[g][][h]	align=none,none,none [A][][B]//[d][][e]//[g][][h]		cell:1:0
+act-move-row	move-row	| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	cell:2:0	2	| A | B |\n| --- | --- |\n| g | h |\n| d | e |\n	cell:2:0	align=none,none [A][B]//[g][h]//[d][e]	align=none,none [A][B]//[g][h]//[d][e]		cell:1:0
+act-align-left	align-left	| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n	cell:2:1		| A | B |\n| :--- | --- |\n| d | e |\n| g | h |\n	cell:1:0	align=left,none [A][B]//[d][e]//[g][h]	align=left,none [A][B]//[d][e]//[g][h]		cell:1:0

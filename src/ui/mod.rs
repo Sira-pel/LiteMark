@@ -10,6 +10,7 @@ pub mod primitives;
 pub mod settings_menu;
 pub mod sidebar;
 pub mod status_bar;
+pub mod table_chrome;
 pub mod text_editor;
 
 pub use editor::*;

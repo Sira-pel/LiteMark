@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod actions;
 mod app;
+mod editor_input;
 mod markdown;
 mod model;
 mod services;

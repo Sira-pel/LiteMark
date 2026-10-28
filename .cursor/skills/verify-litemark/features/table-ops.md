@@ -41,7 +41,7 @@ Preconditions:
 - **Pull requests.** Job `verify-kit` in `.github/workflows/ci.yml` runs that script on `opened`, `synchronize`, and `reopened`.
 - **Rows.** The script reads `.cursor/skills/verify-litemark/fixtures/table-ops/cases.tsv` through the ignored test `table_ops_cases`. The pinned ids are `.cursor/skills/verify-litemark/fixtures/table-ops/expected-ids.txt`.
 - **Lines.** Stdout has one whole line `case=<id> pass|fail` per pinned id, then `pass=N fail=N`.
-- **Exit.** Exit 0 only when every pinned id has exactly one of those lines, the result count is at least `MIN_CASES` (176), and `fail=0`. A missing id, an extra id, a different order, or a result count below that floor exits non-zero (`count_below_min count=<n> min=<m>`).
+- **Exit.** Exit 0 only when every pinned id has exactly one of those lines, the result count is at least `MIN_CASES` (180), and `fail=0`. A missing id, an extra id, a different order, or a result count below that floor exits non-zero (`count_below_min count=<n> min=<m>`).
 - **Red.** `scripts/prove-table-ops-wrong-expect.sh` requires `case=insert-row-below-base fail`. `scripts/prove-table-ops-dropped-case.sh` requires `count_below_min`. Both restore the fixtures.
 - **Plain tests.** `cargo test` does not run this test. The row is `#[ignore]`.
 

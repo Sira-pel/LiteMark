@@ -8,6 +8,7 @@ use std::ops::Range;
 
 use super::{DocumentTab, ViewMode};
 use crate::markdown::{parse_document, LineKind, TableColumnAlign};
+use crate::model::table_ops::TableOp;
 
 const CASES: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -260,7 +261,10 @@ fn expect_caret(content: &str, spec: &str, placed: &Placed) -> Result<Placed, St
     Err(format!("bad caret {spec}"))
 }
 
-fn run_op(doc: &mut DocumentTab, op: &str, arg: &str) -> Result<(), String> {
+fn run_op(doc: &mut DocumentTab, op: &str, arg: &str, act: Option<usize>) -> Result<(), String> {
+    if let Some(pos) = act {
+        return run_op_at(doc, op, arg, pos);
+    }
     match op {
         "insert-row-above" => doc.table_add_row_above(),
         "insert-row-below" => doc.table_add_row_below(),
@@ -270,16 +274,64 @@ fn run_op(doc: &mut DocumentTab, op: &str, arg: &str) -> Result<(), String> {
         "delete-col" => doc.table_delete_col(),
         "move-row" => {
             let index: usize = arg.parse().map_err(|_| format!("bad move-row {arg}"))?;
-            doc.table_move_row(index);
+            let pos = doc.cursor_offset();
+            doc.table_move_row_at(pos, index);
         }
         "move-col" => {
             let index: usize = arg.parse().map_err(|_| format!("bad move-col {arg}"))?;
-            doc.table_move_col(index);
+            let pos = doc.cursor_offset();
+            doc.table_move_col_at(pos, index);
         }
         "align-left" => doc.table_align_column(TableColumnAlign::Left),
         "align-center" => doc.table_align_column(TableColumnAlign::Center),
         "align-right" => doc.table_align_column(TableColumnAlign::Right),
         "align-none" => doc.table_align_column(TableColumnAlign::None),
+        other => return Err(format!("unknown op {other}")),
+    }
+    Ok(())
+}
+
+/// The act byte is the chrome anchor. It can differ from the caret.
+fn run_op_at(doc: &mut DocumentTab, op: &str, arg: &str, pos: usize) -> Result<(), String> {
+    match op {
+        "insert-row-above" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::InsertRowAbove);
+        }
+        "insert-row-below" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::InsertRowBelow);
+        }
+        "insert-col-left" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::InsertColLeft);
+        }
+        "insert-col-right" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::InsertColRight);
+        }
+        "delete-row" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::DeleteRow);
+        }
+        "delete-col" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::DeleteCol);
+        }
+        "move-row" => {
+            let index: usize = arg.parse().map_err(|_| format!("bad move-row {arg}"))?;
+            doc.table_move_row_at(pos, index);
+        }
+        "move-col" => {
+            let index: usize = arg.parse().map_err(|_| format!("bad move-col {arg}"))?;
+            doc.table_move_col_at(pos, index);
+        }
+        "align-left" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::SetAlign(TableColumnAlign::Left));
+        }
+        "align-center" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::SetAlign(TableColumnAlign::Center));
+        }
+        "align-right" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::SetAlign(TableColumnAlign::Right));
+        }
+        "align-none" => {
+            let _ = doc.apply_table_op_at(pos, TableOp::SetAlign(TableColumnAlign::None));
+        }
         other => return Err(format!("unknown op {other}")),
     }
     Ok(())
@@ -332,10 +384,32 @@ fn run_one(fields: &[&str]) -> bool {
         return false;
     }
 
+    let act = if fields.len() == 11 && !fields[10].is_empty() {
+        match place_anchor(&source, fields[10]) {
+            Ok(act) if act.range.is_empty() => Some(act.range.start),
+            Ok(_) => {
+                fail(id, format!("act must be a caret {}", fields[10]));
+                return false;
+            }
+            Err(err) => {
+                fail(id, err);
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(at) = act {
+        if at > source.len() || !source.is_char_boundary(at) {
+            fail(id, format!("act outside source {}", fields[10]));
+            return false;
+        }
+    }
+
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), source.clone(), None, None);
     doc.caret.range = placed.range.clone();
     doc.caret.reversed = placed.reversed;
-    if let Err(err) = run_op(&mut doc, op, arg) {
+    if let Err(err) = run_op(&mut doc, op, arg, act) {
         fail(id, err);
         return false;
     }
@@ -457,7 +531,7 @@ fn table_ops_cases() {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() != 10 {
+        if fields.len() != 10 && fields.len() != 11 {
             fail_n += 1;
             println!("case=bad-row fail");
             println!("detail=bad-row fields={}", fields.len());

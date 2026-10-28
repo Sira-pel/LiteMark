@@ -2987,12 +2987,20 @@ impl DocumentTab {
     }
 
     pub fn apply_table_op(&mut self, op: TableOp) -> bool {
+        let pos = self.cursor_offset();
+        self.apply_table_op_at(pos, op)
+    }
+
+    /// Plan `op` at `pos` and apply it. Undo restores the caret that was
+    /// current when this was called, which can differ from `pos` when a
+    /// hover control targets another cell.
+    pub fn apply_table_op_at(&mut self, pos: usize, op: TableOp) -> bool {
         if self.is_read_only() {
             return false;
         }
         let cursor = self.cursor_offset();
         let original_sel = self.selection_snap();
-        let Some(plan) = table_ops::plan(&self.content, cursor, op) else {
+        let Some(plan) = table_ops::plan(&self.content, pos, op) else {
             return false;
         };
         let mapped = original_sel
@@ -3127,22 +3135,27 @@ impl DocumentTab {
         let _ = self.apply_table_op(TableOp::DeleteCol);
     }
 
-    /// Move the caret's row to `to_index`. Index 0 is the header and is refused.
-    pub fn table_move_row(&mut self, to_index: usize) {
-        let _ = self.apply_table_op(TableOp::MoveRow { to_index });
+    /// Move the row at `pos` to `to_index`. Index 0 is the header and is refused.
+    pub fn table_move_row_at(&mut self, pos: usize, to_index: usize) {
+        let _ = self.apply_table_op_at(pos, TableOp::MoveRow { to_index });
     }
 
-    /// Move the caret's column to `to_index`.
-    pub fn table_move_col(&mut self, to_index: usize) {
-        let _ = self.apply_table_op(TableOp::MoveCol { to_index });
+    /// Move the column at `pos` to `to_index`.
+    pub fn table_move_col_at(&mut self, pos: usize, to_index: usize) {
+        let _ = self.apply_table_op_at(pos, TableOp::MoveCol { to_index });
     }
 
     pub fn table_delete_table(&mut self) {
+        let pos = self.cursor_offset();
+        self.table_delete_table_at(pos);
+    }
+
+    /// Delete the table that contains `pos`. The caret is not required to sit in it.
+    pub fn table_delete_table_at(&mut self, pos: usize) {
         if self.is_read_only() {
             return;
         }
-        let cursor = self.cursor_offset();
-        let Some(source) = table_ops::parsed_table_source(&self.content, cursor) else {
+        let Some(source) = table_ops::parsed_table_source(&self.content, pos) else {
             return;
         };
         let mut del_range = source;

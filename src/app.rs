@@ -1,5 +1,9 @@
 use crate::actions::*;
+use crate::editor_input::{
+    dispatch_editor_input, swallow_table_drag_input, DispatchOutcome, EditorInput,
+};
 use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
+use crate::model::table_ops::TableOp;
 use crate::model::text_ops::{
     home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
 };
@@ -7,6 +11,11 @@ use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
+use crate::ui::table_chrome::{
+    action_anchor, clear_drag_for_key, clear_drag_for_modifier, commit_drag_release,
+    drag_gap_if_inside, hit_test_occupied, hover_at_occupied, next_align, occupied_content,
+    retarget_hover, update_drag_gap, TableDrag, TableDragKind, TableHitKind,
+};
 use crate::ui::MenuItem;
 use crate::ui::*;
 use gpui::prelude::*;
@@ -156,8 +165,20 @@ pub struct LiteMarkApp {
     pub field_owns_keys: bool,
     pub field_focus: TextInput,
     pub bounds_subscription: Option<Subscription>,
+    pub activation_subscription: Option<Subscription>,
     pub table_picker_size: (usize, usize),
     pub editor_context_menu: Option<EditorContextMenu>,
+    pub table_hover: Option<crate::ui::table_chrome::TableHover>,
+    pub table_drag: Option<crate::ui::table_chrome::TableDrag>,
+    /// True while the mouse button that started a table drag is still held.
+    /// Survives a modifier cancel of the visual drag so later chords cannot
+    /// edit the note until that press ends (mouse-up anywhere, next mouse-down,
+    /// a move with no button, a MouseExited with no button, focus loss,
+    /// Escape, right-click, or a non-drag chrome/checkbox click). A leave
+    /// that still has a button (X11, no grab) does not end the press.
+    pub table_drag_press_held: bool,
+    /// Byte the open table menu should edit. Empty means the caret.
+    pub table_action_anchor: Option<usize>,
     title_drag_armed: Rc<Cell<bool>>,
 }
 
@@ -460,12 +481,217 @@ impl LiteMarkApp {
             field_owns_keys: false,
             field_focus: TextInput::Editor,
             bounds_subscription: None,
+            activation_subscription: None,
             table_picker_size: (2, 2),
             editor_context_menu: None,
+            table_hover: None,
+            table_drag: None,
+            table_drag_press_held: false,
+            table_action_anchor: None,
             title_drag_armed: Rc::new(Cell::new(false)),
         };
         app.start_update_check(cx);
         app
+    }
+
+    #[cfg(test)]
+    fn dummy_line_field(cx: &mut Context<Self>, id: &'static str) -> Entity<LineField> {
+        cx.new(|cx| {
+            LineField::new(
+                cx,
+                id,
+                "",
+                Arc::new(|_, _| {}),
+                Arc::new(|_, _, _| {}),
+                Arc::new(|_| {}),
+            )
+        })
+    }
+
+    /// Headless app for drag-press tests. Does not touch the notes directory.
+    #[cfg(test)]
+    pub(crate) fn test_new(content: &str, cx: &mut Context<Self>) -> Self {
+        let mut tab_ids = TabIds::new();
+        let first_id = tab_ids.alloc();
+        let tab = DocumentTab::new(
+            first_id.clone(),
+            "note.md".into(),
+            content.to_string(),
+            None,
+            None,
+        );
+        Self {
+            tabs: vec![tab],
+            active_tab_id: first_id,
+            selected_target: None,
+            multi_selection: None,
+            workspace: WorkspaceDirectory {
+                folder_name: "test".into(),
+                folder_path: PathBuf::from("/tmp/litemark-table-drag-test"),
+                is_linked_to_local_disk: false,
+                folders: Vec::new(),
+                files: Vec::new(),
+            },
+            settings: EditorSettings {
+                check_for_updates: false,
+                ..EditorSettings::default()
+            },
+            show_sidebar: true,
+            show_find_replace: false,
+            show_replace_row: false,
+            show_shortcuts_modal: false,
+            show_pdf_modal: false,
+            show_about_modal: false,
+            open_menu: None,
+            menu_selected_ix: None,
+            menu_open_submenu_ix: None,
+            submenu_selected_ix: None,
+            menu_items_cache: Vec::new(),
+            sidebar_keyboard: false,
+            sidebar_focus_handle: cx.focus_handle(),
+            zen_mode: false,
+            zen_notice: false,
+            saved_toast: None,
+            show_zoom_hud: false,
+            search_query: String::new(),
+            find_term: String::new(),
+            replace_term: String::new(),
+            match_case: false,
+            not_found: false,
+            focus_handle: cx.focus_handle(),
+            menu_focus_handle: cx.focus_handle(),
+            prompt_focus_handle: cx.focus_handle(),
+            appearance_subscription: None,
+            tab_ids,
+            error_message: None,
+            prompt: None,
+            prompt_selected_ix: 0,
+            save_as_tab: None,
+            pending_after_save: None,
+            editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
+            editor_scroll: ScrollHandle::new(),
+            find_field: Self::dummy_line_field(cx, "find-field"),
+            replace_field: Self::dummy_line_field(cx, "replace-field"),
+            find_hits: Vec::new(),
+            find_index: None,
+            applied_focus: None,
+            close_hook_installed: false,
+            allow_window_close: false,
+            selecting: false,
+            zoom_epoch: 0,
+            toast_epoch: 0,
+            available_update: None,
+            pending_find_focus: false,
+            pending_rename_focus: false,
+            sidebar_menu: None,
+            workspace_menu_open: false,
+            rename_target: None,
+            rename_value: String::new(),
+            rename_field: Self::dummy_line_field(cx, "rename-field"),
+            create_draft: None,
+            create_field: Self::dummy_line_field(cx, "create-field"),
+            search_field: Self::dummy_line_field(cx, "search-field"),
+            pending_create_focus: false,
+            field_owns_keys: false,
+            field_focus: TextInput::Editor,
+            bounds_subscription: None,
+            activation_subscription: None,
+            table_picker_size: (2, 2),
+            editor_context_menu: None,
+            table_hover: None,
+            table_drag: None,
+            table_drag_press_held: false,
+            table_action_anchor: None,
+            title_drag_armed: Rc::new(Cell::new(false)),
+        }
+    }
+
+    fn clear_table_drag_press(&mut self) {
+        self.table_drag_press_held = false;
+    }
+
+    fn handle_window_deactivated(&mut self) {
+        self.table_drag = None;
+        self.clear_table_drag_press();
+    }
+
+    fn handle_mouse_down_out(&mut self) {
+        self.table_drag = None;
+        self.clear_table_drag_press();
+    }
+
+    /// Pointer left the window. Only a no-button exit ends the press:
+    /// - Wayland: the implicit grab delivers MouseUp (`on_mouse_up_out`)
+    ///   before Leave, so this event usually has no button.
+    /// - X11: no grab, so XI_Leave arrives mid-press (`pressed_button` Some).
+    ///   Keep the latch until the press really ends (no-button move, next
+    ///   down, focus loss, Escape/CloseModal, right-click).
+    /// - Windows: SetCapture, so MouseUp still arrives outside.
+    ///
+    /// A held exit keeps `table_drag` so an X11 re-entry can continue the
+    /// drop preview. The latch stays set either way until the press ends.
+    fn handle_mouse_exit(&mut self, event: &MouseExitEvent) {
+        if event.pressed_button.is_some() {
+            return;
+        }
+        self.table_drag = None;
+        self.clear_table_drag_press();
+    }
+
+    fn handle_close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_table_drag_press();
+        if self.table_drag.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if self.editor_context_menu.is_some() {
+            self.dismiss_editor_context_menu();
+        } else if self.workspace_menu_open {
+            self.workspace_menu_open = false;
+        } else if self.sidebar_menu.is_some() {
+            self.sidebar_menu = None;
+        } else if self.rename_target.is_some() || self.save_as_tab.is_some() {
+            self.cancel_rename(cx);
+        } else if self.create_draft.is_some() {
+            self.cancel_create(cx);
+        } else if self.prompt.is_some() {
+            self.prompt = None;
+        } else if self.error_message.is_some()
+            && self.open_menu.is_none()
+            && !self.show_about_modal
+            && !self.show_shortcuts_modal
+            && !self.show_pdf_modal
+            && !self.show_find_replace
+            && !self.zen_mode
+        {
+            self.error_message = None;
+        } else if self.open_menu.is_some() {
+            self.open_menu = None;
+            self.menu_selected_ix = None;
+            self.menu_open_submenu_ix = None;
+        } else if self.show_about_modal {
+            self.show_about_modal = false;
+        } else if self.show_shortcuts_modal {
+            self.show_shortcuts_modal = false;
+        } else if self.show_pdf_modal {
+            self.show_pdf_modal = false;
+        } else if self.show_find_replace {
+            self.show_find_replace = false;
+        } else if self.field_focus == TextInput::Search || !self.search_query.is_empty() {
+            self.clear_search(cx);
+        } else if self.active_multi().is_some() || self.selected_target.is_some() {
+            self.multi_selection = None;
+            self.selected_target = None;
+            self.sidebar_keyboard = false;
+        } else if self.show_sidebar
+            && !self.zen_mode
+            && window.viewport_size().width < px(600.0)
+        {
+            self.show_sidebar = false;
+        } else if self.zen_mode {
+            self.handle_exit_zen();
+        }
+        cx.notify();
     }
 
     /// Look for a newer release in the background, at most once a day.
@@ -733,27 +959,7 @@ impl LiteMarkApp {
     }
 
     pub fn handle_format_cmd(&mut self, cmd: &'static str, _cx: &mut App) {
-        if !command_edits_document(cmd, self.field_focus, self.field_owns_keys) {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) && cmd != "undo" && cmd != "redo"
-        {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        let mode = self.settings.view_mode;
-        if let Some(tab) = self.active_tab_mut() {
-            match cmd {
-                "undo" => {
-                    tab.undo();
-                }
-                "redo" => {
-                    tab.redo();
-                }
-                other => tab.apply_format_in_mode(other, mode),
-            }
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Format(cmd));
     }
 
     pub fn handle_insert_table(&mut self, _cx: &mut App) {
@@ -769,6 +975,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_insert_table_size(&mut self, cols: usize, rows: usize, _cx: &mut App) {
+        if self.block_table_drag_edit() {
+            return;
+        }
         if let Some(tab) = self.active_tab_mut() {
             tab.insert_table_with_size(cols, rows);
         }
@@ -776,26 +985,100 @@ impl LiteMarkApp {
     }
 
     pub fn handle_table_edit_action(&mut self, action: &'static str, _cx: &mut App) {
+        if self.block_table_drag_edit() {
+            return;
+        }
+        let anchor = self.table_action_anchor.take();
         if let Some(tab) = self.active_tab_mut() {
             match action {
-                "row_above" => tab.table_add_row_above(),
-                "row_below" => tab.table_add_row_below(),
-                "col_left" => tab.table_add_col_left(),
-                "col_right" => tab.table_add_col_right(),
-                "align_left" => tab.table_align_column(TableColumnAlign::Left),
-                "align_center" => tab.table_align_column(TableColumnAlign::Center),
-                "align_right" => tab.table_align_column(TableColumnAlign::Right),
-                "delete_row" => tab.table_delete_row(),
-                "delete_col" => tab.table_delete_col(),
-                "delete_table" => tab.table_delete_table(),
-                // Reorder passes the drop index to the same methods. This arm
-                // has no index, so the destination is out of range and refused.
-                "move_row" => tab.table_move_row(usize::MAX),
-                "move_col" => tab.table_move_col(usize::MAX),
+                "row_above" => {
+                    if let Some(pos) = anchor {
+                        let _ = tab.apply_table_op_at(pos, TableOp::InsertRowAbove);
+                    } else {
+                        tab.table_add_row_above();
+                    }
+                }
+                "row_below" => {
+                    if let Some(pos) = anchor {
+                        let _ = tab.apply_table_op_at(pos, TableOp::InsertRowBelow);
+                    } else {
+                        tab.table_add_row_below();
+                    }
+                }
+                "col_left" => {
+                    if let Some(pos) = anchor {
+                        let _ = tab.apply_table_op_at(pos, TableOp::InsertColLeft);
+                    } else {
+                        tab.table_add_col_left();
+                    }
+                }
+                "col_right" => {
+                    if let Some(pos) = anchor {
+                        let _ = tab.apply_table_op_at(pos, TableOp::InsertColRight);
+                    } else {
+                        tab.table_add_col_right();
+                    }
+                }
+                "align_left" => {
+                    if let Some(pos) = anchor {
+                        let _ =
+                            tab.apply_table_op_at(pos, TableOp::SetAlign(TableColumnAlign::Left));
+                    } else {
+                        tab.table_align_column(TableColumnAlign::Left);
+                    }
+                }
+                "align_center" => {
+                    if let Some(pos) = anchor {
+                        let _ =
+                            tab.apply_table_op_at(pos, TableOp::SetAlign(TableColumnAlign::Center));
+                    } else {
+                        tab.table_align_column(TableColumnAlign::Center);
+                    }
+                }
+                "align_right" => {
+                    if let Some(pos) = anchor {
+                        let _ =
+                            tab.apply_table_op_at(pos, TableOp::SetAlign(TableColumnAlign::Right));
+                    } else {
+                        tab.table_align_column(TableColumnAlign::Right);
+                    }
+                }
+                "delete_row" => {
+                    if let Some(pos) = anchor {
+                        let _ = tab.apply_table_op_at(pos, TableOp::DeleteRow);
+                    } else {
+                        tab.table_delete_row();
+                    }
+                }
+                "delete_col" => {
+                    if let Some(pos) = anchor {
+                        let _ = tab.apply_table_op_at(pos, TableOp::DeleteCol);
+                    } else {
+                        tab.table_delete_col();
+                    }
+                }
+                "delete_table" => {
+                    if let Some(pos) = anchor {
+                        tab.table_delete_table_at(pos);
+                    } else {
+                        tab.table_delete_table();
+                    }
+                }
                 _ => {}
             }
         }
+        self.retarget_table_hover();
         self.refresh_find();
+    }
+
+    fn retarget_table_hover(&mut self) {
+        let Some(hover) = self.table_hover.clone() else {
+            return;
+        };
+        let next = self
+            .active_tab()
+            .and_then(|tab| retarget_hover(&tab.content, &hover));
+        self.table_hover = next;
     }
 
     pub fn handle_insert_link(&mut self, cx: &mut App) {
@@ -852,6 +1135,10 @@ impl LiteMarkApp {
     }
 
     pub fn handle_toggle_mode(&mut self) {
+        self.table_hover = None;
+        self.table_drag = None;
+        self.table_drag_press_held = false;
+        self.dismiss_editor_context_menu();
         self.settings.view_mode = self.settings.view_mode.toggle();
         self.active_tab_mut();
         if self.settings.view_mode == ViewMode::Wysiwyg {
@@ -1040,6 +1327,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_cut(&mut self, cx: &mut App) {
+        if self.block_table_drag_edit() {
+            return;
+        }
         let Some(item) = self.selection_clipboard_item() else {
             return;
         };
@@ -1062,6 +1352,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_paste(&mut self, cx: &mut App) {
+        if self.block_table_drag_edit() {
+            return;
+        }
         if let Some(item) = cx.read_from_clipboard() {
             // A copy from a Markdown tab carries its source as metadata.
             let into_markdown = self
@@ -3155,6 +3448,15 @@ impl LiteMarkApp {
                     cx.notify();
                 }));
         }
+        if self.activation_subscription.is_none() {
+            self.activation_subscription =
+                Some(cx.observe_window_activation(window, |this, window, cx| {
+                    if !window.is_window_active() {
+                        this.handle_window_deactivated();
+                        cx.notify();
+                    }
+                }));
+        }
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |_window, cx| {
             view.update(cx, |this, cx| {
@@ -3174,199 +3476,53 @@ impl LiteMarkApp {
     }
 
     fn editor_backspace(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        let mode = self.settings.view_mode;
-        if let Some(tab) = self.active_tab_mut() {
-            tab.smart_backspace_in_mode(mode);
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Backspace);
     }
 
     fn editor_delete(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        let mode = self.settings.view_mode;
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_forward_in_mode(mode);
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Delete);
     }
 
     fn editor_delete_word_left(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_word_left();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::DeleteWordLeft);
     }
 
     fn editor_delete_word_right(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_word_right();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::DeleteWordRight);
     }
 
     fn editor_delete_line_start(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_to_line_start();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::DeleteLineStart);
     }
 
     fn editor_delete_line_end(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.delete_to_line_end();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::DeleteLineEnd);
     }
 
     fn editor_newline(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.smart_newline(false);
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Newline);
     }
 
     fn editor_plain_newline(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.smart_newline(true);
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::PlainNewline);
     }
 
     fn editor_table_row_below(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.table_insert_row_below();
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::TableRowBelow);
     }
 
     fn editor_indent(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            if !tab.tab_table_cell(false) {
-                tab.indent();
-            }
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Indent);
     }
 
     fn editor_outdent(&mut self, _cx: &mut App) {
-        if !document_accepts_keystrokes(self.field_focus)
-            || self.field_owns_keys
-            || self.input_blocked()
-        {
-            return;
-        }
-        if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
-            self.show_error("PDF files are read-only.");
-            return;
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            if !tab.tab_table_cell(true) {
-                tab.outdent();
-            }
-        }
-        self.refresh_find();
+        self.dispatch_editor_input(EditorInput::Outdent);
     }
 
     fn editor_move(&mut self, _cx: &mut App, edit: impl FnOnce(&mut DocumentTab)) {
+        if self.block_table_drag_edit() {
+            return;
+        }
         if !document_accepts_keystrokes(self.field_focus)
             || self.field_owns_keys
             || self.input_blocked()
@@ -3378,12 +3534,207 @@ impl LiteMarkApp {
         }
     }
 
+    fn block_table_drag_edit(&mut self) -> bool {
+        swallow_table_drag_input(&mut self.table_drag, self.table_drag_press_held)
+    }
+
+    fn dispatch_editor_input(&mut self, input: EditorInput) {
+        let id = self.active_tab_id.clone();
+        let field_focus = self.field_focus;
+        let field_owns_keys = self.field_owns_keys;
+        let view_mode = self.settings.view_mode;
+        let blocked = self.input_blocked();
+        let press_held = self.table_drag_press_held;
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            let _ = swallow_table_drag_input(&mut self.table_drag, press_held);
+            return;
+        };
+        let outcome = dispatch_editor_input(
+            &mut crate::editor_input::EditorInputState {
+                tab,
+                drag: &mut self.table_drag,
+                press_held,
+                field_focus,
+                field_owns_keys,
+                view_mode,
+                input_blocked: blocked,
+            },
+            input,
+        );
+        match outcome {
+            DispatchOutcome::ReadOnly => self.show_error("PDF files are read-only."),
+            DispatchOutcome::Applied => self.refresh_find(),
+            DispatchOutcome::Swallowed | DispatchOutcome::Ignored => {}
+        }
+    }
+
+    fn dismiss_editor_context_menu(&mut self) {
+        self.editor_context_menu = None;
+        self.table_action_anchor = None;
+    }
+
+    fn table_chrome_interactive(&self) -> bool {
+        self.settings.view_mode == ViewMode::Wysiwyg
+            && !self.active_tab().is_some_and(|tab| tab.is_read_only())
+    }
+
+    /// A hover control click edits the table and leaves the caret alone until the op runs.
+    fn handle_table_chrome_click(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.table_chrome_interactive() {
+            return false;
+        }
+        let hit = {
+            let paint = self.editor_paint.borrow();
+            let occupied = occupied_content(&paint.rows);
+            hit_test_occupied(&paint.tables, event.position, &occupied)
+        };
+        let Some(hit) = hit else {
+            return false;
+        };
+        self.focus_handle.focus(window);
+        self.applied_focus = Some(FocusSlot::Editor);
+        self.field_focus = TextInput::Editor;
+        self.field_owns_keys = false;
+        self.selecting = false;
+        self.sidebar_menu = None;
+        let anchor = {
+            let hover = self.table_hover.clone();
+            let paint = self.editor_paint.borrow();
+            action_anchor(&paint.tables, &hit, hover.as_ref())
+        };
+        match hit.kind {
+            TableHitKind::ColGrip => {
+                self.dismiss_editor_context_menu();
+                self.table_drag_press_held = true;
+                self.table_drag = Some(TableDrag {
+                    source: hit.source,
+                    kind: TableDragKind::Column,
+                    from: hit.index,
+                    anchor,
+                    gap: hit.index,
+                    drop_visible: true,
+                });
+            }
+            TableHitKind::RowGrip => {
+                self.dismiss_editor_context_menu();
+                if hit.index != 0 {
+                    self.table_drag_press_held = true;
+                    self.table_drag = Some(TableDrag {
+                        source: hit.source,
+                        kind: TableDragKind::Row,
+                        from: hit.index,
+                        anchor,
+                        gap: hit.index,
+                        drop_visible: true,
+                    });
+                }
+            }
+            TableHitKind::ColAlign => {
+                self.dismiss_editor_context_menu();
+                self.table_drag = None;
+                self.clear_table_drag_press();
+                if let Some(tab) = self.active_tab_mut() {
+                    let _ = tab.apply_table_op_at(anchor, TableOp::SetAlign(next_align(hit.align)));
+                }
+                self.retarget_table_hover();
+                self.refresh_find();
+            }
+            TableHitKind::ColPlus => {
+                self.dismiss_editor_context_menu();
+                self.table_drag = None;
+                self.clear_table_drag_press();
+                if let Some(tab) = self.active_tab_mut() {
+                    let _ = tab.apply_table_op_at(anchor, TableOp::InsertColRight);
+                }
+                self.retarget_table_hover();
+                self.refresh_find();
+            }
+            TableHitKind::RowPlus => {
+                self.dismiss_editor_context_menu();
+                self.table_drag = None;
+                self.clear_table_drag_press();
+                if let Some(tab) = self.active_tab_mut() {
+                    let _ = tab.apply_table_op_at(anchor, TableOp::InsertRowBelow);
+                }
+                self.retarget_table_hover();
+                self.refresh_find();
+            }
+            TableHitKind::Corner => {
+                self.table_drag = None;
+                self.clear_table_drag_press();
+                self.open_menu = None;
+                self.table_action_anchor = Some(anchor);
+                self.editor_context_menu = Some(EditorContextMenu {
+                    position: event.position,
+                    is_table: true,
+                });
+            }
+        }
+        window.refresh();
+        cx.notify();
+        true
+    }
+
+    fn track_table_hover(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if !self.table_chrome_interactive() {
+            if self.table_hover.is_some() || self.table_drag.is_some() {
+                self.table_hover = None;
+                self.table_drag = None;
+                self.table_drag_press_held = false;
+                cx.notify();
+            }
+            return;
+        }
+        let previous = self.table_hover.clone();
+        let hover = {
+            let paint = self.editor_paint.borrow();
+            let occupied = occupied_content(&paint.rows);
+            hover_at_occupied(&paint.tables, at, previous.as_ref(), &occupied)
+        };
+        if self.table_hover != hover {
+            self.table_hover = hover;
+            cx.notify();
+        }
+    }
+
+    fn editor_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_table_drag_press();
+        if let Some(drag) = self.table_drag.take() {
+            let tables = self.editor_paint.borrow().tables.clone();
+            let moved = self
+                .active_tab_mut()
+                .is_some_and(|tab| commit_drag_release(tab, &tables, &drag, event.position));
+            if moved {
+                self.retarget_table_hover();
+                self.refresh_find();
+            }
+        }
+        if self.selecting {
+            self.selecting = false;
+        }
+        window.refresh();
+        cx.notify();
+    }
+
     fn editor_mouse_down(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A new press ends any earlier table-drag hold, including one whose
+        // mouse-up the hovered root never saw. A grip click re-arms it below.
+        self.clear_table_drag_press();
         // Clicking the editor hands keyboard focus back from the sidebar.
         self.sidebar_keyboard = false;
         self.workspace_menu_open = false;
@@ -3404,12 +3755,17 @@ impl LiteMarkApp {
         if self.input_blocked() || window.default_prevented() {
             return;
         }
+        if self.handle_table_chrome_click(event, window, cx) {
+            return;
+        }
         if self.settings.view_mode == ViewMode::Wysiwyg {
             let checkbox_range = {
                 let paint = self.editor_paint.borrow();
                 checkbox_for_position(&paint, event.position)
             };
             if let Some(range) = checkbox_range {
+                self.table_drag = None;
+                self.clear_table_drag_press();
                 if let Some(tab) = self.active_tab_mut() {
                     if !tab.is_read_only() && range.end <= tab.content.len() {
                         let current = &tab.content[range.clone()];
@@ -3443,7 +3799,9 @@ impl LiteMarkApp {
         }
 
         self.sidebar_menu = None;
-        self.editor_context_menu = None;
+        self.dismiss_editor_context_menu();
+        self.table_drag = None;
+        self.clear_table_drag_press();
         self.focus_handle.focus(window);
         self.applied_focus = Some(FocusSlot::Editor);
         self.field_focus = TextInput::Editor;
@@ -3465,7 +3823,38 @@ impl LiteMarkApp {
     }
 
     fn editor_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if !self.selecting || self.input_blocked() {
+        // A move with no button means the originating press is over. On X11
+        // a release outside the window is never delivered (no grab); the
+        // first in-window move after that has pressed_button None. Wayland's
+        // implicit grab already delivered MouseUp (on_mouse_up_out) before
+        // Leave. Windows SetCapture also delivers MouseUp outside.
+        if event.pressed_button.is_none()
+            && (self.table_drag.is_some() || self.table_drag_press_held)
+        {
+            self.table_drag = None;
+            self.clear_table_drag_press();
+            cx.notify();
+        }
+        if self.input_blocked() {
+            return;
+        }
+        if self.table_drag.is_some() {
+            let drag = self.table_drag.clone().expect("drag");
+            let gap = {
+                let paint = self.editor_paint.borrow();
+                drag_gap_if_inside(&paint.tables, &drag, event.position)
+            };
+            if let Some(drag) = self.table_drag.as_mut() {
+                let before = (drag.gap, drag.drop_visible);
+                update_drag_gap(drag, gap);
+                if (drag.gap, drag.drop_visible) != before {
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        self.track_table_hover(event.position, cx);
+        if !self.selecting {
             return;
         }
         let offset = {
@@ -3487,6 +3876,8 @@ impl LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.table_drag = None;
+        self.clear_table_drag_press();
         if self.input_blocked() || window.default_prevented() {
             return;
         }
@@ -3496,11 +3887,12 @@ impl LiteMarkApp {
             index_for_position(&paint, event.position)
         };
         let Some(offset) = offset else {
-            self.editor_context_menu = None;
+            self.dismiss_editor_context_menu();
             return;
         };
 
         self.sidebar_menu = None;
+        self.table_action_anchor = None;
         self.focus_handle.focus(window);
         self.applied_focus = Some(FocusSlot::Editor);
         self.field_focus = TextInput::Editor;
@@ -3593,6 +3985,8 @@ impl LiteMarkApp {
             gutter_bg: theme.bg_sidebar.into(),
             font_family,
             mono_font_family: Theme::FONT_MONO.into(),
+            table_hover: self.table_hover.clone(),
+            table_drag: self.table_drag.clone(),
         }
         .into_any_element()
     }
@@ -3658,6 +4052,15 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.table_drag.is_some() || self.table_drag_press_held {
+            let (drag, insert) = clear_drag_for_key(self.table_drag.take(), "key", text);
+            self.table_drag = drag;
+            if insert.is_empty() || self.table_drag_press_held {
+                window.refresh();
+                cx.notify();
+                return;
+            }
+        }
         if self.forward_keystroke_to_field(text, window, cx) || self.input_blocked() {
             return;
         }
@@ -3812,6 +4215,12 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.table_drag.is_some() || self.table_drag_press_held {
+            let _ = swallow_table_drag_input(&mut self.table_drag, self.table_drag_press_held);
+            window.refresh();
+            cx.notify();
+            return;
+        }
         if self.forward_keystroke_to_field(new_text, window, cx) {
             return;
         }
@@ -4755,7 +5164,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.editor_context_menu = None;
+                    this.dismiss_editor_context_menu();
                     cx.notify();
                 });
             }
@@ -5484,7 +5893,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &CancelMenu, _window, cx| {
                 if this.editor_context_menu.is_some() {
-                    this.editor_context_menu = None;
+                    this.dismiss_editor_context_menu();
                 } else if this.menu_open_submenu_ix.is_some() {
                     this.menu_open_submenu_ix = None;
                     this.submenu_selected_ix = None;
@@ -5949,18 +6358,12 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorMoveLineUp, window, cx| {
-                if let Some(tab) = this.active_tab_mut() {
-                    tab.move_line_up();
-                }
-                this.refresh_find();
+                this.dispatch_editor_input(EditorInput::MoveLineUp);
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorMoveLineDown, window, cx| {
-                if let Some(tab) = this.active_tab_mut() {
-                    tab.move_line_down();
-                }
-                this.refresh_find();
+                this.dispatch_editor_input(EditorInput::MoveLineDown);
                 window.refresh();
                 cx.notify();
             }))
@@ -5990,64 +6393,62 @@ impl Render for LiteMarkApp {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, window, cx| {
-                    if this.selecting {
-                        this.selecting = false;
-                    }
-                    window.refresh();
-                    cx.notify();
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    this.editor_mouse_up(event, window, cx);
                 }),
             )
-            .on_action(cx.listener(|this, _: &CloseModal, window, cx| {
-                if this.editor_context_menu.is_some() {
-                    this.editor_context_menu = None;
-                } else if this.workspace_menu_open {
-                    this.workspace_menu_open = false;
-                } else if this.sidebar_menu.is_some() {
-                    this.sidebar_menu = None;
-                } else if this.rename_target.is_some() || this.save_as_tab.is_some() {
-                    this.cancel_rename(cx);
-                } else if this.create_draft.is_some() {
-                    this.cancel_create(cx);
-                } else if this.prompt.is_some() {
-                    this.prompt = None;
-                } else if this.error_message.is_some()
-                    && this.open_menu.is_none()
-                    && !this.show_about_modal
-                    && !this.show_shortcuts_modal
-                    && !this.show_pdf_modal
-                    && !this.show_find_replace
-                    && !this.zen_mode
-                {
-                    this.error_message = None;
-                } else if this.open_menu.is_some() {
-                    this.open_menu = None;
-                    this.menu_selected_ix = None;
-                    this.menu_open_submenu_ix = None;
-                } else if this.show_about_modal {
-                    this.show_about_modal = false;
-                } else if this.show_shortcuts_modal {
-                    this.show_shortcuts_modal = false;
-                } else if this.show_pdf_modal {
-                    this.show_pdf_modal = false;
-                } else if this.show_find_replace {
-                    this.show_find_replace = false;
-                } else if this.field_focus == TextInput::Search || !this.search_query.is_empty() {
-                    this.clear_search(cx);
-                } else if this.active_multi().is_some() || this.selected_target.is_some() {
-                    this.multi_selection = None;
-                    this.selected_target = None;
-                    this.sidebar_keyboard = false;
-                } else if this.show_sidebar
-                    && !this.zen_mode
-                    && window.viewport_size().width < px(600.0)
-                {
-                    // The sidebar is a drawer on narrow windows.
-                    this.show_sidebar = false;
-                } else if this.zen_mode {
-                    this.handle_exit_zen();
-                }
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    this.editor_mouse_up(event, window, cx);
+                }),
+            )
+            .on_mouse_down_out(cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                this.handle_mouse_down_out();
                 cx.notify();
+            }))
+            .child({
+                let view = cx.weak_entity();
+                canvas(
+                    |_, _, _| (),
+                    move |_, (), window, _cx| {
+                        window.on_mouse_event(move |event: &MouseExitEvent, phase, _window, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let _ = view.update(cx, |this, cx| {
+                                this.handle_mouse_exit(event);
+                                cx.notify();
+                            });
+                        });
+                    },
+                )
+                .absolute()
+                .size_full()
+            })
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                if this.table_drag.is_none() && !this.table_drag_press_held {
+                    return;
+                }
+                let typed = event.keystroke.key_char.as_deref().unwrap_or("");
+                let (drag, insert) =
+                    clear_drag_for_key(this.table_drag.take(), &event.keystroke.key, typed);
+                this.table_drag = drag;
+                if insert.is_empty() || this.table_drag_press_held {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _window, cx| {
+                if this.table_drag.is_none() || !event.modifiers.modified() {
+                    return;
+                }
+                this.table_drag = clear_drag_for_modifier(this.table_drag.take());
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CloseModal, window, cx| {
+                this.handle_close_modal(window, cx);
             }))
             // Main App View
             .child(if !self.zen_mode {
@@ -6630,3 +7031,7 @@ fn find_match_color(dark: bool, active: bool) -> Hsla {
     };
     color.into()
 }
+
+#[cfg(test)]
+#[path = "table_drag_handler_tests.rs"]
+mod table_drag_handler_tests;

@@ -7,7 +7,7 @@ description = "Native Markdown and text editor for Linux"
 license = "MIT"
 
 [dependencies]
-gpui = "=0.2.2"
+gpui = { version = "=0.2.2" }
 rust-embed = "8.5"
 rfd = "0.15"
 pulldown-cmark = "0.12"
@@ -19,6 +19,9 @@ lopdf = "0.34"
 unicode-segmentation = "1.12"
 trash = "5"
 ureq = "2"
+
+[dev-dependencies]
+gpui = { version = "=0.2.2", features = ["test-support"] }
 
 [patch.crates-io]
 xattr = { path = "patches/xattr" }
