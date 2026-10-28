@@ -158,6 +158,14 @@ fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
 /// Compiled on Linux only for tests, so the portable path is exercised there.
 #[cfg(any(test, not(target_os = "linux")))]
 fn rename_noreplace_portable(from: &Path, to: &Path) -> io::Result<()> {
+    // Directories cannot be hard-linked. Check, then rename; a writer that
+    // creates `to` in between is the one race this path does not close.
+    if fs::symlink_metadata(from)?.is_dir() {
+        if fs::symlink_metadata(to).is_ok() {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        }
+        return fs::rename(from, to);
+    }
     match fs::hard_link(from, to) {
         Ok(()) => fs::remove_file(from),
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(err),
