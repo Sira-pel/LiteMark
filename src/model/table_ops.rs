@@ -46,7 +46,10 @@
 //! A row that would become empty is written as `|  |` so the line is not the
 //! blank line that ends a table. A pipe-less row (example 202's `bar`) stays
 //! byte for byte until a column edit rewrites it. The rewrite then takes the
-//! header's outer pipes, so the line still parses as separate cells.
+//! header's outer pipes, so the line still parses as separate cells. A
+//! rewritten row that would drop an empty edge cell, lose its last pipe, or
+//! pick up four leading spaces (so the parser would not see a table) takes
+//! outer pipes even when the header had none.
 //!
 //! Tables inside a block quote or a list item are not tables in this parser
 //! (`>` and a list marker break the block). Ops do not find them, so the
@@ -298,7 +301,7 @@ impl Table {
     fn apply(&mut self, op: TableOp, anchor: Anchor) -> Option<Anchor> {
         let col_count = self.col_count();
         let col = anchor.col.min(col_count.saturating_sub(1));
-        match op {
+        let target = match op {
             TableOp::InsertRowAbove => {
                 if anchor.row == 0 {
                     return None;
@@ -390,6 +393,16 @@ impl Table {
                     col,
                 })
             }
+        };
+        self.ensure_dirty_rows();
+        target
+    }
+
+    fn ensure_dirty_rows(&mut self) {
+        ensure_row(&mut self.header);
+        ensure_row(&mut self.delim);
+        for row in &mut self.body {
+            ensure_row(row);
         }
     }
 
@@ -759,6 +772,97 @@ fn adopt_header_pipes(row: &mut Row, header: &Parts) {
     if header.leading_pipe || header.trailing_pipe {
         row.parts.leading_pipe = header.leading_pipe;
         row.parts.trailing_pipe = header.trailing_pipe;
+    }
+}
+
+fn cell_is_blank(cell: &str) -> bool {
+    cell.bytes().all(|byte| byte == b' ' || byte == b'\t')
+}
+
+fn line_indent_columns(line: &str) -> usize {
+    let mut column = 0usize;
+    for byte in line.bytes() {
+        match byte {
+            b' ' => column += 1,
+            b'\t' => column += 4 - (column % 4),
+            _ => break,
+        }
+    }
+    column
+}
+
+fn trim_prefix_space(prefix: &mut String) -> bool {
+    match prefix.as_bytes().last() {
+        Some(&b' ') | Some(&b'\t') => {
+            prefix.pop();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Keep a rewritten row as a table row: empty edge cells need a pipe so they
+/// do not fold into the line edge, a single leftover cell needs a pipe so
+/// the delimiter still matches, and four leading spaces would leave the
+/// table (the parser stops a table at column 4).
+fn ensure_row(row: &mut Row) {
+    if !row.dirty {
+        return;
+    }
+    ensure_parts(&mut row.parts);
+}
+
+fn ensure_parts(parts: &mut Parts) {
+    if parts.cells.is_empty() {
+        parts.cells.push("  ".to_string());
+        parts.leading_pipe = true;
+        parts.trailing_pipe = true;
+    } else {
+        if !parts.leading_pipe && cell_is_blank(&parts.cells[0]) {
+            parts.leading_pipe = true;
+        }
+        let last = parts.cells.len() - 1;
+        if !parts.trailing_pipe && cell_is_blank(&parts.cells[last]) {
+            parts.trailing_pipe = true;
+        }
+        if !parts.leading_pipe && !parts.trailing_pipe && parts.cells.len() == 1 {
+            parts.leading_pipe = true;
+            parts.trailing_pipe = true;
+        }
+    }
+    for _ in 0..8 {
+        let joined = join_parts(parts);
+        let parsed = split_parts(&joined);
+        let indent = line_indent_columns(&joined);
+        let pipes = unescaped_pipe_offsets(&joined);
+        if parsed.cells.len() == parts.cells.len() && indent < 4 && !pipes.is_empty() {
+            return;
+        }
+        if indent >= 4 {
+            if !parts.leading_pipe {
+                parts.leading_pipe = true;
+                continue;
+            }
+            if trim_prefix_space(&mut parts.prefix) {
+                continue;
+            }
+        }
+        if pipes.is_empty() {
+            parts.leading_pipe = true;
+            parts.trailing_pipe = true;
+            continue;
+        }
+        if parsed.cells.len() < parts.cells.len() {
+            if !parts.leading_pipe {
+                parts.leading_pipe = true;
+                continue;
+            }
+            if !parts.trailing_pipe {
+                parts.trailing_pipe = true;
+                continue;
+            }
+        }
+        return;
     }
 }
 
@@ -1144,5 +1248,101 @@ mod tests {
         assert!(parsed_table_source(quote, 2).is_none());
         let list = "- | A | B |\n  | --- | --- |\n  | d | e |\n";
         assert!(plan(list, 2, TableOp::InsertRowBelow).is_none());
+    }
+
+    fn table_row_count(content: &str) -> usize {
+        parse_document(content)
+            .lines
+            .iter()
+            .filter(|line| matches!(line.kind, LineKind::TableRow { .. }))
+            .count()
+    }
+
+    fn table_col_count(content: &str) -> usize {
+        for line in &parse_document(content).lines {
+            if let LineKind::TableRow { alignments, .. } = &line.kind {
+                return alignments.len();
+            }
+        }
+        0
+    }
+
+    /// GFM tables may omit the outer pipes (example 199's body, and
+    /// `a | b` / `--|--` / `1 | 2`). An edit must not drop the table.
+    #[test]
+    fn no_outer_pipes_insert_col_left_keeps_the_table() {
+        let src = "a | b\n--|--\n1 | 2\n";
+        assert_eq!(table_row_count(src), 2);
+        assert_eq!(table_col_count(src), 2);
+        let (out, _) = apply(src, 0, 0, TableOp::InsertColLeft);
+        assert_eq!(out, "| |a | b\n---|--|--\n| |1 | 2\n");
+        assert_eq!(table_row_count(&out), 2);
+        assert_eq!(table_col_count(&out), 3);
+    }
+
+    #[test]
+    fn no_outer_pipes_insert_col_right_keeps_the_table() {
+        let src = "a | b\n--|--\n1 | 2\n";
+        let (out, _) = apply(src, 0, 1, TableOp::InsertColRight);
+        assert_eq!(out, "a | b| |\n--|--|---\n1 | 2| |\n");
+        assert_eq!(table_row_count(&out), 2);
+        assert_eq!(table_col_count(&out), 3);
+    }
+
+    #[test]
+    fn no_outer_pipes_delete_col_keeps_a_one_column_table() {
+        let src = "a | b\n--|--\n1 | 2\n";
+        let (out, _) = apply(src, 0, 0, TableOp::DeleteCol);
+        assert_eq!(out, "| b|\n|--|\n| 2|\n");
+        assert_eq!(table_row_count(&out), 2);
+        assert_eq!(table_col_count(&out), 1);
+    }
+
+    #[test]
+    fn no_outer_pipes_move_col_does_not_indent_into_a_code_block() {
+        let src = "  b c  |  é😀  |\n:--|--:\n";
+        assert_eq!(table_row_count(src), 1);
+        let (out, _) = apply(src, 0, 0, TableOp::MoveCol { to_index: 1 });
+        assert_eq!(out, "  |  é😀  |b c  |\n--:|:--\n");
+        assert_eq!(table_row_count(&out), 1);
+        for line in out.lines() {
+            let lead = line.bytes().take_while(|byte| *byte == b' ').count();
+            assert!(lead < 4, "move col indented {lead} spaces, line {line:?}");
+        }
+    }
+
+    #[test]
+    fn insert_row_below_a_single_cell_without_trailing_pipe_stays_a_table_row() {
+        let src = "| a \n|---\n";
+        assert_eq!(table_row_count(src), 1);
+        let (out, _) = apply(src, 0, 0, TableOp::InsertRowBelow);
+        assert_eq!(out, "| a \n|---\n| | \n");
+        assert_eq!(table_row_count(&out), 2);
+    }
+
+    #[test]
+    fn insert_row_below_a_pipe_less_table_stays_a_table_row() {
+        let src = "a | b\n--|--\n1 | 2\n";
+        let (out, caret) = apply(src, 1, 0, TableOp::InsertRowBelow);
+        assert_eq!(out, "a | b\n--|--\n1 | 2\n| | |\n");
+        assert_eq!(table_row_count(&out), 3);
+        assert_eq!(table_col_count(&out), 2);
+        let plan = plan(&out, caret, TableOp::DeleteRow)
+            .unwrap_or_else(|| panic!("delete of the new row refused on {out:?}"));
+        let mut restored = out;
+        restored.replace_range(plan.range, &plan.new_text);
+        assert_eq!(restored, src);
+    }
+
+    /// Escaped pipes are cell text. Deleting a column must not drop body rows.
+    #[test]
+    fn delete_col_keeps_body_rows_when_a_cell_holds_an_escaped_pipe() {
+        let src = "a \\| b | c\n---|---\n1 \\| 2 | 3\n";
+        assert_eq!(table_row_count(src), 2);
+        assert_eq!(table_col_count(src), 2);
+        let (out, _) = apply(src, 0, 1, TableOp::DeleteCol);
+        assert_eq!(out, "|a \\| b |\n|---|\n|1 \\| 2 |\n");
+        assert_eq!(table_row_count(&out), 2);
+        assert_eq!(table_col_count(&out), 1);
     }
 }
