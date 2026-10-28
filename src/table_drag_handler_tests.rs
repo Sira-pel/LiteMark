@@ -3,8 +3,8 @@ use crate::markdown::TableColumnAlign;
 use crate::ui::table_chrome::column_pill_bounds;
 use crate::ui::{TableColGeom, TableRowGeom};
 use gpui::{
-    ClipboardItem, Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    TestAppContext, VisualTestContext,
+    ClipboardItem, Entity, Modifiers, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, TestAppContext, VisualTestContext,
 };
 
 // `use gpui::*` in this crate re-exports a `test` attribute that is not
@@ -129,6 +129,22 @@ fn sample_drag() -> TableDrag {
         anchor: 0,
         gap: 1,
         drop_visible: true,
+    }
+}
+
+fn exit_event(pressed_button: Option<MouseButton>) -> MouseExitEvent {
+    MouseExitEvent {
+        position: point(px(10.0), px(10.0)),
+        pressed_button,
+        modifiers: Modifiers::default(),
+    }
+}
+
+fn move_event(pressed_button: Option<MouseButton>) -> MouseMoveEvent {
+    MouseMoveEvent {
+        position: point(px(10.0), px(10.0)),
+        pressed_button,
+        modifiers: Modifiers::default(),
     }
 }
 
@@ -447,14 +463,7 @@ fn mouse_move_with_no_button_clears_latch_and_allows_typing() {
     hold_press(&view, &mut cx);
     view.update(&mut cx, |app, cx| {
         app.table_drag = Some(sample_drag());
-        app.editor_mouse_move(
-            &MouseMoveEvent {
-                position: point(px(10.0), px(10.0)),
-                pressed_button: None,
-                modifiers: Modifiers::default(),
-            },
-            cx,
-        );
+        app.editor_mouse_move(&move_event(None), cx);
     });
     view.read_with(&cx, |app, _| {
         assert!(!app.table_drag_press_held);
@@ -467,13 +476,69 @@ fn mouse_move_with_no_button_clears_latch_and_allows_typing() {
 }
 
 #[std_test]
-fn mouse_exit_clears_latch_and_allows_typing() {
+fn mouse_exit_with_button_held_swallows_typing() {
     let (view, mut cx) = harness(WORD);
     set_caret(&view, &mut cx, WORD.len());
     hold_press(&view, &mut cx);
     view.update(&mut cx, |app, _cx| {
         app.table_drag = Some(sample_drag());
-        app.handle_mouse_exit();
+        app.handle_mouse_exit(&exit_event(Some(MouseButton::Left)));
+    });
+    view.read_with(&cx, |app, _| {
+        assert!(app.table_drag_press_held);
+        assert!(app.table_drag.is_some());
+    });
+    type_x(&view, &mut cx);
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_eq!(after, WORD);
+}
+
+#[std_test]
+fn mouse_exit_held_then_reentry_move_held_still_swallows() {
+    let (view, mut cx) = harness(WORD);
+    set_caret(&view, &mut cx, WORD.len());
+    hold_press(&view, &mut cx);
+    view.update(&mut cx, |app, cx| {
+        app.table_drag = Some(sample_drag());
+        app.handle_mouse_exit(&exit_event(Some(MouseButton::Left)));
+        app.editor_mouse_move(&move_event(Some(MouseButton::Left)), cx);
+    });
+    view.read_with(&cx, |app, _| {
+        assert!(app.table_drag_press_held);
+    });
+    type_x(&view, &mut cx);
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_eq!(after, WORD);
+}
+
+#[std_test]
+fn mouse_exit_held_then_no_button_move_allows_typing() {
+    let (view, mut cx) = harness(WORD);
+    set_caret(&view, &mut cx, WORD.len());
+    hold_press(&view, &mut cx);
+    view.update(&mut cx, |app, cx| {
+        app.table_drag = Some(sample_drag());
+        app.handle_mouse_exit(&exit_event(Some(MouseButton::Left)));
+        app.editor_mouse_move(&move_event(None), cx);
+    });
+    view.read_with(&cx, |app, _| {
+        assert!(!app.table_drag_press_held);
+        assert!(app.table_drag.is_none());
+    });
+    type_x(&view, &mut cx);
+    let (after, _) = content_and_caret(&view, &cx);
+    assert_ne!(after, WORD);
+    assert!(after.contains('x'));
+}
+
+#[std_test]
+fn mouse_exit_with_no_button_clears_latch() {
+    let (view, mut cx) = harness(WORD);
+    set_caret(&view, &mut cx, WORD.len());
+    hold_press(&view, &mut cx);
+    view.update(&mut cx, |app, _cx| {
+        app.table_drag = Some(sample_drag());
+        app.handle_mouse_exit(&exit_event(None));
     });
     view.read_with(&cx, |app, _| {
         assert!(!app.table_drag_press_held);
@@ -491,14 +556,7 @@ fn mouse_move_with_button_pressed_keeps_latch_and_swallows_typing() {
     set_caret(&view, &mut cx, WORD.len());
     hold_press(&view, &mut cx);
     view.update(&mut cx, |app, cx| {
-        app.editor_mouse_move(
-            &MouseMoveEvent {
-                position: point(px(10.0), px(10.0)),
-                pressed_button: Some(MouseButton::Left),
-                modifiers: Modifiers::default(),
-            },
-            cx,
-        );
+        app.editor_mouse_move(&move_event(Some(MouseButton::Left)), cx);
     });
     view.read_with(&cx, |app, _| {
         assert!(app.table_drag_press_held);

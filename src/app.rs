@@ -173,8 +173,9 @@ pub struct LiteMarkApp {
     /// True while the mouse button that started a table drag is still held.
     /// Survives a modifier cancel of the visual drag so later chords cannot
     /// edit the note until that press ends (mouse-up anywhere, next mouse-down,
-    /// a move with no button, the pointer leaving the window, focus loss,
-    /// Escape, right-click, or a non-drag chrome/checkbox click).
+    /// a move with no button, a MouseExited with no button, focus loss,
+    /// Escape, right-click, or a non-drag chrome/checkbox click). A leave
+    /// that still has a button (X11, no grab) does not end the press.
     pub table_drag_press_held: bool,
     /// Byte the open table menu should edit. Empty means the caret.
     pub table_action_anchor: Option<usize>,
@@ -619,11 +620,19 @@ impl LiteMarkApp {
         self.clear_table_drag_press();
     }
 
-    /// Pointer left the window. Wayland Leave drops `mouse_focused_window`
-    /// so no MouseUp follows; X11 has no pointer grab. Cancel the drag and
-    /// the latch together: a press must not outlive the pointer leaving, and
-    /// a key must not edit while a drag is still running.
-    fn handle_mouse_exit(&mut self) {
+    /// Pointer left the window. Only a no-button exit ends the press:
+    /// - Wayland: the implicit grab delivers MouseUp (`on_mouse_up_out`)
+    ///   before Leave, so this event usually has no button.
+    /// - X11: no grab, so XI_Leave arrives mid-press (`pressed_button` Some).
+    ///   Keep the latch until the press really ends (no-button move, next
+    ///   down, focus loss, Escape/CloseModal, right-click).
+    /// - Windows: SetCapture, so MouseUp still arrives outside.
+    /// A held exit keeps `table_drag` so an X11 re-entry can continue the
+    /// drop preview. The latch stays set either way until the press ends.
+    fn handle_mouse_exit(&mut self, event: &MouseExitEvent) {
+        if event.pressed_button.is_some() {
+            return;
+        }
         self.table_drag = None;
         self.clear_table_drag_press();
     }
@@ -3813,9 +3822,11 @@ impl LiteMarkApp {
     }
 
     fn editor_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        // A move with no button means the originating press is over. This is
-        // the in-window path that does not depend on MouseUp: Wayland/X11
-        // never deliver that event after a release outside the window.
+        // A move with no button means the originating press is over. On X11
+        // a release outside the window is never delivered (no grab); the
+        // first in-window move after that has pressed_button None. Wayland's
+        // implicit grab already delivered MouseUp (on_mouse_up_out) before
+        // Leave. Windows SetCapture also delivers MouseUp outside.
         if event.pressed_button.is_none()
             && (self.table_drag.is_some() || self.table_drag_press_held)
         {
@@ -6400,12 +6411,12 @@ impl Render for LiteMarkApp {
                 canvas(
                     |_, _, _| (),
                     move |_, (), window, _cx| {
-                        window.on_mouse_event(move |_: &MouseExitEvent, phase, _window, cx| {
+                        window.on_mouse_event(move |event: &MouseExitEvent, phase, _window, cx| {
                             if phase != DispatchPhase::Capture {
                                 return;
                             }
                             let _ = view.update(cx, |this, cx| {
-                                this.handle_mouse_exit();
+                                this.handle_mouse_exit(event);
                                 cx.notify();
                             });
                         });
