@@ -627,6 +627,7 @@ impl LiteMarkApp {
     ///   Keep the latch until the press really ends (no-button move, next
     ///   down, focus loss, Escape/CloseModal, right-click).
     /// - Windows: SetCapture, so MouseUp still arrives outside.
+    ///
     /// A held exit keeps `table_drag` so an X11 re-entry can continue the
     /// drop preview. The latch stays set either way until the press ends.
     fn handle_mouse_exit(&mut self, event: &MouseExitEvent) {
