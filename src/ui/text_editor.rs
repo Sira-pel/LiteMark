@@ -1663,7 +1663,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         let bar_x = base_x + px(4.0);
                         bg_quads.push(fill(
                             Bounds::new(point(bar_x, cur_y), size(px(3.0), row_line_height)),
-                            self.link_color,
+                            self.border_color,
                         ));
                     }
                     LineKind::HorizontalRule => {
