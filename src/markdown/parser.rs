@@ -1048,7 +1048,7 @@ pub struct StyledSegment {
     pub link_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum InlineTagKind {
     Bold,
     Italic,
@@ -1064,6 +1064,30 @@ pub struct InlinePair {
     pub open_delim: std::ops::Range<usize>,
     pub inner: std::ops::Range<usize>,
     pub close_delim: std::ops::Range<usize>,
+    /// Min `open_delim.start` among non-link pairs that share `inner`.
+    pub group_open_start: usize,
+    /// Max `close_delim.end` among non-link pairs that share `inner`.
+    pub group_close_end: usize,
+}
+
+impl InlinePair {
+    pub fn new(
+        kind: InlineTagKind,
+        open_delim: std::ops::Range<usize>,
+        inner: std::ops::Range<usize>,
+        close_delim: std::ops::Range<usize>,
+    ) -> Self {
+        let group_open_start = open_delim.start;
+        let group_close_end = close_delim.end;
+        Self {
+            kind,
+            open_delim,
+            inner,
+            close_delim,
+            group_open_start,
+            group_close_end,
+        }
+    }
 }
 
 /// Maps between a visible WYSIWYG display string and original source byte offsets.
@@ -1235,10 +1259,123 @@ pub struct ParsedDocument {
 }
 
 impl ParsedDocument {
+    /// Index of the line whose source range contains `offset` (inclusive end,
+    /// so a line's terminating newline maps to that line).
+    pub fn line_index_at(&self, offset: usize) -> Option<usize> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let i = self.lines.partition_point(|l| l.source.start <= offset);
+        if i == 0 {
+            return None;
+        }
+        let idx = i - 1;
+        if offset <= self.lines[idx].source.end {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
     pub fn line_at_offset(&self, offset: usize) -> Option<&ParsedLine> {
-        self.lines
-            .iter()
-            .find(|l| offset >= l.source.start && offset <= l.source.end)
+        self.line_index_at(offset).map(|i| &self.lines[i])
+    }
+
+    /// Lines whose source overlaps half-open `range`. An empty range is the
+    /// line that contains the caret. `pad` extra lines on each side are
+    /// included so neighbor-span expansion still sees adjacent pairs.
+    pub fn overlapping_line_span(
+        &self,
+        range: std::ops::Range<usize>,
+        pad: usize,
+    ) -> std::ops::Range<usize> {
+        if self.lines.is_empty() {
+            return 0..0;
+        }
+        let (first, last) = if range.end <= range.start {
+            match self.line_index_at(range.start) {
+                Some(i) => (i, i + 1),
+                None => return 0..0,
+            }
+        } else {
+            let first = self.lines.partition_point(|l| l.source.end <= range.start);
+            let last = self.lines.partition_point(|l| l.source.start < range.end);
+            (first, last.max(first))
+        };
+        first.saturating_sub(pad)..last.saturating_add(pad).min(self.lines.len())
+    }
+
+    pub fn lines_overlapping(&self, range: std::ops::Range<usize>) -> &[ParsedLine] {
+        let span = self.overlapping_line_span(range, 0);
+        &self.lines[span]
+    }
+
+    pub fn lines_near(&self, range: std::ops::Range<usize>) -> &[ParsedLine] {
+        let span = self.overlapping_line_span(range, 1);
+        &self.lines[span]
+    }
+
+    /// The text of `range` as the WYSIWYG view shows it: inline markers,
+    /// block prefixes, fence lines and rules are dropped, and list items get
+    /// a plain bullet back. Tables are copied as their Markdown source.
+    pub fn visible_text(&self, content: &str, range: std::ops::Range<usize>) -> String {
+        let mut out = String::new();
+        // A line counts while the range touches its text or its line ending.
+        let first = self.lines.partition_point(|l| l.source.end < range.start);
+        let last = self.lines.partition_point(|l| l.source.start < range.end);
+        for index in first..last.max(first) {
+            let line = &self.lines[index];
+            let next_start = self
+                .lines
+                .get(index + 1)
+                .map(|next| next.source.start)
+                .unwrap_or(content.len());
+            let clip_end = range.end.min(line.source.end);
+            let clip = range.start.max(line.source.start).min(clip_end)..clip_end;
+            let ending = &content[range.start.clamp(line.source.end, next_start)
+                ..range.end.clamp(line.source.end, next_start)];
+            match &line.kind {
+                LineKind::CodeFence { .. } | LineKind::HorizontalRule => continue,
+                LineKind::TableRow { .. } | LineKind::TableDelimiter => {
+                    out.push_str(&content[clip]);
+                }
+                kind => {
+                    if let LineKind::ListItem {
+                        ordered,
+                        number,
+                        task,
+                        indent_cols,
+                        ..
+                    } = kind
+                    {
+                        if clip.start <= line.prefix_range.end {
+                            out.push_str(&" ".repeat(*indent_cols));
+                            match (task, ordered) {
+                                (Some(true), _) => out.push_str("☑ "),
+                                (Some(false), _) => out.push_str("☐ "),
+                                (None, true) => out.push_str(&format!("{number}. ")),
+                                (None, false) => out.push_str("• "),
+                            }
+                        }
+                    }
+                    let mut cursor = clip.start;
+                    for hidden in &line.hidden_ranges {
+                        if hidden.end <= cursor || hidden.start >= clip.end {
+                            continue;
+                        }
+                        if hidden.start > cursor {
+                            out.push_str(&content[cursor..hidden.start]);
+                        }
+                        cursor = cursor.max(hidden.end);
+                    }
+                    if cursor < clip.end {
+                        out.push_str(&content[cursor..clip.end]);
+                    }
+                }
+            }
+            out.push_str(ending);
+        }
+        out
     }
 }
 
@@ -1363,12 +1500,12 @@ fn parse_inline_syntax(
                         let inner = open_d.end..close_d.start;
                         raw_hidden.push(open_d.clone());
                         raw_hidden.push(close_d.clone());
-                        inline_pairs.push(InlinePair {
-                            kind: InlineTagKind::Bold,
-                            open_delim: open_d,
+                        inline_pairs.push(InlinePair::new(
+                            InlineTagKind::Bold,
+                            open_d,
                             inner,
-                            close_delim: close_d,
-                        });
+                            close_d,
+                        ));
                     }
                 }
             }
@@ -1384,12 +1521,12 @@ fn parse_inline_syntax(
                         let inner = open_d.end..close_d.start;
                         raw_hidden.push(open_d.clone());
                         raw_hidden.push(close_d.clone());
-                        inline_pairs.push(InlinePair {
-                            kind: InlineTagKind::Italic,
-                            open_delim: open_d,
+                        inline_pairs.push(InlinePair::new(
+                            InlineTagKind::Italic,
+                            open_d,
                             inner,
-                            close_delim: close_d,
-                        });
+                            close_d,
+                        ));
                     }
                 }
             }
@@ -1410,12 +1547,12 @@ fn parse_inline_syntax(
                         let inner = open_d.end..close_d.start;
                         raw_hidden.push(open_d.clone());
                         raw_hidden.push(close_d.clone());
-                        inline_pairs.push(InlinePair {
-                            kind: InlineTagKind::Strike,
-                            open_delim: open_d,
+                        inline_pairs.push(InlinePair::new(
+                            InlineTagKind::Strike,
+                            open_d,
                             inner,
-                            close_delim: close_d,
-                        });
+                            close_d,
+                        ));
                     }
                 }
             }
@@ -1430,12 +1567,12 @@ fn parse_inline_syntax(
                     let inner = open_d.end..close_d.start;
                     raw_hidden.push(open_d.clone());
                     raw_hidden.push(close_d.clone());
-                    inline_pairs.push(InlinePair {
-                        kind: InlineTagKind::Link,
-                        open_delim: open_d,
+                    inline_pairs.push(InlinePair::new(
+                        InlineTagKind::Link,
+                        open_d,
                         inner,
-                        close_delim: close_d,
-                    });
+                        close_d,
+                    ));
                 }
             }
             pulldown_cmark::Event::InlineHtml(h) | pulldown_cmark::Event::Html(h) => {
@@ -1448,12 +1585,12 @@ fn parse_inline_syntax(
                         let inner = open_d.end..close_d.start;
                         raw_hidden.push(open_d.clone());
                         raw_hidden.push(close_d.clone());
-                        inline_pairs.push(InlinePair {
-                            kind: InlineTagKind::Underline,
-                            open_delim: open_d,
+                        inline_pairs.push(InlinePair::new(
+                            InlineTagKind::Underline,
+                            open_d,
                             inner,
-                            close_delim: close_d,
-                        });
+                            close_d,
+                        ));
                     }
                 }
             }
@@ -1468,12 +1605,12 @@ fn parse_inline_syntax(
                 let inner = open_d.end..close_d.start;
                 raw_hidden.push(open_d.clone());
                 raw_hidden.push(close_d.clone());
-                inline_pairs.push(InlinePair {
-                    kind: InlineTagKind::Code,
-                    open_delim: open_d,
-                    inner: inner.clone(),
-                    close_delim: close_d,
-                });
+                inline_pairs.push(InlinePair::new(
+                    InlineTagKind::Code,
+                    open_d,
+                    inner.clone(),
+                    close_d,
+                ));
                 if inner.end > inner.start {
                     styled_segments.push(StyledSegment {
                         source: inner,
@@ -1560,7 +1697,31 @@ fn parse_inline_syntax(
         }
     }
 
+    finalize_pair_groups(&mut inline_pairs);
     (raw_hidden, inline_pairs, styled_segments)
+}
+
+/// Fill `group_open_start` / `group_close_end` so stacked markers that share
+/// an `inner` range (`***`, `~~**`, `<u>**`) are O(1) to look up later.
+fn finalize_pair_groups(pairs: &mut [InlinePair]) {
+    for i in 0..pairs.len() {
+        if pairs[i].kind == InlineTagKind::Link {
+            pairs[i].group_open_start = pairs[i].open_delim.start;
+            pairs[i].group_close_end = pairs[i].close_delim.end;
+            continue;
+        }
+        let inner = pairs[i].inner.clone();
+        let mut open = pairs[i].open_delim.start;
+        let mut close = pairs[i].close_delim.end;
+        for p in pairs.iter() {
+            if p.kind != InlineTagKind::Link && p.inner == inner {
+                open = open.min(p.open_delim.start);
+                close = close.max(p.close_delim.end);
+            }
+        }
+        pairs[i].group_open_start = open;
+        pairs[i].group_close_end = close;
+    }
 }
 
 /// True when the delimiter byte at `pos` is backslash-escaped and therefore
@@ -1727,12 +1888,12 @@ fn synthesize_flanking_pairs(
             used[close_idx] = true;
             raw_hidden.push(base + o_start..base + o_end);
             raw_hidden.push(base + closer_start..base + c_end);
-            inline_pairs.push(InlinePair {
+            inline_pairs.push(InlinePair::new(
                 kind,
-                open_delim: base + o_start..base + o_end,
-                inner: inner.clone(),
-                close_delim: base + closer_start..base + c_end,
-            });
+                base + o_start..base + o_end,
+                inner.clone(),
+                base + closer_start..base + c_end,
+            ));
             let or_kind = |s: &mut StyledSegment| match kind {
                 InlineTagKind::Bold => s.bold = true,
                 InlineTagKind::Italic => s.italic = true,
@@ -3129,6 +3290,42 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_at_offset_matches_linear_scan() {
+        let md = "aa\n\nbb **c**\n# h\n";
+        let parsed = parse_document(md);
+        for off in 0..=md.len() {
+            let binary = parsed.line_at_offset(off).map(|l| l.line_index);
+            let linear = parsed
+                .lines
+                .iter()
+                .find(|l| off >= l.source.start && off <= l.source.end)
+                .map(|l| l.line_index);
+            assert_eq!(binary, linear, "offset {off}");
+        }
+        for pair in &parsed.inline_pairs {
+            if pair.kind == InlineTagKind::Link {
+                continue;
+            }
+            let naive_close = parsed
+                .inline_pairs
+                .iter()
+                .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
+                .map(|p| p.close_delim.end)
+                .max()
+                .unwrap_or(pair.close_delim.end);
+            let naive_open = parsed
+                .inline_pairs
+                .iter()
+                .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
+                .map(|p| p.open_delim.start)
+                .min()
+                .unwrap_or(pair.open_delim.start);
+            assert_eq!(pair.group_close_end, naive_close);
+            assert_eq!(pair.group_open_start, naive_open);
+        }
+    }
 
     #[test]
     fn test_in_list_or_quote_tracker_exhaustive() {

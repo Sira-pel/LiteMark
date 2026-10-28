@@ -13,9 +13,15 @@ pub fn render_icon(name: &str, size_px: f32, color: Rgba) -> impl IntoElement {
         .text_color(color)
 }
 
-struct SimpleTooltip {
+pub struct SimpleTooltip {
     text: &'static str,
     theme: Theme,
+}
+
+impl SimpleTooltip {
+    pub fn new(text: &'static str, theme: Theme) -> Self {
+        Self { text, theme }
+    }
 }
 
 impl Render for SimpleTooltip {

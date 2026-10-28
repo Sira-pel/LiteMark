@@ -2,20 +2,22 @@ use gpui::prelude::*;
 use gpui::*;
 use crate::model::ActiveFormats;
 use crate::theme::{sz, Theme};
-use super::primitives::{divider, icon_button, DIVIDER_TOTAL_W};
+use super::primitives::{divider, icon_button, render_icon, DIVIDER_TOTAL_W};
 use super::menu::MenuItem;
 
-pub struct FormattingToolbarProps<FFormat, FTable, FLink, FToggleFind, FToggleOverflow>
+pub struct FormattingToolbarProps<FFormat, FTable, FLink, FToggleFind, FToggleOverflow, FToggleHeading>
 where
     FFormat: Fn(&'static str, &mut App) + 'static + Clone,
     FTable: Fn(&mut App) + 'static + Clone,
     FLink: Fn(&mut App) + 'static + Clone,
     FToggleFind: Fn(&mut App) + 'static + Clone,
     FToggleOverflow: Fn(&mut App) + 'static + Clone,
+    FToggleHeading: Fn(&mut App) + 'static + Clone,
 {
     pub active_formats: ActiveFormats,
     pub show_overflow_menu: bool,
     pub show_table_menu: bool,
+    pub show_heading_menu: bool,
     pub is_narrow: bool,
     pub menu_bar_element: AnyElement,
     pub settings_gear_element: AnyElement,
@@ -24,10 +26,18 @@ where
     pub on_insert_link: FLink,
     pub on_toggle_find: FToggleFind,
     pub on_toggle_overflow: FToggleOverflow,
+    pub on_toggle_heading: FToggleHeading,
 }
 
-pub fn render_formatting_toolbar<FFormat, FTable, FLink, FToggleFind, FToggleOverflow>(
-    props: FormattingToolbarProps<FFormat, FTable, FLink, FToggleFind, FToggleOverflow>,
+pub fn render_formatting_toolbar<
+    FFormat,
+    FTable,
+    FLink,
+    FToggleFind,
+    FToggleOverflow,
+    FToggleHeading,
+>(
+    props: FormattingToolbarProps<FFormat, FTable, FLink, FToggleFind, FToggleOverflow, FToggleHeading>,
     theme: &Theme,
 ) -> impl IntoElement
 where
@@ -36,12 +46,14 @@ where
     FLink: Fn(&mut App) + 'static + Clone,
     FToggleFind: Fn(&mut App) + 'static + Clone,
     FToggleOverflow: Fn(&mut App) + 'static + Clone,
+    FToggleHeading: Fn(&mut App) + 'static + Clone,
 {
     let on_format = props.on_format;
     let on_table = props.on_insert_table;
     let on_link = props.on_insert_link;
     let on_find = props.on_toggle_find;
     let on_overflow = props.on_toggle_overflow;
+    let on_heading = props.on_toggle_heading;
     let formats = props.active_formats;
     let is_narrow = props.is_narrow;
 
@@ -58,7 +70,6 @@ where
             .justify_between()
             .h(sz::TOOLBAR)
             .px(px(TOOLBAR_PX_PAD))
-            .pt(px(6.0))
             .bg(theme.bg_toolbar)
             .border_b_1()
             .border_color(theme.border_primary)
@@ -88,18 +99,10 @@ where
                         icon_button("tb-redo", "rotate-cw", "Redo (Ctrl+Y)", false, theme, move |_, _, cx| f("redo", cx))
                     })
                     .child(divider(theme))
-                    // 3, 4, 5: Headings
+                    // 3: Headings dropdown (H1 / H2 / H3)
                     .child({
-                        let f = on_format.clone();
-                        icon_button("tb-h1", "heading-1", "Heading 1 (Ctrl+1)", formats.h1, theme, move |_, _, cx| f("h1", cx))
-                    })
-                    .child({
-                        let f = on_format.clone();
-                        icon_button("tb-h2", "heading-2", "Heading 2 (Ctrl+2)", formats.h2, theme, move |_, _, cx| f("h2", cx))
-                    })
-                    .child({
-                        let f = on_format.clone();
-                        icon_button("tb-h3", "heading-3", "Heading 3 (Ctrl+3)", formats.h3, theme, move |_, _, cx| f("h3", cx))
+                        let h = on_heading.clone();
+                        heading_button(theme, formats, props.show_heading_menu, move |cx| h(cx))
                     })
                     .child(divider(theme))
                     // 6, 7, 8, 9, 10: Bold, Italic, Underline (Ctrl+U), Link, Search
@@ -169,7 +172,6 @@ where
             .justify_between()
             .h(sz::TOOLBAR)
             .px(px(TOOLBAR_PX_PAD))
-            .pt(px(6.0))
             .bg(theme.bg_toolbar)
             .border_b_1()
             .border_color(theme.border_primary)
@@ -231,6 +233,107 @@ where
     }
 }
 
+/// Width of the headings dropdown button: an icon plus a small chevron.
+pub const HEADING_BTN_W: f32 = 44.0;
+
+/// Headings dropdown button. It shows the active level (H1-H3) when the caret
+/// is in a heading and a plain "H" otherwise, with a chevron that says it
+/// opens a menu.
+fn heading_button(
+    theme: &Theme,
+    formats: ActiveFormats,
+    is_open: bool,
+    on_toggle: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    let active = formats.h1 || formats.h2 || formats.h3;
+    let icon = if formats.h1 {
+        "heading-1"
+    } else if formats.h2 {
+        "heading-2"
+    } else if formats.h3 {
+        "heading-3"
+    } else {
+        "heading"
+    };
+    let color = if active || is_open {
+        theme.text_strong
+    } else {
+        theme.text_muted
+    };
+    let th = *theme;
+    div()
+        .id("tb-heading")
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(2.0))
+        .w(px(HEADING_BTN_W))
+        .h(sz::BTN)
+        .rounded(sz::R_MD)
+        .cursor_pointer()
+        .bg(if active || is_open {
+            theme.row_active
+        } else {
+            rgba(0x00000000)
+        })
+        .when(!active && !is_open, |s| {
+            s.hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
+                .active(|a| a.bg(theme.bg_active))
+        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| on_toggle(cx))
+        .tooltip(move |_, cx| {
+            cx.new(|_| super::primitives::SimpleTooltip::new("Headings", th)).into()
+        })
+        .child(render_icon(icon, 16.0, color))
+        .child(render_icon("chevron-down", 10.0, color))
+}
+
+/// Left edge of the headings button for a window `viewport_w` wide. The
+/// centered button group starts `wide_center_width() / 2` left of the middle;
+/// undo, redo and a divider come first.
+pub fn heading_button_left(viewport_w: f32) -> f32 {
+    let btn_w = f32::from(sz::BTN);
+    viewport_w / 2.0 - wide_center_width() / 2.0
+        + (btn_w * 2.0)
+        + (TOOLBAR_ICON_GAP * 3.0)
+        + DIVIDER_TOTAL_W
+}
+
+/// Width of the centered button group in the wide (>= 640px) layout.
+pub fn wide_center_width() -> f32 {
+    let btn_w = f32::from(sz::BTN);
+    // Undo, Redo, Bold, Italic, Underline, Link, Search, Bullet, Numbered,
+    // Checklist, Table, More, plus the headings dropdown.
+    let plain_buttons = 12.0;
+    let dividers = 3.0;
+    let items = plain_buttons + 1.0 + dividers;
+    (plain_buttons * btn_w) + HEADING_BTN_W + (dividers * DIVIDER_TOTAL_W)
+        + ((items - 1.0) * TOOLBAR_ICON_GAP)
+}
+
+/// Entries of the headings dropdown.
+pub fn build_heading_menu_items(
+    on_format: impl Fn(&'static str, &mut App) + 'static + Clone,
+    on_close: impl Fn(&mut App) + 'static + Clone,
+) -> Vec<MenuItem> {
+    [
+        ("Heading 1", "heading-1", "Ctrl+1", "h1"),
+        ("Heading 2", "heading-2", "Ctrl+2", "h2"),
+        ("Heading 3", "heading-3", "Ctrl+3", "h3"),
+    ]
+    .into_iter()
+    .map(|(label, icon, shortcut, cmd)| {
+        let f = on_format.clone();
+        let c = on_close.clone();
+        MenuItem::action(label, Some(icon), Some(shortcut), move |_, cx| {
+            f(cmd, cx);
+            c(cx);
+        })
+    })
+    .collect()
+}
+
 pub const TOOLBAR_PX_PAD: f32 = 8.0;
 pub const TOOLBAR_ICON_GAP: f32 = 2.0;
 
@@ -264,13 +367,7 @@ pub fn calculate_wide_toolbar_min_width() -> f32 {
     // Right zone: settings gear button
     let right_w = btn_w;
     // Center zone format icons:
-    // 15 buttons: Undo, Redo, H1, H2, H3, Bold, Italic, Underline, Link, Search, Bullet, Numbered, Checklist, Table, More
-    // 3 dividers
-    let center_buttons_count = 15.0;
-    let center_dividers_count = 3.0;
-    let total_center_items = center_buttons_count + center_dividers_count;
-    let gaps = (total_center_items - 1.0) * TOOLBAR_ICON_GAP;
-    let center_w = (center_buttons_count * btn_w) + (center_dividers_count * DIVIDER_TOTAL_W) + gaps;
+    let center_w = wide_center_width();
 
     let container_pad = TOOLBAR_PX_PAD * 2.0;
 

@@ -255,12 +255,12 @@ where
                                         .truncate()
                                         .child(tab.title),
                                 )
-                                // Close slot (16px) with close button or modified dot
+                                // Close slot (24px) with close button or modified dot
                                 .child(
                                     div()
                                         .flex_shrink_0()
-                                        .w(px(16.0))
-                                        .h(px(16.0))
+                                        .w(px(24.0))
+                                        .h(px(24.0))
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -271,9 +271,9 @@ where
                                                     "close-tab-{}",
                                                     tid_for_close
                                                 )))
-                                                .w(px(16.0))
-                                                .h(px(16.0))
-                                                .rounded(sz::R_SM)
+                                                .w(px(24.0))
+                                                .h(px(24.0))
+                                                .rounded(sz::R_MD)
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
@@ -291,7 +291,7 @@ where
                                                 .on_click(move |_, _, cx| {
                                                     cls(tid_for_close.clone(), cx);
                                                 })
-                                                .child(render_icon("x", 12.0, theme.text_muted)),
+                                                .child(render_icon("x", 14.0, theme.text_muted)),
                                         )
                                         .when(tab.is_modified, |s| {
                                             // Modified dot when not hovered
@@ -306,13 +306,14 @@ where
                                         }),
                                 )
                         }))
-                        // "+" button: 28x28 at y 6-34, 4px after last tab
+                        // "+" button: 28x28 centered on the tabs (32px, flush to the
+                        // bottom of the bar), 4px after the last tab
                         .child({
                             let nt = on_new_tab.clone();
                             div()
                                 .flex()
                                 .items_center()
-                                .h_full()
+                                .h(sz::TAB_H)
                                 .flex_shrink_0()
                                 .child(
                                     div()

@@ -3,6 +3,7 @@ use crate::markdown::{export_stem, parse_document, render_export, TableColumnAli
 use crate::model::text_ops::{
     home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
 };
+use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
@@ -29,6 +30,31 @@ pub(crate) struct OptimisticClose {
     prev_selected: Option<SidebarTarget>,
 }
 
+/// Result of moving or copying one dropped row.
+enum DropOutcome {
+    /// Carries the single-item toast text.
+    Done(String),
+    /// Nothing to do (already in that folder, dropped on itself).
+    Skipped,
+    Failed(String),
+}
+
+/// Shared state for one bulk trash: the result counter and the selection to
+/// put back (once, after the last row finishes) if anything failed.
+struct BulkTrash {
+    report: RefCell<BulkTrashReport>,
+    prev_selected: Option<SidebarTarget>,
+}
+
+type BulkReport = Rc<BulkTrash>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiSelection {
+    pub anchor: SidebarTarget,
+    pub cursor: SidebarTarget,
+    pub items: Vec<SidebarTarget>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Prompt {
     CloseTab { id: String },
@@ -37,6 +63,8 @@ pub(crate) enum Prompt {
     DeleteFolder { id: String },
     TrashDirtyFile { id: String },
     TrashDirtyFolder { id: String },
+    /// Several sidebar rows selected with Shift, trashed together.
+    DeleteMany { targets: Vec<SidebarTarget> },
     /// A new workspace folder was picked; ask whether to copy the current
     /// note into it before switching.
     SwitchWorkspace { new_dir: PathBuf },
@@ -62,6 +90,7 @@ pub struct LiteMarkApp {
     pub settings: EditorSettings,
     pub show_sidebar: bool,
     pub show_find_replace: bool,
+    pub show_replace_row: bool,
     pub show_shortcuts_modal: bool,
     pub show_pdf_modal: bool,
     pub show_about_modal: bool,
@@ -73,6 +102,10 @@ pub struct LiteMarkApp {
     /// Currently highlighted sidebar item (drives row highlight and the
     /// Ctrl+Delete target). Falls back to the active tab's note when None.
     pub selected_target: Option<SidebarTarget>,
+    /// Shift-selected range in the sidebar; only honored while
+    /// `selected_target` is still its cursor, so any other selection change
+    /// drops it.
+    pub multi_selection: Option<MultiSelection>,
     /// True while the sidebar tree owns arrow-key navigation.
     pub sidebar_keyboard: bool,
     pub sidebar_focus_handle: FocusHandle,
@@ -97,6 +130,7 @@ pub struct LiteMarkApp {
     pub save_as_tab: Option<String>,
     pub pending_after_save: Option<PendingAfterSave>,
     pub editor_paint: Rc<RefCell<EditorPaint>>,
+    pub editor_scroll: ScrollHandle,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
     pub find_hits: Vec<Range<usize>>,
@@ -107,14 +141,17 @@ pub struct LiteMarkApp {
     pub selecting: bool,
     pub zoom_epoch: u64,
     pub toast_epoch: u64,
+    pub available_update: Option<ReleaseInfo>,
     pub pending_find_focus: bool,
     pub pending_rename_focus: bool,
     pub sidebar_menu: Option<SidebarMenu>,
+    pub workspace_menu_open: bool,
     pub rename_target: Option<SidebarTarget>,
     pub rename_value: String,
     pub rename_field: Entity<LineField>,
     pub create_draft: Option<SidebarCreate>,
     pub create_field: Entity<LineField>,
+    pub search_field: Entity<LineField>,
     pub pending_create_focus: bool,
     pub field_owns_keys: bool,
     pub field_focus: TextInput,
@@ -312,16 +349,61 @@ impl LiteMarkApp {
             }
         });
 
+        let search_field = cx.new({
+            let app_handle = app_handle.clone();
+            move |cx| {
+                LineField::new(
+                    cx,
+                    "search-field",
+                    "Search notes",
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |text, app| {
+                            let text = text.to_string();
+                            app_handle
+                                .update(app, |this, cx| {
+                                    this.search_query = text;
+                                    this.multi_selection = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    }),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |_text, _previous, app| {
+                            app_handle
+                                .update(app, |this, cx| {
+                                    this.search_enter(cx);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    }),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |app| {
+                            app_handle
+                                .update(app, |this, cx| this.claim_field(TextInput::Search, cx))
+                                .ok();
+                        }
+                    }),
+                )
+            }
+        });
+
         let initial_selected = initial_tab.workspace_file_id.clone();
 
-        Self {
+        let app = Self {
             tabs: vec![initial_tab],
             active_tab_id: first_id,
             selected_target: initial_selected.map(SidebarTarget::File),
+            multi_selection: None,
             workspace,
             settings,
             show_sidebar: true,
             show_find_replace: false,
+            show_replace_row: false,
             show_shortcuts_modal: false,
             show_pdf_modal: false,
             show_about_modal: false,
@@ -352,6 +434,7 @@ impl LiteMarkApp {
             save_as_tab: None,
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
+            editor_scroll: ScrollHandle::new(),
             find_field,
             replace_field,
             find_hits: Vec::new(),
@@ -362,14 +445,17 @@ impl LiteMarkApp {
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
+            available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
             sidebar_menu: None,
+            workspace_menu_open: false,
             rename_target: None,
             rename_value: String::new(),
             rename_field,
             create_draft: None,
             create_field,
+            search_field,
             pending_create_focus: false,
             field_owns_keys: false,
             field_focus: TextInput::Editor,
@@ -377,12 +463,78 @@ impl LiteMarkApp {
             table_picker_size: (2, 2),
             editor_context_menu: None,
             title_drag_armed: Rc::new(Cell::new(false)),
+        };
+        app.start_update_check(cx);
+        app
+    }
+
+    /// Look for a newer release in the background, at most once a day.
+    /// Offline or failed checks are silent and retried on the next launch.
+    fn start_update_check(&self, cx: &mut Context<Self>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if !self.settings.check_for_updates
+            || !check_is_due(self.settings.last_update_check, now)
+        {
+            return;
         }
+        cx.spawn(async move |this, cx| {
+            let release = cx
+                .background_executor()
+                .spawn(async { fetch_latest_release() })
+                .await;
+            let Some(release) = release else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.settings.last_update_check = Some(now);
+                this.settings.save();
+                let dismissed = this.settings.dismissed_update.as_deref() == Some(&release.version);
+                if is_newer(current_version(), &release.version) && !dismissed {
+                    this.available_update = Some(release);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn handle_toggle_update_checks(&mut self) {
+        self.settings.check_for_updates = !self.settings.check_for_updates;
+        if !self.settings.check_for_updates {
+            self.available_update = None;
+        }
+        self.settings.save();
+    }
+
+    /// Enter in the search box: select the first match and move keyboard
+    /// focus to the list so the arrows walk through the results.
+    fn search_enter(&mut self, cx: &mut Context<Self>) {
+        if let Some(first) = self.sidebar_visible_targets().first().cloned() {
+            self.selected_target = Some(first);
+            self.multi_selection = None;
+            self.field_focus = TextInput::Editor;
+            self.field_owns_keys = false;
+            self.sidebar_keyboard = true;
+        }
+        cx.notify();
+    }
+
+    /// Empty the search box and hand focus back to the editor.
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search_query.clear();
+        self.search_field.update(cx, |field, _cx| field.set_text(""));
+        self.field_focus = TextInput::Editor;
+        self.field_owns_keys = false;
+        self.applied_focus = None;
     }
 
     fn claim_field(&mut self, which: TextInput, cx: &mut Context<Self>) {
         self.field_focus = which;
         self.field_owns_keys = !document_accepts_keystrokes(which);
+        self.sidebar_keyboard = sidebar_keyboard_after_claim(self.sidebar_keyboard, which);
         if which == TextInput::Editor {
             self.applied_focus = None;
         }
@@ -399,6 +551,7 @@ impl LiteMarkApp {
                 Some(self.rename_field.clone())
             }
             TextInput::Create if self.create_draft.is_some() => Some(self.create_field.clone()),
+            TextInput::Search => Some(self.search_field.clone()),
             _ => None,
         }
     }
@@ -419,6 +572,8 @@ impl LiteMarkApp {
             Some(self.rename_field.clone())
         } else if self.create_field.read(cx).is_focused(window) {
             Some(self.create_field.clone())
+        } else if self.search_field.read(cx).is_focused(window) {
+            Some(self.search_field.clone())
         } else {
             self.line_field_for_focus()
         };
@@ -434,6 +589,9 @@ impl LiteMarkApp {
             self.refresh_find();
         } else if field.entity_id() == replace_id {
             self.replace_term = written;
+        } else if field.entity_id() == self.search_field.entity_id() {
+            self.search_query = written;
+            self.multi_selection = None;
         }
         window.refresh();
         cx.notify();
@@ -646,6 +804,15 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_sidebar(&mut self) {
         self.show_sidebar = !self.show_sidebar;
+        if !self.show_sidebar {
+            // Hand input back to the editor; the sidebar can no longer take it.
+            self.sidebar_keyboard = false;
+            if self.field_focus == TextInput::Search {
+                self.field_focus = TextInput::Editor;
+                self.field_owns_keys = false;
+            }
+            self.applied_focus = None;
+        }
     }
 
     #[allow(dead_code)]
@@ -748,8 +915,13 @@ impl LiteMarkApp {
         }
     }
 
+    /// New folder goes inside the selected folder, else at the workspace root.
     pub fn handle_new_folder(&mut self, cx: &mut Context<Self>) {
-        self.begin_create(None, true, cx);
+        let parent = match &self.selected_target {
+            Some(SidebarTarget::Folder(id)) => Some(id.clone()),
+            _ => None,
+        };
+        self.begin_create(parent, true, cx);
     }
 
     /// Start inline creation of a note or folder in the sidebar tree.
@@ -854,15 +1026,24 @@ impl LiteMarkApp {
         self.settings.save();
     }
 
-    pub fn handle_cut(&mut self, cx: &mut App) {
-        let text = self
-            .active_tab()
-            .map(|tab| tab.selected_text())
-            .unwrap_or_default();
-        if text.is_empty() {
-            return;
+    /// Clipboard item for the active selection. Other apps get the text as
+    /// the WYSIWYG view shows it; the Markdown source rides along as metadata
+    /// so a paste back into a Markdown tab keeps the formatting.
+    fn selection_clipboard_item(&mut self) -> Option<ClipboardItem> {
+        let tab = self.active_tab_mut()?;
+        let markdown = tab.selected_text();
+        if markdown.is_empty() {
+            return None;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let visible = tab.selected_visible_text();
+        Some(clipboard_item(visible, markdown))
+    }
+
+    pub fn handle_cut(&mut self, cx: &mut App) {
+        let Some(item) = self.selection_clipboard_item() else {
+            return;
+        };
+        cx.write_to_clipboard(item);
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
             self.show_error("PDF files are read-only.");
             return;
@@ -875,24 +1056,25 @@ impl LiteMarkApp {
     }
 
     pub fn handle_copy(&mut self, cx: &mut App) {
-        if let Some(tab) = self.active_tab() {
-            let text = tab.selected_text();
-            if !text.is_empty() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
+        if let Some(item) = self.selection_clipboard_item() {
+            cx.write_to_clipboard(item);
         }
     }
 
     pub fn handle_paste(&mut self, cx: &mut App) {
         if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
+            // A copy from a Markdown tab carries its source as metadata.
+            let into_markdown = self
+                .active_tab()
+                .is_some_and(|tab| tab.file_type == FileType::Markdown);
+            if let Some(text) = paste_text(&item, into_markdown) {
                 if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
                     self.show_error("PDF files are read-only.");
                     return;
                 }
                 if let Some(tab) = self.active_tab_mut() {
                     let range = tab.selection_range();
-                    tab.edit(range, text.as_ref());
+                    tab.edit(range, &text);
                 }
                 self.refresh_find();
             }
@@ -942,6 +1124,7 @@ impl LiteMarkApp {
             || self.replace_field.read(cx).is_focused(window)
             || self.rename_field.read(cx).is_focused(window)
             || self.create_field.read(cx).is_focused(window)
+            || self.search_field.read(cx).is_focused(window)
     }
 
     fn show_error(&mut self, message: impl Into<String>) {
@@ -1012,7 +1195,7 @@ impl LiteMarkApp {
         if self.find_term.is_empty() {
             String::new()
         } else if self.find_hits.is_empty() {
-            "No matches".into()
+            "No results".into()
         } else if let Some(index) = self.find_index {
             format!("{} of {}", index + 1, self.find_hits.len())
         } else {
@@ -1042,7 +1225,38 @@ impl LiteMarkApp {
         self.refresh_find();
         if index.is_none() {
             self.not_found = true;
+        } else {
+            self.scroll_selection_into_view();
         }
+    }
+
+    /// Scrolls the editor so the row holding the selection start is visible.
+    /// Uses the geometry from the last paint, which is still valid after a
+    /// find step because the content did not change.
+    fn scroll_selection_into_view(&mut self) {
+        let Some(start) = self.active_tab().map(|tab| tab.selection_range().start) else {
+            return;
+        };
+        let paint = self.editor_paint.borrow();
+        let Some(row) = paint
+            .rows
+            .iter()
+            .rev()
+            .find(|row| row.byte_start <= start)
+            .or_else(|| paint.rows.first())
+        else {
+            return;
+        };
+        let view = self.editor_scroll.bounds();
+        let Some(delta) =
+            scroll_delta_for_row(row.origin.y, row.line_height, view.top(), view.size.height)
+        else {
+            return;
+        };
+        let offset = self.editor_scroll.offset();
+        let max = self.editor_scroll.max_offset().height;
+        let y = (offset.y - delta).clamp(-max, px(0.0));
+        self.editor_scroll.set_offset(point(offset.x, y));
     }
 
     fn replace_current(&mut self) {
@@ -1059,6 +1273,9 @@ impl LiteMarkApp {
             .and_then(|tab| tab.replace_current_match(&term, &replacement, case, current));
         self.find_index = index;
         self.refresh_find();
+        if index.is_some() {
+            self.scroll_selection_into_view();
+        }
     }
 
     fn replace_all_matches(&mut self) {
@@ -1150,6 +1367,7 @@ impl LiteMarkApp {
     ) {
         // Opening a note (sidebar click, creation, file open) selects it in
         // the sidebar and hands keyboard focus back to the editor.
+        self.multi_selection = None;
         self.selected_target = workspace_file_id.clone().map(SidebarTarget::File);
         self.sidebar_keyboard = false;
         if let Some(path) = path.as_ref() {
@@ -1250,6 +1468,7 @@ impl LiteMarkApp {
         }
         // Clicking a folder selects it (Ctrl+Delete target) and keeps
         // keyboard navigation in the sidebar tree.
+        self.multi_selection = None;
         self.selected_target = Some(SidebarTarget::Folder(folder_id.to_string()));
         self.sidebar_keyboard = true;
     }
@@ -1266,6 +1485,16 @@ impl LiteMarkApp {
 
     /// Flatten the visible sidebar tree into selection targets, in row order.
     fn sidebar_visible_targets(&self) -> Vec<SidebarTarget> {
+        if !self.search_query.trim().is_empty() {
+            let folders =
+                sidebar_folder_search_matches(&self.workspace.folders, &self.search_query)
+                    .into_iter()
+                    .map(|folder| SidebarTarget::Folder(folder.id.clone()));
+            let files = sidebar_search_matches(&self.workspace.files, &self.search_query)
+                .into_iter()
+                .map(|file| SidebarTarget::File(file.id.clone()));
+            return folders.chain(files).collect();
+        }
         build_sidebar_tree(
             &self.workspace.folders,
             &self.workspace.files,
@@ -1280,6 +1509,134 @@ impl LiteMarkApp {
             SidebarTreeItem::CreateInput { .. } => None,
         })
         .collect()
+    }
+
+    /// The Shift-selected rows, if the selection still has several.
+    fn active_multi(&self) -> Option<&MultiSelection> {
+        self.multi_selection
+            .as_ref()
+            .filter(|m| self.selected_target.as_ref() == Some(&m.cursor) && m.items.len() > 1)
+    }
+
+    /// Extend the selection from its anchor to `to` over the visible rows.
+    fn extend_selection_to(&mut self, to: SidebarTarget) {
+        let anchor = self
+            .active_multi()
+            .map(|m| m.anchor.clone())
+            .or_else(|| self.selected_target.clone())
+            .unwrap_or_else(|| to.clone());
+        let (anchor, items) = extend_selection(&self.sidebar_visible_targets(), &anchor, &to);
+        self.multi_selection = (items.len() > 1).then(|| MultiSelection {
+            anchor,
+            cursor: to.clone(),
+            items,
+        });
+        self.selected_target = Some(to);
+        self.sidebar_keyboard = true;
+    }
+
+    /// Ctrl/Cmd+click: add `target` to the selection, or drop it if already in.
+    /// With nothing selected the open note counts as the starting selection.
+    fn toggle_selection(&mut self, target: SidebarTarget) {
+        let multi = self.active_multi().cloned();
+        let items = match &multi {
+            Some(m) => m.items.clone(),
+            None => self
+                .selected_target
+                .clone()
+                .or_else(|| {
+                    self.active_tab()
+                        .and_then(|tab| tab.workspace_file_id.clone())
+                        .map(SidebarTarget::File)
+                })
+                .into_iter()
+                .collect(),
+        };
+        let toggled = toggle_row(items, multi.map(|m| m.anchor), target);
+        self.selected_target = toggled.as_ref().map(|(_, cursor, _)| cursor.clone());
+        self.multi_selection = toggled.and_then(|(anchor, cursor, items)| {
+            (items.len() > 1).then_some(MultiSelection { anchor, cursor, items })
+        });
+        self.sidebar_keyboard = true;
+    }
+
+    /// Ctrl+A in the sidebar: select every visible row.
+    fn sidebar_select_all(&mut self) {
+        let targets = self.sidebar_visible_targets();
+        let (Some(first), Some(last)) = (targets.first().cloned(), targets.last().cloned()) else {
+            return;
+        };
+        self.multi_selection = (targets.len() > 1).then(|| MultiSelection {
+            anchor: first,
+            cursor: last.clone(),
+            items: targets,
+        });
+        self.selected_target = Some(last);
+        self.sidebar_keyboard = true;
+    }
+
+    /// Shift+Up/Down: grow or shrink the range by one visible row.
+    fn sidebar_extend_selection(&mut self, delta: i32) {
+        let targets = self.sidebar_visible_targets();
+        if let Some(next) = step_cursor(&targets, self.selected_target.as_ref(), delta) {
+            self.extend_selection_to(targets[next].clone());
+        }
+    }
+
+    fn target_path(&self, target: &SidebarTarget) -> Option<PathBuf> {
+        match target {
+            SidebarTarget::Folder(id) => {
+                self.workspace.folders.iter().find(|f| &f.id == id).map(|f| f.path.clone())
+            }
+            SidebarTarget::File(id) => {
+                self.workspace.files.iter().find(|f| &f.id == id).map(|f| f.path.clone())
+            }
+        }
+    }
+
+    /// Ask before trashing every Shift-selected row. Rows inside a selected
+    /// folder go with it; modified notes must be saved or closed first.
+    fn request_trash_many(&mut self, items: Vec<SidebarTarget>) {
+        let rows: Vec<(SidebarTarget, PathBuf, bool)> = items
+            .into_iter()
+            .filter_map(|t| {
+                let (path, is_folder) = match &t {
+                    SidebarTarget::Folder(id) => {
+                        (self.workspace.folders.iter().find(|f| &f.id == id)?.path.clone(), true)
+                    }
+                    SidebarTarget::File(id) => {
+                        (self.workspace.files.iter().find(|f| &f.id == id)?.path.clone(), false)
+                    }
+                };
+                Some((t, path, is_folder))
+            })
+            .collect();
+        // A partly selected folder stays; only its selected rows go.
+        let visible: Vec<PathBuf> = self
+            .sidebar_visible_targets()
+            .iter()
+            .filter_map(|t| self.target_path(t))
+            .collect();
+        let rows = without_partial_folders(&rows, &visible);
+        let modified: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.is_modified)
+            .filter_map(|tab| tab.file_path.clone())
+            .collect();
+        match plan_bulk_trash(&rows, &modified) {
+            BulkTrashPlan::Nothing => {}
+            BulkTrashPlan::ModifiedOpen => self.show_error(
+                "Save or close modified notes before moving several items to the Trash.",
+            ),
+            BulkTrashPlan::Trash(mut targets) => match targets.len() {
+                1 => match targets.remove(0) {
+                    SidebarTarget::File(id) => self.request_trash_file(id),
+                    SidebarTarget::Folder(id) => self.request_trash_folder(id),
+                },
+                _ => self.show_prompt(Prompt::DeleteMany { targets }),
+            },
+        }
     }
 
     /// Move the sidebar selection through the visible tree (wrapping).
@@ -1307,6 +1664,7 @@ impl LiteMarkApp {
                 targets[new_pos].clone()
             }
         };
+        self.multi_selection = None;
         self.selected_target = Some(next);
         self.sidebar_keyboard = true;
     }
@@ -1504,6 +1862,100 @@ impl LiteMarkApp {
     /// Handle a note or folder dragged and dropped onto a sidebar folder,
     /// or onto the notes list itself (`folder_id: None` = move to the
     /// workspace root). A plain drop moves; holding Ctrl drops a copy.
+    /// Drop of one row or a whole multi-selection. Rows inside a selected
+    /// folder travel with it, and a folder dropped on itself is skipped.
+    fn handle_drop_items(
+        &mut self,
+        targets: Vec<SidebarTarget>,
+        folder_id: Option<String>,
+        copy: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if targets.len() <= 1 {
+            if let Some(target) = targets.into_iter().next() {
+                self.handle_drop_item(target, folder_id, copy, cx);
+            }
+            return;
+        }
+        let path_of = |t: &SidebarTarget| match t {
+            SidebarTarget::Folder(id) => self
+                .workspace
+                .folders
+                .iter()
+                .find(|f| &f.id == id)
+                .map(|f| f.path.clone()),
+            SidebarTarget::File(id) => self
+                .workspace
+                .files
+                .iter()
+                .find(|f| &f.id == id)
+                .map(|f| f.path.clone()),
+        };
+        let rows: Vec<(SidebarTarget, PathBuf, bool)> = targets
+            .into_iter()
+            .filter_map(|t| {
+                let path = path_of(&t)?;
+                let is_folder = matches!(t, SidebarTarget::Folder(_));
+                Some((t, path, is_folder))
+            })
+            .collect();
+        // A folder with a skipped row showing stays put; only its selected rows move.
+        let visible: Vec<PathBuf> = self
+            .sidebar_visible_targets()
+            .iter()
+            .filter_map(&path_of)
+            .collect();
+        let rows = without_partial_folders(&rows, &visible);
+        let dest_is_target = |t: &SidebarTarget| {
+            matches!((t, &folder_id), (SidebarTarget::Folder(id), Some(dest)) if id == dest)
+        };
+        let moving: Vec<SidebarTarget> = top_level_targets(&rows)
+            .into_iter()
+            .filter(|t| !dest_is_target(t))
+            .collect();
+        if moving.is_empty() {
+            return;
+        }
+        let dest_name = match &folder_id {
+            Some(id) => self
+                .workspace
+                .folders
+                .iter()
+                .find(|f| &f.id == id)
+                .map(|f| f.name.clone()),
+            None => self
+                .workspace
+                .folder_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string),
+        }
+        .unwrap_or_else(|| "the workspace root".into());
+        self.error_message = None;
+        self.multi_selection = None;
+        let (mut done, mut failed) = (0usize, 0usize);
+        let mut last_error = None;
+        for target in moving {
+            match self.drop_one(target, folder_id.clone(), copy, false) {
+                DropOutcome::Done(_) => done += 1,
+                DropOutcome::Skipped => {}
+                DropOutcome::Failed(err) => {
+                    failed += 1;
+                    last_error = Some(err);
+                }
+            }
+        }
+        let verb = if copy { "Copied" } else { "Moved" };
+        match last_error {
+            None if done > 0 => {
+                let noun = if done == 1 { "item" } else { "items" };
+                self.show_toast(format!("{verb} {done} {noun} to {dest_name}"), cx)
+            }
+            None => {}
+            Some(err) => self.show_error(format!("{verb} {done}, {failed} failed: {err}")),
+        }
+    }
+
     fn handle_drop_item(
         &mut self,
         target: SidebarTarget,
@@ -1511,9 +1963,23 @@ impl LiteMarkApp {
         copy: bool,
         cx: &mut Context<Self>,
     ) {
+        match self.drop_one(target, folder_id, copy, true) {
+            DropOutcome::Done(message) => self.show_toast(message, cx),
+            DropOutcome::Skipped => {}
+            DropOutcome::Failed(err) => self.show_error(err),
+        }
+    }
+
+    fn drop_one(
+        &mut self,
+        target: SidebarTarget,
+        folder_id: Option<String>,
+        copy: bool,
+        open_copy: bool,
+    ) -> DropOutcome {
         match target {
-            SidebarTarget::File(id) => self.move_or_copy_note(&id, folder_id, copy, cx),
-            SidebarTarget::Folder(id) => self.move_or_copy_folder(&id, folder_id, copy, cx),
+            SidebarTarget::File(id) => self.move_or_copy_note(&id, folder_id, copy, open_copy),
+            SidebarTarget::Folder(id) => self.move_or_copy_folder(&id, folder_id, copy),
         }
     }
 
@@ -1522,8 +1988,8 @@ impl LiteMarkApp {
         file_id: &str,
         folder_id: Option<String>,
         copy: bool,
-        cx: &mut Context<Self>,
-    ) {
+        open_copy: bool,
+    ) -> DropOutcome {
         let (dest_name, dest_path) = if let Some(dest_id) = folder_id {
             let Some((name, path)) = self
                 .workspace
@@ -1532,8 +1998,7 @@ impl LiteMarkApp {
                 .find(|f| f.id == dest_id)
                 .map(|f| (f.name.clone(), f.path.clone()))
             else {
-                self.show_error("That folder is no longer available.");
-                return;
+                return DropOutcome::Failed("That folder is no longer available.".into());
             };
             (name, path)
         } else {
@@ -1552,11 +2017,10 @@ impl LiteMarkApp {
             .find(|f| f.id == file_id)
             .cloned()
         else {
-            self.show_error("That note is no longer in the folder.");
-            return;
+            return DropOutcome::Failed("That note is no longer in the folder.".into());
         };
         if file.path.parent() == Some(dest_path.as_path()) {
-            return; // already in that folder
+            return DropOutcome::Skipped;
         }
         if copy {
             let result = read_note(&file.path).and_then(|content| {
@@ -1566,31 +2030,33 @@ impl LiteMarkApp {
             match result {
                 Ok(new_path) => {
                     self.rescan_workspace();
-                    let new_file_id = self
-                        .workspace
-                        .files
-                        .iter()
-                        .find(|f| f.path == new_path)
-                        .map(|f| f.id.clone());
-                    let display = new_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(file.name.as_str())
-                        .to_string();
-                    self.open_loaded_tab(display, String::new(), Some(new_path), new_file_id);
-                    self.show_toast(format!("Copied {} to {dest_name}", file.name), cx);
+                    if open_copy {
+                        let new_file_id = self
+                            .workspace
+                            .files
+                            .iter()
+                            .find(|f| f.path == new_path)
+                            .map(|f| f.id.clone());
+                        let display = new_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(file.name.as_str())
+                            .to_string();
+                        self.open_loaded_tab(display, String::new(), Some(new_path), new_file_id);
+                    }
+                    DropOutcome::Done(format!("Copied {} to {dest_name}", file.name))
                 }
-                Err(err) => self.show_error(format!("Couldn't copy note: {err}")),
+                Err(err) => DropOutcome::Failed(format!("Couldn't copy note: {err}")),
             }
         } else {
             match move_note(&file.path, &dest_path) {
                 Ok(new_path) if new_path != file.path => {
                     self.retarget_open_tabs(&file.path, &new_path);
                     self.rescan_workspace();
-                    self.show_toast(format!("Moved {} to {dest_name}", file.name), cx);
+                    DropOutcome::Done(format!("Moved {} to {dest_name}", file.name))
                 }
-                Ok(_) => {}
-                Err(err) => self.show_error(format!("Couldn't move note: {err}")),
+                Ok(_) => DropOutcome::Skipped,
+                Err(err) => DropOutcome::Failed(format!("Couldn't move note: {err}")),
             }
         }
     }
@@ -1600,8 +2066,7 @@ impl LiteMarkApp {
         folder_id: &str,
         dest_folder_id: Option<String>,
         copy: bool,
-        cx: &mut Context<Self>,
-    ) {
+    ) -> DropOutcome {
         let Some((name, src)) = self
             .workspace
             .folders
@@ -1609,12 +2074,11 @@ impl LiteMarkApp {
             .find(|f| f.id == folder_id)
             .map(|f| (f.name.clone(), f.path.clone()))
         else {
-            self.show_error("That folder is no longer available.");
-            return;
+            return DropOutcome::Failed("That folder is no longer available.".into());
         };
         let (dest_name, dest_path) = if let Some(dest_id) = dest_folder_id {
             if dest_id == folder_id {
-                return; // dropped on itself
+                return DropOutcome::Skipped;
             }
             let Some((dname, dpath)) = self
                 .workspace
@@ -1623,8 +2087,7 @@ impl LiteMarkApp {
                 .find(|f| f.id == dest_id)
                 .map(|f| (f.name.clone(), f.path.clone()))
             else {
-                self.show_error("That folder is no longer available.");
-                return;
+                return DropOutcome::Failed("That folder is no longer available.".into());
             };
             (dname, dpath)
         } else {
@@ -1639,29 +2102,28 @@ impl LiteMarkApp {
         // Never move/copy a folder into its own descendant (or itself) —
         // that would create a cycle on disk.
         if dest_path.starts_with(&src) {
-            self.show_error("Can't move a folder into itself.");
-            return;
+            return DropOutcome::Failed("Can't move a folder into itself.".into());
         }
         if src.parent() == Some(dest_path.as_path()) {
-            return; // already in that folder
+            return DropOutcome::Skipped;
         }
         if copy {
             match copy_folder(&src, &dest_path) {
                 Ok(_) => {
                     self.rescan_workspace();
-                    self.show_toast(format!("Copied {name} to {dest_name}"), cx);
+                    DropOutcome::Done(format!("Copied {name} to {dest_name}"))
                 }
-                Err(err) => self.show_error(format!("Couldn't copy folder: {err}")),
+                Err(err) => DropOutcome::Failed(format!("Couldn't copy folder: {err}")),
             }
         } else {
             match move_folder(&src, &dest_path) {
                 Ok(new_path) if new_path != src => {
                     self.retarget_open_tabs(&src, &new_path);
                     self.rescan_workspace();
-                    self.show_toast(format!("Moved {name} to {dest_name}"), cx);
+                    DropOutcome::Done(format!("Moved {name} to {dest_name}"))
                 }
-                Ok(_) => {}
-                Err(err) => self.show_error(format!("Couldn't move folder: {err}")),
+                Ok(_) => DropOutcome::Skipped,
+                Err(err) => DropOutcome::Failed(format!("Couldn't move folder: {err}")),
             }
         }
     }
@@ -1708,7 +2170,11 @@ impl LiteMarkApp {
                 Err(err) => self.show_error(format!("Couldn't copy note: {err}")),
             }
         }
+        let left = self.workspace.folder_path.clone();
         self.workspace = scan_workspace_dir(&new_dir);
+        self.settings.remember_folders(&left, &new_dir);
+        self.settings.save();
+        self.workspace_menu_open = false;
         if let Some(new_path) = migrated {
             if let Some(tab) = self.active_tab_mut() {
                 if let Some(name) = new_path.file_name().and_then(|n| n.to_str()) {
@@ -2061,7 +2527,12 @@ impl LiteMarkApp {
 
     /// Undo an optimistic tab closure (the trash failed): put the tabs back
     /// in their original positions and restore the previous selection.
-    fn restore_optimistic_close(&mut self, closed: OptimisticClose, cx: &mut Context<Self>) {
+    fn restore_optimistic_close(
+        &mut self,
+        closed: OptimisticClose,
+        restore_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
         let OptimisticClose {
             tabs,
             prev_active,
@@ -2079,12 +2550,18 @@ impl LiteMarkApp {
             self.tabs.insert(at, tab);
         }
         self.active_tab_id = prev_active;
-        self.selected_target = prev_selected;
+        if restore_selection {
+            self.selected_target = prev_selected;
+        }
         self.refresh_find();
         cx.notify();
     }
 
     fn trash_file(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.trash_file_in(id, cx, None);
+    }
+
+    fn trash_file_in(&mut self, id: &str, cx: &mut Context<Self>, bulk: Option<BulkReport>) {
         let Some(file) = self
             .workspace
             .files
@@ -2092,7 +2569,7 @@ impl LiteMarkApp {
             .find(|file| file.id == id)
             .cloned()
         else {
-            self.show_error("That note is no longer in the folder.");
+            self.report_missing("That note is no longer in the folder.", bulk);
             return;
         };
         // Optimistic removal: the note vanishes and its tabs close the same
@@ -2115,19 +2592,83 @@ impl LiteMarkApp {
             .spawn(async move { move_to_trash(&path) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => this.rescan_workspace(),
-                Err(err) => {
-                    this.restore_optimistic_close(closed, cx);
-                    this.rescan_workspace();
-                    this.show_error(err);
-                }
-            });
+            let _ = this.update(cx, |this, cx| this.finish_trash(result, closed, bulk, cx));
         })
         .detach();
     }
 
     fn trash_folder(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.trash_folder_in(id, cx, None);
+    }
+
+    /// Settle one background trash: rescan, undo the optimistic close on
+    /// failure, and report. A bulk trash shows a single message at the end.
+    fn finish_trash(
+        &mut self,
+        result: Result<(), String>,
+        closed: OptimisticClose,
+        bulk: Option<BulkReport>,
+        cx: &mut Context<Self>,
+    ) {
+        let failed = result.clone().err();
+        if failed.is_some() {
+            // In a bulk trash the selection is put back once, below, because
+            // the rows finish in no set order.
+            self.restore_optimistic_close(closed, bulk.is_none(), cx);
+        }
+        self.rescan_workspace();
+        match bulk {
+            Some(bulk) => self.record_bulk(&bulk, result, cx),
+            None => {
+                if let Some(err) = failed {
+                    self.show_error(err);
+                }
+            }
+        }
+    }
+
+    /// Count one row of a bulk trash. After the last row, show one message
+    /// and, if anything failed, restore the pre-trash selection (when that
+    /// row is still in the tree).
+    fn record_bulk(&mut self, bulk: &BulkTrash, result: Result<(), String>, cx: &mut Context<Self>) {
+        let message = bulk.report.borrow_mut().record(result);
+        let (finished, failed) = {
+            let report = bulk.report.borrow();
+            (report.is_finished(), report.has_failures())
+        };
+        if finished && failed {
+            let still_there = match &bulk.prev_selected {
+                Some(SidebarTarget::File(id)) => self.workspace.files.iter().any(|f| &f.id == id),
+                Some(SidebarTarget::Folder(id)) => {
+                    self.workspace.folders.iter().any(|f| &f.id == id)
+                }
+                None => false,
+            };
+            if still_there {
+                self.selected_target = bulk.prev_selected.clone();
+            }
+            cx.notify();
+        }
+        if let Some(message) = message {
+            self.show_error(message);
+        }
+    }
+
+    /// A row vanished (say, deleted outside the app) before it could be
+    /// trashed. In a bulk trash it still counts toward the total, so the
+    /// final message is not lost.
+    fn report_missing(&mut self, message: &str, bulk: Option<BulkReport>) {
+        match bulk {
+            Some(bulk) => {
+                if let Some(message) = bulk.report.borrow_mut().record(Err(message.into())) {
+                    self.show_error(message);
+                }
+            }
+            None => self.show_error(message),
+        }
+    }
+
+    fn trash_folder_in(&mut self, id: &str, cx: &mut Context<Self>, bulk: Option<BulkReport>) {
         let Some(folder) = self
             .workspace
             .folders
@@ -2135,7 +2676,7 @@ impl LiteMarkApp {
             .find(|folder| folder.id == id)
             .cloned()
         else {
-            self.show_error("That folder is no longer available.");
+            self.report_missing("That folder is no longer available.", bulk);
             return;
         };
         // Same optimistic removal as trash_file, for the whole subtree.
@@ -2162,14 +2703,7 @@ impl LiteMarkApp {
             .spawn(async move { move_to_trash(&prefix) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => this.rescan_workspace(),
-                Err(err) => {
-                    this.restore_optimistic_close(closed, cx);
-                    this.rescan_workspace();
-                    this.show_error(err);
-                }
-            });
+            let _ = this.update(cx, |this, cx| this.finish_trash(result, closed, bulk, cx));
         })
         .detach();
     }
@@ -2436,6 +2970,11 @@ impl LiteMarkApp {
                     vec![("Cancel", false), ("Discard", false), ("Save", true)],
                 )
             }
+            Prompt::DeleteMany { targets } => (
+                "Move to Trash",
+                format!("Move {} items to the Trash?", targets.len()),
+                vec![("Cancel", false), ("Trash", true)],
+            ),
             Prompt::SwitchWorkspace { new_dir } => {
                 let name = self
                     .active_tab()
@@ -2565,6 +3104,25 @@ impl LiteMarkApp {
                     self.trash_folder(&id, cx);
                 }
             },
+            Prompt::DeleteMany { targets } => {
+                if choice == "Trash" {
+                    self.multi_selection = None;
+                    let report: BulkReport = Rc::new(BulkTrash {
+                        report: RefCell::new(BulkTrashReport::new(targets.len())),
+                        prev_selected: self.selected_target.clone(),
+                    });
+                    for target in targets {
+                        match target {
+                            SidebarTarget::File(id) => {
+                                self.trash_file_in(&id, cx, Some(report.clone()))
+                            }
+                            SidebarTarget::Folder(id) => {
+                                self.trash_folder_in(&id, cx, Some(report.clone()))
+                            }
+                        }
+                    }
+                }
+            }
             Prompt::SwitchWorkspace { new_dir } => match choice {
                 "Copy note" => {
                     let current = self.migratable_note_path();
@@ -2828,6 +3386,21 @@ impl LiteMarkApp {
     ) {
         // Clicking the editor hands keyboard focus back from the sidebar.
         self.sidebar_keyboard = false;
+        self.workspace_menu_open = false;
+        // The inline create row stops its own presses, so any press that gets
+        // here is a click away from it.
+        if self.create_draft.is_some() {
+            self.cancel_create(cx);
+        }
+        // A click outside the sidebar, or a plain click that isn't a
+        // Shift+click, ends a multi-selection. A press inside the sidebar keeps
+        // it: that press may be the start of dragging the whole selection, and
+        // clicking a row clears it itself.
+        let in_sidebar = self.show_sidebar && event.position.x < crate::theme::sidebar_width(window.viewport_size().width);
+        if !window.modifiers().shift && !in_sidebar {
+            self.multi_selection = None;
+            self.selected_target = None;
+        }
         if self.input_blocked() || window.default_prevented() {
             return;
         }
@@ -2864,7 +3437,7 @@ impl LiteMarkApp {
             && self.settings.view_mode == ViewMode::Wysiwyg
         {
             if let Some(url) = clicked_link {
-                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                cx.open_url(&url);
                 return;
             }
         }
@@ -3013,8 +3586,9 @@ impl LiteMarkApp {
             border_color: theme.border_subtle.into(),
             link_color: theme.text_hi.into(),
             selection_color: theme.selection_bg.into(),
-            find_color: theme.text_hi.into(),
+            find_color: find_match_color(theme.mode.is_dark(), false),
             cursor_color: theme.text_strong.into(),
+            active_find_color: find_match_color(theme.mode.is_dark(), true),
             gutter_color: theme.text_muted.into(),
             gutter_bg: theme.bg_sidebar.into(),
             font_family,
@@ -3439,7 +4013,13 @@ impl Render for LiteMarkApp {
         self.replace_field.update(cx, |field, _cx| {
             field.set_colors(text_color, placeholder_color, field_bg, field_border);
         });
+        self.search_field.update(cx, |field, _cx| {
+            field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
+        });
 
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
+            tab.ensure_stats();
+        }
         let active_tab = self.active_tab().cloned().unwrap_or_else(|| {
             DocumentTab::new(
                 "tab-1".to_string(),
@@ -3452,11 +4032,12 @@ impl Render for LiteMarkApp {
 
         let active_formats = active_tab.active_formats;
         let stats_line = active_tab.cursor_line;
-        let stats_col = active_tab.cursor_col;
         let stats_words = active_tab.word_count;
         let stats_chars = active_tab.char_count;
-        let stats_lines = active_tab.line_count;
-        let stats_read = active_tab.reading_time_min;
+        let stats_selection = {
+            let text = active_tab.selected_text();
+            (!text.is_empty()).then(|| text.split_whitespace().count())
+        };
         let active_tab_has_pdf = active_tab.file_type == FileType::Pdf;
         let pdf_page_count = active_tab.pdf_page_count;
         let is_max = window.is_maximized();
@@ -3684,6 +4265,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = true;
+                    this.show_replace_row = true;
                     this.pending_find_focus = true;
                     this.open_menu = None;
                     cx.notify();
@@ -3706,6 +4288,16 @@ impl Render for LiteMarkApp {
             move |size: f32, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.handle_set_font_size(size);
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_toggle_update_checks = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_toggle_update_checks();
                     cx.notify();
                 });
             }
@@ -3752,6 +4344,22 @@ impl Render for LiteMarkApp {
                     this.open_menu = None;
                     this.menu_selected_ix = None;
                     this.menu_open_submenu_ix = None;
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_toggle_heading = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    if this.open_menu == Some(MenuId::Heading) {
+                        this.open_menu = None;
+                    } else {
+                        this.open_menu = Some(MenuId::Heading);
+                        this.menu_selected_ix = None;
+                        this.menu_open_submenu_ix = None;
+                    }
                     cx.notify();
                 });
             }
@@ -3972,6 +4580,16 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_replace = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.show_replace_row = !this.show_replace_row;
+                    cx.notify();
+                });
+            }
+        };
+
         let on_find_close = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -3999,6 +4617,41 @@ impl Render for LiteMarkApp {
                         ),
                         Err(err) => this.show_error(err),
                     }
+                    // A sidebar click keeps arrow navigation in the tree, like
+                    // clicking a folder; clicking the editor hands it back.
+                    this.sidebar_keyboard = true;
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_range_select = {
+            let view = view.clone();
+            move |target: SidebarTarget, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.extend_selection_to(target);
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_toggle_select = {
+            let view = view.clone();
+            move |target: SidebarTarget, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.toggle_selection(target);
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_blank_click = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.multi_selection = None;
+                    this.selected_target = None;
+                    this.sidebar_keyboard = false;
                     cx.notify();
                 });
             }
@@ -4016,9 +4669,9 @@ impl Render for LiteMarkApp {
 
         let on_drop_item = {
             let view = view.clone();
-            move |target: SidebarTarget, folder_id: Option<String>, copy: bool, cx: &mut App| {
+            move |targets: Vec<SidebarTarget>, folder_id: Option<String>, copy: bool, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_drop_item(target, folder_id, copy, cx);
+                    this.handle_drop_items(targets, folder_id, copy, cx);
                     cx.notify();
                 });
             }
@@ -4129,6 +4782,17 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_workspace_menu = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.workspace_menu_open = !this.workspace_menu_open;
+                    this.sidebar_menu = None;
+                    cx.notify();
+                });
+            }
+        };
+
         let on_choose_dir = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -4233,11 +4897,15 @@ impl Render for LiteMarkApp {
         let on_open_external_pdf = {
             let view = view.clone();
             move |cx: &mut App| {
-                let _ = view.update(cx, |this, _cx| {
-                    if let Some(ref path) = this.active_tab().and_then(|t| t.file_path.clone()) {
-                        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-                    }
-                });
+                let path = view
+                    .read_with(cx, |this, _| {
+                        this.active_tab().and_then(|t| t.file_path.clone())
+                    })
+                    .ok()
+                    .flatten();
+                if let Some(path) = path {
+                    cx.open_with_system(&path);
+                }
             }
         };
 
@@ -4374,6 +5042,8 @@ impl Render for LiteMarkApp {
                         on_set_font_size.clone(),
                         on_open_shortcuts.clone(),
                         on_open_about.clone(),
+                        self.settings.check_for_updates,
+                        on_toggle_update_checks.clone(),
                     ),
                 ),
                 MenuId::Hamburger => {
@@ -4434,12 +5104,21 @@ impl Render for LiteMarkApp {
                         items,
                     )
                 }
+                MenuId::Heading => (
+                    Point::new(
+                        px(heading_button_left(f32::from(window.viewport_size().width))),
+                        px(76.0),
+                    ),
+                    Corner::TopLeft,
+                    px(190.0),
+                    build_heading_menu_items(on_format.clone(), on_close_menu.clone()),
+                ),
                 MenuId::Overflow => {
                     let overflow_x = if is_narrow {
                         (window.viewport_size().width / 2.0 + px(128.0))
                             .min(window.viewport_size().width - px(8.0))
                     } else {
-                        (window.viewport_size().width / 2.0 + px(270.0))
+                        (window.viewport_size().width / 2.0 + px(wide_center_width() / 2.0))
                             .min(window.viewport_size().width - px(8.0))
                     };
                     (
@@ -4472,6 +5151,7 @@ impl Render for LiteMarkApp {
                             point,
                             anchor_corner: anchor,
                             width,
+                            max_width: window.viewport_size().width - px(16.0),
                             items,
                             focus_handle: self.menu_focus_handle.clone(),
                             selected_index: self.menu_selected_ix,
@@ -4602,6 +5282,10 @@ impl Render for LiteMarkApp {
                 this.begin_create(None, false, cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &NewFolder, _window, cx| {
+                this.handle_new_folder(cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &DeleteNote, _window, cx| {
                 // Only act in a normal window state — never while a menu,
                 // modal or naming editor is open.
@@ -4610,6 +5294,15 @@ impl Render for LiteMarkApp {
                     || this.rename_target.is_some()
                     || this.create_draft.is_some()
                 {
+                    return;
+                }
+                if let Some(items) = this
+                    .active_multi()
+                    .filter(|_| this.sidebar_keyboard)
+                    .map(|m| m.items.clone())
+                {
+                    this.request_trash_many(items);
+                    cx.notify();
                     return;
                 }
                 // Target whatever is selected in the sidebar (folder or
@@ -4704,6 +5397,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &OpenReplace, _window, cx| {
                 this.show_find_replace = true;
+                this.show_replace_row = true;
                 this.pending_find_focus = true;
                 cx.notify();
             }))
@@ -4727,6 +5421,12 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SelectAll, window, cx| {
+                if this.sidebar_keyboard && this.open_menu.is_none() && this.modal_choice_count() == 0
+                {
+                    this.sidebar_select_all();
+                    cx.notify();
+                    return;
+                }
                 this.handle_select_all();
                 window.refresh();
                 cx.notify();
@@ -4828,7 +5528,7 @@ impl Render for LiteMarkApp {
                         if let Some(ref path) =
                             this.active_tab().and_then(|t| t.file_path.clone())
                         {
-                            let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+                            cx.open_with_system(path);
                         }
                     } else {
                         this.show_pdf_modal = false;
@@ -4896,6 +5596,18 @@ impl Render for LiteMarkApp {
                     this.menu_move_selection(1);
                 }
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ExtendSelectNext, _window, cx| {
+                if this.sidebar_keyboard {
+                    this.sidebar_extend_selection(1);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ExtendSelectPrev, _window, cx| {
+                if this.sidebar_keyboard {
+                    this.sidebar_extend_selection(-1);
+                    cx.notify();
+                }
             }))
             .on_action(cx.listener(|this, _: &SelectPrev, _window, cx| {
                 if this.sidebar_keyboard {
@@ -5286,9 +5998,11 @@ impl Render for LiteMarkApp {
                     cx.notify();
                 }),
             )
-            .on_action(cx.listener(|this, _: &CloseModal, _window, cx| {
+            .on_action(cx.listener(|this, _: &CloseModal, window, cx| {
                 if this.editor_context_menu.is_some() {
                     this.editor_context_menu = None;
+                } else if this.workspace_menu_open {
+                    this.workspace_menu_open = false;
                 } else if this.sidebar_menu.is_some() {
                     this.sidebar_menu = None;
                 } else if this.rename_target.is_some() || this.save_as_tab.is_some() {
@@ -5318,6 +6032,18 @@ impl Render for LiteMarkApp {
                     this.show_pdf_modal = false;
                 } else if this.show_find_replace {
                     this.show_find_replace = false;
+                } else if this.field_focus == TextInput::Search || !this.search_query.is_empty() {
+                    this.clear_search(cx);
+                } else if this.active_multi().is_some() || this.selected_target.is_some() {
+                    this.multi_selection = None;
+                    this.selected_target = None;
+                    this.sidebar_keyboard = false;
+                } else if this.show_sidebar
+                    && !this.zen_mode
+                    && window.viewport_size().width < px(600.0)
+                {
+                    // The sidebar is a drawer on narrow windows.
+                    this.show_sidebar = false;
                 } else if this.zen_mode {
                     this.handle_exit_zen();
                 }
@@ -5352,6 +6078,7 @@ impl Render for LiteMarkApp {
                         FormattingToolbarProps {
                             active_formats,
                             show_overflow_menu: self.open_menu == Some(MenuId::Overflow),
+                            show_heading_menu: self.open_menu == Some(MenuId::Heading),
                             show_table_menu: self.open_menu == Some(MenuId::Table),
                             is_narrow,
                             menu_bar_element,
@@ -5361,6 +6088,7 @@ impl Render for LiteMarkApp {
                             on_insert_link: on_insert_link.clone(),
                             on_toggle_find: on_toggle_find.clone(),
                             on_toggle_overflow: on_toggle_overflow.clone(),
+                            on_toggle_heading: on_toggle_heading.clone(),
                         },
                         &theme,
                     ))
@@ -5379,6 +6107,9 @@ impl Render for LiteMarkApp {
                                 on_replace_all: on_replace_all.clone(),
                                 on_close: on_find_close.clone(),
                                 on_toggle_case: on_toggle_case.clone(),
+                                show_replace: self.show_replace_row,
+                                width: window_width,
+                                on_toggle_replace: on_toggle_replace.clone(),
                             },
                             &theme,
                         ))
@@ -5389,15 +6120,20 @@ impl Render for LiteMarkApp {
                             .flex_1()
                             .flex()
                             .size_full()
+                            .relative()
                             .overflow_hidden()
                             .when(self.show_sidebar, |s| {
-                                s.child(render_sidebar(
+                                let sidebar = render_sidebar(
                                     SidebarProps {
                                         workspace: self.workspace.clone(),
+                                        width: crate::theme::sidebar_width(window_width),
                                         selected_file_id: match &self.selected_target {
                                             Some(SidebarTarget::File(id)) => Some(id.clone()),
                                             _ => None,
                                         },
+                                        open_file_id: self
+                                            .active_tab()
+                                            .and_then(|tab| tab.workspace_file_id.clone()),
                                         selected_folder_id: match &self.selected_target {
                                             Some(SidebarTarget::Folder(id)) => {
                                                 Some(id.clone())
@@ -5414,24 +6150,63 @@ impl Render for LiteMarkApp {
                                         search_query: self.search_query.clone(),
                                         creating: self.create_draft.clone(),
                                         create_field: self.create_field.clone(),
+                                        search_field: self.search_field.clone(),
                                         dragging: cx.has_active_drag(),
                                         on_select_file: on_select_file.clone(),
                                         on_begin_create: on_begin_create.clone(),
                                         on_delete_file: on_delete_file.clone(),
                                         on_delete_folder: on_delete_folder.clone(),
                                         on_toggle_folder: on_toggle_folder.clone(),
-                                        on_choose_dir: on_choose_dir.clone(),
+                                        on_workspace_menu: on_toggle_workspace_menu.clone(),
+                                        workspace_menu_open: self.workspace_menu_open,
                                         on_close: on_toggle_sidebar.clone(),
                                         on_context_menu: on_sidebar_context.clone(),
                                         on_drop_item: on_drop_item.clone(),
+                                        on_range_select: on_range_select.clone(),
+                                        on_toggle_select: on_toggle_select.clone(),
+                                        on_blank_click: on_blank_click.clone(),
+                                        multi_targets: self
+                                            .active_multi()
+                                            .map(|m| m.items.clone())
+                                            .unwrap_or_default(),
                                     },
                                     &theme,
-                                ))
+                                );
+                                // On narrow windows the sidebar floats over the
+                                // editor as a drawer instead of squeezing it.
+                                if window_width < px(600.0) {
+                                    let close = on_toggle_sidebar.clone();
+                                    s.child(deferred(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .left_0()
+                                            .size_full()
+                                            // A click on the editor beside the drawer closes it.
+                                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                close(cx);
+                                            })
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .occlude()
+                                                    .shadow_2xl()
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                        cx.stop_propagation()
+                                                    })
+                                                    .child(sidebar),
+                                            ),
+                                    ))
+                                } else {
+                                    s.child(sidebar)
+                                }
                             })
                             .child(render_editor(
                                 EditorProps {
                                     zoom_level: self.settings.zoom_level,
                                     show_zoom_hud: self.show_zoom_hud,
+                                    scroll: self.editor_scroll.clone(),
                                     editor_element: self.editor_surface(
                                         cx,
                                         &theme,
@@ -5439,17 +6214,68 @@ impl Render for LiteMarkApp {
                                     ),
                                 },
                                 &theme,
-                            )),
+                            ))
+                            .when(self.workspace_menu_open && self.show_sidebar, |parent| {
+                let recents: Vec<(String, PathBuf)> = self
+                    .settings
+                    .recent_folders
+                    .iter()
+                    .filter(|p| p.is_dir() && **p != self.workspace.folder_path)
+                    .map(|p| {
+                        let name = p
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Folder")
+                            .to_string();
+                        (name, p.clone())
+                    })
+                    .collect();
+                let view = view.clone();
+                parent.child(render_workspace_menu(
+                    self.workspace.folder_path.display().to_string(),
+                    recents,
+                    {
+                        let view = view.clone();
+                        move |dir: PathBuf, cx: &mut App| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.workspace_menu_open = false;
+                                this.prepare_workspace_switch(dir);
+                                cx.notify();
+                            });
+                        }
+                    },
+                    {
+                        let view = view.clone();
+                        let choose = on_choose_dir.clone();
+                        move |cx: &mut App| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.workspace_menu_open = false;
+                                cx.notify();
+                            });
+                            choose(cx);
+                        }
+                    },
+                    {
+                        let view = view.clone();
+                        move |cx: &mut App| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.workspace_menu_open = false;
+                                cx.notify();
+                            });
+                        }
+                    },
+                    &theme,
+                ))
+            })
                     )
                     // 5. StatusBar
                     .child(render_status_bar(
                         StatusBarProps {
                             line: stats_line,
-                            col: stats_col,
                             words: stats_words,
                             chars: stats_chars,
-                            lines: stats_lines,
-                            reading_time_min: stats_read,
+                            selected_words: stats_selection,
+                            width: window_width,
                             zoom_level: self.settings.zoom_level,
                             view_mode: self.settings.view_mode,
                             on_zoom_in: on_zoom_in.clone(),
@@ -5468,6 +6294,7 @@ impl Render for LiteMarkApp {
                         EditorProps {
                             zoom_level: self.settings.zoom_level,
                             show_zoom_hud: self.show_zoom_hud,
+                            scroll: self.editor_scroll.clone(),
                             editor_element: self.editor_surface(cx, &theme, false),
                         },
                         &theme,
@@ -5497,6 +6324,69 @@ impl Render for LiteMarkApp {
                             .child(kbd_badge("Esc", &theme))
                     })
             })
+            // Update notice
+            .when_some(
+                self.available_update.clone().filter(|_| !self.zen_mode),
+                |s, release| {
+                    let url = release.url.clone();
+                    let version = release.version.clone();
+                    let view = cx.entity();
+                    s.child(
+                        div()
+                            .absolute()
+                            .bottom(px(84.0))
+                            .right(px(24.0))
+                            .px(px(14.0))
+                            .py(px(8.0))
+                            .rounded(px(8.0))
+                            .bg(theme.bg_surface)
+                            .border_1()
+                            .border_color(theme.border_primary)
+                            .shadow_2xl()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_primary)
+                            .child(format!("LiteMark {} is available", release.version))
+                            .child(
+                                div()
+                                    .id("update-download")
+                                    .px(px(8.0))
+                                    .py(px(3.0))
+                                    .rounded(px(5.0))
+                                    .cursor_pointer()
+                                    .text_color(theme.text_strong)
+                                    .bg(theme.bg_active)
+                                    .hover(|h| h.bg(theme.bg_hover))
+                                    .on_click(move |_, _, cx| cx.open_url(&url))
+                                    .child("Download"),
+                            )
+                            .child(
+                                div()
+                                    .id("update-dismiss")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .w(px(20.0))
+                                    .h(px(20.0))
+                                    .rounded(px(5.0))
+                                    .cursor_pointer()
+                                    .hover(|h| h.bg(theme.bg_hover))
+                                    .on_click(move |_, _, cx| {
+                                        let version = version.clone();
+                                        view.update(cx, |this, cx| {
+                                            this.settings.dismissed_update = Some(version);
+                                            this.settings.save();
+                                            this.available_update = None;
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(render_icon("x", 14.0, theme.text_muted)),
+                            ),
+                    )
+                },
+            )
             // Save Toast Notification
             .when_some(self.saved_toast.clone(), |s, toast| {
                 s.child(
@@ -5529,6 +6419,7 @@ impl Render for LiteMarkApp {
             // Modals
             .when(self.show_shortcuts_modal, |s| {
                 s.child(render_shortcuts_modal(
+                    (window.viewport_size().height - px(32.0)).min(px(560.0)),
                     self.prompt_focus_handle.clone(),
                     on_close_shortcuts.clone(),
                     &theme,
@@ -5726,4 +6617,16 @@ impl Render for LiteMarkApp {
                 },
             )
     }
+}
+
+/// Translucent amber wash painted behind find matches, so the text on top
+/// keeps its own color and stays readable. The current match is stronger.
+fn find_match_color(dark: bool, active: bool) -> Hsla {
+    let color = match (dark, active) {
+        (false, false) => rgba(0xffd54f73),
+        (false, true) => rgba(0xff9800a6),
+        (true, false) => rgba(0xe6a70033),
+        (true, true) => rgba(0xf59e0b6b),
+    };
+    color.into()
 }
