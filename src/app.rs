@@ -7093,3 +7093,7 @@ fn find_match_color(dark: bool, active: bool) -> Hsla {
 #[cfg(test)]
 #[path = "table_drag_handler_tests.rs"]
 mod table_drag_handler_tests;
+
+#[cfg(test)]
+#[path = "viewport_culling_tests.rs"]
+mod viewport_culling_tests;

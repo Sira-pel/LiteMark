@@ -47,7 +47,9 @@ pub struct PaintRow {
     pub byte_end: usize,
     pub origin: Point<Pixels>,
     pub line_height: Pixels,
-    pub shaped: ShapedLine,
+    /// Shared so a row stays small: `ShapedLine` keeps its decoration runs
+    /// inline (about 3 KB), and every off-screen row shares one empty line.
+    pub shaped: Rc<ShapedLine>,
     pub offset_map: RowOffsetMap,
     pub checkbox_hit: Option<(Bounds<Pixels>, Range<usize>)>,
     pub link_hits: Vec<(Range<usize>, String)>,
@@ -80,7 +82,39 @@ pub struct TableGeom {
 
 #[derive(Clone, Default)]
 pub struct TableWidthCache {
-    pub entries: std::collections::HashMap<Range<usize>, (u64, Pixels, Vec<Pixels>)>,
+    pub entries: std::collections::HashMap<Range<usize>, TableWidthEntry>,
+}
+
+/// Key, content width, column widths, and the row heights of the last frame
+/// that shaped the whole table.
+pub type TableWidthEntry = (u64, Pixels, Vec<Pixels>, Vec<Pixels>);
+
+/// The vertical span worth shaping this frame: the visible part of the editor
+/// plus one screen above and below, so scrolling and drag-selecting past the
+/// edge land on shaped rows. Rows outside keep their geometry only.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShapingBand {
+    top: Pixels,
+    bottom: Pixels,
+}
+
+impl ShapingBand {
+    pub(crate) fn new(visible: Bounds<Pixels>) -> Self {
+        let margin = visible.size.height;
+        Self {
+            top: visible.top() - margin,
+            bottom: visible.bottom() + margin,
+        }
+    }
+
+    pub(crate) fn contains(&self, top: Pixels, height: Pixels) -> bool {
+        top < self.bottom && top + height > self.top
+    }
+}
+
+/// True when `index` is within two rows of any anchor row.
+fn near_any(anchors: &[usize], index: usize) -> bool {
+    anchors.iter().any(|&a| a + 2 >= index && a <= index + 2)
 }
 
 #[derive(Clone)]
@@ -1019,9 +1053,25 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let wrap_cols = wrap_cols.max(1);
         let base_line_height = self.font_size * 1.65;
         let focused = self.focus.is_focused(window);
+        let band = ShapingBand::new(window.content_mask().bounds);
+        // Rows near these offsets are always shaped, wherever they are, so
+        // the caret, the selection ends and IME text keep exact geometry.
+        let mut anchors = vec![self.selection.start, self.selection.end];
+        if let Some(marked) = &self.marked {
+            anchors.extend([marked.start, marked.end]);
+        }
+        let unshaped = Rc::new(ShapedLine::default());
 
         if self.view_mode == ViewMode::Raw {
             let rows_src = visual_rows(&self.content, wrap_cols);
+            let anchor_rows: Vec<usize> = anchors
+                .iter()
+                .map(|&offset| {
+                    rows_src
+                        .partition_point(|&(start, _)| start <= offset)
+                        .saturating_sub(1)
+                })
+                .collect();
             let mut rows = Vec::with_capacity(rows_src.len());
             let mut numbers = Vec::new();
             let mut bg_quads = Vec::new();
@@ -1042,6 +1092,25 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     line_number += 1;
                 }
                 let is_current_line = caret_line == Some(line_number);
+                let origin = point(
+                    bounds.left() + gutter + x_offset,
+                    bounds.top() + px(12.0) + base_line_height * index as f32,
+                );
+                if !band.contains(origin.y, base_line_height) && !near_any(&anchor_rows, index) {
+                    rows.push(PaintRow {
+                        line_index: line_number.saturating_sub(1),
+                        byte_start: start,
+                        byte_end: end,
+                        origin,
+                        line_height: base_line_height,
+                        shaped: unshaped.clone(),
+                        offset_map: RowOffsetMap::identity(start, end),
+                        checkbox_hit: None,
+                        link_hits: Vec::new(),
+                        cells: Vec::new(),
+                    });
+                    continue;
+                }
                 let slice = if start == end {
                     SharedString::from(" ")
                 } else {
@@ -1059,10 +1128,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     window
                         .text_system()
                         .shape_line(slice, self.font_size, &runs, None);
-                let origin = point(
-                    bounds.left() + gutter + x_offset,
-                    bounds.top() + px(12.0) + base_line_height * index as f32,
-                );
                 let offset_map = RowOffsetMap::identity(start, end);
 
                 paint_ranges_mapped(
@@ -1163,7 +1228,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     byte_end: end,
                     origin,
                     line_height: base_line_height,
-                    shaped,
+                    shaped: Rc::new(shaped),
                     offset_map,
                     checkbox_hit: None,
                     link_hits: Vec::new(),
@@ -1220,6 +1285,23 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             std::collections::HashMap::new();
 
         let colors = self.colors();
+        let anchor_lines: Vec<usize> = anchors
+            .iter()
+            .map(|&offset| {
+                self.parsed
+                    .lines
+                    .partition_point(|l| l.source.start <= offset)
+                    .saturating_sub(1)
+            })
+            .collect();
+        // Per table: whether it is shaped this frame, and the row heights it
+        // used, so an off-screen table keeps its height without shaping.
+        let mut table_shaped: std::collections::HashMap<Range<usize>, bool> =
+            std::collections::HashMap::new();
+        let mut table_heights: std::collections::HashMap<Range<usize>, Vec<Pixels>> =
+            std::collections::HashMap::new();
+        let mut table_cached_rows: std::collections::HashMap<Range<usize>, usize> =
+            std::collections::HashMap::new();
 
         for (line_idx, parsed_line) in self.parsed.lines.iter().enumerate() {
             if matches!(parsed_line.kind, LineKind::TableDelimiter) {
@@ -1239,6 +1321,60 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 ref table_source,
             } = parsed_line.kind
             {
+                let shape_table = *table_shaped.entry(table_source.clone()).or_insert_with(|| {
+                    let lines = table_rows
+                        .get(table_source)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let key = table_width_key(
+                        self.content.get(table_source.clone()).unwrap_or(""),
+                        &self.font_family,
+                        &self.mono_font_family,
+                        self.font_size,
+                    );
+                    let heights = table_width_cache
+                        .entries
+                        .get(table_source)
+                        .filter(|(hash, width, _, heights)| {
+                            *hash == key && *width == content_width && heights.len() == lines.len()
+                        })
+                        .map(|(_, _, _, heights)| heights);
+                    let Some(heights) = heights else {
+                        return true;
+                    };
+                    let extent = lines.iter().zip(heights).fold(px(0.0), |acc, (line, h)| {
+                        acc + wysiwyg_line_metrics(&line.kind, self.font_size).2 + *h
+                    });
+                    let first = lines.first().map_or(line_idx, |l| l.line_index);
+                    let last = lines.last().map_or(line_idx, |l| l.line_index);
+                    band.contains(cur_y, extent)
+                        || anchor_lines
+                            .iter()
+                            .any(|&a| a + 2 >= first && a <= last + 2)
+                });
+                if !shape_table {
+                    let row_ix = table_cached_rows.entry(table_source.clone()).or_insert(0);
+                    let row_height = table_width_cache
+                        .entries
+                        .get(table_source)
+                        .and_then(|(_, _, _, heights)| heights.get(*row_ix).copied())
+                        .unwrap_or(row_line_height);
+                    *row_ix += 1;
+                    rows.push(PaintRow {
+                        line_index: line_idx,
+                        byte_start: parsed_line.source.start,
+                        byte_end: parsed_line.source.end,
+                        origin: point(base_x, cur_y),
+                        line_height: row_height,
+                        shaped: unshaped.clone(),
+                        offset_map: parsed_line.offset_map.clone(),
+                        checkbox_hit: None,
+                        link_hits,
+                        cells: Vec::new(),
+                    });
+                    cur_y += row_height;
+                    continue;
+                }
                 let col_widths = table_col_widths
                     .entry(table_source.clone())
                     .or_insert_with(|| {
@@ -1249,7 +1385,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             &self.mono_font_family,
                             self.font_size,
                         );
-                        if let Some((cached_hash, cached_width, widths)) =
+                        if let Some((cached_hash, cached_width, widths, _)) =
                             table_width_cache.entries.get(table_source)
                         {
                             if *cached_hash == table_hash && *cached_width == content_width {
@@ -1290,7 +1426,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         let widths = compute_table_column_widths(lines, content_width, &mut measure);
                         table_width_cache.entries.insert(
                             table_source.clone(),
-                            (table_hash, content_width, widths.clone()),
+                            (table_hash, content_width, widths.clone(), Vec::new()),
                         );
                         widths
                     });
@@ -1425,6 +1561,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
 
                 let max_subrows = cell_preps.iter().map(|p| p.lines.len()).max().unwrap_or(1);
                 let row_height = row_line_height * (max_subrows as f32);
+                table_heights
+                    .entry(table_source.clone())
+                    .or_default()
+                    .push(row_height);
 
                 // Table row horizontal borders
                 if is_header {
@@ -1624,7 +1764,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     byte_end: parsed_line.source.end,
                     origin: point(base_x, cur_y),
                     line_height: row_height,
-                    shaped: dummy_shaped,
+                    shaped: Rc::new(dummy_shaped),
                     offset_map: parsed_line.offset_map.clone(),
                     checkbox_hit: None,
                     link_hits,
@@ -1653,6 +1793,25 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 };
 
                 let row_origin = point(base_x + indent_x, cur_y);
+                let near_anchor = anchor_lines
+                    .iter()
+                    .any(|&a| a + 2 >= parsed_line.line_index && a <= parsed_line.line_index + 2);
+                if !band.contains(cur_y, row_line_height) && !near_anchor {
+                    rows.push(PaintRow {
+                        line_index: line_idx,
+                        byte_start: sub_map.line_start,
+                        byte_end: sub_map.line_end,
+                        origin: row_origin,
+                        line_height: row_line_height,
+                        shaped: unshaped.clone(),
+                        offset_map: sub_map,
+                        checkbox_hit: None,
+                        link_hits: link_hits.clone(),
+                        cells: Vec::new(),
+                    });
+                    cur_y += row_line_height;
+                    continue;
+                }
 
                 // Block backgrounds / decorations
                 match &parsed_line.kind {
@@ -1964,7 +2123,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     byte_end: sub_map.line_end,
                     origin: row_origin,
                     line_height: row_line_height,
-                    shaped,
+                    shaped: Rc::new(shaped),
                     offset_map: sub_map,
                     checkbox_hit,
                     link_hits: link_hits.clone(),
@@ -1972,6 +2131,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 });
 
                 cur_y += row_line_height;
+            }
+        }
+
+        for (source, heights) in table_heights {
+            if let Some(entry) = table_width_cache.entries.get_mut(&source) {
+                entry.3 = heights;
             }
         }
 
@@ -2842,7 +3007,7 @@ mod tests {
             byte_end: 22,
             origin: point(px(10.0), px(0.0)),
             line_height: px(56.0),
-            shaped: ShapedLine::default(),
+            shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: RowOffsetMap::identity(0, 22),
             checkbox_hit: None,
             link_hits: Vec::new(),
@@ -2870,7 +3035,7 @@ mod tests {
             byte_end: 42,
             origin: point(px(10.0), px(56.0)),
             line_height: px(28.0),
-            shaped: ShapedLine::default(),
+            shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: RowOffsetMap::identity(23, 42),
             checkbox_hit: None,
             link_hits: Vec::new(),
@@ -2961,7 +3126,7 @@ mod tests {
             byte_end: 20,
             origin: point(px(10.0), px(0.0)),
             line_height: px(56.0),
-            shaped: ShapedLine::default(),
+            shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: RowOffsetMap::identity(0, 20),
             checkbox_hit: None,
             link_hits: Vec::new(),
@@ -3027,7 +3192,7 @@ mod tests {
             byte_end: 20,
             origin: point(px(10.0), px(0.0)),
             line_height: px(56.0),
-            shaped: ShapedLine::default(),
+            shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: RowOffsetMap::identity(0, 20),
             checkbox_hit: None,
             link_hits: Vec::new(),
@@ -3118,7 +3283,7 @@ mod tests {
             byte_end: 35,
             origin: point(px(0.0), px(0.0)),
             line_height: px(112.0),
-            shaped: ShapedLine::default(),
+            shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: RowOffsetMap::identity(0, 35),
             checkbox_hit: None,
             link_hits: Vec::new(),
@@ -3312,7 +3477,7 @@ mod tests {
             byte_end: 10,
             origin: point(px(0.0), px(0.0)),
             line_height: px(28.0),
-            shaped: ShapedLine::default(),
+            shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: RowOffsetMap::identity(0, 10),
             checkbox_hit: None,
             link_hits: Vec::new(),
