@@ -740,6 +740,8 @@ impl Element for FieldElement {
         let line = window
             .text_system()
             .shape_line(display, font_size, &runs, None);
+        // Caret spans the text line, not the whole 26px field.
+        let caret_height = (font_size * 1.3).min(bounds.size.height);
         let (selection, cursor_quad) =
             if selected.is_empty() && !content.is_empty() || content.is_empty() {
                 (
@@ -748,9 +750,9 @@ impl Element for FieldElement {
                         Bounds::new(
                             point(
                                 bounds.left() + line.x_for_index(cursor.min(line.len())),
-                                bounds.top(),
+                                bounds.top() + (bounds.size.height - caret_height) / 2.0,
                             ),
-                            size(px(1.5), bounds.size.height),
+                            size(px(1.5), caret_height),
                         ),
                         field.text_color,
                     )),

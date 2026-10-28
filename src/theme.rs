@@ -48,6 +48,7 @@ pub mod sz {
     pub const TOOLBAR: Pixels = px(40.);
     pub const STATUS: Pixels = px(28.);
     pub const SIDEBAR_W: Pixels = px(304.);
+    pub const SIDEBAR_MIN_W: Pixels = px(170.);
     pub const ROW_H: Pixels = px(32.);
     pub const R_SM: Pixels = px(4.);
     pub const R_MD: Pixels = px(6.);
@@ -101,6 +102,10 @@ pub struct Theme {
     pub row_text: Rgba,
     pub row_active: Rgba,
     pub row_hover: Rgba,
+    /// Rows in a Shift/Ctrl+A multi-selection: a cool tint that reads apart
+    /// from the neutral open-note highlight in both themes.
+    pub row_multi: Rgba,
+    pub row_multi_border: Rgba,
     pub tile_hover: Rgba,
     pub menu_bg: Rgba,
     pub wc_glyph: Rgba,
@@ -149,6 +154,8 @@ impl Theme {
                 row_text: rgb(0xa8a8a8),
                 row_active: rgb(0x2c2c2c),
                 row_hover: rgb(0x242424),
+                row_multi: rgb(0x1f2a36),
+                row_multi_border: rgb(0x34506b),
                 tile_hover: rgb(0x2a2a2a),
                 menu_bg: rgb(0x262626),
                 wc_glyph: rgb(0xb0b0b0),
@@ -189,6 +196,8 @@ impl Theme {
                 row_text: rgb(0x444444),
                 row_active: rgb(0xe0e0e0),
                 row_hover: rgb(0xeeeeee),
+                row_multi: rgb(0xe1edf8),
+                row_multi_border: rgb(0xa9c6e4),
                 tile_hover: rgb(0xe4e4e4),
                 menu_bg: rgb(0xffffff),
                 wc_glyph: rgb(0x4a4a4a),
@@ -207,4 +216,24 @@ impl Theme {
 
     pub const FONT_PROSE: &'static str = "Ubuntu";
     pub const FONT_MONO: &'static str = "Ubuntu Mono";
+}
+
+/// Sidebar width for a window: the full width when there is room, shrinking
+/// on narrow windows so the editor keeps at least ~55% of the space.
+pub fn sidebar_width(window_width: Pixels) -> Pixels {
+    (window_width * 0.45).clamp(sz::SIDEBAR_MIN_W, sz::SIDEBAR_W)
+}
+
+#[cfg(test)]
+mod sidebar_width_tests {
+    use super::{sidebar_width, sz};
+    use gpui::px;
+
+    #[test]
+    fn sidebar_width_shrinks_with_window_within_bounds() {
+        assert_eq!(sidebar_width(px(1600.0)), sz::SIDEBAR_W);
+        assert_eq!(sidebar_width(px(300.0)), sz::SIDEBAR_MIN_W);
+        let mid = sidebar_width(px(480.0));
+        assert!(mid > sz::SIDEBAR_MIN_W && mid < sz::SIDEBAR_W);
+    }
 }

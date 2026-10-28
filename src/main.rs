@@ -74,11 +74,14 @@ fn main() {
                 KeyBinding::new("ctrl-s", SaveFile, None),
                 KeyBinding::new("ctrl-o", OpenFile, None),
                 KeyBinding::new("ctrl-n", NewNote, None),
+                KeyBinding::new("ctrl-shift-n", NewFolder, None),
                 KeyBinding::new("ctrl-t", NewTab, None),
                 KeyBinding::new("ctrl-delete", DeleteNote, None),
                 // Sidebar tree navigation
                 KeyBinding::new("up", SelectPrev, Some("Sidebar")),
                 KeyBinding::new("down", SelectNext, Some("Sidebar")),
+                KeyBinding::new("shift-up", ExtendSelectPrev, Some("Sidebar")),
+                KeyBinding::new("shift-down", ExtendSelectNext, Some("Sidebar")),
                 KeyBinding::new("enter", Confirm, Some("Sidebar")),
                 KeyBinding::new("space", Confirm, Some("Sidebar")),
                 KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
@@ -215,7 +218,7 @@ fn main() {
                         cx,
                     ))),
                     window_decorations: Some(WindowDecorations::Client),
-                    window_min_size: Some(size(px(480.0), px(360.0))),
+                    window_min_size: Some(size(px(360.0), px(360.0))),
                     app_id: Some("litemark".into()),
                     titlebar: None,
                     ..Default::default()

@@ -2,21 +2,30 @@ use crate::model::{
     file_dialog_block_reason, unique_name, FileType, PortalProbe, WorkspaceDirectory,
     WorkspaceFile, WorkspaceFolder,
 };
+#[cfg(target_os = "linux")]
 use std::ffi::{c_char, CString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
 const AT_FDCWD: i32 = -100;
+#[cfg(target_os = "linux")]
 const RENAME_NOREPLACE: u32 = 1;
+#[cfg(target_os = "linux")]
 const ENOSYS: i32 = 38;
+#[cfg(target_os = "linux")]
 const EINVAL: i32 = 22;
 
+#[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn renameat2(
         olddirfd: i32,
@@ -50,7 +59,7 @@ fn main() {
 pub fn get_or_create_notes_dir() -> PathBuf {
     let base = dirs::document_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
-    let notes = base.join("Notes");
+    let notes = crate::model::workspace::default_notes_dir(&base);
     let _ = fs::create_dir_all(&notes);
     notes
 }
@@ -95,6 +104,13 @@ fn resolve_symlink_chain(path: &Path) -> io::Result<PathBuf> {
     ))
 }
 
+/// Windows cannot open a directory like a file, so there is nothing to sync.
+#[cfg(not(unix))]
+fn fsync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn fsync_parent(path: &Path) -> io::Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
@@ -120,12 +136,50 @@ fn random_suffix() -> u64 {
 
 /// `renameat2(RENAME_NOREPLACE)` is missing on this filesystem.
 /// ENOSYS is the usual code; some filesystems return EINVAL instead.
+#[cfg(target_os = "linux")]
 pub(crate) fn noreplace_unsupported(err: &io::Error) -> bool {
     matches!(err.raw_os_error(), Some(ENOSYS) | Some(EINVAL))
 }
 
+/// Only Linux's `renameat2` can report this; the portable version never does.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn noreplace_unsupported(_err: &io::Error) -> bool {
+    false
+}
+
+/// Move `from` to `to` without replacing an existing `to`. A hard link fails
+/// with [`io::ErrorKind::AlreadyExists`] when `to` is present. Filesystems
+/// without hard links (FAT, exFAT) fall back to an exclusive create and copy.
+#[cfg(not(target_os = "linux"))]
+fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    rename_noreplace_portable(from, to)
+}
+
+/// Compiled on Linux only for tests, so the portable path is exercised there.
+#[cfg(any(test, not(target_os = "linux")))]
+fn rename_noreplace_portable(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::hard_link(from, to) {
+        Ok(()) => fs::remove_file(from),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(err),
+        Err(_) => {
+            let mut dest = OpenOptions::new().write(true).create_new(true).open(to)?;
+            let copied = (|| {
+                dest.write_all(&fs::read(from)?)?;
+                dest.sync_all()
+            })();
+            drop(dest);
+            if let Err(err) = copied {
+                let _ = fs::remove_file(to);
+                return Err(err);
+            }
+            fs::remove_file(from)
+        }
+    }
+}
+
 /// `renameat2(RENAME_NOREPLACE)`. Fails with [`io::ErrorKind::AlreadyExists`]
 /// when `to` is already present, including across a race with another writer.
+#[cfg(target_os = "linux")]
 fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     let from_c = CString::new(from.as_os_str().as_bytes())
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
@@ -157,6 +211,7 @@ fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(parent)?;
 
     let original = fs::metadata(target).ok();
+    #[cfg(unix)]
     let mode = original
         .as_ref()
         .map(|meta| meta.permissions().mode() & 0o777)
@@ -169,11 +224,11 @@ fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
     let mut last_err = io::Error::other("couldn't create a temporary file");
     for _ in 0..8 {
         let temp_path = parent.join(format!(".{file_name}.{}.litemark-tmp", random_suffix()));
-        let opened = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&temp_path);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(mode);
+        let opened = options.open(&temp_path);
         let mut file = match opened {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
@@ -461,7 +516,14 @@ fn copy_dir_inner(src: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Windows and macOS have native file dialogs that are always available.
+#[cfg(not(target_os = "linux"))]
+pub fn probe_file_dialog() -> PortalProbe {
+    PortalProbe::Ready
+}
+
 /// Ask the session bus whether a file dialog can be shown.
+#[cfg(target_os = "linux")]
 pub fn probe_file_dialog() -> PortalProbe {
     if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
         let uid = uzers_or_uid();
@@ -501,6 +563,7 @@ pub fn probe_file_dialog() -> PortalProbe {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn uzers_or_uid() -> u32 {
     // libc isn't a direct dependency; the session bus path uses the real uid via /proc.
     std::fs::read_to_string("/proc/self/status")
@@ -666,6 +729,7 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn atomic_save_keeps_permissions_and_follows_symlinks() {
         use std::os::unix::fs::{symlink, PermissionsExt};
@@ -969,6 +1033,29 @@ mod tests {
     }
 
     #[test]
+    fn portable_rename_moves_and_never_replaces() {
+        let dir = std::env::temp_dir().join(format!("litemark-portable-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("from.md");
+        let to = dir.join("to.md");
+        fs::write(&from, "new").unwrap();
+
+        rename_noreplace_portable(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "new");
+
+        fs::write(&from, "other").unwrap();
+        let err = rename_noreplace_portable(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&to).unwrap(), "new", "existing file untouched");
+        assert!(from.exists(), "source stays when the target is taken");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn noreplace_falls_back_on_enosys_and_einval() {
         assert!(noreplace_unsupported(&io::Error::from_raw_os_error(38)));
         assert!(noreplace_unsupported(&io::Error::from_raw_os_error(22)));
@@ -995,8 +1082,11 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(&written).unwrap(), "fresh");
 
-        let mode = fs::metadata(&written).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644);
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&written).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644);
+        }
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

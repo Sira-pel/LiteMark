@@ -170,19 +170,43 @@ pub fn calculate_submenu_y_offset(items: &[MenuItem], sub_ix: usize) -> Pixels {
     y_offset
 }
 
+/// Gap kept between a popup and the window edges; the bottom also clears the status bar.
+const POPUP_MARGIN: Edges<Pixels> = Edges {
+    top: px(8.0),
+    right: px(8.0),
+    bottom: px(36.0),
+    left: px(8.0),
+};
+
+/// Upper bound for a content-sized menu; longer labels truncate.
+const MENU_MAX_W: f32 = 360.0;
+
+/// Width a menu needs to show its widest row without clipping: check/icon
+/// column, label, hint chip and shortcut, plus row and panel padding.
+pub fn content_width(items: &[MenuItem]) -> Pixels {
+    let has_icons_or_checks = items.iter().any(|it| {
+        it.icon.is_some() || matches!(it.kind, MenuItemKind::Check(_) | MenuItemKind::Radio(_))
+    });
+    let icon_col = if has_icons_or_checks { 24.0 } else { 0.0 };
+    let widest = items
+        .iter()
+        .filter(|it| !matches!(it.kind, MenuItemKind::Divider | MenuItemKind::Heading))
+        .map(|it| {
+            let label = it.label.chars().count() as f32 * 7.5;
+            let hint = it.hint.map_or(0.0, |h| h.chars().count() as f32 * 6.5 + 18.0);
+            let shortcut = it.shortcut.map_or(0.0, |s| s.chars().count() as f32 * 7.0);
+            let chevron = if matches!(it.kind, MenuItemKind::Submenu(_)) { 20.0 } else { 0.0 };
+            let gaps = if hint > 0.0 && shortcut > 0.0 { 8.0 } else { 0.0 };
+            // 24 = row px(12) * 2, 12 = gap between left and right sides
+            label + hint + shortcut + chevron + gaps + 24.0 + 12.0
+        })
+        .fold(0.0_f32, f32::max);
+    px((icon_col + widest + 8.0).min(MENU_MAX_W))
+}
+
 pub fn calculate_submenu_width(item: &MenuItem) -> Pixels {
     if let MenuItemKind::Submenu(ref sub_items) = item.kind {
-        let max_label_len = sub_items.iter().map(|it| it.label.chars().count()).max().unwrap_or(0);
-        let has_hints_or_shortcuts = sub_items.iter().any(|it| it.hint.is_some() || it.shortcut.is_some());
-        let has_icons_or_checks = sub_items.iter().any(|it| it.icon.is_some() || matches!(it.kind, MenuItemKind::Check(_) | MenuItemKind::Radio(_)));
-
-        let padding = px(24.0);
-        let icon_col = if has_icons_or_checks { px(24.0) } else { px(0.0) };
-        let text_w = px(max_label_len as f32 * 7.5);
-        let extra_col = if has_hints_or_shortcuts { px(70.0) } else { px(0.0) };
-
-        let calculated = padding + icon_col + text_w + extra_col;
-        calculated.max(px(160.0)).min(px(320.0))
+        content_width(sub_items).max(px(160.0))
     } else {
         px(200.0)
     }
@@ -197,6 +221,8 @@ where
     pub point: Point<Pixels>,
     pub anchor_corner: Corner,
     pub width: Pixels,
+    /// Widest the menu may grow (the window width less a margin).
+    pub max_width: Pixels,
     pub items: Vec<MenuItem>,
     pub focus_handle: FocusHandle,
     pub selected_index: Option<usize>,
@@ -304,6 +330,7 @@ where
                         .flex()
                         .items_center()
                         .gap(px(8.0))
+                        .min_w_0()
                         .when(has_checks, |s| {
                             s.child(
                                 div()
@@ -319,7 +346,7 @@ where
                         .when_some(item.icon, |s, icon| {
                             s.child(render_icon(icon, 14.0, if is_disabled { theme.menu_disabled } else { theme.text_muted }))
                         })
-                        .child(item.label);
+                        .child(div().truncate().child(item.label));
 
                     row = row.child(left_side);
 
@@ -390,8 +417,9 @@ where
     let cls = props.on_close.clone();
     let point = props.point;
     let anchor_corner = props.anchor_corner;
-    let width = props.width;
     let items = props.items;
+    let max_width = props.max_width;
+    let width = props.width.max(content_width(&items)).min(max_width);
     let selected_index = props.selected_index;
     let open_submenu_ix = props.open_submenu_ix;
     let focus_handle = props.focus_handle;
@@ -402,7 +430,7 @@ where
         if let Some(item) = items.get(sub_ix) {
             if let MenuItemKind::Submenu(ref sub_items) = item.kind {
                 let y_offset = calculate_submenu_y_offset(&items, sub_ix);
-                let sub_w = calculate_submenu_width(item);
+                let sub_w = calculate_submenu_width(item).min(max_width);
                 let is_right_anchored = matches!(
                     anchor_corner,
                     Corner::TopRight | Corner::BottomRight
@@ -418,7 +446,7 @@ where
                     anchored()
                         .position(sub_point)
                         .anchor(sub_anchor)
-                        .snap_to_window()
+                        .snap_to_window_with_margin(POPUP_MARGIN)
                         .child(
                             div()
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -464,7 +492,7 @@ where
                 anchored()
                     .position(point)
                     .anchor(anchor_corner)
-                    .snap_to_window()
+                    .snap_to_window_with_margin(POPUP_MARGIN)
                     .child(
                         div()
                             .track_focus(&focus_handle)
@@ -632,7 +660,7 @@ where
                 anchored()
                     .position(position)
                     .anchor(Corner::TopLeft)
-                    .snap_to_window()
+                    .snap_to_window_with_margin(POPUP_MARGIN)
                     .child(
                         div()
                             .track_focus(&focus_handle)
@@ -739,7 +767,7 @@ where
             anchored()
                 .position(sub_point)
                 .anchor(Corner::TopLeft)
-                .snap_to_window()
+                .snap_to_window_with_margin(POPUP_MARGIN)
                 .child(
                     div()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -778,7 +806,7 @@ where
                 anchored()
                     .position(point)
                     .anchor(Corner::TopLeft)
-                    .snap_to_window()
+                    .snap_to_window_with_margin(POPUP_MARGIN)
                     .child(
                         div()
                             .id("table-picker-menu")
@@ -927,7 +955,7 @@ mod tests {
         ]);
         let width = calculate_submenu_width(&sub);
         assert!(width >= px(160.0));
-        assert!(width <= px(320.0));
+        assert!(width <= px(360.0));
     }
 
     #[test]
@@ -987,5 +1015,20 @@ mod tests {
         assert!(labels.contains(&"Paste"));
         assert!(labels.contains(&"Select all"));
     }
-}
 
+    #[test]
+    fn test_content_width_fits_hint_and_shortcut_and_is_capped() {
+        use super::content_width;
+        let plain = vec![MenuItem::action("Copy", None, None, |_, _| {})];
+        let rich = vec![MenuItem::disabled_action("Line numbers", Some("Ctrl+Shift+L"), Some("Raw only"))];
+        assert!(content_width(&rich) > content_width(&plain));
+        assert!(content_width(&rich) >= px(12.0 * 7.5 + 8.0 * 6.5 + 12.0 * 7.0));
+        let long = vec![MenuItem::action(
+            "An absurdly long label that keeps going and going and going and going",
+            None,
+            None,
+            |_, _| {},
+        )];
+        assert_eq!(content_width(&long), px(360.0));
+    }
+}
