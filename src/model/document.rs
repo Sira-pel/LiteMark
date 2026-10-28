@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    accepted_list_marker, parse_document, unescaped_pipe_offsets, InlinePair,
-    InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment, TableColumnAlign,
+    accepted_list_marker, accepted_list_marker_in, parse_document, unescaped_pipe_offsets,
+    InlinePair, InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment,
+    TableColumnAlign,
 };
 
 use super::table_ops::{self, TableOp};
@@ -851,11 +852,12 @@ impl DocumentTab {
             return;
         }
 
+        let parsed = self.parsed();
         let line = &self.content[line_start..line_end_pos];
         let trimmed_start = line.trim_start();
         let indent = &line[..line.len() - trimmed_start.len()];
 
-        if let Some(item) = accepted_list_marker(&self.content, line_start) {
+        if let Some(item) = accepted_list_marker_in(&parsed, &self.content, line_start) {
             let body = &line[item.prefix_end()..];
             // The caret stops before a CR line ending, so the CR is not in
             // `body`. An ordered task or a paren marker still does not exit
@@ -980,6 +982,7 @@ impl DocumentTab {
             }
         }
 
+        let parsed = self.parsed();
         let line_start = home_offset(&self.content, cursor);
         let line_before = &self.content[line_start..cursor];
 
@@ -998,7 +1001,7 @@ impl DocumentTab {
             }
         }
 
-        if let Some(item) = accepted_list_marker(&self.content, line_start) {
+        if let Some(item) = accepted_list_marker_in(&parsed, &self.content, line_start) {
             if item.prefix_end() == line_before.len() {
                 if item.task.is_some() {
                     let start = line_start + item.marker_end;
@@ -2035,9 +2038,10 @@ impl DocumentTab {
             .all(|idx| {
                 let at = line_at[idx];
                 if target == BlockFormatTarget::TaskList {
-                    accepted_list_marker(&self.content, at).is_some_and(|item| item.task.is_some())
+                    accepted_list_marker_in(&parsed, &self.content, at)
+                        .is_some_and(|item| item.task.is_some())
                 } else {
-                    let (_, existing, _) = parse_line_block_prefix(&self.content, at);
+                    let (_, existing, _) = parse_line_block_prefix(&parsed, &self.content, at);
                     existing == Some(target)
                 }
             });
@@ -2056,7 +2060,7 @@ impl DocumentTab {
                 continue;
             }
             let (indent, _existing, prefix_end) =
-                parse_line_block_prefix(&self.content, line_at[idx]);
+                parse_line_block_prefix(&parsed, &self.content, line_at[idx]);
             let leading_spaces = if matches!(target, BlockFormatTarget::Heading(_)) {
                 &line[..indent.min(3)]
             } else {
@@ -2064,7 +2068,7 @@ impl DocumentTab {
             };
             let raw_body = &line[prefix_end..];
             let has_hidden_closer =
-                self.parsed()
+                parsed
                     .line_at_offset(line_at[idx])
                     .is_some_and(|parsed_line| {
                         visible_line_end(parsed_line, self.view_mode) < parsed_line.source.end
@@ -2079,7 +2083,7 @@ impl DocumentTab {
                 raw_body
             };
             let new_line = if let Some(rewritten) =
-                ordered_checklist_line(&self.content, line_at[idx], target, all_match)
+                ordered_checklist_line(&parsed, &self.content, line_at[idx], target, all_match)
             {
                 rewritten
             } else if all_match {
@@ -3155,7 +3159,7 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        let Some(source) = table_ops::parsed_table_source(&self.content, pos) else {
+        let Some(source) = table_ops::parsed_table_source_in(&self.parsed(), pos) else {
             return;
         };
         let mut del_range = source;
@@ -3830,6 +3834,7 @@ enum BlockFormatTarget {
 /// document does not accept (column 4 or more, or an interrupting empty
 /// marker) are not tasks here either.
 fn ordered_checklist_line(
+    parsed: &ParsedDocument,
     content: &str,
     line_start: usize,
     target: BlockFormatTarget,
@@ -3837,7 +3842,7 @@ fn ordered_checklist_line(
 ) -> Option<String> {
     let line_end_pos = line_end(content, line_start);
     let line = &content[line_start..line_end_pos];
-    let item = accepted_list_marker(content, line_start)?;
+    let item = accepted_list_marker_in(parsed, content, line_start)?;
     // An ordered task shows the checklist button on and the ordered-list
     // button off. The ordered-list click leaves the line unchanged so it
     // matches that off button.
@@ -3869,6 +3874,7 @@ fn ordered_checklist_line(
 }
 
 fn parse_line_block_prefix(
+    parsed: &ParsedDocument,
     content: &str,
     line_start: usize,
 ) -> (usize, Option<BlockFormatTarget>, usize) {
@@ -3894,7 +3900,7 @@ fn parse_line_block_prefix(
             }
         }
     }
-    if let Some(item) = accepted_list_marker(content, line_start) {
+    if let Some(item) = accepted_list_marker_in(parsed, content, line_start) {
         let target = if item.task.is_some() && !item.ordered {
             BlockFormatTarget::TaskList
         } else if item.ordered {
