@@ -75,6 +75,8 @@ pub struct TableGeom {
     pub bounds: Bounds<Pixels>,
     pub columns: Vec<TableColGeom>,
     pub rows: Vec<TableRowGeom>,
+    /// Visible editor area. Hover controls stay inside it. `None` means no limit.
+    pub viewport: Option<Bounds<Pixels>>,
 }
 
 #[derive(Clone, Default)]
@@ -2065,6 +2067,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
             paint.table_width_cache = std::mem::take(&mut prepaint.table_width_cache);
             paint.tables = std::mem::take(&mut prepaint.tables);
+            for table in &mut paint.tables {
+                table.viewport = Some(bounds);
+            }
         }
         let occupied = super::table_chrome::occupied_content(&self.paint.borrow().rows);
         super::table_chrome::paint(
