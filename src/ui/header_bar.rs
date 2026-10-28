@@ -1,10 +1,18 @@
 use super::primitives::render_icon;
-use crate::model::DocumentTab;
 use crate::theme::{sz, Theme};
 use gpui::prelude::*;
 use gpui::*;
 use std::cell::Cell;
 use std::rc::Rc;
+
+/// The parts of a tab the header draws, so the app need not clone each
+/// tab's text and undo history every frame.
+#[derive(Debug, Clone)]
+pub struct HeaderTab {
+    pub id: String,
+    pub title: String,
+    pub is_modified: bool,
+}
 
 pub struct HeaderBarProps<
     FSelectTab,
@@ -23,7 +31,7 @@ pub struct HeaderBarProps<
     FMaximize: Fn(&mut Window, &mut App) + 'static + Clone,
     FCloseWindow: Fn(&mut Window, &mut App) + 'static + Clone,
 {
-    pub tabs: Vec<DocumentTab>,
+    pub tabs: Vec<HeaderTab>,
     pub active_tab_id: String,
     pub is_sidebar_open: bool,
     pub is_maximized: bool,
