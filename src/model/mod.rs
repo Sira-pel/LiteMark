@@ -3,6 +3,7 @@ pub mod document;
 pub mod session;
 pub mod sidebar_selection;
 pub mod settings;
+pub mod table_ops;
 pub mod text_ops;
 pub mod workspace;
 

@@ -45,6 +45,7 @@ Until `main` has a workflow, the kit's CI contract is:
 cargo build
 cargo test
 .cursor/skills/verify-litemark/scripts/format-toggle-gate.sh
+.cursor/skills/verify-litemark/scripts/table-ops-gate.sh
 cargo clippy --all-targets -- -D warnings
 .cursor/skills/verify-litemark/scripts/fmt-gate.sh
 ```
@@ -63,7 +64,9 @@ cargo clippy --all-targets -- -D warnings
 
 `scripts/format-toggle-gate.sh` runs the ignored test `format_toggle_cases` (`cargo test --bin litemark format_toggle_cases -- --ignored`). The test reads `fixtures/format-toggle/cases.tsv` and drives `DocumentTab` in WYSIWYG: `apply_format_in_mode`, `insert_text_in_mode`, `smart_newline`, `move_left_in_mode`, `move_right_in_mode`, and `undo`, then `parse_document`. The pinned ids are `fixtures/format-toggle/expected-ids.txt`. A result counts only as a whole line `case=<id> pass|fail|xfail|xpass`, one per pinned id. The script exits non-zero when an id is missing or extra, the count differs, the result count is below `MIN_CASES`, or `fail` or `xpass` is non-zero. A `known_fail_main` row that still matches the recorded `main_bytes` and `main_caret` is `xfail`, so plain `cargo test` (no `--ignored`) stays green on main. `ci.sh` runs this gate after the test-result check. No fixture may expect a space directly before a closing emphasis marker, and the trailing-space case is tested only by the follow-up-letter row.
 
-Job `verify-kit` in `.github/workflows/ci.yml` runs that same script on `pull_request` types `opened`, `synchronize`, and `reopened`. It installs the same apt packages as the `test` job. The `test` job is unchanged.
+`scripts/table-ops-gate.sh` runs the ignored test `table_ops_cases` the same way. The pinned ids are `fixtures/table-ops/expected-ids.txt` (`MIN_CASES` is 176). A result counts only as a whole line `case=<id> pass|fail`. The script exits non-zero on an id mismatch, a result count below `MIN_CASES` (`count_below_min`), or any `fail`. `scripts/prove-table-ops-wrong-expect.sh` flips one expected byte and requires `case=insert-row-below-base fail`. `scripts/prove-table-ops-dropped-case.sh` deletes the last id from both files and requires `count_below_min`. Neither proof is part of `ci.sh`. Ids containing `/` or `..` are rejected.
+
+Job `verify-kit` in `.github/workflows/ci.yml` runs the format-toggle gate and the table-ops gate on `pull_request` types `opened`, `synchronize`, and `reopened`. It installs the same apt packages as the `test` job. The `test` job is unchanged.
 
 The kit commit `4e72b711` recorded `fmt_baseline_files=19` and `fmt_baseline_hunks=201` after the `src/markdown/mod.rs` reorder. This branch's `fixtures/fmt-baseline.hunks` is regenerated with `scripts/fmt-hunks.py tokens` when a leaf-block edit moves a header; the file is that token list (`fmt_baseline_hunks=206`). `cargo fmt --check` on `main` (`fc681a8`) is 20 files and 202 hunks. The only header on main that the kit tip does not have is `src/markdown/mod.rs:1`. The kit tip adds no dirty hunk of its own.
 

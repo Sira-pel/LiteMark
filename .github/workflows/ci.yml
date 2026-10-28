@@ -84,6 +84,9 @@ jobs:
       - name: Format-toggle gate
         run: .cursor/skills/verify-litemark/scripts/format-toggle-gate.sh
 
+      - name: Table-ops gate
+        run: .cursor/skills/verify-litemark/scripts/table-ops-gate.sh
+
   # Compile check on Windows and macOS. Not required to pass yet: the port is
   # in progress, so a failure here shows what is left without blocking merges.
   check-cross-platform:

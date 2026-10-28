@@ -18,13 +18,37 @@ pub const TYPING_BURST_MS: u64 = 1_000;
 /// Hide zoom and save toasts after this long.
 pub const TRANSIENT_TTL_MS: u64 = 1_500;
 
+/// A non-empty selection stored with an undo entry.
+///
+/// Offsets are absolute in the document that entry restores. A collapsed
+/// caret leaves this empty so undo keeps the single-offset path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionSnap {
+    pub start: usize,
+    pub end: usize,
+    pub reversed: bool,
+}
+
+/// Caret, and selection when the edit had one, after undo or redo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRestore {
+    pub caret: usize,
+    pub selection: Option<SelectionSnap>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffEdit {
     pub start: usize,
     pub deleted: String,
     pub inserted: String,
-    /// Caret restored by undo. Defaults to the end of the deleted range.
+    /// Caret restored when this edit is applied. Defaults to the end of the
+    /// deleted range (the document after the inverse write).
     pub undo_caret: usize,
+    /// Caret restored when this edit is inverted again. Defaults to the end
+    /// of the inserted text.
+    pub redo_caret: usize,
+    pub undo_sel: Option<SelectionSnap>,
+    pub redo_sel: Option<SelectionSnap>,
 }
 
 impl DiffEdit {
@@ -34,11 +58,15 @@ impl DiffEdit {
 
     pub fn new(start: usize, deleted: String, inserted: String) -> Self {
         let undo_caret = start + deleted.len();
+        let redo_caret = start + inserted.len();
         Self {
             start,
             deleted,
             inserted,
             undo_caret,
+            redo_caret,
+            undo_sel: None,
+            redo_sel: None,
         }
     }
 }
@@ -92,6 +120,7 @@ fn absorb_into_span_group(previous: &mut DiffEdit, edit: &DiffEdit) -> bool {
     previous
         .inserted
         .replace_range(offset..offset + edit.deleted.len(), &edit.inserted);
+    previous.redo_caret = previous.start + previous.inserted.len();
     true
 }
 
@@ -149,6 +178,7 @@ impl UndoHistory {
         if merge {
             if let Some(previous) = self.undo.last_mut() {
                 previous.inserted.push_str(&edit.inserted);
+                previous.redo_caret = previous.start + previous.inserted.len();
             }
             self.undo_bytes += edit.cost();
         } else {
@@ -166,10 +196,10 @@ impl UndoHistory {
 
     /// Undo the latest edit.
     ///
-    /// The returned caret is `start + inserted.len()`, where `inserted` is the
-    /// text this undo wrote back into `content` (the popped edit's `deleted`
-    /// bytes). Callers still snap that offset onto a char boundary.
-    pub fn undo(&mut self, content: &mut String) -> Option<usize> {
+    /// The caret is the edit's `undo_caret`, which defaults to the end of the
+    /// restored (previously deleted) text. A stored selection is returned with
+    /// it and is not snapped by this function.
+    pub fn undo(&mut self, content: &mut String) -> Option<HistoryRestore> {
         let edit = self.undo.pop()?;
         self.last_edit = None;
         self.span_group_open = false;
@@ -181,20 +211,26 @@ impl UndoHistory {
         let inserted = edit.deleted;
         content.replace_range(edit.start..end, &inserted);
         let caret = edit.undo_caret.min(content.len());
-        let redo_caret = edit.start + edit.inserted.len();
+        let selection = edit.undo_sel.clone();
         let inverse = DiffEdit {
             start: edit.start,
             deleted: edit.inserted,
             inserted,
-            undo_caret: redo_caret,
+            undo_caret: edit.redo_caret,
+            redo_caret: edit.undo_caret,
+            undo_sel: edit.redo_sel,
+            redo_sel: edit.undo_sel,
         };
         self.redo_bytes += inverse.cost();
         self.redo.push(inverse);
-        Some(caret)
+        Some(HistoryRestore { caret, selection })
     }
 
-    /// Redo the latest undone edit. The caret is the end of the text just written.
-    pub fn redo(&mut self, content: &mut String) -> Option<usize> {
+    /// Redo the latest undone edit.
+    ///
+    /// The caret is the stored redo caret, which defaults to the end of the
+    /// text just written.
+    pub fn redo(&mut self, content: &mut String) -> Option<HistoryRestore> {
         let edit = self.redo.pop()?;
         self.last_edit = None;
         self.span_group_open = false;
@@ -206,16 +242,19 @@ impl UndoHistory {
         let inserted = edit.deleted;
         content.replace_range(edit.start..end, &inserted);
         let caret = edit.undo_caret.min(content.len());
-        let undo_caret = edit.start + edit.inserted.len();
+        let selection = edit.undo_sel.clone();
         let inverse = DiffEdit {
             start: edit.start,
             deleted: edit.inserted,
             inserted,
-            undo_caret,
+            undo_caret: edit.redo_caret,
+            redo_caret: edit.undo_caret,
+            undo_sel: edit.redo_sel,
+            redo_sel: edit.undo_sel,
         };
         self.undo_bytes += inverse.cost();
         self.undo.push(inverse);
-        Some(caret)
+        Some(HistoryRestore { caret, selection })
     }
 }
 
@@ -1145,7 +1184,10 @@ mod tests {
             content.push_str(&text);
         }
         assert_eq!(history.undo.len(), 1);
-        assert_eq!(history.undo(&mut content), Some(0));
+        assert_eq!(
+            history.undo(&mut content).map(|restore| restore.caret),
+            Some(0)
+        );
         assert_eq!(content, "");
 
         history.push_at(
@@ -1163,9 +1205,15 @@ mod tests {
             start + Duration::from_millis(80),
         );
         content.push_str("you");
-        assert_eq!(history.undo(&mut content), Some(3));
+        assert_eq!(
+            history.undo(&mut content).map(|restore| restore.caret),
+            Some(3)
+        );
         assert_eq!(content, "hi ");
-        assert_eq!(history.undo(&mut content), Some(2));
+        assert_eq!(
+            history.undo(&mut content).map(|restore| restore.caret),
+            Some(2)
+        );
         assert_eq!(content, "hi");
 
         let mut paused = UndoHistory::default();
@@ -1181,7 +1229,12 @@ mod tests {
         );
         paused_content.push('b');
         assert_eq!(paused.undo.len(), 2);
-        assert_eq!(paused.undo(&mut paused_content), Some(1));
+        assert_eq!(
+            paused
+                .undo(&mut paused_content)
+                .map(|restore| restore.caret),
+            Some(1)
+        );
         assert_eq!(paused_content, "a");
 
         assert!(!coalesce_typing(
@@ -1202,11 +1255,11 @@ mod tests {
         let mut content = "ab".to_string();
         history.push(DiffEdit::new(0, "ab".into(), "😀".into()));
         content.replace_range(0..2, "😀");
-        let caret = history.undo(&mut content).unwrap();
+        let caret = history.undo(&mut content).unwrap().caret;
         assert_eq!(content, "ab");
         assert_eq!(caret, 2);
         assert!(content.is_char_boundary(caret));
-        let caret = history.redo(&mut content).unwrap();
+        let caret = history.redo(&mut content).unwrap().caret;
         assert_eq!(content, "😀");
         assert_eq!(caret, "😀".len());
         assert!(content.is_char_boundary(caret));
