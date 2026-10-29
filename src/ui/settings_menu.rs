@@ -103,7 +103,7 @@ pub fn build_settings_menu_items(
             shortcut: None,
             kind: super::menu::MenuItemKind::Submenu(font_sub_items),
             disabled: false,
-            hint: Some(Box::leak(current_size_label.into_boxed_str())),
+            hint: Some(current_size_label.into()),
             action: std::sync::Arc::new(|_, _| {}),
         },
         MenuItem::divider(),
@@ -143,7 +143,7 @@ mod tests {
         );
 
         let font_item = items.iter().find(|i| i.label == "Font size").expect("Font size menu item exists");
-        assert_eq!(font_item.hint, Some("17 px"));
+        assert_eq!(font_item.hint.as_ref().map(|hint| hint.as_ref()), Some("17 px"));
 
         if let MenuItemKind::Submenu(sub) = &font_item.kind {
             let labels: Vec<&str> = sub.iter().map(|s| s.label).collect();
