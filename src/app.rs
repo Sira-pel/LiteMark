@@ -7127,3 +7127,7 @@ mod table_drag_handler_tests;
 #[cfg(test)]
 #[path = "viewport_culling_tests.rs"]
 mod viewport_culling_tests;
+
+#[cfg(test)]
+#[path = "note_drop_tests.rs"]
+mod note_drop_tests;
