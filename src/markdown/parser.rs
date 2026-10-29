@@ -1462,18 +1462,52 @@ pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-fn parse_inline_syntax(
-    input: &str,
-    base: usize,
-) -> (
+type InlineSyntax = (
     Vec<std::ops::Range<usize>>,
     Vec<InlinePair>,
     Vec<StyledSegment>,
-) {
+);
+
+fn parse_inline_syntax(input: &str, base: usize) -> InlineSyntax {
     if input.is_empty() {
         return (Vec::new(), Vec::new(), Vec::new());
     }
+    if is_plain_inline(input) {
+        let plain = StyledSegment {
+            source: base..base + input.len(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            code: false,
+            link_url: None,
+        };
+        return (Vec::new(), Vec::new(), vec![plain]);
+    }
+    parse_inline_with_pulldown(input, base)
+}
 
+/// Text pulldown-cmark would return as one unstyled run: it starts with a
+/// letter (so no list, heading, quote or indented code), has no edge
+/// whitespace to trim, no control characters, and no byte that can open
+/// inline syntax.
+fn is_plain_inline(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let (Some(&first), Some(&last)) = (bytes.first(), bytes.last()) else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || !first.is_ascii())
+        && last != b' '
+        && !bytes.iter().any(|&b| {
+            b.is_ascii_control()
+                || matches!(
+                    b,
+                    b'*' | b'_' | b'~' | b'`' | b'[' | b']' | b'<' | b'>' | b'\\' | b'&' | b'!' | b'|'
+                )
+        })
+}
+
+fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
     let prepared = prepare_for_pulldown(input);
     let mut options = pulldown_cmark::Options::empty();
     options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
@@ -3299,6 +3333,55 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_inline_shortcut_matches_pulldown() {
+        let named = [
+            "Plain prose, with commas; colons: and (parens).",
+            "Smoke  test with  double spaces",
+            "a 1. b",
+            "word #tag and x = y",
+            "a -- b - c + d",
+            "see http://example.com/path?q=1 or www.example.com",
+            "e.g. this \"quoted\" and 'single' text",
+            "Ünïcödé text with ß and 😀 emoji",
+            "tail ends with a period.",
+            "a",
+        ];
+        let mut checked = 0usize;
+        for text in named {
+            assert!(is_plain_inline(text), "{text:?} should take the shortcut");
+            for base in [0, 7] {
+                assert_eq!(parse_inline_syntax(text, base), parse_inline_with_pulldown(text, base), "{text:?}");
+            }
+            checked += 1;
+        }
+
+        let alphabet: Vec<char> =
+            "aZ 09.,;:-+#=()/?'\"$%^{}@é😀ßhtp:w1)\u{a0}\u{3000}\u{2003}\u{c}\u{b}".chars().collect();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..200_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let len = 1 + (seed % 24) as usize;
+            let mut text = String::new();
+            let mut s = seed;
+            for _ in 0..len {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                text.push(alphabet[(s >> 33) as usize % alphabet.len()]);
+            }
+            if is_plain_inline(&text) {
+                assert_eq!(parse_inline_syntax(&text, 3), parse_inline_with_pulldown(&text, 3), "{text:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 10_000, "only {checked} inputs exercised the shortcut");
+
+        for text in ["1. item", " lead", "trail ", "# h", "*a*", "a_b", "x\\y", "Q&A", "<b>", "[l](u)", "- x"] {
+            assert!(!is_plain_inline(text), "{text:?} must use pulldown");
+        }
+    }
 
     #[test]
     fn line_at_offset_matches_linear_scan() {
