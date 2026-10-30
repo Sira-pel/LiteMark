@@ -7975,6 +7975,41 @@ mod tests {
     }
 
     #[test]
+    fn per_line_hidden_skips_match_a_document_wide_scan() {
+        let source = "# **Head** ##\n> *quote* and `code`\n\n- [link](http://x) **b**\n\
+                      | **a** | *b* |\n| --- | --- |\n| `c` | [d](e) |\n---\n```\nfn x\n```\nend ~~s~~";
+        let parsed = parse_document(source);
+        let all: Vec<Range<usize>> = parsed
+            .lines
+            .iter()
+            .flat_map(|l| l.hidden_ranges.iter().cloned())
+            .collect();
+        let skip = |mut pos: usize, hit: &dyn Fn(usize, &Range<usize>) -> bool, left: bool| {
+            while let Some(r) = all.iter().find(|r| hit(pos, r)) {
+                pos = if left { r.start } else { r.end };
+            }
+            pos
+        };
+        for pos in 0..=source.len() {
+            assert_eq!(
+                skip_hidden_left(&parsed, pos),
+                skip(pos, &|p, r| p > r.start && p <= r.end, true),
+                "left at {pos}"
+            );
+            assert_eq!(
+                skip_hidden_interior_left(&parsed, pos),
+                skip(pos, &|p, r| p > r.start && p < r.end, true),
+                "interior left at {pos}"
+            );
+            assert_eq!(
+                next_visible_pos(&parsed, pos),
+                skip(pos, &|p, r| p >= r.start && p < r.end, false),
+                "next visible at {pos}"
+            );
+        }
+    }
+
+    #[test]
     fn test_wysiwyg_delimiter_skipping_navigation_and_atomic_backspace() {
         let mut doc =
             DocumentTab::new("n".into(), "test.md".into(), "a **b** c".into(), None, None);

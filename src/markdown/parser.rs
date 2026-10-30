@@ -1124,34 +1124,38 @@ impl RowOffsetMap {
         hidden: &[std::ops::Range<usize>],
     ) -> (String, Self) {
         let line_end = line_start + line_text.len();
-        let mut visible = Vec::new();
-        let mut cursor = line_start;
-
-        for h in hidden {
-            let h_start = h.start.clamp(line_start, line_end);
-            let h_end = h.end.clamp(line_start, line_end);
-            if h_start > cursor {
-                visible.push(cursor..h_start);
+        // Walk the visible gaps twice: once to size the buffers exactly, once
+        // to fill them, so no temporary list is allocated.
+        let for_each_visible = |f: &mut dyn FnMut(std::ops::Range<usize>)| {
+            let mut cursor = line_start;
+            for h in hidden {
+                let h_start = h.start.clamp(line_start, line_end);
+                let h_end = h.end.clamp(line_start, line_end);
+                if h_start > cursor {
+                    f(cursor..h_start);
+                }
+                cursor = cursor.max(h_end);
             }
-            cursor = cursor.max(h_end);
-        }
-        if cursor < line_end {
-            visible.push(cursor..line_end);
-        }
-
-        let visible_bytes: usize = visible.iter().map(|r| r.len()).sum();
-        let mut display = if visible_bytes == 0 {
-            String::new()
-        } else {
-            String::with_capacity(visible_bytes)
+            if cursor < line_end {
+                f(cursor..line_end);
+            }
         };
-        let mut segments = Vec::with_capacity(visible.len());
-        for src in visible {
+
+        let mut visible_bytes = 0usize;
+        let mut visible_count = 0usize;
+        for_each_visible(&mut |r| {
+            visible_bytes += r.len();
+            visible_count += 1;
+        });
+
+        let mut display = String::with_capacity(visible_bytes);
+        let mut segments = Vec::with_capacity(visible_count.max(1));
+        for_each_visible(&mut |src| {
             let slice = &line_text[(src.start - line_start)..(src.end - line_start)];
             let disp_start = display.len();
             display.push_str(slice);
             segments.push((disp_start..display.len(), src));
-        }
+        });
 
         if segments.is_empty() {
             let anchor = visible_start.clamp(line_start, line_end);
