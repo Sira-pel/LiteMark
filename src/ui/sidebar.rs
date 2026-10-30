@@ -218,6 +218,7 @@ pub fn build_sidebar_tree(
 
 #[allow(dead_code)]
 pub struct SidebarProps<
+    'a,
     FSelect,
     FBeginCreate,
     FDeleteFile,
@@ -244,7 +245,7 @@ pub struct SidebarProps<
     FToggle: Fn(SidebarTarget, &mut App) + 'static + Clone,
     FBlank: Fn(&mut App) + 'static + Clone,
 {
-    pub workspace: WorkspaceDirectory,
+    pub workspace: &'a WorkspaceDirectory,
     pub width: Pixels,
     pub selected_file_id: Option<String>,
     /// Note open in the editor; gets a quieter mark than the selection.
@@ -280,6 +281,7 @@ pub struct SidebarProps<
 }
 
 pub fn render_sidebar<
+    'a,
     FSelect,
     FBeginCreate,
     FDeleteFile,
@@ -294,6 +296,7 @@ pub fn render_sidebar<
     FBlank,
 >(
     props: SidebarProps<
+        'a,
         FSelect,
         FBeginCreate,
         FDeleteFile,

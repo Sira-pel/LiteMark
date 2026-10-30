@@ -812,27 +812,49 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
     if needle_chars == 0 {
         return Vec::new();
     }
-    let chars: Vec<(usize, char)> = content.char_indices().collect();
-    if chars.len() < needle_chars {
-        return Vec::new();
-    }
     let mut hits = Vec::new();
-    let mut index = 0usize;
-    while index + needle_chars <= chars.len() {
-        let start = chars[index].0;
-        let end = if index + needle_chars < chars.len() {
-            chars[index + needle_chars].0
+    let mut start = 0usize;
+    while start < content.len() {
+        let rest = &content[start..];
+        if let Some(len) = caseless_match_len(rest, &needle, needle_chars) {
+            hits.push(start..start + len);
+            start += len;
         } else {
-            content.len()
-        };
-        if content[start..end].to_lowercase() == needle {
-            hits.push(start..end);
-            index += needle_chars;
-        } else {
-            index += 1;
+            start += rest.chars().next().map_or(1, char::len_utf8);
         }
     }
     hits
+}
+
+/// Byte length of the first `count` chars of `text` when they lowercase to
+/// `needle`, without allocating. Matches `text[..len].to_lowercase() == needle`.
+fn caseless_match_len(text: &str, needle: &str, count: usize) -> Option<usize> {
+    let mut want = needle.chars();
+    let mut taken = 0usize;
+    let mut end = 0usize;
+    for (index, ch) in text.char_indices() {
+        if taken == count {
+            break;
+        }
+        if ch == '\u{03A3}' {
+            // Capital sigma lowercases by context (final sigma), which only
+            // str::to_lowercase knows; compare the whole window that way.
+            let len = text
+                .char_indices()
+                .nth(count)
+                .map_or(text.len(), |(at, _)| at);
+            let enough = text[..len].chars().count() == count;
+            return (enough && text[..len].to_lowercase() == needle).then_some(len);
+        }
+        for lower in ch.to_lowercase() {
+            if want.next() != Some(lower) {
+                return None;
+            }
+        }
+        taken += 1;
+        end = index + ch.len_utf8();
+    }
+    (taken == count && want.next().is_none()).then_some(end)
 }
 
 /// Index of the next hit at or after `cursor`. Wraps to the first hit.
@@ -1183,6 +1205,55 @@ mod tests {
         let replaced = replace_all(content, "cat", "dog", false).unwrap();
         assert_eq!(replaced, "one dog, two dog, three dog");
         assert!(replace_all(content, "missing", "x", false).is_none());
+    }
+
+    /// The allocation-per-position search `find_matches` replaced.
+    fn find_matches_by_lowercasing(content: &str, term: &str) -> Vec<Range<usize>> {
+        let needle = term.to_lowercase();
+        let needle_chars = needle.chars().count();
+        let chars: Vec<(usize, char)> = content.char_indices().collect();
+        let mut hits = Vec::new();
+        let mut index = 0usize;
+        while needle_chars > 0 && index + needle_chars <= chars.len() {
+            let start = chars[index].0;
+            let end = chars
+                .get(index + needle_chars)
+                .map_or(content.len(), |c| c.0);
+            if content[start..end].to_lowercase() == needle {
+                hits.push(start..end);
+                index += needle_chars;
+            } else {
+                index += 1;
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn caseless_find_matches_lowercasing_each_window() {
+        let contents = [
+            "one cat, two Cat, three CAT",
+            "\u{212A}elvin kelvin KELVIN",
+            "İstanbul i\u{307}stanbul ISTANBUL",
+            "ΟΔΟΣ οδος ΟΔΟΣΑ Σ σ ς",
+            "Straße STRASSE strasse ẞ ß",
+            "emoji 😀 cat😀CAT\r\nline two\r\n",
+            "aaaa",
+            "",
+        ];
+        let terms = [
+            "cat", "kelvin", "\u{212A}", "k", "istanbul", "i̇", "İ", "οδος", "ΟΔΟΣ", "σ", "ς", "Σ",
+            "ß", "ẞ", "ss", "😀c", "\r\nl", "aa", "a",
+        ];
+        for content in contents {
+            for term in terms {
+                assert_eq!(
+                    find_matches(content, term, false),
+                    find_matches_by_lowercasing(content, term),
+                    "content {content:?} term {term:?}"
+                );
+            }
+        }
     }
 
     #[test]
