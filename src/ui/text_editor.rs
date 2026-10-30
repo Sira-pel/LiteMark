@@ -12,6 +12,7 @@ use gpui::*;
 
 use crate::markdown::{
     LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
+    TableRowBody,
 };
 use crate::model::document::visible_line_end;
 use crate::model::text_ops::{visual_rows, Caret};
@@ -275,7 +276,8 @@ pub fn compute_table_column_widths(
     let num_cols = table_lines
         .iter()
         .find_map(|line| {
-            if let LineKind::TableRow { ref cells, .. } = line.kind {
+            if let LineKind::TableRow { ref body, .. } = line.kind {
+                let TableRowBody { cells, .. } = &**body;
                 Some(cells.len())
             } else {
                 None
@@ -297,7 +299,8 @@ pub fn compute_table_column_widths(
     // Measure natural content width for each column (minimum needed to avoid wrapping)
     let mut natural_w = vec![min_col_w; num_cols];
     for pline in table_lines {
-        if let LineKind::TableRow { ref cells, .. } = pline.kind {
+        if let LineKind::TableRow { ref body, .. } = pline.kind {
+            let TableRowBody { cells, .. } = &**body;
             for (col_idx, cell_range) in cells.iter().enumerate().take(num_cols) {
                 let text_w = measure(pline, cell_range);
                 let needed = (text_w + pad_x * 2.0 + TABLE_FIT_SLACK).max(min_col_w);
@@ -1273,8 +1276,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut table_rows: std::collections::HashMap<Range<usize>, Vec<&ParsedLine>> =
             std::collections::HashMap::new();
         for line in &self.parsed.lines {
-            if let LineKind::TableRow { ref table_source, .. } = line.kind {
-                table_rows.entry(table_source.clone()).or_default().push(line);
+            if let LineKind::TableRow { ref body, .. } = line.kind {
+                table_rows
+                    .entry(body.table_source.clone())
+                    .or_default()
+                    .push(line);
             }
         }
 
@@ -1315,12 +1321,17 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
 
             if let LineKind::TableRow {
                 is_header,
-                ref cells,
-                ref raw_cells,
-                ref alignments,
-                ref table_source,
+                ref body,
+                ..
             } = parsed_line.kind
             {
+                let TableRowBody {
+                    cells,
+                    raw_cells,
+                    alignments,
+                    table_source,
+                    ..
+                } = &**body;
                 let shape_table = *table_shaped.entry(table_source.clone()).or_insert_with(|| {
                     let lines = table_rows
                         .get(table_source)
@@ -3516,7 +3527,8 @@ mod tests {
         let mut measure = fake_measure(md);
         let mut widest = px(0.0);
         for line in &table_lines {
-            if let crate::markdown::LineKind::TableRow { cells, .. } = &line.kind {
+            if let crate::markdown::LineKind::TableRow { ref body, .. } = &line.kind {
+                let crate::markdown::TableRowBody { cells, .. } = &**body;
                 widest = widest.max(measure(line, &cells[1]));
             }
         }

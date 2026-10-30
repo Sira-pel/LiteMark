@@ -1025,15 +1025,21 @@ pub enum LineKind {
     TableDelimiter,
     TableRow {
         is_header: bool,
-        /// Byte ranges of each cell's editable content in the document
-        cells: Vec<std::ops::Range<usize>>,
-        /// Full inner byte ranges between pipes (`pipe[k]+1..pipe[k+1]`)
-        raw_cells: Vec<std::ops::Range<usize>>,
-        /// Column alignments parsed from the table's delimiter row
-        alignments: Vec<TableColumnAlign>,
-        /// Full table block byte range in the document
-        table_source: std::ops::Range<usize>,
+        /// Boxed so the rare table variant does not size every `LineKind`
+        body: Box<TableRowBody>,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TableRowBody {
+    /// Byte ranges of each cell's editable content in the document
+    pub cells: Vec<std::ops::Range<usize>>,
+    /// Full inner byte ranges between pipes (`pipe[k]+1..pipe[k+1]`)
+    pub raw_cells: Vec<std::ops::Range<usize>>,
+    /// Column alignments parsed from the table's delimiter row
+    pub alignments: Vec<TableColumnAlign>,
+    /// Full table block byte range in the document
+    pub table_source: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1118,30 +1124,38 @@ impl RowOffsetMap {
         hidden: &[std::ops::Range<usize>],
     ) -> (String, Self) {
         let line_end = line_start + line_text.len();
-        let mut display = String::with_capacity(line_text.len());
-        let mut segments = Vec::new();
-        let mut cursor = line_start;
-
-        for h in hidden {
-            let h_start = h.start.clamp(line_start, line_end);
-            let h_end = h.end.clamp(line_start, line_end);
-            if h_start > cursor {
-                let slice = &line_text[(cursor - line_start)..(h_start - line_start)];
-                let disp_start = display.len();
-                display.push_str(slice);
-                let disp_end = display.len();
-                segments.push((disp_start..disp_end, cursor..h_start));
+        // Walk the visible gaps twice: once to size the buffers exactly, once
+        // to fill them, so no temporary list is allocated.
+        let for_each_visible = |f: &mut dyn FnMut(std::ops::Range<usize>)| {
+            let mut cursor = line_start;
+            for h in hidden {
+                let h_start = h.start.clamp(line_start, line_end);
+                let h_end = h.end.clamp(line_start, line_end);
+                if h_start > cursor {
+                    f(cursor..h_start);
+                }
+                cursor = cursor.max(h_end);
             }
-            cursor = cursor.max(h_end);
-        }
+            if cursor < line_end {
+                f(cursor..line_end);
+            }
+        };
 
-        if cursor < line_end {
-            let slice = &line_text[(cursor - line_start)..(line_end - line_start)];
+        let mut visible_bytes = 0usize;
+        let mut visible_count = 0usize;
+        for_each_visible(&mut |r| {
+            visible_bytes += r.len();
+            visible_count += 1;
+        });
+
+        let mut display = String::with_capacity(visible_bytes);
+        let mut segments = Vec::with_capacity(visible_count.max(1));
+        for_each_visible(&mut |src| {
+            let slice = &line_text[(src.start - line_start)..(src.end - line_start)];
             let disp_start = display.len();
             display.push_str(slice);
-            let disp_end = display.len();
-            segments.push((disp_start..disp_end, cursor..line_end));
-        }
+            segments.push((disp_start..display.len(), src));
+        });
 
         if segments.is_empty() {
             let anchor = visible_start.clamp(line_start, line_end);
@@ -1250,8 +1264,6 @@ pub struct ParsedLine {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedDocument {
     pub lines: Vec<ParsedLine>,
-    /// All hidden byte ranges across the entire document (sorted, non-overlapping)
-    pub hidden_ranges: Vec<std::ops::Range<usize>>,
     /// All inline delimiter pairs across the document
     pub inline_pairs: Vec<InlinePair>,
     /// Fenced code block ranges `(open_fence_line_range, close_fence_line_range)`
@@ -2969,7 +2981,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 
     let mut lines = Vec::with_capacity(raw_lines.len());
     let mut list_quote_tracker = InListOrQuoteTracker::default();
-    let mut all_hidden = Vec::new();
     let mut all_pairs = Vec::new();
     let mut code_blocks = Vec::new();
 
@@ -3017,7 +3028,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                         opening: false,
                     },
                 );
-                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
                 push_line!(parsed);
             } else {
                 let strip = open_fence
@@ -3026,7 +3036,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     .map(|fence| prefix_through_column(line, fence.indent))
                     .unwrap_or(0);
                 let parsed = code_content_line(i, line_source, line, strip);
-                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
                 push_line!(parsed);
             }
             continue;
@@ -3053,7 +3062,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     opening: true,
                 },
             );
-            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
             push_line!(parsed);
             continue;
         }
@@ -3079,7 +3087,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     opening: true,
                 },
             );
-            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
             push_line!(parsed);
             continue;
         }
@@ -3105,7 +3112,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         if exact_thematic_break(line, list_walk.thematic_parent_col(line)) {
             list_walk.note_block(line);
             let hidden = vec![line_start..line_end];
-            all_hidden.extend(hidden.iter().cloned());
             let (display_text, offset_map) =
                 RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
             push_line!(ParsedLine {
@@ -3141,7 +3147,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             list_walk.note_block(line);
             if i == tbl.delimiter {
                 let hidden = vec![line_start..line_end];
-                all_hidden.extend(hidden.iter().cloned());
                 let (display_text, offset_map) =
                     RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
                 push_line!(ParsedLine {
@@ -3198,17 +3203,18 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     });
                 }
                 let merged_hidden = merge_ranges(row_hidden);
-                all_hidden.extend(merged_hidden.iter().cloned());
                 all_pairs.extend(row_pairs.iter().cloned());
                 push_line!(ParsedLine {
                     line_index: i,
                     source: line_source.clone(),
                     kind: LineKind::TableRow {
                         is_header,
-                        cells,
-                        raw_cells,
-                        alignments: tbl.alignments.clone(),
-                        table_source: tbl.source.clone(),
+                        body: Box::new(TableRowBody {
+                            cells,
+                            raw_cells,
+                            alignments: tbl.alignments.clone(),
+                            table_source: tbl.source.clone(),
+                        }),
                     },
                     prefix_range: line_start..line_start,
                     hidden_ranges: merged_hidden,
@@ -3224,7 +3230,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         if let Some((level, content)) = atx_display_content_range(line) {
             list_walk.note_block(line);
             let parsed = atx_line(i, line_source, line, level, content);
-            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
             all_pairs.extend(parsed.inline_pairs.iter().cloned());
             push_line!(parsed);
             continue;
@@ -3265,7 +3270,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             inline_hidden.push(prefix_range.clone());
         }
         let merged_hidden = merge_ranges(inline_hidden);
-        all_hidden.extend(merged_hidden.iter().cloned());
         all_pairs.extend(inline_pairs.iter().cloned());
 
         let (display_text, offset_map) =
@@ -3290,7 +3294,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 
     ParsedDocument {
         lines,
-        hidden_ranges: merge_ranges(all_hidden),
         inline_pairs: all_pairs,
         code_blocks,
     }
@@ -3351,10 +3354,7 @@ mod tests {
             LineKind::Blockquote,
             LineKind::TableRow {
                 is_header: false,
-                cells: Vec::new(),
-                raw_cells: Vec::new(),
-                alignments: Vec::new(),
-                table_source: 0..0,
+                body: Box::default(),
             },
         ];
 
@@ -3513,9 +3513,10 @@ mod tests {
         let md = "| a \\| b | c |\n| --- | --- |\n| d | e |";
         let doc = parse_document(md);
         match &doc.lines[0].kind {
-            LineKind::TableRow {
-                cells, alignments, ..
-            } => {
+            LineKind::TableRow { ref body, .. } => {
+                let TableRowBody {
+                    cells, alignments, ..
+                } = &**body;
                 assert_eq!(cells.len(), 2);
                 assert_eq!(&md[cells[0].clone()], "a \\| b");
                 assert_eq!(&md[cells[1].clone()], "c");
@@ -4409,8 +4410,10 @@ mod tests {
             LineKind::HorizontalRule => "HorizontalRule".to_string(),
             LineKind::TableDelimiter => "TableDelimiter".to_string(),
             LineKind::TableRow {
-                is_header, cells, ..
-            } => format!("TableRow header={is_header} cells={}", cells.len()),
+                is_header,
+                ref body,
+                ..
+            } => format!("TableRow header={is_header} cells={}", body.cells.len()),
         }
     }
 
@@ -5150,10 +5153,12 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
                 LineKind::TableDelimiter => "TableDelimiter".to_string(),
                 LineKind::TableRow {
                     is_header,
-                    cells,
-                    alignments,
+                    ref body,
                     ..
                 } => {
+                    let TableRowBody {
+                        cells, alignments, ..
+                    } = &**body;
                     let texts = cells
                         .iter()
                         .map(|range| markdown[range.clone()].to_string())
@@ -5317,7 +5322,8 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
                 in_table = true;
                 rows = 0;
             }
-            if let LineKind::TableRow { alignments, .. } = &line.kind {
+            if let LineKind::TableRow { ref body, .. } = &line.kind {
+                let TableRowBody { alignments, .. } = &**body;
                 cols = alignments.len();
                 rows += 1;
                 align = alignments
