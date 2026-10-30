@@ -9410,7 +9410,7 @@ mod tests {
                 shaped: std::rc::Rc::new(ShapedLine::default()),
                 offset_map,
                 checkbox_hit: None,
-                link_hits: Vec::new(),
+                link_hits: Arc::default(),
                 cells: Vec::new(),
             }],
             bounds: None,
@@ -9862,7 +9862,7 @@ mod tests {
                 shaped: std::rc::Rc::new(ShapedLine::default()),
                 offset_map: line.offset_map.clone(),
                 checkbox_hit: None,
-                link_hits: Vec::new(),
+                link_hits: Arc::default(),
                 cells: Vec::new(),
             })
             .collect();
