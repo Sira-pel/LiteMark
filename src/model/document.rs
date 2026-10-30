@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::markdown::{
     accepted_list_marker, accepted_list_marker_in, parse_document, unescaped_pipe_offsets,
     InlinePair, InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment,
-    TableColumnAlign,
+    TableColumnAlign, TableRowBody,
 };
 
 use super::table_ops::{self, TableOp};
@@ -394,12 +394,16 @@ impl DocumentTab {
         let mut info: Option<TableInfo> = None;
         for line in &parsed.lines {
             if let LineKind::TableRow {
-                ref cells,
                 is_header,
-                ref table_source,
+                ref body,
                 ..
             } = line.kind
             {
+                let TableRowBody {
+                    cells,
+                    table_source,
+                    ..
+                } = &**body;
                 if pos < table_source.start || pos > table_source.end {
                     continue;
                 }
@@ -677,11 +681,12 @@ impl DocumentTab {
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
             if let LineKind::TableRow {
-                ref cells,
                 is_header,
+                ref body,
                 ..
             } = pline.kind
             {
+                let TableRowBody { cells, .. } = &**body;
                 let col_count = cells.len().max(2);
                 let is_empty_row = cells.iter().all(|c| {
                     if c.end <= self.content.len() && c.start <= c.end {
@@ -698,11 +703,12 @@ impl DocumentTab {
                         // Check if there is already a body row after delimiter
                         if let Some(first_body) = parsed.lines.get(pline.line_index + 2) {
                             if let LineKind::TableRow {
-                                ref cells,
                                 is_header: false,
+                                ref body,
                                 ..
                             } = first_body.kind
                             {
+                                let TableRowBody { cells, .. } = &**body;
                                 if let Some(first_cell) = cells.first() {
                                     self.caret.move_to(first_cell.start);
                                     self.refresh_cursor();
@@ -1376,9 +1382,10 @@ impl DocumentTab {
                     | LineKind::HorizontalRule => {
                         continue;
                     }
-                    LineKind::TableRow {
-                        cells, raw_cells, ..
-                    } => {
+                    LineKind::TableRow { ref body, .. } => {
+                        let TableRowBody {
+                            cells, raw_cells, ..
+                        } = &**body;
                         let cell_ranges = if raw_cells.is_empty() {
                             cells
                         } else {
@@ -1801,10 +1808,8 @@ impl DocumentTab {
 
             // Check if cursor is currently inside an existing table
             let in_table = parsed.lines.iter().find(|l| {
-                if let LineKind::TableRow {
-                    ref table_source, ..
-                } = l.kind
-                {
+                if let LineKind::TableRow { ref body, .. } = l.kind {
+                    let TableRowBody { table_source, .. } = &**body;
                     range.start >= table_source.start && range.start <= table_source.end
                 } else {
                     false
@@ -1812,12 +1817,12 @@ impl DocumentTab {
             });
 
             if let Some(table_line) = in_table {
-                if let LineKind::TableRow {
-                    ref cells,
-                    ref table_source,
-                    ..
-                } = table_line.kind
-                {
+                if let LineKind::TableRow { ref body, .. } = table_line.kind {
+                    let TableRowBody {
+                        cells,
+                        table_source,
+                        ..
+                    } = &**body;
                     let col_count = cells.len().max(2);
                     let row_str = format!("\n|{}", "  |".repeat(col_count));
                     let insert_pos = table_source.end;
@@ -2649,13 +2654,13 @@ impl DocumentTab {
             if extend && pos > visible_line_end(pline, self.view_mode) && pos <= pline.source.end {
                 return self.move_left(true);
             }
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ref table_source,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells,
+                    raw_cells,
+                    table_source,
+                    ..
+                } = &**body;
                 if let Some(c_idx) = raw_cells
                     .iter()
                     .position(|rc| pos >= rc.start && pos <= rc.end)
@@ -2667,12 +2672,12 @@ impl DocumentTab {
                         } else {
                             let prev_row_cell_end =
                                 parsed.lines[..pline.line_index].iter().rev().find_map(|l| {
-                                    if let LineKind::TableRow {
-                                        cells: ref pcells,
-                                        table_source: ref pts,
-                                        ..
-                                    } = l.kind
-                                    {
+                                    if let LineKind::TableRow { ref body, .. } = l.kind {
+                                        let TableRowBody {
+                                            cells: pcells,
+                                            table_source: pts,
+                                            ..
+                                        } = &**body;
                                         if pts == table_source {
                                             return pcells.last().map(|c| c.end);
                                         }
@@ -2737,13 +2742,13 @@ impl DocumentTab {
             return;
         }
         if let Some(pline) = parsed.line_at_offset(pos) {
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ref table_source,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells,
+                    raw_cells,
+                    table_source,
+                    ..
+                } = &**body;
                 if let Some(c_idx) = raw_cells
                     .iter()
                     .position(|rc| pos >= rc.start && pos <= rc.end)
@@ -2756,12 +2761,12 @@ impl DocumentTab {
                             let next_row_cell_start =
                                 parsed.lines.get(pline.line_index + 1..).and_then(|rest| {
                                     rest.iter().find_map(|l| {
-                                        if let LineKind::TableRow {
-                                            cells: ref ncells,
-                                            table_source: ref nts,
-                                            ..
-                                        } = l.kind
-                                        {
+                                        if let LineKind::TableRow { ref body, .. } = l.kind {
+                                            let TableRowBody {
+                                                cells: ncells,
+                                                table_source: nts,
+                                                ..
+                                            } = &**body;
                                             if nts == table_source {
                                                 return ncells.first().map(|c| c.start);
                                             }
@@ -2846,12 +2851,10 @@ impl DocumentTab {
 
         // Guard table pipe delimiters in WYSIWYG mode
         if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells, raw_cells, ..
+                } = &**body;
                 let at_cell_start_or_pipe = raw_cells
                     .iter()
                     .zip(cells.iter())
@@ -2913,12 +2916,10 @@ impl DocumentTab {
         if mode == ViewMode::Wysiwyg {
             let parsed = self.parsed();
             if let Some(pline) = parsed.line_at_offset(cursor) {
-                if let LineKind::TableRow {
-                    ref cells,
-                    ref raw_cells,
-                    ..
-                } = pline.kind
-                {
+                if let LineKind::TableRow { ref body, .. } = pline.kind {
+                    let TableRowBody {
+                        cells, raw_cells, ..
+                    } = &**body;
                     let at_cell_end_or_pipe = raw_cells
                         .iter()
                         .zip(cells.iter())
@@ -2983,9 +2984,9 @@ impl DocumentTab {
         let cursor = self.cursor_offset();
         let parsed = self.parsed();
         parsed.lines.iter().any(|l| match l.kind {
-            LineKind::TableRow {
-                ref table_source, ..
-            } => cursor >= table_source.start && cursor <= table_source.end,
+            LineKind::TableRow { ref body, .. } => {
+                cursor >= body.table_source.start && cursor <= body.table_source.end
+            }
             _ => false,
         })
     }
@@ -3065,10 +3066,8 @@ impl DocumentTab {
         let mut range = self.selection_range();
         let parsed = self.parsed();
         if let Some(table_end) = parsed.lines.iter().find_map(|l| {
-            if let LineKind::TableRow {
-                ref table_source, ..
-            } = l.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = l.kind {
+                let TableRowBody { table_source, .. } = &**body;
                 if range.start >= table_source.start && range.start <= table_source.end {
                     return Some(table_source.end);
                 }
@@ -3186,12 +3185,12 @@ impl DocumentTab {
         let mut table_end = 0usize;
         let mut num_cols = 2usize;
         for line in &parsed.lines {
-            if let LineKind::TableRow {
-                ref cells,
-                ref table_source,
-                ..
-            } = line.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = line.kind {
+                let TableRowBody {
+                    cells,
+                    table_source,
+                    ..
+                } = &**body;
                 if cursor >= table_source.start && cursor <= table_source.end {
                     in_table = true;
                     table_end = table_source.end;
@@ -3309,12 +3308,10 @@ impl DocumentTab {
         let cursor = snap_off_ending_interior(&self.content, self.cursor_offset());
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells, raw_cells, ..
+                } = &**body;
                 if let Some((_, cell)) = raw_cells
                     .iter()
                     .zip(cells.iter())
@@ -3359,12 +3356,10 @@ impl DocumentTab {
         let cursor = self.cursor_offset();
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells, raw_cells, ..
+                } = &**body;
                 if let Some((_, cell)) = raw_cells
                     .iter()
                     .zip(cells.iter())
@@ -4197,12 +4192,26 @@ fn add_contained_pairs<'a>(
 /// The next source position at or after `pos` that is not inside a hidden
 /// (WYSIWYG-invisible) range.
 fn next_visible_pos(parsed: &ParsedDocument, mut pos: usize) -> usize {
-    while let Some(r) = parsed.hidden_ranges.iter().find(|r| pos >= r.start && pos < r.end) {
+    while let Some(r) = hidden_range_at(parsed, pos, |r| pos >= r.start && pos < r.end) {
         pos = r.end;
     }
     pos
 }
 
+/// First hidden range of the line containing `pos` that satisfies `pred`.
+/// Hidden ranges never cover the newline, so the line is enough.
+fn hidden_range_at(
+    parsed: &ParsedDocument,
+    pos: usize,
+    pred: impl Fn(&std::ops::Range<usize>) -> bool,
+) -> Option<std::ops::Range<usize>> {
+    parsed
+        .line_at_offset(pos)?
+        .hidden_ranges
+        .iter()
+        .find(|r| pred(r))
+        .cloned()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FormatFlags {
@@ -5612,22 +5621,14 @@ fn compute_active_formats(
 }
 
 fn skip_hidden_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
-    while let Some(h) = parsed
-        .hidden_ranges
-        .iter()
-        .find(|r| pos > r.start && pos <= r.end)
-    {
+    while let Some(h) = hidden_range_at(parsed, pos, |r| pos > r.start && pos <= r.end) {
         pos = h.start;
     }
     pos
 }
 
 fn skip_hidden_interior_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
-    while let Some(h) = parsed
-        .hidden_ranges
-        .iter()
-        .find(|r| pos > r.start && pos < r.end)
-    {
+    while let Some(h) = hidden_range_at(parsed, pos, |r| pos > r.start && pos < r.end) {
         pos = h.start;
     }
     pos
@@ -5651,11 +5652,7 @@ fn skip_hidden_right(parsed: &ParsedDocument, mut pos: usize) -> usize {
             return pos;
         }
     }
-    while let Some(h) = parsed
-        .hidden_ranges
-        .iter()
-        .find(|r| pos >= r.start && pos < r.end)
-    {
+    while let Some(h) = hidden_range_at(parsed, pos, |r| pos >= r.start && pos < r.end) {
         pos = h.end;
     }
     pos

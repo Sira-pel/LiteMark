@@ -69,6 +69,7 @@ use std::ops::Range;
 use crate::markdown::parser::{delimiter_alignments, line_breaks_table};
 use crate::markdown::{
     parse_document, unescaped_pipe_offsets, LineKind, ParsedDocument, TableColumnAlign,
+    TableRowBody,
 };
 
 /// One table edit. The anchor row and column come from the caret.
@@ -136,7 +137,8 @@ pub fn parsed_table_source(content: &str, pos: usize) -> Option<Range<usize>> {
 /// [`parsed_table_source`] against an existing parse of the content.
 pub fn parsed_table_source_in(parsed: &ParsedDocument, pos: usize) -> Option<Range<usize>> {
     for line in &parsed.lines {
-        if let LineKind::TableRow { table_source, .. } = &line.kind {
+        if let LineKind::TableRow { ref body, .. } = &line.kind {
+            let TableRowBody { table_source, .. } = &**body;
             if pos >= table_source.start && pos <= table_source.end {
                 return Some(table_source.clone());
             }
@@ -1176,7 +1178,8 @@ mod tests {
         let src = "| a \\| b | c |\n| --- | --- |\n| `c|d` | e |\n| bar |\n| bar | baz | boo |";
         let parsed = parse_document(src);
         for line in &parsed.lines {
-            if let LineKind::TableRow { raw_cells, .. } = &line.kind {
+            if let LineKind::TableRow { ref body, .. } = &line.kind {
+                let TableRowBody { raw_cells, .. } = &**body;
                 let text = &src[line.source.clone()];
                 let parts = split_parts(text);
                 let spans = cell_spans(line.source.start, &parts);
@@ -1192,7 +1195,8 @@ mod tests {
         let parsed = parse_document(content);
         let mut seen = 0usize;
         for line in &parsed.lines {
-            if let LineKind::TableRow { cells, .. } = &line.kind {
+            if let LineKind::TableRow { ref body, .. } = &line.kind {
+                let TableRowBody { cells, .. } = &**body;
                 if seen == row {
                     return cells.get(col).map(|range| range.start).unwrap_or(0);
                 }
@@ -1304,7 +1308,8 @@ mod tests {
 
     fn table_col_count(content: &str) -> usize {
         for line in &parse_document(content).lines {
-            if let LineKind::TableRow { alignments, .. } = &line.kind {
+            if let LineKind::TableRow { ref body, .. } = &line.kind {
+                let TableRowBody { alignments, .. } = &**body;
                 return alignments.len();
             }
         }
