@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     pub text: String,
@@ -1243,8 +1245,11 @@ pub struct ParsedLine {
     pub inline_pairs: Vec<InlinePair>,
     /// Visible text in WYSIWYG mode (with hidden_ranges stripped)
     pub display_text: String,
-    pub offset_map: RowOffsetMap,
+    pub offset_map: Arc<RowOffsetMap>,
     pub styled_segments: Vec<StyledSegment>,
+    /// Link spans `(source, url)`, filled once when the document is parsed so
+    /// painting can share them instead of rebuilding them every frame.
+    pub link_hits: Arc<Vec<(std::ops::Range<usize>, String)>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2374,7 +2379,8 @@ fn fence_marker_line(
         hidden_ranges: hidden,
         inline_pairs: Vec::new(),
         display_text,
-        offset_map,
+        offset_map: Arc::new(offset_map),
+        link_hits: Arc::default(),
         styled_segments: Vec::new(),
     }
 }
@@ -2397,7 +2403,8 @@ fn code_content_line(
             hidden_ranges: Vec::new(),
             inline_pairs: Vec::new(),
             display_text: line.to_string(),
-            offset_map: RowOffsetMap::identity(line_start, line_end),
+            offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
+            link_hits: Arc::default(),
             styled_segments: vec![StyledSegment {
                 source,
                 bold: false,
@@ -2433,7 +2440,8 @@ fn code_content_line(
         hidden_ranges: hidden,
         inline_pairs: Vec::new(),
         display_text,
-        offset_map,
+        offset_map: Arc::new(offset_map),
+        link_hits: Arc::default(),
         styled_segments,
     }
 }
@@ -2474,7 +2482,8 @@ fn atx_line(
         hidden_ranges: hidden,
         inline_pairs,
         display_text,
-        offset_map,
+        offset_map: Arc::new(offset_map),
+        link_hits: Arc::default(),
         styled_segments,
     }
 }
@@ -3098,7 +3107,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 hidden_ranges: Vec::new(),
                 inline_pairs: Vec::new(),
                 display_text: line.to_string(),
-                offset_map: RowOffsetMap::identity(line_start, line_end),
+                offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
+                link_hits: Arc::default(),
                 styled_segments: Vec::new(),
             });
             continue;
@@ -3120,7 +3130,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 hidden_ranges: hidden,
                 inline_pairs: Vec::new(),
                 display_text,
-                offset_map,
+                offset_map: Arc::new(offset_map),
+                link_hits: Arc::default(),
                 styled_segments: Vec::new(),
             });
             continue;
@@ -3156,7 +3167,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     hidden_ranges: hidden,
                     inline_pairs: Vec::new(),
                     display_text,
-                    offset_map,
+                    offset_map: Arc::new(offset_map),
+                    link_hits: Arc::default(),
                     styled_segments: Vec::new(),
                 });
                 continue;
@@ -3217,7 +3229,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     hidden_ranges: merged_hidden,
                     inline_pairs: row_pairs,
                     display_text: line.to_string(),
-                    offset_map: RowOffsetMap::identity(line_start, line_end),
+                    offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
+                    link_hits: Arc::default(),
                     styled_segments: row_segments,
                 });
                 continue;
@@ -3280,13 +3293,30 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             hidden_ranges: merged_hidden,
             inline_pairs,
             display_text,
-            offset_map,
+            offset_map: Arc::new(offset_map),
+            link_hits: Arc::default(),
             styled_segments,
         });
     }
 
     if let Some(fence) = open_fence {
         code_blocks.push((fence.open_range, markdown.len()..markdown.len()));
+    }
+
+    for line in &mut lines {
+        let links: Vec<_> = line
+            .styled_segments
+            .iter()
+            .filter_map(|seg| match &seg.link_url {
+                Some(url) if seg.source.end > seg.source.start => {
+                    Some((seg.source.clone(), url.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        if !links.is_empty() {
+            line.link_hits = Arc::new(links);
+        }
     }
 
     ParsedDocument {
@@ -3387,7 +3417,8 @@ mod tests {
                     hidden_ranges: Vec::new(),
                     inline_pairs: Vec::new(),
                     display_text: String::new(),
-                    offset_map: RowOffsetMap::identity(0, 0),
+                    offset_map: Arc::new(RowOffsetMap::identity(0, 0)),
+                    link_hits: Arc::default(),
                     styled_segments: Vec::new(),
                 });
                 check_all(kinds, seq, next_tracker, depth + 1);
@@ -3458,6 +3489,14 @@ mod tests {
         assert!(has_underline, "Expected underline span");
         assert!(has_strike, "Expected strike span");
         assert!(has_code, "Expected code span");
+    }
+
+    #[test]
+    fn test_link_hits_precomputed_per_line() {
+        let doc = parse_document("see [site](https://a.example) now\nplain");
+        assert_eq!(doc.lines[0].link_hits.len(), 1);
+        assert_eq!(doc.lines[0].link_hits[0].1, "https://a.example");
+        assert!(doc.lines[1].link_hits.is_empty());
     }
 
     #[test]
