@@ -209,6 +209,12 @@ impl DocumentTab {
         doc
     }
 
+    /// Drop the cached parse of a tab that isn't on screen; `parsed()`
+    /// rebuilds it when the tab is shown again.
+    pub fn release_parse_cache(&mut self) {
+        self.cached_parse = None;
+    }
+
     #[allow(dead_code)]
     pub fn parsed_snapshot(&self) -> Arc<ParsedDocument> {
         if let Some((rev, ref doc)) = self.cached_parse {
@@ -3676,10 +3682,10 @@ impl DocumentTab {
 
     pub fn refresh_cursor(&mut self) {
         let cursor = self.cursor_offset();
-        let (line, col) = line_col(&self.content, cursor);
+        let parsed = self.parsed();
+        let (line, col) = parsed_line_col(&self.content, &parsed, cursor);
         self.cursor_line = line;
         self.cursor_col = col;
-        let parsed = self.parsed();
         self.active_formats = compute_active_formats(&parsed, cursor, &self.pending_formats);
     }
 
@@ -4192,6 +4198,18 @@ fn add_contained_pairs<'a>(
             }
         }
     }
+}
+
+/// `line_col` answered from the parsed line table instead of rescanning the
+/// text from the start.
+fn parsed_line_col(content: &str, parsed: &ParsedDocument, offset: usize) -> (usize, usize) {
+    let offset = super::text_ops::floor_char_boundary(content, offset.min(content.len()));
+    let idx = parsed.lines.partition_point(|l| l.source.start <= offset);
+    let Some(line) = idx.checked_sub(1).map(|i| &parsed.lines[i]) else {
+        return line_col(content, offset);
+    };
+    let end = offset.min(line.source.end);
+    (idx, content[line.source.start..end].chars().count() + 1)
 }
 
 /// The next source position at or after `pos` that is not inside a hidden
@@ -5837,6 +5855,20 @@ fn placeholder_len(cmd: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parsed_line_col_matches_line_col() {
+        use crate::markdown::parser::parse_document;
+        for text in ["", "a", "a\n", "\n\n", "ab\r\ncd\re\n", "héllo\nwörld\n\nx"] {
+            let parsed = parse_document(text);
+            for offset in 0..=text.len() + 1 {
+                assert_eq!(
+                    super::parsed_line_col(text, &parsed, offset),
+                    super::line_col(text, offset),
+                    "{text:?} at {offset}"
+                );
+            }
+        }
+    }
     use super::*;
     use crate::ui::{move_vertical_visual, EditorPaint, PaintRow};
     use gpui::{point, px, ShapedLine};
@@ -6708,7 +6740,7 @@ mod tests {
             "strike" => InlineTagKind::Strike,
             _ => InlineTagKind::Link,
         };
-        doc.parsed().inline_pairs.iter().any(|p| p.kind == kind)
+        doc.parsed().all_inline_pairs().any(|p| p.kind == kind)
     }
 
     /// Ctrl+B/I/U/Shift+S/` with no selection, type a word, then toggle the
@@ -9346,7 +9378,7 @@ mod tests {
                 shaped: std::rc::Rc::new(ShapedLine::default()),
                 offset_map,
                 checkbox_hit: None,
-                link_hits: Vec::new(),
+                link_hits: Arc::default(),
                 cells: Vec::new(),
             }],
             bounds: None,
@@ -9798,7 +9830,7 @@ mod tests {
                 shaped: std::rc::Rc::new(ShapedLine::default()),
                 offset_map: line.offset_map.clone(),
                 checkbox_hit: None,
-                link_hits: Vec::new(),
+                link_hits: Arc::default(),
                 cells: Vec::new(),
             })
             .collect();
@@ -11271,8 +11303,7 @@ mod tests {
 
     fn naive_span_close_end(parsed: &ParsedDocument, pair: &InlinePair) -> usize {
         parsed
-            .inline_pairs
-            .iter()
+            .all_inline_pairs()
             .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
             .map(|p| p.close_delim.end)
             .max()
@@ -11281,8 +11312,7 @@ mod tests {
 
     fn naive_span_open_start(parsed: &ParsedDocument, pair: &InlinePair) -> usize {
         parsed
-            .inline_pairs
-            .iter()
+            .all_inline_pairs()
             .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
             .map(|p| p.open_delim.start)
             .min()
@@ -11294,8 +11324,7 @@ mod tests {
         range: Range<usize>,
     ) -> Vec<&InlinePair> {
         let mut group_pairs: Vec<&InlinePair> = parsed
-            .inline_pairs
-            .iter()
+            .all_inline_pairs()
             .filter(|p| {
                 p.kind != InlineTagKind::Link
                     && p.open_delim.start < range.end
@@ -11305,7 +11334,7 @@ mod tests {
         let mut expanded = true;
         while expanded {
             expanded = false;
-            for p in &parsed.inline_pairs {
+            for p in parsed.all_inline_pairs() {
                 if p.kind == InlineTagKind::Link
                     || group_pairs.iter().any(|g| std::ptr::eq(*g, p))
                 {
@@ -11347,7 +11376,7 @@ mod tests {
     }
 
     fn assert_helper_equivalence(parsed: &ParsedDocument) {
-        for pair in &parsed.inline_pairs {
+        for pair in parsed.all_inline_pairs() {
             assert_eq!(
                 span_close_end(parsed, pair),
                 naive_span_close_end(parsed, pair),
@@ -11361,7 +11390,7 @@ mod tests {
             assert_eq!(pair.group_close_end, naive_span_close_end(parsed, pair));
             assert_eq!(pair.group_open_start, naive_span_open_start(parsed, pair));
         }
-        let n = parsed.inline_pairs.len().max(1);
+        let n = parsed.all_inline_pairs().count().max(1);
         let step = (parsed.lines.last().map(|l| l.source.end).unwrap_or(0) / n.max(1)).max(1);
         for start in (0..=parsed.lines.last().map(|l| l.source.end).unwrap_or(0)).step_by(step.max(7)) {
             let end = (start + 11).min(parsed.lines.last().map(|l| l.source.end).unwrap_or(start));

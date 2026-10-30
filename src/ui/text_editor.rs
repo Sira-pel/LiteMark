@@ -14,7 +14,7 @@ use crate::markdown::{
     LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
 };
 use crate::model::document::visible_line_end;
-use crate::model::text_ops::{visual_rows, Caret};
+use crate::model::text_ops::{visual_row_count, visual_rows, Caret};
 use crate::model::ViewMode;
 use crate::theme::sz;
 
@@ -50,9 +50,9 @@ pub struct PaintRow {
     /// Shared so a row stays small: `ShapedLine` keeps its decoration runs
     /// inline (about 3 KB), and every off-screen row shares one empty line.
     pub shaped: Rc<ShapedLine>,
-    pub offset_map: RowOffsetMap,
+    pub offset_map: Arc<RowOffsetMap>,
     pub checkbox_hit: Option<(Bounds<Pixels>, Range<usize>)>,
-    pub link_hits: Vec<(Range<usize>, String)>,
+    pub link_hits: Arc<Vec<(Range<usize>, String)>>,
     pub cells: Vec<PaintCell>,
 }
 
@@ -424,7 +424,7 @@ pub fn checkbox_for_position(paint: &EditorPaint, position: Point<Pixels>) -> Op
 pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<String> {
     for row in &paint.rows {
         if source_offset >= row.byte_start && source_offset <= row.byte_end {
-            for (range, url) in &row.link_hits {
+            for (range, url) in row.link_hits.iter() {
                 if source_offset >= range.start && source_offset <= range.end {
                     return Some(url.clone());
                 }
@@ -980,15 +980,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let wrapped = if line.display_text.is_empty() {
                     1
                 } else {
-                    visual_rows(&line.display_text, wrap_cols).len().max(1)
+                    visual_row_count(&line.display_text, wrap_cols).max(1)
                 };
                 h += top_gap + line_h * wrapped as f32;
             }
             h.max(paint_borrow.total_height)
         } else {
-            let rows = visual_rows(&self.content, wrap_cols);
+            let rows = visual_row_count(&self.content, wrap_cols);
             let line_height = self.font_size * 1.65;
-            line_height * rows.len() as f32 + px(32.0)
+            line_height * rows as f32 + px(32.0)
         };
         drop(paint_borrow);
 
@@ -1104,9 +1104,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         origin,
                         line_height: base_line_height,
                         shaped: unshaped.clone(),
-                        offset_map: RowOffsetMap::identity(start, end),
+                        offset_map: Arc::new(RowOffsetMap::identity(start, end)),
                         checkbox_hit: None,
-                        link_hits: Vec::new(),
+                        link_hits: Arc::default(),
                         cells: Vec::new(),
                     });
                     continue;
@@ -1229,9 +1229,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     origin,
                     line_height: base_line_height,
                     shaped: Rc::new(shaped),
-                    offset_map,
+                    offset_map: Arc::new(offset_map),
                     checkbox_hit: None,
-                    link_hits: Vec::new(),
+                    link_hits: Arc::default(),
                     cells: Vec::new(),
                 });
             }
@@ -1311,7 +1311,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 wysiwyg_line_metrics(&parsed_line.kind, self.font_size);
             cur_y += top_gap;
 
-            let link_hits = collect_line_links(parsed_line);
+            let link_hits = parsed_line.link_hits.clone();
 
             if let LineKind::TableRow {
                 is_header,
@@ -1789,7 +1789,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let sub_map = if sub_rows.len() == 1 {
                     parsed_line.offset_map.clone()
                 } else {
-                    parsed_line.offset_map.slice_display(d_start..d_end)
+                    Arc::new(parsed_line.offset_map.slice_display(d_start..d_end))
                 };
 
                 let row_origin = point(base_x + indent_x, cur_y);
@@ -2386,18 +2386,6 @@ fn find_task_bracket_range(content: &str, line_range: &Range<usize>) -> Option<R
     Some((line_range.start + pos)..(line_range.start + pos + 3))
 }
 
-fn collect_line_links(line: &ParsedLine) -> Vec<(Range<usize>, String)> {
-    let mut links = Vec::new();
-    for seg in &line.styled_segments {
-        if let Some(ref url) = seg.link_url {
-            if seg.source.end > seg.source.start {
-                links.push((seg.source.clone(), url.clone()));
-            }
-        }
-    }
-    links
-}
-
 /// GPUI merges neighbouring runs into the first run's font whenever color,
 /// underline and strikethrough match, without comparing the fonts. Bold or
 /// italic text that keeps its neighbours' color (headings do) would then draw
@@ -2889,6 +2877,7 @@ fn paint_ranges_mapped(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::{
         compute_table_column_widths, editor_end_visual, editor_home_visual, index_in_rows,
         move_vertical_visual, wrap_cell_text, CellLine, EditorPaint, PaintCell, PaintRow,
@@ -3008,9 +2997,9 @@ mod tests {
             origin: point(px(10.0), px(0.0)),
             line_height: px(56.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
-            offset_map: RowOffsetMap::identity(0, 22),
+            offset_map: Arc::new(RowOffsetMap::identity(0, 22)),
             checkbox_hit: None,
-            link_hits: Vec::new(),
+            link_hits: Arc::default(),
             cells: vec![cell_0],
         };
 
@@ -3036,9 +3025,9 @@ mod tests {
             origin: point(px(10.0), px(56.0)),
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
-            offset_map: RowOffsetMap::identity(23, 42),
+            offset_map: Arc::new(RowOffsetMap::identity(23, 42)),
             checkbox_hit: None,
-            link_hits: Vec::new(),
+            link_hits: Arc::default(),
             cells: vec![next_cell],
         };
 
@@ -3127,9 +3116,9 @@ mod tests {
             origin: point(px(10.0), px(0.0)),
             line_height: px(56.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
-            offset_map: RowOffsetMap::identity(0, 20),
+            offset_map: Arc::new(RowOffsetMap::identity(0, 20)),
             checkbox_hit: None,
-            link_hits: Vec::new(),
+            link_hits: Arc::default(),
             cells: vec![cell],
         };
 
@@ -3193,9 +3182,9 @@ mod tests {
             origin: point(px(10.0), px(0.0)),
             line_height: px(56.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
-            offset_map: RowOffsetMap::identity(0, 20),
+            offset_map: Arc::new(RowOffsetMap::identity(0, 20)),
             checkbox_hit: None,
-            link_hits: Vec::new(),
+            link_hits: Arc::default(),
             cells: vec![cell],
         };
 
@@ -3284,9 +3273,9 @@ mod tests {
             origin: point(px(0.0), px(0.0)),
             line_height: px(112.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
-            offset_map: RowOffsetMap::identity(0, 35),
+            offset_map: Arc::new(RowOffsetMap::identity(0, 35)),
             checkbox_hit: None,
-            link_hits: Vec::new(),
+            link_hits: Arc::default(),
             cells: vec![cell0, cell1],
         };
 
@@ -3478,9 +3467,9 @@ mod tests {
             origin: point(px(0.0), px(0.0)),
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
-            offset_map: RowOffsetMap::identity(0, 10),
+            offset_map: Arc::new(RowOffsetMap::identity(0, 10)),
             checkbox_hit: None,
-            link_hits: Vec::new(),
+            link_hits: Arc::default(),
             cells: vec![empty_cell],
         };
 
