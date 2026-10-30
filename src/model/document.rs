@@ -209,6 +209,12 @@ impl DocumentTab {
         doc
     }
 
+    /// Drop the cached parse of a tab that isn't on screen; `parsed()`
+    /// rebuilds it when the tab is shown again.
+    pub fn release_parse_cache(&mut self) {
+        self.cached_parse = None;
+    }
+
     #[allow(dead_code)]
     pub fn parsed_snapshot(&self) -> Arc<ParsedDocument> {
         if let Some((rev, ref doc)) = self.cached_parse {

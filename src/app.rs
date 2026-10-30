@@ -4037,6 +4037,10 @@ impl LiteMarkApp {
         let zoom = self.settings.zoom_level as f32 / 100.0;
         let view_mode = self.settings.view_mode;
         let content = self.active_content();
+        let active_id = self.active_tab_id.clone();
+        for tab in self.tabs.iter_mut().filter(|t| t.id != active_id) {
+            tab.release_parse_cache();
+        }
         let (parsed, selection, marked) = if let Some(tab) = self.active_tab_mut() {
             (
                 tab.parsed(),
