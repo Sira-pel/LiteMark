@@ -2347,10 +2347,11 @@ impl LiteMarkApp {
         if copy {
             let result = read_note(&file.path).and_then(|content| {
                 copy_note_into_workspace(&file.path, &dest_path, &content)
+                    .map(|new_path| (new_path, content))
                     .map_err(|err| err.to_string())
             });
             match result {
-                Ok(new_path) => {
+                Ok((new_path, copied)) => {
                     self.rescan_workspace();
                     if open_copy {
                         let new_file_id = self
@@ -2364,7 +2365,7 @@ impl LiteMarkApp {
                             .and_then(|n| n.to_str())
                             .unwrap_or(file.name.as_str())
                             .to_string();
-                        self.open_loaded_tab(display, String::new(), Some(new_path), new_file_id);
+                        self.open_loaded_tab(display, copied, Some(new_path), new_file_id);
                     }
                     DropOutcome::Done(format!("Copied {} to {dest_name}", file.name))
                 }
@@ -6617,7 +6618,7 @@ impl Render for LiteMarkApp {
                             .when(self.show_sidebar, |s| {
                                 let sidebar = render_sidebar(
                                     SidebarProps {
-                                        workspace: self.workspace.clone(),
+                                        workspace: &self.workspace,
                                         width: crate::theme::sidebar_width(window_width),
                                         selected_file_id: match &self.selected_target {
                                             Some(SidebarTarget::File(id)) => Some(id.clone()),
@@ -7130,3 +7131,7 @@ mod table_drag_handler_tests;
 #[cfg(test)]
 #[path = "viewport_culling_tests.rs"]
 mod viewport_culling_tests;
+
+#[cfg(test)]
+#[path = "note_drop_tests.rs"]
+mod note_drop_tests;
