@@ -169,7 +169,7 @@ pub fn build_sidebar_tree(
                 }
             })
             .collect();
-        level_folders.sort_by_key(|a| a.name.to_lowercase());
+        level_folders.sort_by_cached_key(|a| a.name.to_lowercase());
 
         for folder in level_folders {
             let is_open = folder.is_open;
@@ -194,7 +194,7 @@ pub fn build_sidebar_tree(
                 }
             })
             .collect();
-        level_files.sort_by_key(|a| a.name.to_lowercase());
+        level_files.sort_by_cached_key(|a| a.name.to_lowercase());
 
         for file in level_files {
             out.push(SidebarTreeItem::File {

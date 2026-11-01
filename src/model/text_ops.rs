@@ -948,6 +948,34 @@ pub fn visual_rows(content: &str, wrap_cols: usize) -> Vec<(usize, usize)> {
     rows
 }
 
+/// Number of rows `visual_rows` would return, without building the list for
+/// content that fits on one row (the common case).
+pub fn visual_row_count(content: &str, wrap_cols: usize) -> usize {
+    if wrap_cols == 0 || wrap_cols == usize::MAX {
+        return content.bytes().filter(|&b| b == b'\n').count() + 1;
+    }
+    let mut count = 0usize;
+    let mut line_start = 0usize;
+    let mut tally = |start: usize, end: usize| {
+        // A line of at most `wrap_cols` bytes has at most that many chars.
+        count += if end - start <= wrap_cols {
+            1
+        } else {
+            let mut rows = Vec::new();
+            push_wrapped(&mut rows, content, start, end, wrap_cols);
+            rows.len()
+        };
+    };
+    for (index, byte) in content.bytes().enumerate() {
+        if byte == b'\n' {
+            tally(line_start, index);
+            line_start = index + 1;
+        }
+    }
+    tally(line_start, content.len());
+    count
+}
+
 fn push_wrapped(
     rows: &mut Vec<(usize, usize)>,
     content: &str,
@@ -1013,6 +1041,20 @@ pub fn wysiwyg_list_row_height(font_px: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visual_row_count_matches_visual_rows() {
+        let samples = ["", "a", "a\n", "abc def ghi\n\nxy", "ααα βββ γγγ δδδ", "averyveryverylongword end"];
+        for text in samples {
+            for cols in [0, 1, 3, 5, 8, 40, usize::MAX] {
+                assert_eq!(
+                    visual_row_count(text, cols),
+                    visual_rows(text, cols).len(),
+                    "{text:?} at {cols}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn typing_backspace_enter_and_cursor_position() {

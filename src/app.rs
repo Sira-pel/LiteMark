@@ -691,6 +691,7 @@ impl LiteMarkApp {
             self.show_pdf_modal = false;
         } else if self.show_find_replace {
             self.show_find_replace = false;
+            self.refresh_find();
         } else if self.field_focus == TextInput::Search || !self.search_query.is_empty() {
             self.clear_search(cx);
         } else if self.active_multi().is_some() || self.selected_target.is_some() {
@@ -1484,6 +1485,13 @@ impl LiteMarkApp {
     }
 
     fn refresh_find(&mut self) {
+        if !self.show_find_replace {
+            // Don't search a hidden bar; reopening re-runs it.
+            self.find_hits.clear();
+            self.find_index = None;
+            self.not_found = false;
+            return;
+        }
         self.find_hits = self
             .active_tab()
             .map(|tab| tab.find_hit_ranges(&self.find_term, self.match_case))
@@ -3637,7 +3645,9 @@ impl LiteMarkApp {
         );
         match outcome {
             DispatchOutcome::ReadOnly => self.show_error("PDF files are read-only."),
-            DispatchOutcome::Applied => self.refresh_find(),
+            DispatchOutcome::Applied => {
+                self.refresh_find();
+            }
             DispatchOutcome::Swallowed | DispatchOutcome::Ignored => {}
         }
     }
@@ -4027,6 +4037,10 @@ impl LiteMarkApp {
         let zoom = self.settings.zoom_level as f32 / 100.0;
         let view_mode = self.settings.view_mode;
         let content = self.active_content();
+        let active_id = self.active_tab_id.clone();
+        for tab in self.tabs.iter_mut().filter(|t| t.id != active_id) {
+            tab.release_parse_cache();
+        }
         let (parsed, selection, marked) = if let Some(tab) = self.active_tab_mut() {
             (
                 tab.parsed(),
@@ -4781,6 +4795,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = true;
+                    this.refresh_find();
                     this.show_replace_row = true;
                     this.pending_find_focus = true;
                     this.open_menu = None;
@@ -5037,8 +5052,10 @@ impl Render for LiteMarkApp {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = !this.show_find_replace;
                     if this.show_find_replace {
+                        this.refresh_find();
                         this.pending_find_focus = true;
                     } else {
+                        this.refresh_find();
                         this.pending_find_focus = false;
                         this.applied_focus = None;
                         this.field_owns_keys = false;
@@ -5111,6 +5128,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_find_replace = false;
+                    this.refresh_find();
                     this.pending_find_focus = false;
                     this.applied_focus = None;
                     this.field_owns_keys = false;
@@ -5813,8 +5831,10 @@ impl Render for LiteMarkApp {
             .on_action(cx.listener(|this, _: &FindReplace, _window, cx| {
                 this.show_find_replace = !this.show_find_replace;
                 if this.show_find_replace {
+                    this.refresh_find();
                     this.pending_find_focus = true;
                 } else {
+                    this.refresh_find();
                     this.pending_find_focus = false;
                     this.applied_focus = None;
                     this.field_owns_keys = false;
@@ -5865,6 +5885,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &OpenReplace, _window, cx| {
                 this.show_find_replace = true;
+                this.refresh_find();
                 this.show_replace_row = true;
                 this.pending_find_focus = true;
                 cx.notify();
@@ -6450,9 +6471,8 @@ impl Render for LiteMarkApp {
                     this.editor_right_mouse_down(event, window, cx);
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.editor_mouse_move(event, cx);
-                window.refresh();
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -6522,7 +6542,15 @@ impl Render for LiteMarkApp {
                     // 1. HeaderBar
                     .child(render_header_bar(
                         HeaderBarProps {
-                            tabs: self.tabs.clone(),
+                            tabs: self
+                                .tabs
+                                .iter()
+                                .map(|t| HeaderTab {
+                                    id: t.id.clone(),
+                                    title: t.title.clone(),
+                                    is_modified: t.is_modified,
+                                })
+                                .collect(),
                             active_tab_id: self.active_tab_id.clone(),
                             is_sidebar_open: self.show_sidebar,
                             is_maximized: is_max,
