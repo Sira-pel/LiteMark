@@ -294,6 +294,7 @@ pub fn build_view_menu_items(
     show_line_numbers: bool,
     word_wrap: bool,
     show_sidebar: bool,
+    show_code_files: bool,
     content_alignment: ContentAlignment,
     on_set_view_mode: impl Fn(ViewMode, &mut App) + 'static + Clone,
     on_toggle_line_numbers: impl Fn(&mut App) + 'static + Clone,
@@ -303,6 +304,7 @@ pub fn build_view_menu_items(
     on_zoom_out: impl Fn(&mut App) + 'static + Clone,
     on_reset_zoom: impl Fn(&mut App) + 'static + Clone,
     on_toggle_sidebar: impl Fn(&mut App) + 'static + Clone,
+    on_toggle_show_code_files: impl Fn(&mut App) + 'static + Clone,
     on_toggle_zen: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
     let is_wysiwyg = view_mode == ViewMode::Wysiwyg;
@@ -325,6 +327,10 @@ pub fn build_view_menu_items(
         MenuItem::divider(),
         MenuItem::check("Sidebar", show_sidebar, Some("Ctrl+\\"), {
             let f = on_toggle_sidebar.clone();
+            move |_, cx| f(cx)
+        }),
+        MenuItem::check("Code files in sidebar", show_code_files, None, {
+            let f = on_toggle_show_code_files.clone();
             move |_, cx| f(cx)
         }),
         MenuItem::action("Zen mode", None, Some("F11"), {

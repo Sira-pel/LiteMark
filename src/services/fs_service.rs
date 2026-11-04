@@ -1,5 +1,5 @@
 use crate::model::{
-    file_dialog_block_reason, looks_binary, CODE_EXTENSIONS, unique_name, FileType, PortalProbe, WorkspaceDirectory,
+    file_dialog_block_reason, looks_binary, CODE_EXTENSIONS, TEXT_EXTENSIONS, unique_name, FileType, PortalProbe, WorkspaceDirectory,
     WorkspaceFile, WorkspaceFolder,
 };
 #[cfg(target_os = "linux")]
@@ -606,7 +606,9 @@ pub fn safe_delete(path: &Path, is_dir: bool) -> io::Result<()> {
     }
 }
 
-pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
+/// List the notes folder. Hidden entries are never listed; code files only when
+/// `show_code_files` is set.
+pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirectory {
     let folder_name = if let Some(name) = dir.file_name().and_then(|f| f.to_str()) {
         format!("📁 {}", name)
     } else {
@@ -619,6 +621,7 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
     fn walk(
         current: &Path,
         parent_id: Option<String>,
+        show_code_files: bool,
         folders: &mut Vec<WorkspaceFolder>,
         files: &mut Vec<WorkspaceFile>,
     ) {
@@ -654,13 +657,15 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
                         path: path.clone(),
                         is_open: true,
                     });
-                    walk(&path, Some(folder_id), folders, files);
+                    walk(&path, Some(folder_id), show_code_files, folders, files);
                 } else if entry_type.is_file() {
                     let file_type = FileType::from_filename(&file_name);
-                    if matches!(
-                        file_type,
-                        FileType::Markdown | FileType::PlainText | FileType::Code
-                    ) {
+                    let listed = match file_type {
+                        FileType::Markdown | FileType::PlainText => true,
+                        FileType::Code => show_code_files,
+                        FileType::Pdf => false,
+                    };
+                    if listed {
                         let updated_at = entry
                             .metadata()
                             .and_then(|m| m.modified())
@@ -683,7 +688,7 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
         }
     }
 
-    walk(dir, None, &mut folders, &mut files);
+    walk(dir, None, show_code_files, &mut folders, &mut files);
 
     WorkspaceDirectory {
         folder_name,
@@ -695,17 +700,16 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
 }
 
 pub fn pick_open_file() -> Option<PathBuf> {
-    let all_supported: Vec<&str> = ["md", "markdown", "txt", "text", "log", "pdf"]
-        .into_iter()
+    let text_and_pdf: Vec<&str> = TEXT_EXTENSIONS.iter().copied().chain(["pdf"]).collect();
+    let all_supported: Vec<&str> = text_and_pdf
+        .iter()
+        .copied()
         .chain(CODE_EXTENSIONS.iter().copied())
         .collect();
     rfd::FileDialog::new()
         .set_title("Open Text, Markdown, Code, or PDF File")
         .add_filter("All Supported", &all_supported)
-        .add_filter(
-            "Text & Markdown Files",
-            &["md", "markdown", "txt", "text", "log", "pdf"],
-        )
+        .add_filter("Text & Markdown Files", &text_and_pdf)
         .add_filter("Code Files", CODE_EXTENSIONS)
         .pick_file()
 }
@@ -860,7 +864,7 @@ mod tests {
         // A broken link must not crash the scan.
         symlink(temp_dir.join("does-not-exist"), temp_dir.join("broken")).unwrap();
 
-        let scanned = scan_workspace_dir(&temp_dir);
+        let scanned = scan_workspace_dir(&temp_dir, true);
         assert_eq!(scanned.folders.len(), 1, "only the real folder is listed");
         assert_eq!(scanned.folders[0].name, "Real");
         assert_eq!(scanned.files.len(), 1, "only the real note is indexed");
@@ -906,7 +910,7 @@ mod tests {
 
         // Simulate the new-folder workflow: create one more folder, then rescan.
         safe_create_folder(&temp_dir, "New Folder").unwrap();
-        let scanned = scan_workspace_dir(&temp_dir);
+        let scanned = scan_workspace_dir(&temp_dir, true);
 
         let file_paths: Vec<_> = scanned.files.iter().map(|f| f.path.clone()).collect();
         assert!(file_paths.contains(&welcome), "existing root note must survive");
@@ -1167,5 +1171,36 @@ mod tests {
         let pdf_name = safe_rename(&plain, "scan.pdf").unwrap();
         assert_eq!(pdf_name.file_name().unwrap(), "scan.pdf.rs");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_hides_dotfiles_and_code_files_follow_the_setting() {
+        let temp_dir = std::env::temp_dir().join(format!("litemark-scan-code-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        for name in ["Note.md", "plain.txt", "main.rs", "Makefile", ".env", ".gitignore", ".hidden.rs"] {
+            fs::write(temp_dir.join(name), "x").unwrap();
+        }
+
+        let names = |show: bool| -> Vec<String> {
+            scan_workspace_dir(&temp_dir, show)
+                .files
+                .into_iter()
+                .map(|f| f.name)
+                .collect()
+        };
+        let with_code = names(true);
+        assert_eq!(with_code, ["Makefile", "Note.md", "main.rs", "plain.txt"]);
+        assert_eq!(names(false), ["Note.md", "plain.txt"]);
+        // `.env` is no longer treated as a code file even when opened directly.
+        assert_eq!(FileType::from_filename(".env"), FileType::PlainText);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn show_code_files_defaults_on_for_old_settings_files() {
+        let settings: crate::model::EditorSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.show_code_files);
     }
 }

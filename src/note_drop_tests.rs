@@ -18,7 +18,7 @@ fn opening_a_copied_note_shows_its_content() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, _cx| {
-        app.workspace = scan_workspace_dir(&root);
+        app.workspace = scan_workspace_dir(&root, true);
         app.refresh_workspace_ids();
         let file_id = app.workspace.files[0].id.clone();
         let folder_id = app.workspace.folders[0].id.clone();

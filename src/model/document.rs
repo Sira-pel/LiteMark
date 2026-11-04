@@ -35,12 +35,15 @@ pub const CODE_EXTENSIONS: &[&str] = &[
     "sql", "ini", "conf", "mk", "vue", "svelte",
 ];
 
+/// Extensions (lowercase, no dot) of the text and Markdown files the Open dialog lists
+/// besides code. `.pdf` is added by the dialog.
+pub const TEXT_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "text", "log"];
+
 /// Whole file names (lowercase) that open as code although they have no extension.
 const CODE_FILE_NAMES: &[&str] = &[
     "dockerfile",
     "makefile",
     "gnumakefile",
-    ".env",
     ".gitignore",
 ];
 
@@ -12385,7 +12388,7 @@ mod clear_formatting_tests {
         for name in ["main.rs", "a.PY", "data.json", "Cargo.toml", "x.tsx", "build.mk"] {
             assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
         }
-        for name in ["Makefile", "dockerfile", "GNUmakefile", ".env", ".gitignore"] {
+        for name in ["Makefile", "dockerfile", "GNUmakefile", ".gitignore"] {
             assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
         }
         assert_eq!(FileType::from_filename("notes.md"), FileType::Markdown);
