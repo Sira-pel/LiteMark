@@ -90,6 +90,98 @@ impl FileType {
     }
 }
 
+/// What one indent level is made of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndentStyle {
+    Tabs,
+    Spaces(usize),
+}
+
+impl IndentStyle {
+    /// Text of one indent level.
+    pub fn unit(self) -> String {
+        match self {
+            IndentStyle::Tabs => "\t".to_string(),
+            IndentStyle::Spaces(n) => " ".repeat(n),
+        }
+    }
+
+    /// Columns per indent stop (a tab counts as one level).
+    fn width(self) -> usize {
+        match self {
+            IndentStyle::Tabs => 1,
+            IndentStyle::Spaces(n) => n.max(1),
+        }
+    }
+}
+
+/// Default indent for a file: tabs for Makefiles and Go, 4 spaces for other code,
+/// 2 spaces for Markdown and plain text.
+pub fn indent_style(name: &str, file_type: FileType) -> IndentStyle {
+    let lower = name.to_lowercase();
+    if lower == "makefile"
+        || lower == "gnumakefile"
+        || lower.ends_with(".mk")
+        || lower.ends_with(".go")
+    {
+        return IndentStyle::Tabs;
+    }
+    if file_type.is_code() {
+        IndentStyle::Spaces(4)
+    } else {
+        IndentStyle::Spaces(2)
+    }
+}
+
+/// Look at the first 200 lines: mostly tab-indented lines mean tabs, a clear space
+/// majority with a consistent step means that step, anything mixed keeps `default`.
+pub fn detect_indent_style(content: &str, default: IndentStyle) -> IndentStyle {
+    let mut tab_lines = 0usize;
+    let mut widths = Vec::new();
+    for line in content.lines().take(200) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with('\t') {
+            tab_lines += 1;
+        } else if line.starts_with(' ') {
+            // " * text" continuation lines of block comments are not indentation.
+            if line.trim_start().starts_with('*') {
+                continue;
+            }
+            widths.push(line.len() - line.trim_start_matches(' ').len());
+        }
+    }
+    let space_lines = widths.len();
+    if tab_lines > 2 * space_lines && tab_lines > 0 {
+        return IndentStyle::Tabs;
+    }
+    if space_lines <= 2 * tab_lines {
+        return default;
+    }
+    // A stray odd line (an aligned continuation) must not hide the step: take the
+    // step that is the shallowest indent and that most lines are a multiple of.
+    let shallowest = widths.iter().copied().min().unwrap_or(0);
+    for step in [4, 2, 3] {
+        let fits = widths.iter().filter(|w| **w % step == 0).count();
+        if shallowest == step && fits * 4 >= space_lines * 3 {
+            return IndentStyle::Spaces(step);
+        }
+    }
+    default
+}
+
+/// Closing character for the pairs auto-closed in code: `( [ { "`.
+pub fn code_pair_close(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        _ => None,
+    }
+}
+
 /// A file with a zero byte is binary, even when the bytes happen to be valid UTF-8.
 pub fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8 * 1024).any(|&b| b == 0)
@@ -182,6 +274,7 @@ pub struct DocumentTab {
     pub pending_formats: ActiveFormats,
     pub caret: Caret,
     pub view_mode: ViewMode,
+    pub indent_style: IndentStyle,
     /// Set only on the scratch tab used by Clear Formatting: forces inline
     /// toggles to turn the format off instead of deciding from the selection.
     force_inline_toggle: Option<bool>,
@@ -217,6 +310,12 @@ impl DocumentTab {
     ) -> Self {
         let file_type = FileType::from_filename(&title);
         let stats = compute_stats(&content);
+        let default_style = indent_style(&title, file_type);
+        let indent_style = if file_type.is_code() {
+            detect_indent_style(&content, default_style)
+        } else {
+            default_style
+        };
 
         let mut tab = Self {
             id,
@@ -237,6 +336,7 @@ impl DocumentTab {
             pending_formats: ActiveFormats::default(),
             caret: Caret::default(),
             view_mode: ViewMode::Wysiwyg,
+            indent_style,
             force_inline_toggle: None,
             marked_range: None,
             revision: 1,
@@ -283,6 +383,13 @@ impl DocumentTab {
     /// Re-detect the type after Save As or a rename. A change drops the parse cache,
     /// which was built for the old type. Returns whether the type changed.
     pub fn set_file_type(&mut self, file_type: FileType) -> bool {
+        // The name may have changed even when the type did not (a.rs -> Makefile).
+        let default_style = indent_style(&self.title, file_type);
+        self.indent_style = if file_type.is_code() {
+            detect_indent_style(&self.content, default_style)
+        } else {
+            default_style
+        };
         if self.file_type == file_type {
             return false;
         }
@@ -725,7 +832,7 @@ impl DocumentTab {
         self.history.seal();
         let range = self.selection_range();
         if !self.file_type.supports_markdown_features() {
-            self.plain_newline(range);
+            self.code_newline(range);
             return;
         }
         if is_shift {
@@ -1033,15 +1140,72 @@ impl DocumentTab {
         self.edit(range, "\n");
     }
 
+    /// The line break to insert at `offset`: the ending of the line being split, else
+    /// the one before it, else the file's first ending, so mixed files stay local.
+    fn line_break(&self, offset: usize) -> &'static str {
+        let ending = |at: usize| match line_ending_len(&self.content, at) {
+            2 => Some("\r\n"),
+            1 if self.content.as_bytes()[at] == b'\n' => Some("\n"),
+            _ => None,
+        };
+        let line_start = home_offset(&self.content, offset);
+        if let Some(found) = ending(line_end(&self.content, offset)) {
+            return found;
+        }
+        match line_ending_len_before(&self.content, line_start) {
+            2 => return "\r\n",
+            1 if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' => {
+                return "\n"
+            }
+            _ => {}
+        }
+        match self.content.find('\n') {
+            Some(i) if i > 0 && self.content.as_bytes()[i - 1] == b'\r' => "\r\n",
+            _ => "\n",
+        }
+    }
+
     /// Enter in a non-Markdown file: break the line and keep its leading whitespace.
-    /// No list, quote or table continuation, and nothing is parsed.
-    fn plain_newline(&mut self, range: Range<usize>) {
+    /// No list, quote or table continuation, and nothing is parsed. In code an opener
+    /// (`{ ( [`, or `:` in Python) adds one indent level, and Enter between a matching
+    /// pair opens a three-line block. All of it is a single edit, so one undo step.
+    fn code_newline(&mut self, range: Range<usize>) {
+        let nl = self.line_break(range.start);
         let line_start = home_offset(&self.content, range.start);
-        let indent: String = self.content[line_start..range.start]
+        let before = &self.content[line_start..range.start];
+        let indent: String = before
             .chars()
             .take_while(|c| *c == ' ' || *c == '\t')
             .collect();
-        self.edit(range, &format!("\n{indent}"));
+        if !self.file_type.is_code() {
+            self.edit(range, &format!("{nl}{indent}"));
+            return;
+        }
+        let unit = self.indent_style.unit();
+        let opener = before.trim_end_matches([' ', '\t']).chars().next_back();
+        let python_colon = opener == Some(':') && self.title.to_lowercase().ends_with(".py");
+        let deeper = matches!(opener, Some('{' | '(' | '['));
+        let inner = if deeper || python_colon {
+            format!("{indent}{unit}")
+        } else {
+            indent.clone()
+        };
+
+        let prev = self.content[..range.start].chars().next_back();
+        let next = self.content[range.end..].chars().next();
+        let between_pair = match (prev, next) {
+            (Some(open), Some(close)) => open != '"' && code_pair_close(open) == Some(close),
+            _ => false,
+        };
+        if between_pair {
+            let caret = range.start + nl.len() + inner.len();
+            self.next_redo_caret = Some(caret);
+            self.edit(range, &format!("{nl}{inner}{nl}{indent}"));
+            self.caret.move_to(caret);
+            self.refresh_cursor();
+            return;
+        }
+        self.edit(range, &format!("{nl}{inner}"));
     }
 
     pub fn smart_backspace(&mut self) -> bool {
@@ -1059,14 +1223,13 @@ impl DocumentTab {
             return false;
         }
 
-        // 1. Auto-pairing bracket/quote deletion: (|), [|], {|}, "|", '|', `|`
+        // 1. Auto-pairing bracket/quote deletion: (|), [|], {|}, "|", and in Markdown '|', `|`
         if cursor < self.content.len() {
             let prev_char = self.content[..cursor].chars().next_back().unwrap();
             let next_char = self.content[cursor..].chars().next().unwrap();
-            let is_paired = matches!(
-                (prev_char, next_char),
-                ('(', ')') | ('[', ']') | ('{', '}') | ('"', '"') | ('\'', '\'') | ('`', '`')
-            );
+            let markdown = self.file_type.supports_markdown_features();
+            let is_paired = code_pair_close(prev_char) == Some(next_char)
+                || (markdown && matches!((prev_char, next_char), ('\'', '\'') | ('`', '`')));
             if is_paired {
                 let p_len = prev_char.len_utf8();
                 let n_len = next_char.len_utf8();
@@ -1076,6 +1239,21 @@ impl DocumentTab {
         }
 
         if !self.file_type.supports_markdown_features() {
+            let line_start = home_offset(&self.content, cursor);
+            let line_before = &self.content[line_start..cursor];
+            // In leading spaces, step back to the previous indent stop.
+            if let IndentStyle::Spaces(_) = self.indent_style {
+                let width = self.indent_style.width();
+                if !line_before.is_empty() && line_before.chars().all(|c| c == ' ') {
+                    let col = line_before.len();
+                    let step = match col % width {
+                        0 => width,
+                        rest => rest,
+                    };
+                    self.edit(cursor - step..cursor, "");
+                    return true;
+                }
+            }
             let prev = previous_grapheme(&self.content, cursor);
             self.edit(prev..cursor, "");
             return true;
@@ -1140,26 +1318,68 @@ impl DocumentTab {
         true
     }
 
+    /// First and one-past-last byte of the lines a Tab or Shift+Tab touches. In
+    /// code, a selection that ends exactly at the start of a line leaves that line out.
+    fn indent_target_lines(&self, range: &Range<usize>) -> (usize, usize) {
+        let start_line = home_offset(&self.content, range.start);
+        let mut end = range.end;
+        if !self.file_type.supports_markdown_features()
+            && range.end > range.start
+            && home_offset(&self.content, range.end) == range.end
+        {
+            end -= line_ending_len_before(&self.content, range.end);
+        }
+        (start_line, line_end(&self.content, end).max(start_line))
+    }
+
     pub fn indent(&mut self) {
         if self.is_read_only() {
             return;
         }
         let range = self.selection_range();
-        let start_line = home_offset(&self.content, range.start);
-        let end_line = line_end(&self.content, range.end);
-
+        let markdown = self.file_type.supports_markdown_features();
+        let style = self.indent_style;
+        if !markdown && range.is_empty() {
+            // A lone caret inserts up to the next indent stop.
+            let line_start = home_offset(&self.content, range.start);
+            let text = match style {
+                IndentStyle::Tabs => "\t".to_string(),
+                IndentStyle::Spaces(_) => {
+                    let width = style.width();
+                    let mut col = 0;
+                    for c in self.content[line_start..range.start].chars() {
+                        col = if c == '\t' { (col / width + 1) * width } else { col + 1 };
+                    }
+                    " ".repeat(width - col % width)
+                }
+            };
+            self.edit(range, &text);
+            self.refresh_cursor();
+            return;
+        }
+        let (start_line, end_line) = self.indent_target_lines(&range);
+        let unit = style.unit();
         let lines_str = self.content[start_line..end_line].to_string();
         let mut modified = Vec::new();
-        for line in lines_str.split('\n') {
-            modified.push(format!("  {}", line));
+        let mut first_added = 0;
+        for (i, line) in lines_str.split('\n').enumerate() {
+            let blank = line.trim().is_empty();
+            if !markdown && blank {
+                modified.push(line.to_string());
+                continue;
+            }
+            if i == 0 {
+                first_added = unit.len();
+            }
+            modified.push(format!("{unit}{line}"));
         }
         let replacement = modified.join("\n");
         let added_len = replacement.len() - lines_str.len();
         self.edit(start_line..end_line, &replacement);
         if range.is_empty() {
-            self.caret.move_to(range.start + 2);
+            self.caret.move_to(range.start + first_added);
         } else {
-            self.caret.range = (range.start + 2)..(range.end + added_len);
+            self.caret.range = (range.start + first_added)..(range.end + added_len);
         }
         self.snap_caret_to_visible_line_end();
         self.refresh_cursor();
@@ -1170,8 +1390,11 @@ impl DocumentTab {
             return;
         }
         let range = self.selection_range();
-        let start_line = home_offset(&self.content, range.start);
-        let end_line = line_end(&self.content, range.end);
+        let (start_line, end_line) = self.indent_target_lines(&range);
+        let strip_spaces = match self.indent_style {
+            IndentStyle::Tabs => 4,
+            IndentStyle::Spaces(n) => n.max(1),
+        };
 
         let lines_str = self.content[start_line..end_line].to_string();
         let mut modified = Vec::new();
@@ -1181,20 +1404,19 @@ impl DocumentTab {
         let mut removed_before_end = 0;
         let mut line_start_pos = start_line;
         for (i, line) in lines_str.split('\n').enumerate() {
-            let stripped = if let Some(s) = line.strip_prefix("  ") {
-                s
-            } else if let Some(s) = line.strip_prefix(' ') {
-                s
-            } else if let Some(s) = line.strip_prefix('\t') {
-                s
+            let strip = if line.starts_with('\t') {
+                1
             } else {
-                line
+                line.bytes()
+                    .take(strip_spaces)
+                    .take_while(|b| *b == b' ')
+                    .count()
             };
+            let stripped = &line[strip..];
             if i == 0 {
-                first_line_stripped = line.len() - stripped.len();
+                first_line_stripped = strip;
             }
-            let removed = line.len() - stripped.len();
-            removed_before_end += removed.min(range.end.saturating_sub(line_start_pos));
+            removed_before_end += strip.min(range.end.saturating_sub(line_start_pos));
             line_start_pos += line.len() + 1;
             modified.push(stripped.to_string());
         }
@@ -12242,5 +12464,265 @@ mod clear_formatting_tests {
         assert!(doc.set_file_type(FileType::Code));
         assert!(doc.cached_parse.is_none());
         assert_eq!(doc.file_type, FileType::Code);
+    }
+
+    // --- Markdown indentation behaviour that code-file support must not change ---
+
+    #[test]
+    fn markdown_indent_adds_two_spaces_at_line_start_wherever_the_caret_is() {
+        let mut doc = DocumentTab::new("m".into(), "a.md".into(), "hello world".into(), None, None);
+        doc.caret.move_to(5);
+        doc.indent();
+        assert_eq!(doc.content, "  hello world");
+        assert_eq!(doc.caret.cursor(), 7);
+    }
+
+    #[test]
+    fn markdown_indent_touches_blank_lines_in_a_selection() {
+        let mut doc = DocumentTab::new("m".into(), "a.md".into(), "a\n\nb".into(), None, None);
+        doc.caret.range = 0..doc.content.len();
+        doc.indent();
+        assert_eq!(doc.content, "  a\n  \n  b");
+    }
+
+    #[test]
+    fn markdown_outdent_strips_two_spaces_one_space_or_a_tab() {
+        let mut doc = DocumentTab::new("m".into(), "a.md".into(), "    a\n b\n\tc".into(), None, None);
+        doc.caret.range = 0..doc.content.len();
+        doc.outdent();
+        assert_eq!(doc.content, "  a\nb\nc");
+    }
+
+    #[test]
+    fn markdown_backspace_in_indentation_deletes_two_spaces() {
+        let mut doc = DocumentTab::new("m".into(), "a.md".into(), "      text".into(), None, None);
+        doc.caret.move_to(6);
+        doc.smart_backspace();
+        assert_eq!(doc.content, "    text");
+        // An odd run still removes two, as before.
+        let mut odd = DocumentTab::new("m".into(), "a.md".into(), "   text".into(), None, None);
+        odd.caret.move_to(3);
+        odd.smart_backspace();
+        assert_eq!(odd.content, " text");
+    }
+
+    // --- Code-file indentation and editing ---
+
+    fn code_doc(name: &str, text: &str) -> DocumentTab {
+        DocumentTab::new("c".into(), name.into(), text.to_string(), None, None)
+    }
+
+    #[test]
+    fn crlf_content_round_trips_unchanged() {
+        let text = "fn main() {\r\n    a();\r\n}\r\n";
+        let doc = code_doc("a.rs", text);
+        assert_eq!(doc.content, text);
+        assert_eq!(doc.content.as_bytes(), text.as_bytes());
+    }
+
+    #[test]
+    fn indent_style_defaults_by_file() {
+        assert_eq!(code_doc("Makefile", "").indent_style, IndentStyle::Tabs);
+        assert_eq!(code_doc("GNUmakefile", "").indent_style, IndentStyle::Tabs);
+        assert_eq!(code_doc("rules.mk", "").indent_style, IndentStyle::Tabs);
+        assert_eq!(code_doc("main.go", "").indent_style, IndentStyle::Tabs);
+        assert_eq!(code_doc("main.rs", "").indent_style, IndentStyle::Spaces(4));
+        assert_eq!(code_doc("notes.md", "").indent_style, IndentStyle::Spaces(2));
+        assert_eq!(code_doc("notes.txt", "").indent_style, IndentStyle::Spaces(2));
+    }
+
+    #[test]
+    fn indent_style_is_detected_from_existing_lines() {
+        let two = "function f() {\n  if (a) {\n    b();\n  }\n}\n";
+        assert_eq!(code_doc("a.js", two).indent_style, IndentStyle::Spaces(2));
+        let tabs = "a {\n\tb;\n\tc;\n}\n";
+        assert_eq!(code_doc("a.c", tabs).indent_style, IndentStyle::Tabs);
+        let mixed = "a {\n\tb;\n    c;\n}\n";
+        assert_eq!(code_doc("a.js", mixed).indent_style, IndentStyle::Spaces(4));
+        assert_eq!(code_doc("a.go", mixed).indent_style, IndentStyle::Tabs);
+        // Markdown keeps its default whatever the content looks like.
+        assert_eq!(code_doc("a.md", tabs).indent_style, IndentStyle::Spaces(2));
+    }
+
+    #[test]
+    fn tab_inserts_up_to_the_next_stop_in_code() {
+        let mut doc = code_doc("a.rs", "ab");
+        doc.caret.move_to(2);
+        doc.indent();
+        assert_eq!(doc.content, "ab  ");
+        assert_eq!(doc.caret.cursor(), 4);
+        doc.indent();
+        assert_eq!(doc.content, "ab      ");
+        let mut go = code_doc("a.go", "x");
+        go.caret.move_to(1);
+        go.indent();
+        assert_eq!(go.content, "x\t");
+    }
+
+    #[test]
+    fn multi_line_indent_skips_blank_lines_and_keeps_crlf() {
+        let mut doc = code_doc("a.rs", "a\r\n\r\nb\r\nc");
+        doc.caret.range = 0..doc.content.len();
+        doc.indent();
+        assert_eq!(doc.content, "    a\r\n\r\n    b\r\n    c");
+        doc.outdent();
+        assert_eq!(doc.content, "a\r\n\r\nb\r\nc");
+    }
+
+    #[test]
+    fn selection_ending_at_a_line_start_leaves_that_line_alone() {
+        let mut doc = code_doc("a.rs", "a\nb\nc");
+        doc.caret.range = 0..4; // "a\nb\n", ends at the start of "c"
+        doc.indent();
+        assert_eq!(doc.content, "    a\n    b\nc");
+        doc.outdent();
+        assert_eq!(doc.content, "a\nb\nc");
+    }
+
+    #[test]
+    fn tabs_style_indents_and_outdents_with_real_tabs() {
+        let mut doc = code_doc("Makefile", "a\nb");
+        doc.caret.range = 0..doc.content.len();
+        doc.indent();
+        assert_eq!(doc.content, "\ta\n\tb");
+        doc.outdent();
+        assert_eq!(doc.content, "a\nb");
+    }
+
+    #[test]
+    fn outdent_strips_at_most_one_level_of_spaces() {
+        let mut doc = code_doc("a.rs", "        a\n  b");
+        doc.indent_style = IndentStyle::Spaces(4);
+        doc.caret.range = 0..doc.content.len();
+        doc.outdent();
+        assert_eq!(doc.content, "    a\nb");
+    }
+
+    #[test]
+    fn multi_line_indent_is_one_undo_step() {
+        let mut doc = code_doc("a.rs", "a\nb\nc");
+        doc.caret.range = 0..doc.content.len();
+        doc.indent();
+        assert!(doc.undo());
+        assert_eq!(doc.content, "a\nb\nc");
+        assert!(!doc.undo());
+    }
+
+    #[test]
+    fn code_newline_keeps_indent_and_adds_a_level_after_openers() {
+        let mut doc = code_doc("a.rs", "    foo(");
+        doc.caret.move_to(8);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "    foo(\n        ");
+        let mut plain = code_doc("a.rs", "  x = 1");
+        plain.caret.move_to(7);
+        plain.smart_newline(false);
+        assert_eq!(plain.content, "  x = 1\n  ");
+        let mut tabs = code_doc("a.go", "\tif x {");
+        tabs.caret.move_to(7);
+        tabs.smart_newline(false);
+        assert_eq!(tabs.content, "\tif x {\n\t\t");
+    }
+
+    #[test]
+    fn code_newline_does_not_continue_markdown_lists() {
+        let mut doc = code_doc("a.rs", "- item");
+        doc.caret.move_to(6);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "- item\n");
+    }
+
+    #[test]
+    fn colon_indents_only_in_python() {
+        let mut py = code_doc("a.py", "if x:");
+        py.caret.move_to(5);
+        py.smart_newline(false);
+        assert_eq!(py.content, "if x:\n    ");
+        let mut rs = code_doc("a.rs", "x:");
+        rs.caret.move_to(2);
+        rs.smart_newline(false);
+        assert_eq!(rs.content, "x:\n");
+    }
+
+    #[test]
+    fn enter_between_a_pair_opens_a_block_in_one_undo_step() {
+        let mut doc = code_doc("a.rs", "fn f() {}");
+        doc.caret.move_to(8);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "fn f() {\n    \n}");
+        assert_eq!(doc.caret.cursor(), 13);
+        assert!(doc.undo());
+        assert_eq!(doc.content, "fn f() {}");
+        assert!(doc.redo());
+        assert_eq!(doc.caret.cursor(), 13);
+        let mut arr = code_doc("a.js", "  x = []");
+        arr.caret.move_to(7);
+        arr.smart_newline(false);
+        assert_eq!(arr.content, "  x = [\n    \n  ]");
+    }
+
+    #[test]
+    fn code_newline_uses_crlf_in_crlf_files() {
+        let mut doc = code_doc("a.rs", "fn f() {}\r\nx");
+        doc.caret.move_to(8);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "fn f() {\r\n    \r\n}\r\nx");
+        let mut plain = code_doc("a.rs", "a\r\nb");
+        plain.caret.move_to(1);
+        plain.smart_newline(false);
+        assert_eq!(plain.content, "a\r\n\r\nb");
+    }
+
+    #[test]
+    fn backspace_in_leading_spaces_goes_to_the_previous_stop() {
+        let mut doc = code_doc("a.rs", "      x");
+        doc.caret.move_to(6);
+        doc.smart_backspace();
+        assert_eq!(doc.content, "    x");
+        doc.smart_backspace();
+        assert_eq!(doc.content, "x");
+        let mut tabs = code_doc("a.go", "\t\tx");
+        tabs.caret.move_to(2);
+        tabs.smart_backspace();
+        assert_eq!(tabs.content, "\tx");
+        // Not in leading whitespace: one character.
+        let mut mid = code_doc("a.rs", "a    b");
+        mid.caret.move_to(5);
+        mid.smart_backspace();
+        assert_eq!(mid.content, "a   b");
+    }
+
+    #[test]
+    fn backspace_deletes_only_code_pairs() {
+        let mut doc = code_doc("a.rs", "{}");
+        doc.caret.move_to(1);
+        doc.smart_backspace();
+        assert_eq!(doc.content, "");
+        let mut quote = code_doc("a.rs", "''");
+        quote.caret.move_to(1);
+        quote.smart_backspace();
+        assert_eq!(quote.content, "'");
+    }
+
+    #[test]
+    fn one_odd_indented_line_does_not_hide_the_detected_step() {
+        let text = "a {\n  b;\n    c;\n   d;\n  e;\n    f;\n}\n";
+        assert_eq!(code_doc("a.js", text).indent_style, IndentStyle::Spaces(2));
+        let four = "a {\n    b;\n        c;\n   d;\n    e;\n}\n";
+        assert_eq!(code_doc("a.js", four).indent_style, IndentStyle::Spaces(4));
+    }
+
+    #[test]
+    fn code_newline_follows_the_line_ending_where_it_splits() {
+        // First line LF, later lines CRLF.
+        let mut doc = code_doc("a.rs", "a\nb\r\nc\r\n");
+        doc.caret.move_to(3);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "a\nb\r\n\r\nc\r\n");
+        // Last line without an ending takes the previous line's.
+        let mut tail = code_doc("a.rs", "a\nb\r\nc");
+        tail.caret.move_to(tail.content.len());
+        tail.smart_newline(false);
+        assert_eq!(tail.content, "a\nb\r\nc\r\n");
     }
 }

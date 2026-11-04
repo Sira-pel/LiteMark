@@ -4264,14 +4264,9 @@ impl EntityInputHandler for LiteMarkApp {
             let ch = text.chars().next().unwrap();
             if !range.is_empty() {
                 let closing = match ch {
-                    '(' => Some(')'),
-                    '[' => Some(']'),
-                    '{' => Some('}'),
-                    '"' => Some('"'),
-                    '\'' => Some('\''),
-                    '`' => Some('`'),
+                    '\'' | '`' if markdown_tab => Some(ch),
                     '*' | '_' | '~' if markdown_tab => Some(ch),
-                    _ => None,
+                    _ => code_pair_close(ch),
                 };
                 if let Some(close_ch) = closing {
                     let selected = &content[range.clone()];
@@ -4290,7 +4285,9 @@ impl EntityInputHandler for LiteMarkApp {
             } else {
                 let cursor = range.start;
                 // Over-typing closing bracket or quote
-                if (ch == ')' || ch == ']' || ch == '}' || ch == '"' || ch == '\'' || ch == '`')
+                let over_types = matches!(ch, ')' | ']' | '}' | '"')
+                    || (markdown_tab && matches!(ch, '\'' | '`'));
+                if over_types
                     && cursor < content.len()
                     && content[cursor..].starts_with(ch)
                 {
@@ -4308,7 +4305,7 @@ impl EntityInputHandler for LiteMarkApp {
                     '(' => Some("()"),
                     '[' => Some("[]"),
                     '{' => Some("{}"),
-                    '`' => Some("``"),
+                    '`' if markdown_tab => Some("``"),
                     '"' => {
                         let prev_is_alnum = cursor > 0
                             && content[..cursor]
