@@ -5,8 +5,7 @@ use crate::editor_input::{
 use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
 use crate::model::table_ops::TableOp;
 use crate::model::text_ops::{
-    TAB_DISPLAY_COLUMNS,
-    home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
+    home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16, TAB_DISPLAY_COLUMNS,
 };
 use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::*;
@@ -853,7 +852,8 @@ impl LiteMarkApp {
 
     /// The active tab ignores the global view mode (code and plain text).
     fn view_locked_raw(&self) -> bool {
-        self.active_tab().is_some_and(|tab| tab.file_type.forces_raw())
+        self.active_tab()
+            .is_some_and(|tab| tab.file_type.forces_raw())
     }
 
     /// The view mode the active tab renders and edits in. Code and plain-text
@@ -2115,7 +2115,8 @@ impl LiteMarkApp {
             .iter()
             .map(|f| (f.path.clone(), f.is_open))
             .collect();
-        let mut new_workspace = scan_workspace_dir(&self.workspace.folder_path, self.settings.show_code_files);
+        let mut new_workspace =
+            scan_workspace_dir(&self.workspace.folder_path, self.settings.show_code_files);
         for folder in &mut new_workspace.folders {
             if let Some(&open) = open_map.get(&folder.path) {
                 folder.is_open = open;
@@ -4105,8 +4106,7 @@ impl LiteMarkApp {
             show_line_numbers,
             word_wrap: self.settings.word_wrap,
             tab_width: if markdown_tab { 0 } else { TAB_DISPLAY_COLUMNS },
-            centered: markdown_tab
-                && self.settings.content_alignment == ContentAlignment::Centered,
+            centered: markdown_tab && self.settings.content_alignment == ContentAlignment::Centered,
             max_measure: Some(sz::MEASURE_FALLBACK * zoom),
             font_size: px(self.settings.base_font_size * zoom),
             text_color: theme.text_primary.into(),
@@ -4295,10 +4295,7 @@ impl EntityInputHandler for LiteMarkApp {
                 // Over-typing closing bracket or quote
                 let over_types = matches!(ch, ')' | ']' | '}' | '"')
                     || (markdown_tab && matches!(ch, '\'' | '`'));
-                if over_types
-                    && cursor < content.len()
-                    && content[cursor..].starts_with(ch)
-                {
+                if over_types && cursor < content.len() && content[cursor..].starts_with(ch) {
                     if let Some(tab) = self.active_tab_mut() {
                         tab.caret.move_to(cursor + ch.len_utf8());
                         tab.refresh_cursor();

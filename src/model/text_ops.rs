@@ -957,7 +957,7 @@ pub fn range_from_utf16(content: &str, range: &Range<usize>) -> Range<usize> {
 
 /// Visual rows as `(byte_start, byte_end)` exclusive of the newline.
 /// `wrap_cols == usize::MAX` keeps one row per logical line.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn visual_rows(content: &str, wrap_cols: usize) -> Vec<(usize, usize)> {
     visual_rows_tabbed(content, wrap_cols, 0)
 }
@@ -993,11 +993,6 @@ pub fn visual_rows_tabbed(
 
 /// Number of rows `visual_rows` would return, without building the list for
 /// content that fits on one row (the common case).
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn visual_row_count(content: &str, wrap_cols: usize) -> usize {
-    visual_row_count_tabbed(content, wrap_cols, 0)
-}
-
 pub fn visual_row_count_tabbed(content: &str, wrap_cols: usize, tab_width: usize) -> usize {
     if wrap_cols == 0 || wrap_cols == usize::MAX {
         return content.bytes().filter(|&b| b == b'\n').count() + 1;
@@ -1025,7 +1020,13 @@ pub fn visual_row_count_tabbed(content: &str, wrap_cols: usize, tab_width: usize
 
 /// A line of at most `wrap_cols` bytes has at most that many chars, so it fits
 /// unless a tab widens it.
-fn fits_one_row(content: &str, start: usize, end: usize, wrap_cols: usize, tab_width: usize) -> bool {
+fn fits_one_row(
+    content: &str,
+    start: usize,
+    end: usize,
+    wrap_cols: usize,
+    tab_width: usize,
+) -> bool {
     end - start <= wrap_cols && (tab_width == 0 || !content[start..end].contains('\t'))
 }
 
@@ -1109,6 +1110,10 @@ pub fn wysiwyg_list_row_height(font_px: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    fn visual_row_count(content: &str, wrap_cols: usize) -> usize {
+        visual_row_count_tabbed(content, wrap_cols, 0)
+    }
+
     use super::*;
 
     #[test]
@@ -1539,7 +1544,11 @@ mod tests {
             let rows = visual_rows_tabbed(&one_line, wrap, 4);
             assert_eq!(rows.len(), visual_row_count_tabbed(&one_line, wrap, 4));
             // Generous: even an unoptimised test build stays far under a visible freeze.
-            assert!(started.elapsed().as_millis() < 3000, "5 MB took {:?}", started.elapsed());
+            assert!(
+                started.elapsed().as_millis() < 3000,
+                "5 MB took {:?}",
+                started.elapsed()
+            );
             assert!(
                 started_line.elapsed().as_millis() < 2000,
                 "1 MB line took {:?}",

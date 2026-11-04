@@ -1158,9 +1158,7 @@ impl DocumentTab {
         }
         match line_ending_len_before(&self.content, line_start) {
             2 => return "\r\n",
-            1 if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' => {
-                return "\n"
-            }
+            1 if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' => return "\n",
             _ => {}
         }
         match self.content.find('\n') {
@@ -1352,7 +1350,11 @@ impl DocumentTab {
                     let width = style.width();
                     let mut col = 0;
                     for c in self.content[line_start..range.start].chars() {
-                        col = if c == '\t' { (col / width + 1) * width } else { col + 1 };
+                        col = if c == '\t' {
+                            (col / width + 1) * width
+                        } else {
+                            col + 1
+                        };
                     }
                     " ".repeat(width - col % width)
                 }
@@ -12402,10 +12404,23 @@ mod clear_formatting_tests {
 
     #[test]
     fn code_files_are_detected_by_extension_and_name() {
-        for name in ["main.rs", "a.PY", "data.json", "Cargo.toml", "x.tsx", "build.mk"] {
+        for name in [
+            "main.rs",
+            "a.PY",
+            "data.json",
+            "Cargo.toml",
+            "x.tsx",
+            "build.mk",
+        ] {
             assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
         }
-        for name in ["Makefile", "dockerfile", "GNUmakefile", ".env", ".gitignore"] {
+        for name in [
+            "Makefile",
+            "dockerfile",
+            "GNUmakefile",
+            ".env",
+            ".gitignore",
+        ] {
             assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
         }
         assert_eq!(FileType::from_filename("notes.md"), FileType::Markdown);
@@ -12427,7 +12442,10 @@ mod clear_formatting_tests {
     fn code_and_plain_text_are_always_raw() {
         for global in [ViewMode::Raw, ViewMode::Wysiwyg] {
             assert_eq!(FileType::Code.effective_view_mode(global), ViewMode::Raw);
-            assert_eq!(FileType::PlainText.effective_view_mode(global), ViewMode::Raw);
+            assert_eq!(
+                FileType::PlainText.effective_view_mode(global),
+                ViewMode::Raw
+            );
             assert_eq!(FileType::Markdown.effective_view_mode(global), global);
         }
     }
@@ -12491,7 +12509,13 @@ mod clear_formatting_tests {
 
     #[test]
     fn markdown_outdent_strips_two_spaces_one_space_or_a_tab() {
-        let mut doc = DocumentTab::new("m".into(), "a.md".into(), "    a\n b\n\tc".into(), None, None);
+        let mut doc = DocumentTab::new(
+            "m".into(),
+            "a.md".into(),
+            "    a\n b\n\tc".into(),
+            None,
+            None,
+        );
         doc.caret.range = 0..doc.content.len();
         doc.outdent();
         assert_eq!(doc.content, "  a\nb\nc");
@@ -12531,8 +12555,14 @@ mod clear_formatting_tests {
         assert_eq!(code_doc("rules.mk", "").indent_style, IndentStyle::Tabs);
         assert_eq!(code_doc("main.go", "").indent_style, IndentStyle::Tabs);
         assert_eq!(code_doc("main.rs", "").indent_style, IndentStyle::Spaces(4));
-        assert_eq!(code_doc("notes.md", "").indent_style, IndentStyle::Spaces(2));
-        assert_eq!(code_doc("notes.txt", "").indent_style, IndentStyle::Spaces(2));
+        assert_eq!(
+            code_doc("notes.md", "").indent_style,
+            IndentStyle::Spaces(2)
+        );
+        assert_eq!(
+            code_doc("notes.txt", "").indent_style,
+            IndentStyle::Spaces(2)
+        );
     }
 
     #[test]
