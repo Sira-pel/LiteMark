@@ -1170,6 +1170,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_toggle_mode(&mut self) {
+        if self.view_locked_raw() {
+            return;
+        }
         self.table_hover = None;
         self.table_drag = None;
         self.table_drag_press_held = false;
@@ -1323,11 +1326,17 @@ impl LiteMarkApp {
     }
 
     pub fn handle_toggle_line_numbers(&mut self) {
+        if self.view_locked_raw() {
+            return;
+        }
         self.settings.show_line_numbers = !self.settings.show_line_numbers;
         self.settings.save();
     }
 
     pub fn handle_set_view_mode(&mut self, mode: ViewMode) {
+        if self.view_locked_raw() {
+            return;
+        }
         self.settings.view_mode = mode;
         self.active_tab_mut();
         if mode == ViewMode::Wysiwyg {

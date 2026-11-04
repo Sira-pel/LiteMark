@@ -270,13 +270,7 @@ pub fn build_edit_menu_items(
 #[allow(clippy::too_many_arguments)]
 fn build_locked_raw_view_menu_items(
     word_wrap: bool,
-    show_sidebar: bool,
     on_toggle_word_wrap: impl Fn(&mut App) + 'static + Clone,
-    on_zoom_in: impl Fn(&mut App) + 'static + Clone,
-    on_zoom_out: impl Fn(&mut App) + 'static + Clone,
-    on_reset_zoom: impl Fn(&mut App) + 'static + Clone,
-    on_toggle_sidebar: impl Fn(&mut App) + 'static + Clone,
-    on_toggle_zen: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
     vec![
         MenuItem::disabled_action("WYSIWYG", Some("Ctrl+Shift+M"), Some("Markdown only")),
@@ -290,6 +284,31 @@ fn build_locked_raw_view_menu_items(
         MenuItem::divider(),
         MenuItem::disabled_action("Centered text", None, Some("Markdown only")),
         MenuItem::radio("Left-aligned text", true, None, |_, _| {}),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_view_menu_items(
+    view_mode: ViewMode,
+    locked_raw: bool,
+    show_line_numbers: bool,
+    word_wrap: bool,
+    show_sidebar: bool,
+    content_alignment: ContentAlignment,
+    on_set_view_mode: impl Fn(ViewMode, &mut App) + 'static + Clone,
+    on_toggle_line_numbers: impl Fn(&mut App) + 'static + Clone,
+    on_toggle_word_wrap: impl Fn(&mut App) + 'static + Clone,
+    on_set_content_alignment: impl Fn(ContentAlignment, &mut App) + 'static + Clone,
+    on_zoom_in: impl Fn(&mut App) + 'static + Clone,
+    on_zoom_out: impl Fn(&mut App) + 'static + Clone,
+    on_reset_zoom: impl Fn(&mut App) + 'static + Clone,
+    on_toggle_sidebar: impl Fn(&mut App) + 'static + Clone,
+    on_toggle_zen: impl Fn(&mut App) + 'static + Clone,
+) -> Vec<MenuItem> {
+    let is_wysiwyg = view_mode == ViewMode::Wysiwyg;
+
+    // The zoom, sidebar and zen items are the same on every tab.
+    let shared = vec![
         MenuItem::divider(),
         MenuItem::action("Zoom in", None, Some("Ctrl+="), {
             let f = on_zoom_in.clone();
@@ -312,42 +331,12 @@ fn build_locked_raw_view_menu_items(
             let f = on_toggle_zen.clone();
             move |_, cx| f(cx)
         }),
-    ]
-}
+    ];
 
-#[allow(clippy::too_many_arguments)]
-pub fn build_view_menu_items(
-    view_mode: ViewMode,
-    locked_raw: bool,
-    show_line_numbers: bool,
-    word_wrap: bool,
-    show_sidebar: bool,
-    content_alignment: ContentAlignment,
-    on_set_view_mode: impl Fn(ViewMode, &mut App) + 'static + Clone,
-    on_toggle_line_numbers: impl Fn(&mut App) + 'static + Clone,
-    on_toggle_word_wrap: impl Fn(&mut App) + 'static + Clone,
-    on_set_content_alignment: impl Fn(ContentAlignment, &mut App) + 'static + Clone,
-    on_zoom_in: impl Fn(&mut App) + 'static + Clone,
-    on_zoom_out: impl Fn(&mut App) + 'static + Clone,
-    on_reset_zoom: impl Fn(&mut App) + 'static + Clone,
-    on_toggle_sidebar: impl Fn(&mut App) + 'static + Clone,
-    on_toggle_zen: impl Fn(&mut App) + 'static + Clone,
-) -> Vec<MenuItem> {
-    if locked_raw {
-        return build_locked_raw_view_menu_items(
-            word_wrap,
-            show_sidebar,
-            on_toggle_word_wrap,
-            on_zoom_in,
-            on_zoom_out,
-            on_reset_zoom,
-            on_toggle_sidebar,
-            on_toggle_zen,
-        );
-    }
-    let is_wysiwyg = view_mode == ViewMode::Wysiwyg;
-
-    vec![
+    let mut items = if locked_raw {
+        build_locked_raw_view_menu_items(word_wrap, on_toggle_word_wrap)
+    } else {
+        vec![
         MenuItem::radio("WYSIWYG", is_wysiwyg, Some("Ctrl+Shift+M"), {
             let f = on_set_view_mode.clone();
             move |_, cx| f(ViewMode::Wysiwyg, cx)
@@ -388,27 +377,8 @@ pub fn build_view_menu_items(
                 move |_, cx| f(ContentAlignment::Left, cx)
             },
         ),
-        MenuItem::divider(),
-        MenuItem::action("Zoom in", None, Some("Ctrl+="), {
-            let f = on_zoom_in.clone();
-            move |_, cx| f(cx)
-        }),
-        MenuItem::action("Zoom out", None, Some("Ctrl+-"), {
-            let f = on_zoom_out.clone();
-            move |_, cx| f(cx)
-        }),
-        MenuItem::action("Reset zoom", None, Some("Ctrl+0"), {
-            let f = on_reset_zoom.clone();
-            move |_, cx| f(cx)
-        }),
-        MenuItem::divider(),
-        MenuItem::check("Sidebar", show_sidebar, Some("Ctrl+\\"), {
-            let f = on_toggle_sidebar.clone();
-            move |_, cx| f(cx)
-        }),
-        MenuItem::action("Zen mode", None, Some("F11"), {
-            let f = on_toggle_zen.clone();
-            move |_, cx| f(cx)
-        }),
-    ]
+        ]
+    };
+    items.extend(shared);
+    items
 }

@@ -82,9 +82,10 @@ impl FileType {
 
     /// Code and plain text never render as formatted Markdown, whatever the global mode.
     pub fn effective_view_mode(self, global: ViewMode) -> ViewMode {
-        match self {
-            FileType::Code | FileType::PlainText => ViewMode::Raw,
-            FileType::Markdown | FileType::Pdf => global,
+        if self.forces_raw() {
+            ViewMode::Raw
+        } else {
+            global
         }
     }
 }
