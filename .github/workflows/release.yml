@@ -56,6 +56,9 @@ jobs:
             --title "LiteMark ${GITHUB_REF_NAME#v}" \
             --generate-notes \
             build/litemark_*_amd64.deb build/SHA256SUMS
+          # Fixed-name copy so the README can link to releases/latest/download/.
+          cp build/litemark_*_amd64.deb build/litemark_amd64.deb
+          gh release upload "${GITHUB_REF_NAME}" build/litemark_amd64.deb
 
   windows:
     needs: deb
@@ -89,6 +92,9 @@ jobs:
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
             build/LiteMark-*-windows-x64-setup.exe build/SHA256SUMS-windows.txt
+          # Fixed-name copy so the README can link to releases/latest/download/.
+          cp build/LiteMark-*-windows-x64-setup.exe build/LiteMark-windows-x64-setup.exe
+          gh release upload "${GITHUB_REF_NAME}" build/LiteMark-windows-x64-setup.exe
 
   macos:
     needs: deb
@@ -115,3 +121,8 @@ jobs:
         run: |
           gh release upload "${GITHUB_REF_NAME}" \
             build/LiteMark-*-macos-*.dmg build/SHA256SUMS-macos-*.txt
+          # Fixed-name copies so the README can link to releases/latest/download/.
+          for f in build/LiteMark-*-macos-*.dmg; do
+            cp "$f" "build/LiteMark-macos-${f##*-macos-}"
+            gh release upload "${GITHUB_REF_NAME}" "build/LiteMark-macos-${f##*-macos-}"
+          done

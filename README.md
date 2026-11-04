@@ -2,6 +2,17 @@
 
 LiteMark is a native Markdown and text editor. It is in **beta** (0.x): it works, but it has had little testing outside the author's machine, so keep backups of important notes and please report bugs. It edits Markdown and plain text in a raw view or a WYSIWYG view, and stores notes in a folder (by default `~/Documents/Notes`).
 
+## Download
+
+| Platform | Download |
+| --- | --- |
+| Windows (x64) | [LiteMark-windows-x64-setup.exe](https://github.com/Sira-pel/LiteMark/releases/latest/download/LiteMark-windows-x64-setup.exe) |
+| macOS (Apple silicon) | [LiteMark-macos-arm64.dmg](https://github.com/Sira-pel/LiteMark/releases/latest/download/LiteMark-macos-arm64.dmg) |
+| macOS (Intel) | [LiteMark-macos-x64.dmg](https://github.com/Sira-pel/LiteMark/releases/latest/download/LiteMark-macos-x64.dmg) |
+| Linux (Debian/Ubuntu) | [litemark_amd64.deb](https://github.com/Sira-pel/LiteMark/releases/latest/download/litemark_amd64.deb) |
+
+These links always point to the newest release. See [Install](#install) for notes per system.
+
 ## Features
 
 - Raw Markdown and a WYSIWYG view of the same document. Line numbers are available in the raw view.
@@ -27,7 +38,10 @@ LiteMark works fully offline. The only network request it makes is the update ch
 
 ## Screenshots
 
-_Placeholder. Screenshots are not in the repository yet._
+<p align="center">
+  <img src="docs/screenshot-dark.png" alt="LiteMark in dark mode, showing the Welcome note in the WYSIWYG view" width="49%">
+  <img src="docs/screenshot-light.png" alt="LiteMark in light mode, showing the Welcome note in the WYSIWYG view" width="49%">
+</p>
 
 ## Install
 
