@@ -1194,18 +1194,12 @@ impl RowOffsetMap {
                 continue;
             }
             if i > run_src {
-                segments.push((
-                    run_disp..display.len(),
-                    row_start + run_src..row_start + i,
-                ));
+                segments.push((run_disp..display.len(), row_start + run_src..row_start + i));
             }
             let width = tab_width - col % tab_width;
             let disp_start = display.len();
             display.extend(std::iter::repeat_n(' ', width));
-            segments.push((
-                disp_start..display.len(),
-                row_start + i..row_start + i + 1,
-            ));
+            segments.push((disp_start..display.len(), row_start + i..row_start + i + 1));
             col += width;
             run_src = i + 1;
             run_disp = display.len();

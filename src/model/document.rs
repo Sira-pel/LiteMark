@@ -15,7 +15,7 @@ use super::text_ops::{
     find_matches, find_next, find_prev, format_replacement, home_offset, line_col, line_end,
     line_ending_len, line_ending_len_before, line_start_flags, move_vertical_collapsed,
     next_grapheme, previous_grapheme, replace_all, snap_off_ending_interior, Caret, DiffEdit,
-    HistoryRestore, SelectionSnap, UndoHistory,
+    HistoryRestore, SelectionSnap, UndoHistory, TAB_DISPLAY_COLUMNS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -130,7 +130,7 @@ pub fn indent_style(name: &str, file_type: FileType) -> IndentStyle {
     {
         return IndentStyle::Tabs;
     }
-    if file_type.is_code() {
+    if file_type.is_code() || file_type == FileType::PlainText {
         IndentStyle::Spaces(4)
     } else {
         IndentStyle::Spaces(2)
@@ -399,6 +399,7 @@ impl DocumentTab {
         }
         self.file_type = file_type;
         self.cached_parse = None;
+        self.pending_formats = ActiveFormats::default();
         true
     }
 
@@ -634,7 +635,7 @@ impl DocumentTab {
     /// Ctrl+Enter: add an empty row below the current row and put the caret in
     /// the same column. Returns false outside a table.
     pub fn table_insert_row_below(&mut self) -> bool {
-        if self.is_read_only() {
+        if self.is_read_only() || !self.file_type.supports_markdown_features() {
             return false;
         }
         let cursor = self.selection_range().end;
@@ -1158,9 +1159,7 @@ impl DocumentTab {
         }
         match line_ending_len_before(&self.content, line_start) {
             2 => return "\r\n",
-            1 if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' => {
-                return "\n"
-            }
+            1 if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' => return "\n",
             _ => {}
         }
         match self.content.find('\n') {
@@ -1352,7 +1351,11 @@ impl DocumentTab {
                     let width = style.width();
                     let mut col = 0;
                     for c in self.content[line_start..range.start].chars() {
-                        col = if c == '\t' { (col / width + 1) * width } else { col + 1 };
+                        col = if c == '\t' {
+                            (col / TAB_DISPLAY_COLUMNS + 1) * TAB_DISPLAY_COLUMNS
+                        } else {
+                            col + 1
+                        };
                     }
                     " ".repeat(width - col % width)
                 }
@@ -3319,7 +3322,7 @@ impl DocumentTab {
     /// current when this was called, which can differ from `pos` when a
     /// hover control targets another cell.
     pub fn apply_table_op_at(&mut self, pos: usize, op: TableOp) -> bool {
-        if self.is_read_only() {
+        if self.is_read_only() || !self.file_type.supports_markdown_features() {
             return false;
         }
         let cursor = self.cursor_offset();
@@ -3376,7 +3379,7 @@ impl DocumentTab {
     }
 
     pub fn insert_table_with_size(&mut self, cols: usize, rows: usize) {
-        if self.is_read_only() {
+        if self.is_read_only() || !self.file_type.supports_markdown_features() {
             return;
         }
         let cols = cols.clamp(1, 10);
@@ -3497,6 +3500,9 @@ impl DocumentTab {
     }
 
     pub fn tab_table_cell(&mut self, backwards: bool) -> bool {
+        if !self.file_type.supports_markdown_features() {
+            return false;
+        }
         let cursor = self.cursor_offset();
         let parsed = self.parsed();
         let mut all_cells: Vec<Range<usize>> = Vec::new();
@@ -3595,7 +3601,7 @@ impl DocumentTab {
     /// that stopped inside a hidden closing-hash run moves to the visible
     /// end. A selection keeps both endpoints.
     fn snap_caret_to_visible_line_end(&mut self) {
-        if !self.caret.range.is_empty() {
+        if !self.caret.range.is_empty() || !self.file_type.supports_markdown_features() {
             return;
         }
         let offset = self.cursor_offset();
@@ -3990,6 +3996,14 @@ impl DocumentTab {
 
     pub fn refresh_cursor(&mut self) {
         let cursor = self.cursor_offset();
+        if !self.file_type.supports_markdown_features() {
+            // Raw tabs have no Markdown structure: skip the parse.
+            let (line, col) = line_col(&self.content, cursor);
+            self.cursor_line = line;
+            self.cursor_col = col;
+            self.active_formats = ActiveFormats::default();
+            return;
+        }
         let parsed = self.parsed();
         let (line, col) = parsed_line_col(&self.content, &parsed, cursor);
         self.cursor_line = line;
@@ -12402,10 +12416,23 @@ mod clear_formatting_tests {
 
     #[test]
     fn code_files_are_detected_by_extension_and_name() {
-        for name in ["main.rs", "a.PY", "data.json", "Cargo.toml", "x.tsx", "build.mk"] {
+        for name in [
+            "main.rs",
+            "a.PY",
+            "data.json",
+            "Cargo.toml",
+            "x.tsx",
+            "build.mk",
+        ] {
             assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
         }
-        for name in ["Makefile", "dockerfile", "GNUmakefile", ".env", ".gitignore"] {
+        for name in [
+            "Makefile",
+            "dockerfile",
+            "GNUmakefile",
+            ".env",
+            ".gitignore",
+        ] {
             assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
         }
         assert_eq!(FileType::from_filename("notes.md"), FileType::Markdown);
@@ -12427,7 +12454,10 @@ mod clear_formatting_tests {
     fn code_and_plain_text_are_always_raw() {
         for global in [ViewMode::Raw, ViewMode::Wysiwyg] {
             assert_eq!(FileType::Code.effective_view_mode(global), ViewMode::Raw);
-            assert_eq!(FileType::PlainText.effective_view_mode(global), ViewMode::Raw);
+            assert_eq!(
+                FileType::PlainText.effective_view_mode(global),
+                ViewMode::Raw
+            );
             assert_eq!(FileType::Markdown.effective_view_mode(global), global);
         }
     }
@@ -12491,7 +12521,13 @@ mod clear_formatting_tests {
 
     #[test]
     fn markdown_outdent_strips_two_spaces_one_space_or_a_tab() {
-        let mut doc = DocumentTab::new("m".into(), "a.md".into(), "    a\n b\n\tc".into(), None, None);
+        let mut doc = DocumentTab::new(
+            "m".into(),
+            "a.md".into(),
+            "    a\n b\n\tc".into(),
+            None,
+            None,
+        );
         doc.caret.range = 0..doc.content.len();
         doc.outdent();
         assert_eq!(doc.content, "  a\nb\nc");
@@ -12517,6 +12553,61 @@ mod clear_formatting_tests {
     }
 
     #[test]
+    fn table_commands_do_nothing_in_code_tabs() {
+        let text = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let mut doc = code_doc("a.rs", text);
+        doc.caret.move_to(2);
+        assert!(!doc.tab_table_cell(false));
+        assert!(!doc.table_insert_row_below());
+        assert!(!doc.apply_table_op_at(2, TableOp::InsertColRight));
+        doc.insert_table_with_size(2, 2);
+        assert_eq!(doc.content, text);
+    }
+
+    #[test]
+    fn code_tabs_track_the_cursor_without_markdown_state() {
+        let mut doc = code_doc("a.py", "x = 1\n# hi\n");
+        doc.caret.move_to(8);
+        doc.refresh_cursor();
+        assert_eq!((doc.cursor_line, doc.cursor_col), (2, 3));
+        assert!(!doc.active_formats.h1);
+        assert!(doc.cached_parse.is_none());
+    }
+
+    #[test]
+    fn undo_in_a_code_tab_does_not_parse_markdown() {
+        let mut doc = code_doc("a.py", "x\n");
+        doc.caret.move_to(1);
+        doc.edit(1..1, "y");
+        doc.release_parse_cache();
+        assert!(doc.undo());
+        assert!(doc.cached_parse.is_none());
+    }
+
+    #[test]
+    fn caret_tab_after_a_real_tab_uses_display_columns() {
+        let mut doc = code_doc("a.c", "\tx");
+        doc.indent_style = IndentStyle::Spaces(3);
+        doc.caret.move_to(2);
+        doc.indent();
+        // The tab shows as 4 columns and x as 1, so one space reaches the stop at 6.
+        assert_eq!(doc.content, "\tx ");
+    }
+
+    #[test]
+    fn plain_text_indents_four_spaces() {
+        assert_eq!(code_doc("n.txt", "").indent_style, IndentStyle::Spaces(4));
+    }
+
+    #[test]
+    fn set_file_type_clears_pending_formats() {
+        let mut doc = code_doc("a.md", "");
+        doc.pending_formats.bold = true;
+        assert!(doc.set_file_type(FileType::Code));
+        assert!(!doc.pending_formats.bold);
+    }
+
+    #[test]
     fn crlf_content_round_trips_unchanged() {
         let text = "fn main() {\r\n    a();\r\n}\r\n";
         let doc = code_doc("a.rs", text);
@@ -12531,8 +12622,14 @@ mod clear_formatting_tests {
         assert_eq!(code_doc("rules.mk", "").indent_style, IndentStyle::Tabs);
         assert_eq!(code_doc("main.go", "").indent_style, IndentStyle::Tabs);
         assert_eq!(code_doc("main.rs", "").indent_style, IndentStyle::Spaces(4));
-        assert_eq!(code_doc("notes.md", "").indent_style, IndentStyle::Spaces(2));
-        assert_eq!(code_doc("notes.txt", "").indent_style, IndentStyle::Spaces(2));
+        assert_eq!(
+            code_doc("notes.md", "").indent_style,
+            IndentStyle::Spaces(2)
+        );
+        assert_eq!(
+            code_doc("notes.txt", "").indent_style,
+            IndentStyle::Spaces(4)
+        );
     }
 
     #[test]

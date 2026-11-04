@@ -5,8 +5,7 @@ use crate::editor_input::{
 use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
 use crate::model::table_ops::TableOp;
 use crate::model::text_ops::{
-    TAB_DISPLAY_COLUMNS,
-    home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
+    home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16, TAB_DISPLAY_COLUMNS,
 };
 use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::*;
@@ -853,7 +852,8 @@ impl LiteMarkApp {
 
     /// The active tab ignores the global view mode (code and plain text).
     fn view_locked_raw(&self) -> bool {
-        self.active_tab().is_some_and(|tab| tab.file_type.forces_raw())
+        self.active_tab()
+            .is_some_and(|tab| tab.file_type.forces_raw())
     }
 
     /// The view mode the active tab renders and edits in. Code and plain-text
@@ -1231,15 +1231,19 @@ impl LiteMarkApp {
             .unwrap_or_default();
         match atomic_save(&path, &content) {
             Ok(()) => {
+                let mut type_changed = false;
                 if let Some(tab) = self.active_tab_mut() {
                     tab.file_path = Some(path.clone());
                     if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
                         tab.title = name.to_string();
                     }
-                    tab.set_file_type(FileType::from_filename(&tab.title));
+                    type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
                     tab.is_modified = false;
                     let title = tab.title.clone();
                     self.show_toast(format!("Saved {title}"), cx);
+                }
+                if type_changed {
+                    self.refresh_find();
                 }
                 self.rescan_workspace();
             }
@@ -1328,6 +1332,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_set_content_alignment(&mut self, alignment: ContentAlignment) {
+        if self.view_locked_raw() {
+            return;
+        }
         self.settings.content_alignment = alignment;
         self.settings.save();
     }
@@ -1691,8 +1698,11 @@ impl LiteMarkApp {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
             tab.file_path = Some(saved_path);
             tab.title = saved_title;
-            tab.set_file_type(FileType::from_filename(&tab.title));
+            let type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
             tab.is_modified = false;
+            if type_changed {
+                self.refresh_find();
+            }
         }
         self.rescan_workspace();
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
@@ -2115,7 +2125,8 @@ impl LiteMarkApp {
             .iter()
             .map(|f| (f.path.clone(), f.is_open))
             .collect();
-        let mut new_workspace = scan_workspace_dir(&self.workspace.folder_path, self.settings.show_code_files);
+        let mut new_workspace =
+            scan_workspace_dir(&self.workspace.folder_path, self.settings.show_code_files);
         for folder in &mut new_workspace.folders {
             if let Some(&open) = open_map.get(&folder.path) {
                 folder.is_open = open;
@@ -2546,6 +2557,7 @@ impl LiteMarkApp {
     }
 
     fn retarget_open_tabs(&mut self, old: &Path, new_path: &Path) {
+        let mut type_changed = false;
         for tab in &mut self.tabs {
             let Some(path) = tab.file_path.clone() else {
                 continue;
@@ -2554,11 +2566,14 @@ impl LiteMarkApp {
                 tab.file_path = Some(new_path.to_path_buf());
                 if let Some(name) = new_path.file_name().and_then(|name| name.to_str()) {
                     tab.title = name.to_string();
-                    tab.set_file_type(FileType::from_filename(&tab.title));
+                    type_changed |= tab.set_file_type(FileType::from_filename(&tab.title));
                 }
             } else if let Ok(rest) = path.strip_prefix(old) {
                 tab.file_path = Some(new_path.join(rest));
             }
+        }
+        if type_changed {
+            self.refresh_find();
         }
     }
 
@@ -4105,8 +4120,7 @@ impl LiteMarkApp {
             show_line_numbers,
             word_wrap: self.settings.word_wrap,
             tab_width: if markdown_tab { 0 } else { TAB_DISPLAY_COLUMNS },
-            centered: markdown_tab
-                && self.settings.content_alignment == ContentAlignment::Centered,
+            centered: markdown_tab && self.settings.content_alignment == ContentAlignment::Centered,
             max_measure: Some(sz::MEASURE_FALLBACK * zoom),
             font_size: px(self.settings.base_font_size * zoom),
             text_color: theme.text_primary.into(),
@@ -4295,10 +4309,7 @@ impl EntityInputHandler for LiteMarkApp {
                 // Over-typing closing bracket or quote
                 let over_types = matches!(ch, ')' | ']' | '}' | '"')
                     || (markdown_tab && matches!(ch, '\'' | '`'));
-                if over_types
-                    && cursor < content.len()
-                    && content[cursor..].starts_with(ch)
-                {
+                if over_types && cursor < content.len() && content[cursor..].starts_with(ch) {
                     if let Some(tab) = self.active_tab_mut() {
                         tab.caret.move_to(cursor + ch.len_utf8());
                         tab.refresh_cursor();

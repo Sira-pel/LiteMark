@@ -1,6 +1,6 @@
 use crate::model::{
-    file_dialog_block_reason, looks_binary, CODE_EXTENSIONS, TEXT_EXTENSIONS, unique_name, FileType, PortalProbe, WorkspaceDirectory,
-    WorkspaceFile, WorkspaceFolder,
+    file_dialog_block_reason, looks_binary, unique_name, FileType, PortalProbe, WorkspaceDirectory,
+    WorkspaceFile, WorkspaceFolder, CODE_EXTENSIONS, TEXT_EXTENSIONS,
 };
 #[cfg(target_os = "linux")]
 use std::ffi::{c_char, CString};
@@ -1175,13 +1175,22 @@ mod tests {
 
     #[test]
     fn scan_lists_dotfiles_and_code_files_follow_the_setting() {
-        let temp_dir = std::env::temp_dir().join(format!("litemark-scan-code-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-scan-code-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(temp_dir.join(".git")).unwrap();
         fs::create_dir_all(temp_dir.join("node_modules")).unwrap();
         fs::write(temp_dir.join(".git").join("config.txt"), "x").unwrap();
         fs::write(temp_dir.join("node_modules").join("a.js"), "x").unwrap();
-        for name in ["Note.md", "plain.txt", "main.rs", "Makefile", ".env", ".gitignore", ".bashrc"] {
+        for name in [
+            "Note.md",
+            "plain.txt",
+            "main.rs",
+            "Makefile",
+            ".env",
+            ".gitignore",
+            ".bashrc",
+        ] {
             fs::write(temp_dir.join(name), "x").unwrap();
         }
 
@@ -1194,7 +1203,15 @@ mod tests {
         };
         assert_eq!(
             names(true),
-            [".bashrc", ".env", ".gitignore", "Makefile", "Note.md", "main.rs", "plain.txt"]
+            [
+                ".bashrc",
+                ".env",
+                ".gitignore",
+                "Makefile",
+                "Note.md",
+                "main.rs",
+                "plain.txt"
+            ]
         );
         // `.bashrc` is plain text, so it stays when code files are off.
         assert_eq!(names(false), [".bashrc", "Note.md", "plain.txt"]);
