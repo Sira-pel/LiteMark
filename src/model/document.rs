@@ -137,8 +137,7 @@ pub fn indent_style(name: &str, file_type: FileType) -> IndentStyle {
 /// majority with a consistent step means that step, anything mixed keeps `default`.
 pub fn detect_indent_style(content: &str, default: IndentStyle) -> IndentStyle {
     let mut tab_lines = 0usize;
-    let mut space_lines = 0usize;
-    let mut step = 0usize;
+    let mut widths = Vec::new();
     for line in content.lines().take(200) {
         if line.trim().is_empty() {
             continue;
@@ -150,26 +149,26 @@ pub fn detect_indent_style(content: &str, default: IndentStyle) -> IndentStyle {
             if line.trim_start().starts_with('*') {
                 continue;
             }
-            let width = line.len() - line.trim_start_matches(' ').len();
-            space_lines += 1;
-            step = gcd(step, width);
+            widths.push(line.len() - line.trim_start_matches(' ').len());
         }
     }
+    let space_lines = widths.len();
     if tab_lines > 2 * space_lines && tab_lines > 0 {
-        IndentStyle::Tabs
-    } else if space_lines > 2 * tab_lines && matches!(step, 2 | 3 | 4 | 8) {
-        IndentStyle::Spaces(step)
-    } else {
-        default
+        return IndentStyle::Tabs;
     }
-}
-
-fn gcd(a: usize, b: usize) -> usize {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
+    if space_lines <= 2 * tab_lines {
+        return default;
     }
+    // A stray odd line (an aligned continuation) must not hide the step: take the
+    // step that is the shallowest indent and that most lines are a multiple of.
+    let shallowest = widths.iter().copied().min().unwrap_or(0);
+    for step in [4, 2, 3] {
+        let fits = widths.iter().filter(|w| **w % step == 0).count();
+        if shallowest == step && fits * 4 >= space_lines * 3 {
+            return IndentStyle::Spaces(step);
+        }
+    }
+    default
 }
 
 /// Closing character for the pairs auto-closed in code: `( [ { "`.
@@ -1141,8 +1140,25 @@ impl DocumentTab {
         self.edit(range, "\n");
     }
 
-    /// The line break this file uses: CRLF when its first line ends in one.
-    fn line_break(&self) -> &'static str {
+    /// The line break to insert at `offset`: the ending of the line being split, else
+    /// the one before it, else the file's first ending, so mixed files stay local.
+    fn line_break(&self, offset: usize) -> &'static str {
+        let ending = |at: usize| match line_ending_len(&self.content, at) {
+            2 => Some("\r\n"),
+            1 if self.content.as_bytes()[at] == b'\n' => Some("\n"),
+            _ => None,
+        };
+        let line_start = home_offset(&self.content, offset);
+        if let Some(found) = ending(line_end(&self.content, offset)) {
+            return found;
+        }
+        match line_ending_len_before(&self.content, line_start) {
+            2 => return "\r\n",
+            1 if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' => {
+                return "\n"
+            }
+            _ => {}
+        }
         match self.content.find('\n') {
             Some(i) if i > 0 && self.content.as_bytes()[i - 1] == b'\r' => "\r\n",
             _ => "\n",
@@ -1154,7 +1170,7 @@ impl DocumentTab {
     /// (`{ ( [`, or `:` in Python) adds one indent level, and Enter between a matching
     /// pair opens a three-line block. All of it is a single edit, so one undo step.
     fn code_newline(&mut self, range: Range<usize>) {
-        let nl = self.line_break();
+        let nl = self.line_break(range.start);
         let line_start = home_offset(&self.content, range.start);
         let before = &self.content[line_start..range.start];
         let indent: String = before
@@ -12686,5 +12702,27 @@ mod clear_formatting_tests {
         quote.caret.move_to(1);
         quote.smart_backspace();
         assert_eq!(quote.content, "'");
+    }
+
+    #[test]
+    fn one_odd_indented_line_does_not_hide_the_detected_step() {
+        let text = "a {\n  b;\n    c;\n   d;\n  e;\n    f;\n}\n";
+        assert_eq!(code_doc("a.js", text).indent_style, IndentStyle::Spaces(2));
+        let four = "a {\n    b;\n        c;\n   d;\n    e;\n}\n";
+        assert_eq!(code_doc("a.js", four).indent_style, IndentStyle::Spaces(4));
+    }
+
+    #[test]
+    fn code_newline_follows_the_line_ending_where_it_splits() {
+        // First line LF, later lines CRLF.
+        let mut doc = code_doc("a.rs", "a\nb\r\nc\r\n");
+        doc.caret.move_to(3);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "a\nb\r\n\r\nc\r\n");
+        // Last line without an ending takes the previous line's.
+        let mut tail = code_doc("a.rs", "a\nb\r\nc");
+        tail.caret.move_to(tail.content.len());
+        tail.smart_newline(false);
+        assert_eq!(tail.content, "a\nb\r\nc\r\n");
     }
 }
