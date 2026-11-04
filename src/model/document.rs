@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::markdown::{
     accepted_list_marker, accepted_list_marker_in, parse_document, unescaped_pipe_offsets,
     InlinePair, InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment,
-    TableColumnAlign,
+    TableColumnAlign, TableRowBody,
 };
 
 use super::table_ops::{self, TableOp};
@@ -258,6 +258,12 @@ impl DocumentTab {
         doc
     }
 
+    /// Drop the cached parse of a tab that isn't on screen; `parsed()`
+    /// rebuilds it when the tab is shown again.
+    pub fn release_parse_cache(&mut self) {
+        self.cached_parse = None;
+    }
+
     #[allow(dead_code)]
     pub fn parsed_snapshot(&self) -> Arc<ParsedDocument> {
         if let Some((rev, ref doc)) = self.cached_parse {
@@ -454,12 +460,16 @@ impl DocumentTab {
         let mut info: Option<TableInfo> = None;
         for line in &parsed.lines {
             if let LineKind::TableRow {
-                ref cells,
                 is_header,
-                ref table_source,
+                ref body,
                 ..
             } = line.kind
             {
+                let TableRowBody {
+                    cells,
+                    table_source,
+                    ..
+                } = &**body;
                 if pos < table_source.start || pos > table_source.end {
                     continue;
                 }
@@ -741,11 +751,12 @@ impl DocumentTab {
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
             if let LineKind::TableRow {
-                ref cells,
                 is_header,
+                ref body,
                 ..
             } = pline.kind
             {
+                let TableRowBody { cells, .. } = &**body;
                 let col_count = cells.len().max(2);
                 let is_empty_row = cells.iter().all(|c| {
                     if c.end <= self.content.len() && c.start <= c.end {
@@ -762,11 +773,12 @@ impl DocumentTab {
                         // Check if there is already a body row after delimiter
                         if let Some(first_body) = parsed.lines.get(pline.line_index + 2) {
                             if let LineKind::TableRow {
-                                ref cells,
                                 is_header: false,
+                                ref body,
                                 ..
                             } = first_body.kind
                             {
+                                let TableRowBody { cells, .. } = &**body;
                                 if let Some(first_cell) = cells.first() {
                                     self.caret.move_to(first_cell.start);
                                     self.refresh_cursor();
@@ -1457,9 +1469,10 @@ impl DocumentTab {
                     | LineKind::HorizontalRule => {
                         continue;
                     }
-                    LineKind::TableRow {
-                        cells, raw_cells, ..
-                    } => {
+                    LineKind::TableRow { ref body, .. } => {
+                        let TableRowBody {
+                            cells, raw_cells, ..
+                        } = &**body;
                         let cell_ranges = if raw_cells.is_empty() {
                             cells
                         } else {
@@ -1882,10 +1895,8 @@ impl DocumentTab {
 
             // Check if cursor is currently inside an existing table
             let in_table = parsed.lines.iter().find(|l| {
-                if let LineKind::TableRow {
-                    ref table_source, ..
-                } = l.kind
-                {
+                if let LineKind::TableRow { ref body, .. } = l.kind {
+                    let TableRowBody { table_source, .. } = &**body;
                     range.start >= table_source.start && range.start <= table_source.end
                 } else {
                     false
@@ -1893,12 +1904,12 @@ impl DocumentTab {
             });
 
             if let Some(table_line) = in_table {
-                if let LineKind::TableRow {
-                    ref cells,
-                    ref table_source,
-                    ..
-                } = table_line.kind
-                {
+                if let LineKind::TableRow { ref body, .. } = table_line.kind {
+                    let TableRowBody {
+                        cells,
+                        table_source,
+                        ..
+                    } = &**body;
                     let col_count = cells.len().max(2);
                     let row_str = format!("\n|{}", "  |".repeat(col_count));
                     let insert_pos = table_source.end;
@@ -2730,13 +2741,13 @@ impl DocumentTab {
             if extend && pos > visible_line_end(pline, self.view_mode) && pos <= pline.source.end {
                 return self.move_left(true);
             }
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ref table_source,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells,
+                    raw_cells,
+                    table_source,
+                    ..
+                } = &**body;
                 if let Some(c_idx) = raw_cells
                     .iter()
                     .position(|rc| pos >= rc.start && pos <= rc.end)
@@ -2748,12 +2759,12 @@ impl DocumentTab {
                         } else {
                             let prev_row_cell_end =
                                 parsed.lines[..pline.line_index].iter().rev().find_map(|l| {
-                                    if let LineKind::TableRow {
-                                        cells: ref pcells,
-                                        table_source: ref pts,
-                                        ..
-                                    } = l.kind
-                                    {
+                                    if let LineKind::TableRow { ref body, .. } = l.kind {
+                                        let TableRowBody {
+                                            cells: pcells,
+                                            table_source: pts,
+                                            ..
+                                        } = &**body;
                                         if pts == table_source {
                                             return pcells.last().map(|c| c.end);
                                         }
@@ -2818,13 +2829,13 @@ impl DocumentTab {
             return;
         }
         if let Some(pline) = parsed.line_at_offset(pos) {
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ref table_source,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells,
+                    raw_cells,
+                    table_source,
+                    ..
+                } = &**body;
                 if let Some(c_idx) = raw_cells
                     .iter()
                     .position(|rc| pos >= rc.start && pos <= rc.end)
@@ -2837,12 +2848,12 @@ impl DocumentTab {
                             let next_row_cell_start =
                                 parsed.lines.get(pline.line_index + 1..).and_then(|rest| {
                                     rest.iter().find_map(|l| {
-                                        if let LineKind::TableRow {
-                                            cells: ref ncells,
-                                            table_source: ref nts,
-                                            ..
-                                        } = l.kind
-                                        {
+                                        if let LineKind::TableRow { ref body, .. } = l.kind {
+                                            let TableRowBody {
+                                                cells: ncells,
+                                                table_source: nts,
+                                                ..
+                                            } = &**body;
                                             if nts == table_source {
                                                 return ncells.first().map(|c| c.start);
                                             }
@@ -2927,12 +2938,10 @@ impl DocumentTab {
 
         // Guard table pipe delimiters in WYSIWYG mode
         if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells, raw_cells, ..
+                } = &**body;
                 let at_cell_start_or_pipe = raw_cells
                     .iter()
                     .zip(cells.iter())
@@ -2994,12 +3003,10 @@ impl DocumentTab {
         if mode == ViewMode::Wysiwyg {
             let parsed = self.parsed();
             if let Some(pline) = parsed.line_at_offset(cursor) {
-                if let LineKind::TableRow {
-                    ref cells,
-                    ref raw_cells,
-                    ..
-                } = pline.kind
-                {
+                if let LineKind::TableRow { ref body, .. } = pline.kind {
+                    let TableRowBody {
+                        cells, raw_cells, ..
+                    } = &**body;
                     let at_cell_end_or_pipe = raw_cells
                         .iter()
                         .zip(cells.iter())
@@ -3064,9 +3071,9 @@ impl DocumentTab {
         let cursor = self.cursor_offset();
         let parsed = self.parsed();
         parsed.lines.iter().any(|l| match l.kind {
-            LineKind::TableRow {
-                ref table_source, ..
-            } => cursor >= table_source.start && cursor <= table_source.end,
+            LineKind::TableRow { ref body, .. } => {
+                cursor >= body.table_source.start && cursor <= body.table_source.end
+            }
             _ => false,
         })
     }
@@ -3146,10 +3153,8 @@ impl DocumentTab {
         let mut range = self.selection_range();
         let parsed = self.parsed();
         if let Some(table_end) = parsed.lines.iter().find_map(|l| {
-            if let LineKind::TableRow {
-                ref table_source, ..
-            } = l.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = l.kind {
+                let TableRowBody { table_source, .. } = &**body;
                 if range.start >= table_source.start && range.start <= table_source.end {
                     return Some(table_source.end);
                 }
@@ -3267,12 +3272,12 @@ impl DocumentTab {
         let mut table_end = 0usize;
         let mut num_cols = 2usize;
         for line in &parsed.lines {
-            if let LineKind::TableRow {
-                ref cells,
-                ref table_source,
-                ..
-            } = line.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = line.kind {
+                let TableRowBody {
+                    cells,
+                    table_source,
+                    ..
+                } = &**body;
                 if cursor >= table_source.start && cursor <= table_source.end {
                     in_table = true;
                     table_end = table_source.end;
@@ -3390,12 +3395,10 @@ impl DocumentTab {
         let cursor = snap_off_ending_interior(&self.content, self.cursor_offset());
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells, raw_cells, ..
+                } = &**body;
                 if let Some((_, cell)) = raw_cells
                     .iter()
                     .zip(cells.iter())
@@ -3440,12 +3443,10 @@ impl DocumentTab {
         let cursor = self.cursor_offset();
         let parsed = self.parsed();
         if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow {
-                ref cells,
-                ref raw_cells,
-                ..
-            } = pline.kind
-            {
+            if let LineKind::TableRow { ref body, .. } = pline.kind {
+                let TableRowBody {
+                    cells, raw_cells, ..
+                } = &**body;
                 if let Some((_, cell)) = raw_cells
                     .iter()
                     .zip(cells.iter())
@@ -3757,10 +3758,10 @@ impl DocumentTab {
 
     pub fn refresh_cursor(&mut self) {
         let cursor = self.cursor_offset();
-        let (line, col) = line_col(&self.content, cursor);
+        let parsed = self.parsed();
+        let (line, col) = parsed_line_col(&self.content, &parsed, cursor);
         self.cursor_line = line;
         self.cursor_col = col;
-        let parsed = self.parsed();
         self.active_formats = compute_active_formats(&parsed, cursor, &self.pending_formats);
     }
 
@@ -4275,15 +4276,41 @@ fn add_contained_pairs<'a>(
     }
 }
 
+/// `line_col` answered from the parsed line table instead of rescanning the
+/// text from the start.
+fn parsed_line_col(content: &str, parsed: &ParsedDocument, offset: usize) -> (usize, usize) {
+    let offset = super::text_ops::floor_char_boundary(content, offset.min(content.len()));
+    let idx = parsed.lines.partition_point(|l| l.source.start <= offset);
+    let Some(line) = idx.checked_sub(1).map(|i| &parsed.lines[i]) else {
+        return line_col(content, offset);
+    };
+    let end = offset.min(line.source.end);
+    (idx, content[line.source.start..end].chars().count() + 1)
+}
+
 /// The next source position at or after `pos` that is not inside a hidden
 /// (WYSIWYG-invisible) range.
 fn next_visible_pos(parsed: &ParsedDocument, mut pos: usize) -> usize {
-    while let Some(r) = parsed.hidden_ranges.iter().find(|r| pos >= r.start && pos < r.end) {
+    while let Some(r) = hidden_range_at(parsed, pos, |r| pos >= r.start && pos < r.end) {
         pos = r.end;
     }
     pos
 }
 
+/// First hidden range of the line containing `pos` that satisfies `pred`.
+/// Hidden ranges never cover the newline, so the line is enough.
+fn hidden_range_at(
+    parsed: &ParsedDocument,
+    pos: usize,
+    pred: impl Fn(&std::ops::Range<usize>) -> bool,
+) -> Option<std::ops::Range<usize>> {
+    parsed
+        .line_at_offset(pos)?
+        .hidden_ranges
+        .iter()
+        .find(|r| pred(r))
+        .cloned()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FormatFlags {
@@ -5693,22 +5720,14 @@ fn compute_active_formats(
 }
 
 fn skip_hidden_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
-    while let Some(h) = parsed
-        .hidden_ranges
-        .iter()
-        .find(|r| pos > r.start && pos <= r.end)
-    {
+    while let Some(h) = hidden_range_at(parsed, pos, |r| pos > r.start && pos <= r.end) {
         pos = h.start;
     }
     pos
 }
 
 fn skip_hidden_interior_left(parsed: &ParsedDocument, mut pos: usize) -> usize {
-    while let Some(h) = parsed
-        .hidden_ranges
-        .iter()
-        .find(|r| pos > r.start && pos < r.end)
-    {
+    while let Some(h) = hidden_range_at(parsed, pos, |r| pos > r.start && pos < r.end) {
         pos = h.start;
     }
     pos
@@ -5732,11 +5751,7 @@ fn skip_hidden_right(parsed: &ParsedDocument, mut pos: usize) -> usize {
             return pos;
         }
     }
-    while let Some(h) = parsed
-        .hidden_ranges
-        .iter()
-        .find(|r| pos >= r.start && pos < r.end)
-    {
+    while let Some(h) = hidden_range_at(parsed, pos, |r| pos >= r.start && pos < r.end) {
         pos = h.end;
     }
     pos
@@ -5918,6 +5933,20 @@ fn placeholder_len(cmd: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parsed_line_col_matches_line_col() {
+        use crate::markdown::parser::parse_document;
+        for text in ["", "a", "a\n", "\n\n", "ab\r\ncd\re\n", "héllo\nwörld\n\nx"] {
+            let parsed = parse_document(text);
+            for offset in 0..=text.len() + 1 {
+                assert_eq!(
+                    super::parsed_line_col(text, &parsed, offset),
+                    super::line_col(text, offset),
+                    "{text:?} at {offset}"
+                );
+            }
+        }
+    }
     use super::*;
     use crate::ui::{move_vertical_visual, EditorPaint, PaintRow};
     use gpui::{point, px, ShapedLine};
@@ -6789,7 +6818,7 @@ mod tests {
             "strike" => InlineTagKind::Strike,
             _ => InlineTagKind::Link,
         };
-        doc.parsed().inline_pairs.iter().any(|p| p.kind == kind)
+        doc.parsed().all_inline_pairs().any(|p| p.kind == kind)
     }
 
     /// Ctrl+B/I/U/Shift+S/` with no selection, type a word, then toggle the
@@ -8056,6 +8085,41 @@ mod tests {
             );
         }
         assert!(!doc.content.contains('\u{200B}'));
+    }
+
+    #[test]
+    fn per_line_hidden_skips_match_a_document_wide_scan() {
+        let source = "# **Head** ##\n> *quote* and `code`\n\n- [link](http://x) **b**\n\
+                      | **a** | *b* |\n| --- | --- |\n| `c` | [d](e) |\n---\n```\nfn x\n```\nend ~~s~~";
+        let parsed = parse_document(source);
+        let all: Vec<Range<usize>> = parsed
+            .lines
+            .iter()
+            .flat_map(|l| l.hidden_ranges.iter().cloned())
+            .collect();
+        let skip = |mut pos: usize, hit: &dyn Fn(usize, &Range<usize>) -> bool, left: bool| {
+            while let Some(r) = all.iter().find(|r| hit(pos, r)) {
+                pos = if left { r.start } else { r.end };
+            }
+            pos
+        };
+        for pos in 0..=source.len() {
+            assert_eq!(
+                skip_hidden_left(&parsed, pos),
+                skip(pos, &|p, r| p > r.start && p <= r.end, true),
+                "left at {pos}"
+            );
+            assert_eq!(
+                skip_hidden_interior_left(&parsed, pos),
+                skip(pos, &|p, r| p > r.start && p < r.end, true),
+                "interior left at {pos}"
+            );
+            assert_eq!(
+                next_visible_pos(&parsed, pos),
+                skip(pos, &|p, r| p >= r.start && p < r.end, false),
+                "next visible at {pos}"
+            );
+        }
     }
 
     #[test]
@@ -9427,7 +9491,7 @@ mod tests {
                 shaped: std::rc::Rc::new(ShapedLine::default()),
                 offset_map,
                 checkbox_hit: None,
-                link_hits: Vec::new(),
+                link_hits: Arc::default(),
                 cells: Vec::new(),
             }],
             bounds: None,
@@ -9879,7 +9943,7 @@ mod tests {
                 shaped: std::rc::Rc::new(ShapedLine::default()),
                 offset_map: line.offset_map.clone(),
                 checkbox_hit: None,
-                link_hits: Vec::new(),
+                link_hits: Arc::default(),
                 cells: Vec::new(),
             })
             .collect();
@@ -11352,8 +11416,7 @@ mod tests {
 
     fn naive_span_close_end(parsed: &ParsedDocument, pair: &InlinePair) -> usize {
         parsed
-            .inline_pairs
-            .iter()
+            .all_inline_pairs()
             .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
             .map(|p| p.close_delim.end)
             .max()
@@ -11362,8 +11425,7 @@ mod tests {
 
     fn naive_span_open_start(parsed: &ParsedDocument, pair: &InlinePair) -> usize {
         parsed
-            .inline_pairs
-            .iter()
+            .all_inline_pairs()
             .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
             .map(|p| p.open_delim.start)
             .min()
@@ -11375,8 +11437,7 @@ mod tests {
         range: Range<usize>,
     ) -> Vec<&InlinePair> {
         let mut group_pairs: Vec<&InlinePair> = parsed
-            .inline_pairs
-            .iter()
+            .all_inline_pairs()
             .filter(|p| {
                 p.kind != InlineTagKind::Link
                     && p.open_delim.start < range.end
@@ -11386,7 +11447,7 @@ mod tests {
         let mut expanded = true;
         while expanded {
             expanded = false;
-            for p in &parsed.inline_pairs {
+            for p in parsed.all_inline_pairs() {
                 if p.kind == InlineTagKind::Link
                     || group_pairs.iter().any(|g| std::ptr::eq(*g, p))
                 {
@@ -11428,7 +11489,7 @@ mod tests {
     }
 
     fn assert_helper_equivalence(parsed: &ParsedDocument) {
-        for pair in &parsed.inline_pairs {
+        for pair in parsed.all_inline_pairs() {
             assert_eq!(
                 span_close_end(parsed, pair),
                 naive_span_close_end(parsed, pair),
@@ -11442,7 +11503,7 @@ mod tests {
             assert_eq!(pair.group_close_end, naive_span_close_end(parsed, pair));
             assert_eq!(pair.group_open_start, naive_span_open_start(parsed, pair));
         }
-        let n = parsed.inline_pairs.len().max(1);
+        let n = parsed.all_inline_pairs().count().max(1);
         let step = (parsed.lines.last().map(|l| l.source.end).unwrap_or(0) / n.max(1)).max(1);
         for start in (0..=parsed.lines.last().map(|l| l.source.end).unwrap_or(0)).step_by(step.max(7)) {
             let end = (start + 11).min(parsed.lines.last().map(|l| l.source.end).unwrap_or(start));

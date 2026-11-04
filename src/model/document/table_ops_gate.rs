@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use super::{DocumentTab, ViewMode};
-use crate::markdown::{parse_document, LineKind, TableColumnAlign};
+use crate::markdown::{parse_document, LineKind, TableColumnAlign, TableRowBody};
 use crate::model::table_ops::TableOp;
 
 const CASES: &str = include_str!(concat!(
@@ -68,9 +68,10 @@ fn editor_sig(markdown: &str) -> String {
     for line in &doc.lines {
         match &line.kind {
             LineKind::TableDelimiter => open = true,
-            LineKind::TableRow {
-                cells, alignments, ..
-            } => {
+            LineKind::TableRow { ref body, .. } => {
+                let TableRowBody {
+                    cells, alignments, ..
+                } = &**body;
                 open = true;
                 align = alignments
                     .iter()
@@ -177,7 +178,8 @@ fn cell_start(markdown: &str, row: usize, col: usize) -> Result<usize, String> {
     let doc = parse_document(markdown);
     let mut seen = 0usize;
     for line in &doc.lines {
-        if let LineKind::TableRow { cells, .. } = &line.kind {
+        if let LineKind::TableRow { ref body, .. } = &line.kind {
+            let TableRowBody { cells, .. } = &**body;
             if seen == row {
                 let range = cells
                     .get(col)

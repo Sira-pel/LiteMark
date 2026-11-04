@@ -28,10 +28,10 @@ pub fn render_tree(markdown: &str, wrap_cols: usize) -> String {
             quote_token(&line.display_text),
         ));
 
-        if let LineKind::TableRow {
-            cells, alignments, ..
-        } = &line.kind
-        {
+        if let LineKind::TableRow { ref body, .. } = &line.kind {
+            let crate::markdown::TableRowBody {
+                cells, alignments, ..
+            } = &**body;
             for (cell_index, cell) in cells.iter().enumerate() {
                 let align = alignments
                     .get(cell_index)
@@ -100,8 +100,13 @@ fn kind_token(kind: &LineKind) -> String {
         LineKind::HorizontalRule => "kind=HorizontalRule".to_string(),
         LineKind::TableDelimiter => "kind=TableDelimiter".to_string(),
         LineKind::TableRow {
-            is_header, cells, ..
-        } => format!("kind=TableRow header={is_header} cells={}", cells.len()),
+            is_header,
+            ref body,
+            ..
+        } => format!(
+            "kind=TableRow header={is_header} cells={}",
+            body.cells.len()
+        ),
     }
 }
 

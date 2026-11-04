@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
     pub text: String,
@@ -1025,15 +1027,21 @@ pub enum LineKind {
     TableDelimiter,
     TableRow {
         is_header: bool,
-        /// Byte ranges of each cell's editable content in the document
-        cells: Vec<std::ops::Range<usize>>,
-        /// Full inner byte ranges between pipes (`pipe[k]+1..pipe[k+1]`)
-        raw_cells: Vec<std::ops::Range<usize>>,
-        /// Column alignments parsed from the table's delimiter row
-        alignments: Vec<TableColumnAlign>,
-        /// Full table block byte range in the document
-        table_source: std::ops::Range<usize>,
+        /// Boxed so the rare table variant does not size every `LineKind`
+        body: Box<TableRowBody>,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TableRowBody {
+    /// Byte ranges of each cell's editable content in the document
+    pub cells: Vec<std::ops::Range<usize>>,
+    /// Full inner byte ranges between pipes (`pipe[k]+1..pipe[k+1]`)
+    pub raw_cells: Vec<std::ops::Range<usize>>,
+    /// Column alignments parsed from the table's delimiter row
+    pub alignments: Vec<TableColumnAlign>,
+    /// Full table block byte range in the document
+    pub table_source: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1118,30 +1126,38 @@ impl RowOffsetMap {
         hidden: &[std::ops::Range<usize>],
     ) -> (String, Self) {
         let line_end = line_start + line_text.len();
-        let mut display = String::with_capacity(line_text.len());
-        let mut segments = Vec::new();
-        let mut cursor = line_start;
-
-        for h in hidden {
-            let h_start = h.start.clamp(line_start, line_end);
-            let h_end = h.end.clamp(line_start, line_end);
-            if h_start > cursor {
-                let slice = &line_text[(cursor - line_start)..(h_start - line_start)];
-                let disp_start = display.len();
-                display.push_str(slice);
-                let disp_end = display.len();
-                segments.push((disp_start..disp_end, cursor..h_start));
+        // Walk the visible gaps twice: once to size the buffers exactly, once
+        // to fill them, so no temporary list is allocated.
+        let for_each_visible = |f: &mut dyn FnMut(std::ops::Range<usize>)| {
+            let mut cursor = line_start;
+            for h in hidden {
+                let h_start = h.start.clamp(line_start, line_end);
+                let h_end = h.end.clamp(line_start, line_end);
+                if h_start > cursor {
+                    f(cursor..h_start);
+                }
+                cursor = cursor.max(h_end);
             }
-            cursor = cursor.max(h_end);
-        }
+            if cursor < line_end {
+                f(cursor..line_end);
+            }
+        };
 
-        if cursor < line_end {
-            let slice = &line_text[(cursor - line_start)..(line_end - line_start)];
+        let mut visible_bytes = 0usize;
+        let mut visible_count = 0usize;
+        for_each_visible(&mut |r| {
+            visible_bytes += r.len();
+            visible_count += 1;
+        });
+
+        let mut display = String::with_capacity(visible_bytes);
+        let mut segments = Vec::with_capacity(visible_count.max(1));
+        for_each_visible(&mut |src| {
+            let slice = &line_text[(src.start - line_start)..(src.end - line_start)];
             let disp_start = display.len();
             display.push_str(slice);
-            let disp_end = display.len();
-            segments.push((disp_start..disp_end, cursor..line_end));
-        }
+            segments.push((disp_start..display.len(), src));
+        });
 
         if segments.is_empty() {
             let anchor = visible_start.clamp(line_start, line_end);
@@ -1243,22 +1259,28 @@ pub struct ParsedLine {
     pub inline_pairs: Vec<InlinePair>,
     /// Visible text in WYSIWYG mode (with hidden_ranges stripped)
     pub display_text: String,
-    pub offset_map: RowOffsetMap,
+    pub offset_map: Arc<RowOffsetMap>,
     pub styled_segments: Vec<StyledSegment>,
+    /// Link spans `(source, url)`, filled once when the document is parsed so
+    /// painting can share them instead of rebuilding them every frame.
+    pub link_hits: Arc<Vec<(std::ops::Range<usize>, String)>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedDocument {
     pub lines: Vec<ParsedLine>,
-    /// All hidden byte ranges across the entire document (sorted, non-overlapping)
-    pub hidden_ranges: Vec<std::ops::Range<usize>>,
-    /// All inline delimiter pairs across the document
-    pub inline_pairs: Vec<InlinePair>,
     /// Fenced code block ranges `(open_fence_line_range, close_fence_line_range)`
     pub code_blocks: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
 }
 
 impl ParsedDocument {
+    /// Every inline delimiter pair in the document, line by line. Only the
+    /// tests want the flat view; the editor looks pairs up by line.
+    #[cfg(test)]
+    pub fn all_inline_pairs(&self) -> impl Iterator<Item = &InlinePair> {
+        self.lines.iter().flat_map(|l| l.inline_pairs.iter())
+    }
+
     /// Index of the line whose source range contains `offset` (inclusive end,
     /// so a line's terminating newline maps to that line).
     pub fn line_index_at(&self, offset: usize) -> Option<usize> {
@@ -1457,18 +1479,52 @@ pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-fn parse_inline_syntax(
-    input: &str,
-    base: usize,
-) -> (
+type InlineSyntax = (
     Vec<std::ops::Range<usize>>,
     Vec<InlinePair>,
     Vec<StyledSegment>,
-) {
+);
+
+fn parse_inline_syntax(input: &str, base: usize) -> InlineSyntax {
     if input.is_empty() {
         return (Vec::new(), Vec::new(), Vec::new());
     }
+    if is_plain_inline(input) {
+        let plain = StyledSegment {
+            source: base..base + input.len(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            code: false,
+            link_url: None,
+        };
+        return (Vec::new(), Vec::new(), vec![plain]);
+    }
+    parse_inline_with_pulldown(input, base)
+}
 
+/// Text pulldown-cmark would return as one unstyled run: it starts with a
+/// letter (so no list, heading, quote or indented code), has no edge
+/// whitespace to trim, no control characters, and no byte that can open
+/// inline syntax.
+fn is_plain_inline(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let (Some(&first), Some(&last)) = (bytes.first(), bytes.last()) else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || !first.is_ascii())
+        && last != b' '
+        && !bytes.iter().any(|&b| {
+            b.is_ascii_control()
+                || matches!(
+                    b,
+                    b'*' | b'_' | b'~' | b'`' | b'[' | b']' | b'<' | b'>' | b'\\' | b'&' | b'!' | b'|'
+                )
+        })
+}
+
+fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
     let prepared = prepare_for_pulldown(input);
     let mut options = pulldown_cmark::Options::empty();
     options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
@@ -2369,7 +2425,8 @@ fn fence_marker_line(
         hidden_ranges: hidden,
         inline_pairs: Vec::new(),
         display_text,
-        offset_map,
+        offset_map: Arc::new(offset_map),
+        link_hits: Arc::default(),
         styled_segments: Vec::new(),
     }
 }
@@ -2392,7 +2449,8 @@ fn code_content_line(
             hidden_ranges: Vec::new(),
             inline_pairs: Vec::new(),
             display_text: line.to_string(),
-            offset_map: RowOffsetMap::identity(line_start, line_end),
+            offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
+            link_hits: Arc::default(),
             styled_segments: vec![StyledSegment {
                 source,
                 bold: false,
@@ -2428,7 +2486,8 @@ fn code_content_line(
         hidden_ranges: hidden,
         inline_pairs: Vec::new(),
         display_text,
-        offset_map,
+        offset_map: Arc::new(offset_map),
+        link_hits: Arc::default(),
         styled_segments,
     }
 }
@@ -2469,7 +2528,8 @@ fn atx_line(
         hidden_ranges: hidden,
         inline_pairs,
         display_text,
-        offset_map,
+        offset_map: Arc::new(offset_map),
+        link_hits: Arc::default(),
         styled_segments,
     }
 }
@@ -2969,8 +3029,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 
     let mut lines = Vec::with_capacity(raw_lines.len());
     let mut list_quote_tracker = InListOrQuoteTracker::default();
-    let mut all_hidden = Vec::new();
-    let mut all_pairs = Vec::new();
     let mut code_blocks = Vec::new();
 
     let mut open_fence: Option<OpenFence> = None;
@@ -3017,7 +3075,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                         opening: false,
                     },
                 );
-                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
                 push_line!(parsed);
             } else {
                 let strip = open_fence
@@ -3026,7 +3083,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     .map(|fence| prefix_through_column(line, fence.indent))
                     .unwrap_or(0);
                 let parsed = code_content_line(i, line_source, line, strip);
-                all_hidden.extend(parsed.hidden_ranges.iter().cloned());
                 push_line!(parsed);
             }
             continue;
@@ -3053,7 +3109,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     opening: true,
                 },
             );
-            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
             push_line!(parsed);
             continue;
         }
@@ -3079,7 +3134,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     opening: true,
                 },
             );
-            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
             push_line!(parsed);
             continue;
         }
@@ -3094,7 +3148,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 hidden_ranges: Vec::new(),
                 inline_pairs: Vec::new(),
                 display_text: line.to_string(),
-                offset_map: RowOffsetMap::identity(line_start, line_end),
+                offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
+                link_hits: Arc::default(),
                 styled_segments: Vec::new(),
             });
             continue;
@@ -3105,7 +3160,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         if exact_thematic_break(line, list_walk.thematic_parent_col(line)) {
             list_walk.note_block(line);
             let hidden = vec![line_start..line_end];
-            all_hidden.extend(hidden.iter().cloned());
             let (display_text, offset_map) =
                 RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
             push_line!(ParsedLine {
@@ -3116,7 +3170,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 hidden_ranges: hidden,
                 inline_pairs: Vec::new(),
                 display_text,
-                offset_map,
+                offset_map: Arc::new(offset_map),
+                link_hits: Arc::default(),
                 styled_segments: Vec::new(),
             });
             continue;
@@ -3141,7 +3196,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             list_walk.note_block(line);
             if i == tbl.delimiter {
                 let hidden = vec![line_start..line_end];
-                all_hidden.extend(hidden.iter().cloned());
                 let (display_text, offset_map) =
                     RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
                 push_line!(ParsedLine {
@@ -3152,7 +3206,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     hidden_ranges: hidden,
                     inline_pairs: Vec::new(),
                     display_text,
-                    offset_map,
+                    offset_map: Arc::new(offset_map),
+                    link_hits: Arc::default(),
                     styled_segments: Vec::new(),
                 });
                 continue;
@@ -3198,23 +3253,24 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     });
                 }
                 let merged_hidden = merge_ranges(row_hidden);
-                all_hidden.extend(merged_hidden.iter().cloned());
-                all_pairs.extend(row_pairs.iter().cloned());
                 push_line!(ParsedLine {
                     line_index: i,
                     source: line_source.clone(),
                     kind: LineKind::TableRow {
                         is_header,
-                        cells,
-                        raw_cells,
-                        alignments: tbl.alignments.clone(),
-                        table_source: tbl.source.clone(),
+                        body: Box::new(TableRowBody {
+                            cells,
+                            raw_cells,
+                            alignments: tbl.alignments.clone(),
+                            table_source: tbl.source.clone(),
+                        }),
                     },
                     prefix_range: line_start..line_start,
                     hidden_ranges: merged_hidden,
                     inline_pairs: row_pairs,
                     display_text: line.to_string(),
-                    offset_map: RowOffsetMap::identity(line_start, line_end),
+                    offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
+                    link_hits: Arc::default(),
                     styled_segments: row_segments,
                 });
                 continue;
@@ -3224,8 +3280,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         if let Some((level, content)) = atx_display_content_range(line) {
             list_walk.note_block(line);
             let parsed = atx_line(i, line_source, line, level, content);
-            all_hidden.extend(parsed.hidden_ranges.iter().cloned());
-            all_pairs.extend(parsed.inline_pairs.iter().cloned());
             push_line!(parsed);
             continue;
         }
@@ -3265,8 +3319,6 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             inline_hidden.push(prefix_range.clone());
         }
         let merged_hidden = merge_ranges(inline_hidden);
-        all_hidden.extend(merged_hidden.iter().cloned());
-        all_pairs.extend(inline_pairs.iter().cloned());
 
         let (display_text, offset_map) =
             RowOffsetMap::from_hidden(line, line_start, body_base, &merged_hidden);
@@ -3279,7 +3331,8 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             hidden_ranges: merged_hidden,
             inline_pairs,
             display_text,
-            offset_map,
+            offset_map: Arc::new(offset_map),
+            link_hits: Arc::default(),
             styled_segments,
         });
     }
@@ -3288,10 +3341,24 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         code_blocks.push((fence.open_range, markdown.len()..markdown.len()));
     }
 
+    for line in &mut lines {
+        let links: Vec<_> = line
+            .styled_segments
+            .iter()
+            .filter_map(|seg| match &seg.link_url {
+                Some(url) if seg.source.end > seg.source.start => {
+                    Some((seg.source.clone(), url.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        if !links.is_empty() {
+            line.link_hits = Arc::new(links);
+        }
+    }
+
     ParsedDocument {
         lines,
-        hidden_ranges: merge_ranges(all_hidden),
-        inline_pairs: all_pairs,
         code_blocks,
     }
 }
@@ -3299,6 +3366,55 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_inline_shortcut_matches_pulldown() {
+        let named = [
+            "Plain prose, with commas; colons: and (parens).",
+            "Smoke  test with  double spaces",
+            "a 1. b",
+            "word #tag and x = y",
+            "a -- b - c + d",
+            "see http://example.com/path?q=1 or www.example.com",
+            "e.g. this \"quoted\" and 'single' text",
+            "Ünïcödé text with ß and 😀 emoji",
+            "tail ends with a period.",
+            "a",
+        ];
+        let mut checked = 0usize;
+        for text in named {
+            assert!(is_plain_inline(text), "{text:?} should take the shortcut");
+            for base in [0, 7] {
+                assert_eq!(parse_inline_syntax(text, base), parse_inline_with_pulldown(text, base), "{text:?}");
+            }
+            checked += 1;
+        }
+
+        let alphabet: Vec<char> =
+            "aZ 09.,;:-+#=()/?'\"$%^{}@é😀ßhtp:w1)\u{a0}\u{3000}\u{2003}\u{c}\u{b}".chars().collect();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for _ in 0..200_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let len = 1 + (seed % 24) as usize;
+            let mut text = String::new();
+            let mut s = seed;
+            for _ in 0..len {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                text.push(alphabet[(s >> 33) as usize % alphabet.len()]);
+            }
+            if is_plain_inline(&text) {
+                assert_eq!(parse_inline_syntax(&text, 3), parse_inline_with_pulldown(&text, 3), "{text:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 10_000, "only {checked} inputs exercised the shortcut");
+
+        for text in ["1. item", " lead", "trail ", "# h", "*a*", "a_b", "x\\y", "Q&A", "<b>", "[l](u)", "- x"] {
+            assert!(!is_plain_inline(text), "{text:?} must use pulldown");
+        }
+    }
 
     #[test]
     fn line_at_offset_matches_linear_scan() {
@@ -3313,20 +3429,18 @@ mod tests {
                 .map(|l| l.line_index);
             assert_eq!(binary, linear, "offset {off}");
         }
-        for pair in &parsed.inline_pairs {
+        for pair in parsed.all_inline_pairs() {
             if pair.kind == InlineTagKind::Link {
                 continue;
             }
             let naive_close = parsed
-                .inline_pairs
-                .iter()
+                .all_inline_pairs()
                 .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
                 .map(|p| p.close_delim.end)
                 .max()
                 .unwrap_or(pair.close_delim.end);
             let naive_open = parsed
-                .inline_pairs
-                .iter()
+                .all_inline_pairs()
                 .filter(|p| p.kind != InlineTagKind::Link && p.inner == pair.inner)
                 .map(|p| p.open_delim.start)
                 .min()
@@ -3351,10 +3465,7 @@ mod tests {
             LineKind::Blockquote,
             LineKind::TableRow {
                 is_header: false,
-                cells: Vec::new(),
-                raw_cells: Vec::new(),
-                alignments: Vec::new(),
-                table_source: 0..0,
+                body: Box::default(),
             },
         ];
 
@@ -3389,7 +3500,8 @@ mod tests {
                     hidden_ranges: Vec::new(),
                     inline_pairs: Vec::new(),
                     display_text: String::new(),
-                    offset_map: RowOffsetMap::identity(0, 0),
+                    offset_map: Arc::new(RowOffsetMap::identity(0, 0)),
+                    link_hits: Arc::default(),
                     styled_segments: Vec::new(),
                 });
                 check_all(kinds, seq, next_tracker, depth + 1);
@@ -3463,6 +3575,14 @@ mod tests {
     }
 
     #[test]
+    fn test_link_hits_precomputed_per_line() {
+        let doc = parse_document("see [site](https://a.example) now\nplain");
+        assert_eq!(doc.lines[0].link_hits.len(), 1);
+        assert_eq!(doc.lines[0].link_hits[0].1, "https://a.example");
+        assert!(doc.lines[1].link_hits.is_empty());
+    }
+
+    #[test]
     fn test_styled_segments_bold() {
         let input = "Normal **bold** text";
         let doc = parse_document(input);
@@ -3513,9 +3633,10 @@ mod tests {
         let md = "| a \\| b | c |\n| --- | --- |\n| d | e |";
         let doc = parse_document(md);
         match &doc.lines[0].kind {
-            LineKind::TableRow {
-                cells, alignments, ..
-            } => {
+            LineKind::TableRow { ref body, .. } => {
+                let TableRowBody {
+                    cells, alignments, ..
+                } = &**body;
                 assert_eq!(cells.len(), 2);
                 assert_eq!(&md[cells[0].clone()], "a \\| b");
                 assert_eq!(&md[cells[1].clone()], "c");
@@ -4409,8 +4530,10 @@ mod tests {
             LineKind::HorizontalRule => "HorizontalRule".to_string(),
             LineKind::TableDelimiter => "TableDelimiter".to_string(),
             LineKind::TableRow {
-                is_header, cells, ..
-            } => format!("TableRow header={is_header} cells={}", cells.len()),
+                is_header,
+                ref body,
+                ..
+            } => format!("TableRow header={is_header} cells={}", body.cells.len()),
         }
     }
 
@@ -5150,10 +5273,12 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
                 LineKind::TableDelimiter => "TableDelimiter".to_string(),
                 LineKind::TableRow {
                     is_header,
-                    cells,
-                    alignments,
+                    ref body,
                     ..
                 } => {
+                    let TableRowBody {
+                        cells, alignments, ..
+                    } = &**body;
                     let texts = cells
                         .iter()
                         .map(|range| markdown[range.clone()].to_string())
@@ -5317,7 +5442,8 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
                 in_table = true;
                 rows = 0;
             }
-            if let LineKind::TableRow { alignments, .. } = &line.kind {
+            if let LineKind::TableRow { ref body, .. } = &line.kind {
+                let TableRowBody { alignments, .. } = &**body;
                 cols = alignments.len();
                 rows += 1;
                 align = alignments

@@ -21,7 +21,7 @@ pub struct MenuItem {
     pub shortcut: Option<&'static str>,
     pub kind: MenuItemKind,
     pub disabled: bool,
-    pub hint: Option<&'static str>,
+    pub hint: Option<SharedString>,
     pub action: Arc<dyn Fn(&mut Window, &mut App) + 'static>,
 }
 
@@ -33,7 +33,7 @@ impl Clone for MenuItem {
             shortcut: self.shortcut,
             kind: self.kind.clone(),
             disabled: self.disabled,
-            hint: self.hint,
+            hint: self.hint.clone(),
             action: self.action.clone(),
         }
     }
@@ -68,7 +68,7 @@ impl MenuItem {
             shortcut,
             kind: MenuItemKind::Action,
             disabled: true,
-            hint,
+            hint: hint.map(SharedString::new_static),
             action: Arc::new(|_, _| {}),
         }
     }
@@ -193,7 +193,7 @@ pub fn content_width(items: &[MenuItem]) -> Pixels {
         .filter(|it| !matches!(it.kind, MenuItemKind::Divider | MenuItemKind::Heading))
         .map(|it| {
             let label = it.label.chars().count() as f32 * 7.5;
-            let hint = it.hint.map_or(0.0, |h| h.chars().count() as f32 * 6.5 + 18.0);
+            let hint = it.hint.as_ref().map_or(0.0, |h| h.chars().count() as f32 * 6.5 + 18.0);
             let shortcut = it.shortcut.map_or(0.0, |s| s.chars().count() as f32 * 7.0);
             let chevron = if matches!(it.kind, MenuItemKind::Submenu(_)) { 20.0 } else { 0.0 };
             let gaps = if hint > 0.0 && shortcut > 0.0 { 8.0 } else { 0.0 };
