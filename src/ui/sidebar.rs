@@ -977,20 +977,6 @@ where
                                                 }
                                             },
                                         )
-                                        // Active 3px indicator bar, right before
-                                        // the note icon at the row's inset edge.
-                                        .when(is_active, |s| {
-                                            s.child(
-                                                div()
-                                                    .absolute()
-                                                    .left_0()
-                                                    .top(px(4.0))
-                                                    .bottom(px(4.0))
-                                                    .w(px(3.0))
-                                                    .rounded_r(px(2.0))
-                                                    .bg(theme.text_hi),
-                                            )
-                                        })
                                         .child(
                                             div()
                                                 .flex()
