@@ -4,6 +4,10 @@ use std::path::PathBuf;
 use crate::theme::ThemeMode;
 use super::document::ViewMode;
 
+fn default_show_code_files() -> bool {
+    true
+}
+
 fn default_word_wrap() -> bool {
     true
 }
@@ -37,6 +41,9 @@ pub struct EditorSettings {
     pub show_sidebar: bool,
     #[serde(default)]
     pub zen_mode: bool,
+    /// List code files (`.rs`, `.py`, `Makefile`, ...) in the sidebar.
+    #[serde(default = "default_show_code_files")]
+    pub show_code_files: bool,
     #[serde(default = "default_word_wrap")]
     pub word_wrap: bool,
     #[serde(default = "default_base_font_size")]
@@ -66,6 +73,7 @@ impl Default for EditorSettings {
             show_line_numbers: false,
             show_sidebar: true,
             zen_mode: false,
+            show_code_files: true,
             word_wrap: true,
             base_font_size: 17.0,
             content_alignment: ContentAlignment::Centered,

@@ -35,6 +35,10 @@ pub const CODE_EXTENSIONS: &[&str] = &[
     "sql", "ini", "conf", "mk", "vue", "svelte",
 ];
 
+/// Extensions (lowercase, no dot) of the text and Markdown files the Open dialog lists
+/// besides code. `.pdf` is added by the dialog.
+pub const TEXT_EXTENSIONS: &[&str] = &["md", "markdown", "txt", "text", "log"];
+
 /// Whole file names (lowercase) that open as code although they have no extension.
 const CODE_FILE_NAMES: &[&str] = &[
     "dockerfile",

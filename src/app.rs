@@ -194,7 +194,7 @@ impl LiteMarkApp {
         let settings = EditorSettings::load();
         let notes_dir = get_or_create_notes_dir();
         seed_welcome_note(&notes_dir);
-        let workspace = scan_workspace_dir(&notes_dir);
+        let workspace = scan_workspace_dir(&notes_dir, settings.show_code_files);
 
         let mut tab_ids = TabIds::new();
         let first_id = tab_ids.alloc();
@@ -1119,6 +1119,12 @@ impl LiteMarkApp {
 
     pub fn handle_insert_link(&mut self, cx: &mut App) {
         self.handle_format_cmd("link", cx);
+    }
+
+    pub fn handle_toggle_show_code_files(&mut self) {
+        self.settings.show_code_files = !self.settings.show_code_files;
+        self.settings.save();
+        self.rescan_workspace();
     }
 
     pub fn handle_toggle_sidebar(&mut self) {
@@ -2109,7 +2115,7 @@ impl LiteMarkApp {
             .iter()
             .map(|f| (f.path.clone(), f.is_open))
             .collect();
-        let mut new_workspace = scan_workspace_dir(&self.workspace.folder_path);
+        let mut new_workspace = scan_workspace_dir(&self.workspace.folder_path, self.settings.show_code_files);
         for folder in &mut new_workspace.folders {
             if let Some(&open) = open_map.get(&folder.path) {
                 folder.is_open = open;
@@ -2520,7 +2526,7 @@ impl LiteMarkApp {
             }
         }
         let left = self.workspace.folder_path.clone();
-        self.workspace = scan_workspace_dir(&new_dir);
+        self.workspace = scan_workspace_dir(&new_dir, self.settings.show_code_files);
         self.settings.remember_folders(&left, &new_dir);
         self.settings.save();
         self.workspace_menu_open = false;
@@ -4639,6 +4645,16 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_show_code_files = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_toggle_show_code_files();
+                    cx.notify();
+                });
+            }
+        };
+
         let on_toggle_sidebar = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -5585,6 +5601,7 @@ impl Render for LiteMarkApp {
                         self.settings.show_line_numbers,
                         self.settings.word_wrap,
                         self.show_sidebar,
+                        self.settings.show_code_files,
                         self.settings.content_alignment,
                         on_set_view_mode.clone(),
                         on_toggle_line_numbers.clone(),
@@ -5594,6 +5611,7 @@ impl Render for LiteMarkApp {
                         on_zoom_out.clone(),
                         on_reset_zoom.clone(),
                         on_toggle_sidebar.clone(),
+                        on_toggle_show_code_files.clone(),
                         on_toggle_zen.clone(),
                     ),
                 ),
@@ -5648,6 +5666,7 @@ impl Render for LiteMarkApp {
                         self.settings.show_line_numbers,
                         self.settings.word_wrap,
                         self.show_sidebar,
+                        self.settings.show_code_files,
                         self.settings.content_alignment,
                         on_set_view_mode.clone(),
                         on_toggle_line_numbers.clone(),
@@ -5657,6 +5676,7 @@ impl Render for LiteMarkApp {
                         on_zoom_out.clone(),
                         on_reset_zoom.clone(),
                         on_toggle_sidebar.clone(),
+                        on_toggle_show_code_files.clone(),
                         on_toggle_zen.clone(),
                     );
                     let items = vec![
