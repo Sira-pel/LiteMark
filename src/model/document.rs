@@ -28,7 +28,7 @@ pub enum FileType {
 }
 
 /// Extensions (lowercase, no dot) that open as code.
-const CODE_EXTENSIONS: &[&str] = &[
+pub const CODE_EXTENSIONS: &[&str] = &[
     "rs", "c", "cpp", "cc", "cxx", "h", "hpp", "go", "java", "kt", "swift", "cs", "zig", "py",
     "js", "ts", "jsx", "tsx", "mjs", "cjs", "sh", "bash", "zsh", "fish", "rb", "php", "lua", "pl",
     "r", "json", "jsonc", "toml", "yaml", "yml", "xml", "html", "css", "scss", "sass", "less",
@@ -12166,18 +12166,6 @@ mod clear_formatting_tests {
         assert_ne!(cleared, S);
         assert!(d.undo());
         assert_eq!(d.content, S);
-    }
-
-    #[test]
-    #[ignore = "timing probe, run with --ignored --nocapture"]
-    fn probe_parse_time_for_big_code_files() {
-        let big: String = "    let value = compute(a, b, c); // note\n".repeat(130_000);
-        let one_line: String = "var a=1,b=2;".repeat(90_000);
-        for (label, text) in [("5MB multi-line", big), ("1MB one line", one_line)] {
-            let t = std::time::Instant::now();
-            let n = parse_document(&text).lines.len();
-            eprintln!("{label}: {} bytes, {n} lines, parse {:?}", text.len(), t.elapsed());
-        }
     }
 
     #[test]

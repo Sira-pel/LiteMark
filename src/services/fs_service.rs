@@ -1,5 +1,5 @@
 use crate::model::{
-    file_dialog_block_reason, looks_binary, unique_name, FileType, PortalProbe, WorkspaceDirectory,
+    file_dialog_block_reason, looks_binary, CODE_EXTENSIONS, unique_name, FileType, PortalProbe, WorkspaceDirectory,
     WorkspaceFile, WorkspaceFolder,
 };
 #[cfg(target_os = "linux")]
@@ -388,7 +388,12 @@ pub fn safe_rename(old_path: &Path, new_name: &str) -> io::Result<PathBuf> {
     // "n.md" renamed to "v1.2 notes" stays "v1.2 notes.md".
     let keeps_note_ext = |name: &str| {
         let lower = name.to_lowercase();
-        lower.ends_with(".txt") || FileType::from_filename(name) != FileType::PlainText
+        // A note must not turn into a read-only PDF tab by being renamed.
+        lower.ends_with(".txt")
+            || matches!(
+                FileType::from_filename(name),
+                FileType::Markdown | FileType::Code
+            )
     };
     let clean_name = if old_path.is_file() && !keeps_note_ext(&clean_name) {
         if let Some(ext) = old_path.extension().and_then(|e| e.to_str()) {
@@ -690,12 +695,18 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
 }
 
 pub fn pick_open_file() -> Option<PathBuf> {
+    let all_supported: Vec<&str> = ["md", "markdown", "txt", "text", "log", "pdf"]
+        .into_iter()
+        .chain(CODE_EXTENSIONS.iter().copied())
+        .collect();
     rfd::FileDialog::new()
-        .set_title("Open Text, Markdown, or PDF File")
+        .set_title("Open Text, Markdown, Code, or PDF File")
+        .add_filter("All Supported", &all_supported)
         .add_filter(
             "Text & Markdown Files",
             &["md", "markdown", "txt", "text", "log", "pdf"],
         )
+        .add_filter("Code Files", CODE_EXTENSIONS)
         .pick_file()
 }
 
@@ -1153,6 +1164,8 @@ mod tests {
         assert_eq!(as_rs.file_name().unwrap(), "x.rs");
         let plain = safe_rename(&as_rs, "notes").unwrap();
         assert_eq!(plain.file_name().unwrap(), "notes.rs");
+        let pdf_name = safe_rename(&plain, "scan.pdf").unwrap();
+        assert_eq!(pdf_name.file_name().unwrap(), "scan.pdf.rs");
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -6567,6 +6567,7 @@ impl Render for LiteMarkApp {
                                     id: t.id.clone(),
                                     title: t.title.clone(),
                                     is_modified: t.is_modified,
+                                    is_code: t.file_type.is_code(),
                                 })
                                 .collect(),
                             active_tab_id: self.active_tab_id.clone(),

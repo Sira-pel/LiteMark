@@ -12,6 +12,7 @@ pub struct HeaderTab {
     pub id: String,
     pub title: String,
     pub is_modified: bool,
+    pub is_code: bool,
 }
 
 pub struct HeaderBarProps<
@@ -247,7 +248,7 @@ where
                                     div()
                                         .flex_shrink_0()
                                         .child(render_icon(
-                                            if tab.file_type.is_code() {
+                                            if tab.is_code {
                                                 "file-code"
                                             } else {
                                                 "file-text"
