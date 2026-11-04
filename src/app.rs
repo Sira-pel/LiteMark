@@ -1231,15 +1231,19 @@ impl LiteMarkApp {
             .unwrap_or_default();
         match atomic_save(&path, &content) {
             Ok(()) => {
+                let mut type_changed = false;
                 if let Some(tab) = self.active_tab_mut() {
                     tab.file_path = Some(path.clone());
                     if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
                         tab.title = name.to_string();
                     }
-                    tab.set_file_type(FileType::from_filename(&tab.title));
+                    type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
                     tab.is_modified = false;
                     let title = tab.title.clone();
                     self.show_toast(format!("Saved {title}"), cx);
+                }
+                if type_changed {
+                    self.refresh_find();
                 }
                 self.rescan_workspace();
             }
@@ -1694,8 +1698,11 @@ impl LiteMarkApp {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
             tab.file_path = Some(saved_path);
             tab.title = saved_title;
-            tab.set_file_type(FileType::from_filename(&tab.title));
+            let type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
             tab.is_modified = false;
+            if type_changed {
+                self.refresh_find();
+            }
         }
         self.rescan_workspace();
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
@@ -2550,6 +2557,7 @@ impl LiteMarkApp {
     }
 
     fn retarget_open_tabs(&mut self, old: &Path, new_path: &Path) {
+        let mut type_changed = false;
         for tab in &mut self.tabs {
             let Some(path) = tab.file_path.clone() else {
                 continue;
@@ -2558,11 +2566,14 @@ impl LiteMarkApp {
                 tab.file_path = Some(new_path.to_path_buf());
                 if let Some(name) = new_path.file_name().and_then(|name| name.to_str()) {
                     tab.title = name.to_string();
-                    tab.set_file_type(FileType::from_filename(&tab.title));
+                    type_changed |= tab.set_file_type(FileType::from_filename(&tab.title));
                 }
             } else if let Ok(rest) = path.strip_prefix(old) {
                 tab.file_path = Some(new_path.join(rest));
             }
+        }
+        if type_changed {
+            self.refresh_find();
         }
     }
 

@@ -15,7 +15,7 @@ use super::text_ops::{
     find_matches, find_next, find_prev, format_replacement, home_offset, line_col, line_end,
     line_ending_len, line_ending_len_before, line_start_flags, move_vertical_collapsed,
     next_grapheme, previous_grapheme, replace_all, snap_off_ending_interior, Caret, DiffEdit,
-    HistoryRestore, SelectionSnap, UndoHistory,
+    HistoryRestore, SelectionSnap, UndoHistory, TAB_DISPLAY_COLUMNS,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1352,7 +1352,7 @@ impl DocumentTab {
                     let mut col = 0;
                     for c in self.content[line_start..range.start].chars() {
                         col = if c == '\t' {
-                            (col / width + 1) * width
+                            (col / TAB_DISPLAY_COLUMNS + 1) * TAB_DISPLAY_COLUMNS
                         } else {
                             col + 1
                         };
@@ -3601,7 +3601,7 @@ impl DocumentTab {
     /// that stopped inside a hidden closing-hash run moves to the visible
     /// end. A selection keeps both endpoints.
     fn snap_caret_to_visible_line_end(&mut self) {
-        if !self.caret.range.is_empty() {
+        if !self.caret.range.is_empty() || !self.file_type.supports_markdown_features() {
             return;
         }
         let offset = self.cursor_offset();
@@ -12572,6 +12572,26 @@ mod clear_formatting_tests {
         assert_eq!((doc.cursor_line, doc.cursor_col), (2, 3));
         assert!(!doc.active_formats.h1);
         assert!(doc.cached_parse.is_none());
+    }
+
+    #[test]
+    fn undo_in_a_code_tab_does_not_parse_markdown() {
+        let mut doc = code_doc("a.py", "x\n");
+        doc.caret.move_to(1);
+        doc.edit(1..1, "y");
+        doc.release_parse_cache();
+        assert!(doc.undo());
+        assert!(doc.cached_parse.is_none());
+    }
+
+    #[test]
+    fn caret_tab_after_a_real_tab_uses_display_columns() {
+        let mut doc = code_doc("a.c", "\tx");
+        doc.indent_style = IndentStyle::Spaces(3);
+        doc.caret.move_to(2);
+        doc.indent();
+        // The tab shows as 4 columns and x as 1, so one space reaches the stop at 6.
+        assert_eq!(doc.content, "\tx ");
     }
 
     #[test]
