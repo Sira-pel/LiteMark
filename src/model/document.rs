@@ -130,7 +130,7 @@ pub fn indent_style(name: &str, file_type: FileType) -> IndentStyle {
     {
         return IndentStyle::Tabs;
     }
-    if file_type.is_code() {
+    if file_type.is_code() || file_type == FileType::PlainText {
         IndentStyle::Spaces(4)
     } else {
         IndentStyle::Spaces(2)
@@ -399,6 +399,7 @@ impl DocumentTab {
         }
         self.file_type = file_type;
         self.cached_parse = None;
+        self.pending_formats = ActiveFormats::default();
         true
     }
 
@@ -634,7 +635,7 @@ impl DocumentTab {
     /// Ctrl+Enter: add an empty row below the current row and put the caret in
     /// the same column. Returns false outside a table.
     pub fn table_insert_row_below(&mut self) -> bool {
-        if self.is_read_only() {
+        if self.is_read_only() || !self.file_type.supports_markdown_features() {
             return false;
         }
         let cursor = self.selection_range().end;
@@ -3321,7 +3322,7 @@ impl DocumentTab {
     /// current when this was called, which can differ from `pos` when a
     /// hover control targets another cell.
     pub fn apply_table_op_at(&mut self, pos: usize, op: TableOp) -> bool {
-        if self.is_read_only() {
+        if self.is_read_only() || !self.file_type.supports_markdown_features() {
             return false;
         }
         let cursor = self.cursor_offset();
@@ -3378,7 +3379,7 @@ impl DocumentTab {
     }
 
     pub fn insert_table_with_size(&mut self, cols: usize, rows: usize) {
-        if self.is_read_only() {
+        if self.is_read_only() || !self.file_type.supports_markdown_features() {
             return;
         }
         let cols = cols.clamp(1, 10);
@@ -3499,6 +3500,9 @@ impl DocumentTab {
     }
 
     pub fn tab_table_cell(&mut self, backwards: bool) -> bool {
+        if !self.file_type.supports_markdown_features() {
+            return false;
+        }
         let cursor = self.cursor_offset();
         let parsed = self.parsed();
         let mut all_cells: Vec<Range<usize>> = Vec::new();
@@ -3992,6 +3996,14 @@ impl DocumentTab {
 
     pub fn refresh_cursor(&mut self) {
         let cursor = self.cursor_offset();
+        if !self.file_type.supports_markdown_features() {
+            // Raw tabs have no Markdown structure: skip the parse.
+            let (line, col) = line_col(&self.content, cursor);
+            self.cursor_line = line;
+            self.cursor_col = col;
+            self.active_formats = ActiveFormats::default();
+            return;
+        }
         let parsed = self.parsed();
         let (line, col) = parsed_line_col(&self.content, &parsed, cursor);
         self.cursor_line = line;
@@ -12541,6 +12553,41 @@ mod clear_formatting_tests {
     }
 
     #[test]
+    fn table_commands_do_nothing_in_code_tabs() {
+        let text = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let mut doc = code_doc("a.rs", text);
+        doc.caret.move_to(2);
+        assert!(!doc.tab_table_cell(false));
+        assert!(!doc.table_insert_row_below());
+        assert!(!doc.apply_table_op_at(2, TableOp::InsertColRight));
+        doc.insert_table_with_size(2, 2);
+        assert_eq!(doc.content, text);
+    }
+
+    #[test]
+    fn code_tabs_track_the_cursor_without_markdown_state() {
+        let mut doc = code_doc("a.py", "x = 1\n# hi\n");
+        doc.caret.move_to(8);
+        doc.refresh_cursor();
+        assert_eq!((doc.cursor_line, doc.cursor_col), (2, 3));
+        assert!(!doc.active_formats.h1);
+        assert!(doc.cached_parse.is_none());
+    }
+
+    #[test]
+    fn plain_text_indents_four_spaces() {
+        assert_eq!(code_doc("n.txt", "").indent_style, IndentStyle::Spaces(4));
+    }
+
+    #[test]
+    fn set_file_type_clears_pending_formats() {
+        let mut doc = code_doc("a.md", "");
+        doc.pending_formats.bold = true;
+        assert!(doc.set_file_type(FileType::Code));
+        assert!(!doc.pending_formats.bold);
+    }
+
+    #[test]
     fn crlf_content_round_trips_unchanged() {
         let text = "fn main() {\r\n    a();\r\n}\r\n";
         let doc = code_doc("a.rs", text);
@@ -12561,7 +12608,7 @@ mod clear_formatting_tests {
         );
         assert_eq!(
             code_doc("notes.txt", "").indent_style,
-            IndentStyle::Spaces(2)
+            IndentStyle::Spaces(4)
         );
     }
 

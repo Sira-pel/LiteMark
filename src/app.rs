@@ -1328,6 +1328,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_set_content_alignment(&mut self, alignment: ContentAlignment) {
+        if self.view_locked_raw() {
+            return;
+        }
         self.settings.content_alignment = alignment;
         self.settings.save();
     }
