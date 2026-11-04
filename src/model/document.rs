@@ -44,6 +44,7 @@ const CODE_FILE_NAMES: &[&str] = &[
     "dockerfile",
     "makefile",
     "gnumakefile",
+    ".env",
     ".gitignore",
 ];
 
@@ -12388,7 +12389,7 @@ mod clear_formatting_tests {
         for name in ["main.rs", "a.PY", "data.json", "Cargo.toml", "x.tsx", "build.mk"] {
             assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
         }
-        for name in ["Makefile", "dockerfile", "GNUmakefile", ".gitignore"] {
+        for name in ["Makefile", "dockerfile", "GNUmakefile", ".env", ".gitignore"] {
             assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
         }
         assert_eq!(FileType::from_filename("notes.md"), FileType::Markdown);

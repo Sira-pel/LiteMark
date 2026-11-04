@@ -606,8 +606,11 @@ pub fn safe_delete(path: &Path, is_dir: bool) -> io::Result<()> {
     }
 }
 
-/// List the notes folder. Hidden entries are never listed; code files only when
-/// `show_code_files` is set.
+/// Folders the scan never descends into: VCS metadata and build output.
+const SKIPPED_ENTRIES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store", "node_modules", "target"];
+
+/// List the notes folder. Dotfiles are listed; only `SKIPPED_ENTRIES` are left out.
+/// Code files are listed only when `show_code_files` is set.
 pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirectory {
     let folder_name = if let Some(name) = dir.file_name().and_then(|f| f.to_str()) {
         format!("📁 {}", name)
@@ -633,10 +636,7 @@ pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirecto
                 let path = entry.path();
                 let file_name = entry.file_name().to_string_lossy().to_string();
 
-                if file_name.starts_with('.')
-                    || file_name == "node_modules"
-                    || file_name == "target"
-                {
+                if SKIPPED_ENTRIES.contains(&file_name.as_str()) {
                     continue;
                 }
 
@@ -1174,11 +1174,14 @@ mod tests {
     }
 
     #[test]
-    fn scan_hides_dotfiles_and_code_files_follow_the_setting() {
+    fn scan_lists_dotfiles_and_code_files_follow_the_setting() {
         let temp_dir = std::env::temp_dir().join(format!("litemark-scan-code-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).unwrap();
-        for name in ["Note.md", "plain.txt", "main.rs", "Makefile", ".env", ".gitignore", ".hidden.rs"] {
+        fs::create_dir_all(temp_dir.join(".git")).unwrap();
+        fs::create_dir_all(temp_dir.join("node_modules")).unwrap();
+        fs::write(temp_dir.join(".git").join("config.txt"), "x").unwrap();
+        fs::write(temp_dir.join("node_modules").join("a.js"), "x").unwrap();
+        for name in ["Note.md", "plain.txt", "main.rs", "Makefile", ".env", ".gitignore", ".bashrc"] {
             fs::write(temp_dir.join(name), "x").unwrap();
         }
 
@@ -1189,11 +1192,14 @@ mod tests {
                 .map(|f| f.name)
                 .collect()
         };
-        let with_code = names(true);
-        assert_eq!(with_code, ["Makefile", "Note.md", "main.rs", "plain.txt"]);
-        assert_eq!(names(false), ["Note.md", "plain.txt"]);
-        // `.env` is no longer treated as a code file even when opened directly.
-        assert_eq!(FileType::from_filename(".env"), FileType::PlainText);
+        assert_eq!(
+            names(true),
+            [".bashrc", ".env", ".gitignore", "Makefile", "Note.md", "main.rs", "plain.txt"]
+        );
+        // `.bashrc` is plain text, so it stays when code files are off.
+        assert_eq!(names(false), [".bashrc", "Note.md", "plain.txt"]);
+        assert!(scan_workspace_dir(&temp_dir, true).folders.is_empty());
+        assert_eq!(FileType::from_filename(".env"), FileType::Code);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
