@@ -15,6 +15,9 @@ pub const UNDO_BYTE_BUDGET: usize = 256 * 1024;
 /// Typing that continues the same word inside this window is one undo step.
 pub const TYPING_BURST_MS: u64 = 1_000;
 
+/// Columns between tab stops when a code or plain-text tab shows a `\t`.
+pub const TAB_DISPLAY_COLUMNS: usize = 4;
+
 /// Hide zoom and save toasts after this long.
 pub const TRANSIENT_TTL_MS: u64 = 1_500;
 
@@ -954,16 +957,34 @@ pub fn range_from_utf16(content: &str, range: &Range<usize>) -> Range<usize> {
 
 /// Visual rows as `(byte_start, byte_end)` exclusive of the newline.
 /// `wrap_cols == usize::MAX` keeps one row per logical line.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn visual_rows(content: &str, wrap_cols: usize) -> Vec<(usize, usize)> {
+    visual_rows_tabbed(content, wrap_cols, 0)
+}
+
+/// Like `visual_rows`, but a `\t` counts as the columns up to the next
+/// `tab_width` stop (measured from the row start). `tab_width` 0 counts a tab as one column.
+pub fn visual_rows_tabbed(
+    content: &str,
+    wrap_cols: usize,
+    tab_width: usize,
+) -> Vec<(usize, usize)> {
     let mut rows = Vec::new();
     let mut line_start = 0usize;
     for (index, byte) in content.bytes().enumerate() {
         if byte == b'\n' {
-            push_wrapped(&mut rows, content, line_start, index, wrap_cols);
+            push_wrapped(&mut rows, content, line_start, index, wrap_cols, tab_width);
             line_start = index + 1;
         }
     }
-    push_wrapped(&mut rows, content, line_start, content.len(), wrap_cols);
+    push_wrapped(
+        &mut rows,
+        content,
+        line_start,
+        content.len(),
+        wrap_cols,
+        tab_width,
+    );
     if rows.is_empty() {
         rows.push((0, 0));
     }
@@ -972,19 +993,23 @@ pub fn visual_rows(content: &str, wrap_cols: usize) -> Vec<(usize, usize)> {
 
 /// Number of rows `visual_rows` would return, without building the list for
 /// content that fits on one row (the common case).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn visual_row_count(content: &str, wrap_cols: usize) -> usize {
+    visual_row_count_tabbed(content, wrap_cols, 0)
+}
+
+pub fn visual_row_count_tabbed(content: &str, wrap_cols: usize, tab_width: usize) -> usize {
     if wrap_cols == 0 || wrap_cols == usize::MAX {
         return content.bytes().filter(|&b| b == b'\n').count() + 1;
     }
     let mut count = 0usize;
     let mut line_start = 0usize;
     let mut tally = |start: usize, end: usize| {
-        // A line of at most `wrap_cols` bytes has at most that many chars.
-        count += if end - start <= wrap_cols {
+        count += if fits_one_row(content, start, end, wrap_cols, tab_width) {
             1
         } else {
             let mut rows = Vec::new();
-            push_wrapped(&mut rows, content, start, end, wrap_cols);
+            push_wrapped(&mut rows, content, start, end, wrap_cols, tab_width);
             rows.len()
         };
     };
@@ -998,14 +1023,25 @@ pub fn visual_row_count(content: &str, wrap_cols: usize) -> usize {
     count
 }
 
+/// A line of at most `wrap_cols` bytes has at most that many chars, so it fits
+/// unless a tab widens it.
+fn fits_one_row(content: &str, start: usize, end: usize, wrap_cols: usize, tab_width: usize) -> bool {
+    end - start <= wrap_cols && (tab_width == 0 || !content[start..end].contains('\t'))
+}
+
 fn push_wrapped(
     rows: &mut Vec<(usize, usize)>,
     content: &str,
     start: usize,
     end: usize,
     wrap_cols: usize,
+    tab_width: usize,
 ) {
-    if wrap_cols == 0 || wrap_cols == usize::MAX || start >= end {
+    if wrap_cols == 0
+        || wrap_cols == usize::MAX
+        || start >= end
+        || fits_one_row(content, start, end, wrap_cols, tab_width)
+    {
         rows.push((start, end));
         return;
     }
@@ -1013,14 +1049,25 @@ fn push_wrapped(
         .char_indices()
         .map(|(index, ch)| (start + index, ch))
         .collect();
-    if chars.len() <= wrap_cols {
-        rows.push((start, end));
-        return;
-    }
     let mut index = 0usize;
     while index < chars.len() {
         let row_start = chars[index].0;
-        let max_next = (index + wrap_cols).min(chars.len());
+        // The furthest char that still fits in `wrap_cols` columns; a row
+        // always takes at least one char.
+        let mut col = 0usize;
+        let mut max_next = index;
+        while max_next < chars.len() {
+            let width = if tab_width > 0 && chars[max_next].1 == '\t' {
+                tab_width - col % tab_width
+            } else {
+                1
+            };
+            if col + width > wrap_cols && max_next > index {
+                break;
+            }
+            col += width;
+            max_next += 1;
+        }
         if max_next == chars.len() {
             rows.push((row_start, end));
             break;
@@ -1448,5 +1495,56 @@ mod tests {
         assert_eq!(word_left(text, 7), 5);
         assert_eq!(word_left(text, 5), 0);
         assert_eq!(word_left(text, 0), 0);
+    }
+
+    // --- Tab display ---
+
+    #[test]
+    fn tabbed_rows_wrap_by_displayed_columns() {
+        // A tab is 4 columns and a break opportunity, so it ends the first row.
+        let rows = visual_rows_tabbed("\tab\tcd", 6, 4);
+        assert_eq!(rows, vec![(0, 1), (1, 6)]);
+        // Without tab expansion the same line fits in one row.
+        assert_eq!(visual_rows("\tab\tcd", 6), vec![(0, 6)]);
+    }
+
+    #[test]
+    fn tabbed_row_count_matches_tabbed_rows() {
+        let samples = ["", "\t", "\ta\tb\n\t\t\t\t", "ab\tcd ef\tgh ij", "x\n\ty z"];
+        for text in samples {
+            for cols in [0, 1, 3, 5, 8, 40, usize::MAX] {
+                for tab in [0, 2, 4] {
+                    assert_eq!(
+                        visual_row_count_tabbed(text, cols, tab),
+                        visual_rows_tabbed(text, cols, tab).len(),
+                        "{text:?} cols {cols} tab {tab}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tabbed_rows_stay_within_budget_on_large_files() {
+        use std::time::Instant;
+        // 5 MB of short, tab-indented lines and a 1 MB single line.
+        let lines = "\tlet value = compute(arg);\n".repeat(5 * 1024 * 1024 / 27);
+        let one_line = "var a=1;\t".repeat(100_000);
+        for wrap in [usize::MAX, 80] {
+            let started = Instant::now();
+            let rows = visual_rows_tabbed(&lines, wrap, 4);
+            let count = visual_row_count_tabbed(&lines, wrap, 4);
+            assert_eq!(rows.len(), count);
+            let started_line = Instant::now();
+            let rows = visual_rows_tabbed(&one_line, wrap, 4);
+            assert_eq!(rows.len(), visual_row_count_tabbed(&one_line, wrap, 4));
+            // Generous: even an unoptimised test build stays far under a visible freeze.
+            assert!(started.elapsed().as_millis() < 3000, "5 MB took {:?}", started.elapsed());
+            assert!(
+                started_line.elapsed().as_millis() < 2000,
+                "1 MB line took {:?}",
+                started_line.elapsed()
+            );
+        }
     }
 }

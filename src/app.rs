@@ -5,6 +5,7 @@ use crate::editor_input::{
 use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
 use crate::model::table_ops::TableOp;
 use crate::model::text_ops::{
+    TAB_DISPLAY_COLUMNS,
     home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16,
 };
 use crate::model::clipboard::{clipboard_item, paste_text};
@@ -4097,6 +4098,7 @@ impl LiteMarkApp {
             active_find: self.find_index,
             show_line_numbers,
             word_wrap: self.settings.word_wrap,
+            tab_width: if markdown_tab { 0 } else { TAB_DISPLAY_COLUMNS },
             centered: markdown_tab
                 && self.settings.content_alignment == ContentAlignment::Centered,
             max_measure: Some(sz::MEASURE_FALLBACK * zoom),

@@ -15,7 +15,7 @@ use crate::markdown::{
     TableRowBody,
 };
 use crate::model::document::visible_line_end;
-use crate::model::text_ops::{visual_row_count, visual_rows, Caret};
+use crate::model::text_ops::{visual_row_count_tabbed, visual_rows_tabbed, Caret};
 use crate::model::ViewMode;
 use crate::theme::sz;
 
@@ -839,6 +839,8 @@ pub struct EditorElement<V: 'static> {
     pub active_find: Option<usize>,
     pub show_line_numbers: bool,
     pub word_wrap: bool,
+    /// Columns per tab stop in raw rows; 0 shows tabs as the font draws them.
+    pub tab_width: usize,
     pub centered: bool,
     pub max_measure: Option<Pixels>,
     pub font_size: Pixels,
@@ -983,13 +985,13 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let wrapped = if line.display_text.is_empty() {
                     1
                 } else {
-                    visual_row_count(&line.display_text, wrap_cols).max(1)
+                    visual_row_count_tabbed(&line.display_text, wrap_cols, 0).max(1)
                 };
                 h += top_gap + line_h * wrapped as f32;
             }
             h.max(paint_borrow.total_height)
         } else {
-            let rows = visual_row_count(&self.content, wrap_cols);
+            let rows = visual_row_count_tabbed(&self.content, wrap_cols, self.tab_width);
             let line_height = self.font_size * 1.65;
             line_height * rows as f32 + px(32.0)
         };
@@ -1066,7 +1068,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let unshaped = Rc::new(ShapedLine::default());
 
         if self.view_mode == ViewMode::Raw {
-            let rows_src = visual_rows(&self.content, wrap_cols);
+            let rows_src = visual_rows_tabbed(&self.content, wrap_cols, self.tab_width);
             let anchor_rows: Vec<usize> = anchors
                 .iter()
                 .map(|&offset| {
@@ -1114,16 +1116,31 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     });
                     continue;
                 }
-                let slice = if start == end {
-                    SharedString::from(" ")
-                } else {
-                    SharedString::from(self.content[start..end].to_string())
+                let row_text = &self.content[start..end];
+                let tabbed = RowOffsetMap::expand_tabs(row_text, start, self.tab_width);
+                let (slice, offset_map) = match tabbed {
+                    Some((display, map)) => (SharedString::from(display), map),
+                    None if start == end => {
+                        (SharedString::from(" "), RowOffsetMap::identity(start, end))
+                    }
+                    None => (
+                        SharedString::from(row_text.to_string()),
+                        RowOffsetMap::identity(start, end),
+                    ),
                 };
                 let display_len = if start == end { 0 } else { slice.len() };
+                let marked = self.marked.clone().map(|m| {
+                    if m.end <= start || m.start >= end {
+                        return m;
+                    }
+                    let lo = offset_map.source_to_display(m.start.clamp(start, end));
+                    let hi = offset_map.source_to_display(m.end.clamp(start, end));
+                    start + lo..start + hi
+                });
                 let runs = raw_line_runs(
                     display_len.max(slice.len()),
                     start,
-                    self.marked.clone(),
+                    marked,
                     base_font.clone(),
                     self.text_color,
                 );
@@ -1131,7 +1148,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     window
                         .text_system()
                         .shape_line(slice, self.font_size, &runs, None);
-                let offset_map = RowOffsetMap::identity(start, end);
 
                 paint_ranges_mapped(
                     &mut quads,
@@ -1170,7 +1186,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     self.selection.start >= start && self.selection.start < end
                 };
                 if focused && self.selection.is_empty() && caret_matches {
-                    let local = (self.selection.start - start).min(display_len);
+                    let local = offset_map
+                        .source_to_display(self.selection.start.clamp(start, end))
+                        .min(display_len);
                     let x = if start == end {
                         px(0.0)
                     } else {
@@ -1793,7 +1811,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 usize::MAX
             };
 
-            let sub_rows = visual_rows(&parsed_line.display_text, row_wrap_cols);
+            let sub_rows = visual_rows_tabbed(&parsed_line.display_text, row_wrap_cols, 0);
 
             for (sub_idx, (d_start, d_end)) in sub_rows.iter().copied().enumerate() {
                 let is_last_sub = sub_idx + 1 == sub_rows.len();

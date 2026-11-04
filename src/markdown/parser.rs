@@ -1175,6 +1175,59 @@ impl RowOffsetMap {
         )
     }
 
+    /// Show each `\t` of a raw row as spaces up to the next `tab_width` column
+    /// (counted from the row start). Returns `None` when the row has no tab.
+    /// The text keeps its real tabs; only the shaped string and this map change.
+    pub fn expand_tabs(text: &str, row_start: usize, tab_width: usize) -> Option<(String, Self)> {
+        if tab_width == 0 || !text.contains('\t') {
+            return None;
+        }
+        let mut display = String::with_capacity(text.len() + 3 * tab_width);
+        let mut segments = Vec::new();
+        let mut col = 0usize;
+        let mut run_src = 0usize;
+        let mut run_disp = 0usize;
+        for (i, ch) in text.char_indices() {
+            if ch != '\t' {
+                display.push(ch);
+                col += 1;
+                continue;
+            }
+            if i > run_src {
+                segments.push((
+                    run_disp..display.len(),
+                    row_start + run_src..row_start + i,
+                ));
+            }
+            let width = tab_width - col % tab_width;
+            let disp_start = display.len();
+            display.extend(std::iter::repeat_n(' ', width));
+            segments.push((
+                disp_start..display.len(),
+                row_start + i..row_start + i + 1,
+            ));
+            col += width;
+            run_src = i + 1;
+            run_disp = display.len();
+        }
+        if text.len() > run_src {
+            segments.push((
+                run_disp..display.len(),
+                row_start + run_src..row_start + text.len(),
+            ));
+        }
+        let end = row_start + text.len();
+        Some((
+            display,
+            Self {
+                segments,
+                line_start: row_start,
+                line_end: end,
+                visible_start: row_start,
+            },
+        ))
+    }
+
     /// Map a byte offset in the source Markdown to the byte offset in `ShapedLine`.
     pub fn source_to_display(&self, src: usize) -> usize {
         if self.segments.is_empty() {
@@ -1185,6 +1238,11 @@ impl RowOffsetMap {
                 return disp.start;
             }
             if src >= s.start && src <= s.end {
+                if disp.len() != s.len() {
+                    // An expanded span (a tab shown as spaces): the caret sits at
+                    // one edge of it, never inside.
+                    return if src == s.end { disp.end } else { disp.start };
+                }
                 return disp.start + (src - s.start).min(disp.len());
             }
         }
@@ -1198,6 +1256,11 @@ impl RowOffsetMap {
         }
         for (d, s) in &self.segments {
             if disp < d.end {
+                if d.len() != s.len() {
+                    // Inside an expanded span, snap to the nearer edge.
+                    let into = disp.saturating_sub(d.start);
+                    return if into * 2 >= d.len() { s.end } else { s.start };
+                }
                 let offset_in_seg = disp.saturating_sub(d.start).min(s.len());
                 return s.start + offset_in_seg;
             }
@@ -6785,5 +6848,52 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
                 );
             }
         }
+    }
+
+    // --- Tabs shown as spaces in raw rows ---
+
+    #[test]
+    fn expand_tabs_pads_to_the_next_stop_and_maps_offsets() {
+        let (display, map) = RowOffsetMap::expand_tabs("a\tbc\td", 100, 4).unwrap();
+        assert_eq!(display, "a   bc  d");
+        // Source offsets: a=100, tab=101, b=102, c=103, tab=104, d=105, end=106.
+        let shown: Vec<usize> = (100..=106).map(|src| map.source_to_display(src)).collect();
+        assert_eq!(shown, vec![0, 1, 4, 5, 6, 8, 9]);
+        // Rows without a tab are left to the identity map.
+        assert!(RowOffsetMap::expand_tabs("abc", 0, 4).is_none());
+        assert!(RowOffsetMap::expand_tabs("a\tb", 0, 0).is_none());
+    }
+
+    #[test]
+    fn clicking_in_or_after_a_tab_lands_on_the_nearer_edge() {
+        let (display, map) = RowOffsetMap::expand_tabs("\tx", 10, 4).unwrap();
+        assert_eq!(display, "    x");
+        // Display columns 0..=1 are the tab's first half, 2..=3 the second.
+        assert_eq!(map.display_to_source(0), 10);
+        assert_eq!(map.display_to_source(1), 10);
+        assert_eq!(map.display_to_source(2), 11);
+        assert_eq!(map.display_to_source(3), 11);
+        // Clicking right after the tab, on or past "x", puts the caret by "x".
+        assert_eq!(map.display_to_source(4), 11);
+        assert_eq!(map.display_to_source(5), 12);
+    }
+
+    #[test]
+    fn selection_across_tabs_maps_both_ends() {
+        let (_, map) = RowOffsetMap::expand_tabs("a\t\tb", 0, 4).unwrap();
+        // Selecting "\t\t" (source 1..3) covers display columns 1..8.
+        assert_eq!(map.source_to_display(1), 1);
+        assert_eq!(map.source_to_display(3), 8);
+        assert_eq!(map.display_to_source(8), 3);
+    }
+
+    #[test]
+    fn expanded_tabs_keep_multibyte_text_aligned() {
+        let (display, map) = RowOffsetMap::expand_tabs("é\tü", 0, 4).unwrap();
+        assert_eq!(display, "é   ü");
+        // é is 2 bytes: the tab is source 2..3 and display 2..5.
+        assert_eq!(map.source_to_display(2), 2);
+        assert_eq!(map.source_to_display(3), 5);
+        assert_eq!(map.display_to_source(5), 3);
     }
 }
