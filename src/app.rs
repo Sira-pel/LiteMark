@@ -850,6 +850,11 @@ impl LiteMarkApp {
         Some(tab)
     }
 
+    /// The active tab ignores the global view mode (code and plain text).
+    fn view_locked_raw(&self) -> bool {
+        self.active_tab().is_some_and(|tab| tab.file_type.forces_raw())
+    }
+
     /// The view mode the active tab renders and edits in. Code and plain-text
     /// tabs are always raw; the global Markdown setting only applies to the rest.
     pub fn effective_view_mode(&self) -> ViewMode {
@@ -5568,6 +5573,7 @@ impl Render for LiteMarkApp {
                     px(220.0),
                     build_view_menu_items(
                         self.settings.view_mode,
+                        self.view_locked_raw(),
                         self.settings.show_line_numbers,
                         self.settings.word_wrap,
                         self.show_sidebar,
@@ -5630,6 +5636,7 @@ impl Render for LiteMarkApp {
                     );
                     let view_items = build_view_menu_items(
                         self.settings.view_mode,
+                        self.view_locked_raw(),
                         self.settings.show_line_numbers,
                         self.settings.word_wrap,
                         self.show_sidebar,

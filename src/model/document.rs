@@ -75,6 +75,11 @@ impl FileType {
         self == FileType::Code
     }
 
+    /// Code and plain text ignore the global view-mode, line-number and alignment choices.
+    pub fn forces_raw(self) -> bool {
+        matches!(self, FileType::Code | FileType::PlainText)
+    }
+
     /// Code and plain text never render as formatted Markdown, whatever the global mode.
     pub fn effective_view_mode(self, global: ViewMode) -> ViewMode {
         match self {
