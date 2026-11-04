@@ -239,7 +239,11 @@ where
                                     div()
                                         .flex_shrink_0()
                                         .child(render_icon(
-                                            "file-text",
+                                            if tab.file_type.is_code() {
+                                                "file-code"
+                                            } else {
+                                                "file-text"
+                                            },
                                             14.0,
                                             if is_active {
                                                 theme.text_hi

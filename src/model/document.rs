@@ -23,21 +23,70 @@ pub enum FileType {
     #[default]
     Markdown,
     PlainText,
+    Code,
     Pdf,
 }
 
+/// Extensions (lowercase, no dot) that open as code.
+const CODE_EXTENSIONS: &[&str] = &[
+    "rs", "c", "cpp", "cc", "cxx", "h", "hpp", "go", "java", "kt", "swift", "cs", "zig", "py",
+    "js", "ts", "jsx", "tsx", "mjs", "cjs", "sh", "bash", "zsh", "fish", "rb", "php", "lua", "pl",
+    "r", "json", "jsonc", "toml", "yaml", "yml", "xml", "html", "css", "scss", "sass", "less",
+    "sql", "ini", "conf", "mk", "vue", "svelte",
+];
+
+/// Whole file names (lowercase) that open as code although they have no extension.
+const CODE_FILE_NAMES: &[&str] = &[
+    "dockerfile",
+    "makefile",
+    "gnumakefile",
+    ".env",
+    ".gitignore",
+];
+
 impl FileType {
-    /// `.md` and `.markdown` are Markdown. `.pdf` is PDF. Every other name is plain text.
+    /// `.md` and `.markdown` are Markdown. `.pdf` is PDF. Known source extensions and
+    /// build file names are code. Every other name is plain text.
     pub fn from_filename(name: &str) -> Self {
         let lower = name.to_lowercase();
         if lower.ends_with(".pdf") {
-            FileType::Pdf
-        } else if lower.ends_with(".md") || lower.ends_with(".markdown") {
-            FileType::Markdown
-        } else {
-            FileType::PlainText
+            return FileType::Pdf;
+        }
+        if lower.ends_with(".md") || lower.ends_with(".markdown") {
+            return FileType::Markdown;
+        }
+        if CODE_FILE_NAMES.contains(&lower.as_str()) {
+            return FileType::Code;
+        }
+        match lower.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() && CODE_EXTENSIONS.contains(&ext) => {
+                FileType::Code
+            }
+            _ => FileType::PlainText,
         }
     }
+
+    /// Only Markdown tabs get Markdown formatting, lists, tables and WYSIWYG.
+    pub fn supports_markdown_features(self) -> bool {
+        self == FileType::Markdown
+    }
+
+    pub fn is_code(self) -> bool {
+        self == FileType::Code
+    }
+
+    /// Code and plain text never render as formatted Markdown, whatever the global mode.
+    pub fn effective_view_mode(self, global: ViewMode) -> ViewMode {
+        match self {
+            FileType::Code | FileType::PlainText => ViewMode::Raw,
+            FileType::Markdown | FileType::Pdf => global,
+        }
+    }
+}
+
+/// A file with a zero byte is binary, even when the bytes happen to be valid UTF-8.
+pub fn looks_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8 * 1024).any(|&b| b == 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -217,6 +266,17 @@ impl DocumentTab {
             }
         }
         Arc::new(parse_document(&self.content))
+    }
+
+    /// Re-detect the type after Save As or a rename. A change drops the parse cache,
+    /// which was built for the old type. Returns whether the type changed.
+    pub fn set_file_type(&mut self, file_type: FileType) -> bool {
+        if self.file_type == file_type {
+            return false;
+        }
+        self.file_type = file_type;
+        self.cached_parse = None;
+        true
     }
 
     pub fn is_read_only(&self) -> bool {
@@ -648,6 +708,10 @@ impl DocumentTab {
         }
         self.history.seal();
         let range = self.selection_range();
+        if !self.file_type.supports_markdown_features() {
+            self.plain_newline(range);
+            return;
+        }
         if is_shift {
             // Shift+Enter in a table cell leaves the table without touching it.
             if let Some(table) = self.table_at(range.start) {
@@ -951,6 +1015,17 @@ impl DocumentTab {
         self.edit(range, "\n");
     }
 
+    /// Enter in a non-Markdown file: break the line and keep its leading whitespace.
+    /// No list, quote or table continuation, and nothing is parsed.
+    fn plain_newline(&mut self, range: Range<usize>) {
+        let line_start = home_offset(&self.content, range.start);
+        let indent: String = self.content[line_start..range.start]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        self.edit(range, &format!("\n{indent}"));
+    }
+
     pub fn smart_backspace(&mut self) -> bool {
         if self.is_read_only() {
             return false;
@@ -980,6 +1055,12 @@ impl DocumentTab {
                 self.edit(cursor - p_len..cursor + n_len, "");
                 return true;
             }
+        }
+
+        if !self.file_type.supports_markdown_features() {
+            let prev = previous_grapheme(&self.content, cursor);
+            self.edit(prev..cursor, "");
+            return true;
         }
 
         let parsed = self.parsed();
@@ -1126,7 +1207,7 @@ impl DocumentTab {
     }
 
     pub fn apply_format_in_mode(&mut self, cmd: &str, mode: ViewMode) {
-        if self.is_read_only() {
+        if self.is_read_only() || !self.file_type.supports_markdown_features() {
             return;
         }
         // A format toggle is an undo boundary: pending span typing groups end
@@ -12024,5 +12105,87 @@ mod clear_formatting_tests {
         assert_ne!(cleared, S);
         assert!(d.undo());
         assert_eq!(d.content, S);
+    }
+
+    #[test]
+    #[ignore = "timing probe, run with --ignored --nocapture"]
+    fn probe_parse_time_for_big_code_files() {
+        let big: String = "    let value = compute(a, b, c); // note\n".repeat(130_000);
+        let one_line: String = "var a=1,b=2;".repeat(90_000);
+        for (label, text) in [("5MB multi-line", big), ("1MB one line", one_line)] {
+            let t = std::time::Instant::now();
+            let n = parse_document(&text).lines.len();
+            eprintln!("{label}: {} bytes, {n} lines, parse {:?}", text.len(), t.elapsed());
+        }
+    }
+
+    #[test]
+    fn code_files_are_detected_by_extension_and_name() {
+        for name in ["main.rs", "a.PY", "data.json", "Cargo.toml", "x.tsx", "build.mk"] {
+            assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
+        }
+        for name in ["Makefile", "dockerfile", "GNUmakefile", ".env", ".gitignore"] {
+            assert_eq!(FileType::from_filename(name), FileType::Code, "{name}");
+        }
+        assert_eq!(FileType::from_filename("notes.md"), FileType::Markdown);
+        assert_eq!(FileType::from_filename("scan.pdf"), FileType::Pdf);
+        assert_eq!(FileType::from_filename("notes.txt"), FileType::PlainText);
+        assert_eq!(FileType::from_filename("photo.xyz"), FileType::PlainText);
+        assert_eq!(FileType::from_filename("rs"), FileType::PlainText);
+        assert_eq!(FileType::from_filename(".rs"), FileType::PlainText);
+    }
+
+    #[test]
+    fn zero_byte_means_binary() {
+        assert!(looks_binary(b"ab\0cd"));
+        assert!(!looks_binary(b"fn main() {}\n"));
+        assert!(!looks_binary("héllo".as_bytes()));
+    }
+
+    #[test]
+    fn code_and_plain_text_are_always_raw() {
+        for global in [ViewMode::Raw, ViewMode::Wysiwyg] {
+            assert_eq!(FileType::Code.effective_view_mode(global), ViewMode::Raw);
+            assert_eq!(FileType::PlainText.effective_view_mode(global), ViewMode::Raw);
+            assert_eq!(FileType::Markdown.effective_view_mode(global), global);
+        }
+    }
+
+    #[test]
+    fn enter_in_code_keeps_indent_and_never_continues_a_list() {
+        let mut doc = DocumentTab::new("s".into(), "a.rs".into(), "    - item".into(), None, None);
+        doc.caret.move_to(doc.content.len());
+        doc.refresh_cursor();
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "    - item\n    ");
+    }
+
+    #[test]
+    fn backspace_in_code_skips_markdown_list_logic() {
+        let mut doc = DocumentTab::new("s".into(), "a.rs".into(), "- ".into(), None, None);
+        doc.caret.move_to(2);
+        doc.refresh_cursor();
+        doc.smart_backspace();
+        assert_eq!(doc.content, "-");
+    }
+
+    #[test]
+    fn format_commands_do_nothing_in_code() {
+        let mut doc = DocumentTab::new("s".into(), "a.py".into(), "word".into(), None, None);
+        doc.caret.range = 0..4;
+        doc.apply_format_in_mode("bold", ViewMode::Raw);
+        assert_eq!(doc.content, "word");
+    }
+
+    #[test]
+    fn set_file_type_clears_the_parse_cache() {
+        let mut doc = DocumentTab::new("s".into(), "a.md".into(), "# Hi".into(), None, None);
+        doc.parsed();
+        assert!(doc.cached_parse.is_some());
+        assert!(!doc.set_file_type(FileType::Markdown));
+        assert!(doc.cached_parse.is_some());
+        assert!(doc.set_file_type(FileType::Code));
+        assert!(doc.cached_parse.is_none());
+        assert_eq!(doc.file_type, FileType::Code);
     }
 }

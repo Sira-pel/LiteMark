@@ -1,5 +1,5 @@
 use crate::model::{
-    file_dialog_block_reason, unique_name, FileType, PortalProbe, WorkspaceDirectory,
+    file_dialog_block_reason, looks_binary, unique_name, FileType, PortalProbe, WorkspaceDirectory,
     WorkspaceFile, WorkspaceFolder,
 };
 #[cfg(target_os = "linux")]
@@ -328,7 +328,12 @@ pub fn atomic_save_new(dir: &Path, desired_name: &str, content: &str) -> io::Res
 
 /// Read a note. Failure is an error — callers must not substitute an empty document.
 pub fn read_note(path: &Path) -> Result<String, String> {
-    fs::read_to_string(path).map_err(|err| format!("Couldn't open {}: {err}", path.display()))
+    let fail = |err: &dyn std::fmt::Display| format!("Couldn't open {}: {err}", path.display());
+    let bytes = fs::read(path).map_err(|err| fail(&err))?;
+    if looks_binary(&bytes) {
+        return Err(fail(&"binary file, can't open"));
+    }
+    String::from_utf8(bytes).map_err(|err| fail(&err))
 }
 
 pub fn move_to_trash(path: &Path) -> Result<(), String> {
@@ -379,13 +384,11 @@ pub fn safe_rename(old_path: &Path, new_name: &str) -> io::Result<PathBuf> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty name"));
     }
     // Preserve the original extension unless the new name already ends in a
-    // text-note extension. A dot mid-name (e.g. "v1.2 notes") is not an
-    // extension, so "n.md" renamed to "v1.2 notes" stays "v1.2 notes.md".
+    // known one. A dot mid-name (e.g. "v1.2 notes") is not an extension, so
+    // "n.md" renamed to "v1.2 notes" stays "v1.2 notes.md".
     let keeps_note_ext = |name: &str| {
         let lower = name.to_lowercase();
-        lower.ends_with(".md")
-            || lower.ends_with(".markdown")
-            || lower.ends_with(".txt")
+        lower.ends_with(".txt") || FileType::from_filename(name) != FileType::PlainText
     };
     let clean_name = if old_path.is_file() && !keeps_note_ext(&clean_name) {
         if let Some(ext) = old_path.extension().and_then(|e| e.to_str()) {
@@ -649,7 +652,10 @@ pub fn scan_workspace_dir(dir: &Path) -> WorkspaceDirectory {
                     walk(&path, Some(folder_id), folders, files);
                 } else if entry_type.is_file() {
                     let file_type = FileType::from_filename(&file_name);
-                    if matches!(file_type, FileType::Markdown | FileType::PlainText) {
+                    if matches!(
+                        file_type,
+                        FileType::Markdown | FileType::PlainText | FileType::Code
+                    ) {
                         let updated_at = entry
                             .metadata()
                             .and_then(|m| m.modified())
@@ -1115,5 +1121,38 @@ mod tests {
         assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn nul_bytes_make_a_file_unopenable() {
+        let dir = std::env::temp_dir().join(format!("litemark-bin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("blob.txt");
+        fs::write(&bin, b"ok\0text").unwrap();
+        let err = read_note(&bin).unwrap_err();
+        assert!(err.contains("binary file"), "{err}");
+        let good = dir.join("main.rs");
+        fs::write(&good, "fn main() {}").unwrap();
+        assert_eq!(read_note(&good).unwrap(), "fn main() {}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_swaps_between_known_extensions() {
+        let dir = std::env::temp_dir().join(format!("litemark-ren-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let rs = dir.join("a.rs");
+        fs::write(&rs, "x").unwrap();
+        let py = safe_rename(&rs, "b.py").unwrap();
+        assert_eq!(py.file_name().unwrap(), "b.py");
+        let rs_md = dir.join("x.md");
+        fs::write(&rs_md, "x").unwrap();
+        let as_rs = safe_rename(&rs_md, "x.rs").unwrap();
+        assert_eq!(as_rs.file_name().unwrap(), "x.rs");
+        let plain = safe_rename(&as_rs, "notes").unwrap();
+        assert_eq!(plain.file_name().unwrap(), "notes.rs");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

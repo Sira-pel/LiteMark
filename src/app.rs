@@ -843,10 +843,18 @@ impl LiteMarkApp {
     }
 
     pub fn active_tab_mut(&mut self) -> Option<&mut DocumentTab> {
-        let mode = self.settings.view_mode;
+        let global = self.settings.view_mode;
         let tab = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id)?;
-        tab.set_view_mode(mode);
+        tab.set_view_mode(tab.file_type.effective_view_mode(global));
         Some(tab)
+    }
+
+    /// The view mode the active tab renders and edits in. Code and plain-text
+    /// tabs are always raw; the global Markdown setting only applies to the rest.
+    pub fn effective_view_mode(&self) -> ViewMode {
+        let global = self.settings.view_mode;
+        self.active_tab()
+            .map_or(global, |tab| tab.file_type.effective_view_mode(global))
     }
 
     pub fn handle_new_tab(&mut self) {
@@ -1212,7 +1220,7 @@ impl LiteMarkApp {
                     if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
                         tab.title = name.to_string();
                     }
-                    tab.file_type = FileType::from_filename(&tab.title);
+                    tab.set_file_type(FileType::from_filename(&tab.title));
                     tab.is_modified = false;
                     let title = tab.title.clone();
                     self.show_toast(format!("Saved {title}"), cx);
@@ -1654,7 +1662,7 @@ impl LiteMarkApp {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
             tab.file_path = Some(saved_path);
             tab.title = saved_title;
-            tab.file_type = FileType::from_filename(&tab.title);
+            tab.set_file_type(FileType::from_filename(&tab.title));
             tab.is_modified = false;
         }
         self.rescan_workspace();
@@ -2461,7 +2469,10 @@ impl LiteMarkApp {
     /// current workspace (the only kind that can be copied to a new one).
     fn migratable_note_path(&self) -> Option<PathBuf> {
         let tab = self.active_tab()?;
-        if !matches!(tab.file_type, FileType::Markdown | FileType::PlainText) {
+        if !matches!(
+            tab.file_type,
+            FileType::Markdown | FileType::PlainText | FileType::Code
+        ) {
             return None;
         }
         tab.file_path
@@ -2513,7 +2524,7 @@ impl LiteMarkApp {
                 tab.file_path = Some(new_path.to_path_buf());
                 if let Some(name) = new_path.file_name().and_then(|name| name.to_str()) {
                     tab.title = name.to_string();
-                    tab.file_type = FileType::from_filename(&tab.title);
+                    tab.set_file_type(FileType::from_filename(&tab.title));
                 }
             } else if let Ok(rest) = path.strip_prefix(old) {
                 tab.file_path = Some(new_path.join(rest));
@@ -3616,7 +3627,7 @@ impl LiteMarkApp {
         let id = self.active_tab_id.clone();
         let field_focus = self.field_focus;
         let field_owns_keys = self.field_owns_keys;
-        let view_mode = self.settings.view_mode;
+        let view_mode = self.effective_view_mode();
         let blocked = self.input_blocked();
         let press_held = self.table_drag_press_held;
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
@@ -3648,7 +3659,7 @@ impl LiteMarkApp {
     }
 
     fn table_chrome_interactive(&self) -> bool {
-        self.settings.view_mode == ViewMode::Wysiwyg
+        self.effective_view_mode() == ViewMode::Wysiwyg
             && !self.active_tab().is_some_and(|tab| tab.is_read_only())
     }
 
@@ -3840,7 +3851,7 @@ impl LiteMarkApp {
         if self.handle_table_chrome_click(event, window, cx) {
             return;
         }
-        if self.settings.view_mode == ViewMode::Wysiwyg {
+        if self.effective_view_mode() == ViewMode::Wysiwyg {
             let checkbox_range = {
                 let paint = self.editor_paint.borrow();
                 checkbox_for_position(&paint, event.position)
@@ -3872,7 +3883,7 @@ impl LiteMarkApp {
         };
 
         if (event.modifiers.control || event.modifiers.platform)
-            && self.settings.view_mode == ViewMode::Wysiwyg
+            && self.effective_view_mode() == ViewMode::Wysiwyg
         {
             if let Some(url) = clicked_link {
                 cx.open_url(&url);
@@ -4025,7 +4036,11 @@ impl LiteMarkApp {
         show_line_numbers: bool,
     ) -> AnyElement {
         let zoom = self.settings.zoom_level as f32 / 100.0;
-        let view_mode = self.settings.view_mode;
+        let view_mode = self.effective_view_mode();
+        let markdown_tab = self
+            .active_tab()
+            .is_none_or(|tab| tab.file_type.supports_markdown_features());
+        let show_line_numbers = show_line_numbers || !markdown_tab;
         let content = self.active_content();
         let (parsed, selection, marked) = if let Some(tab) = self.active_tab_mut() {
             (
@@ -4053,7 +4068,8 @@ impl LiteMarkApp {
             active_find: self.find_index,
             show_line_numbers,
             word_wrap: self.settings.word_wrap,
-            centered: self.settings.content_alignment == ContentAlignment::Centered,
+            centered: markdown_tab
+                && self.settings.content_alignment == ContentAlignment::Centered,
             max_measure: Some(sz::MEASURE_FALLBACK * zoom),
             font_size: px(self.settings.base_font_size * zoom),
             text_color: theme.text_primary.into(),
@@ -4173,7 +4189,7 @@ impl EntityInputHandler for LiteMarkApp {
             .unwrap_or(0..0);
 
         // 1. In WYSIWYG mode, preserve block prefixes when typing at start of line
-        if self.settings.view_mode == ViewMode::Wysiwyg && range.is_empty() && text != "\n" {
+        if self.effective_view_mode() == ViewMode::Wysiwyg && range.is_empty() && text != "\n" {
             let cursor = range.start;
             let line_start = home_offset(&content, cursor);
             let line_end_pos = line_end(&content, cursor);
@@ -4200,8 +4216,8 @@ impl EntityInputHandler for LiteMarkApp {
         let has_pending = self
             .active_tab()
             .is_some_and(|tab| tab.has_pending_inline_formats());
-        if self.settings.view_mode == ViewMode::Wysiwyg && range.is_empty() && has_pending {
-            let mode = self.settings.view_mode;
+        if self.effective_view_mode() == ViewMode::Wysiwyg && range.is_empty() && has_pending {
+            let mode = self.effective_view_mode();
             if let Some(tab) = self.active_tab_mut() {
                 tab.insert_text_in_mode(range, text, mode);
             }
@@ -4212,6 +4228,9 @@ impl EntityInputHandler for LiteMarkApp {
         }
 
         // 3. Selection auto-wrapping or typing auto-pairing
+        let markdown_tab = self
+            .active_tab()
+            .is_none_or(|tab| tab.file_type.supports_markdown_features());
         if text.chars().count() == 1 {
             let ch = text.chars().next().unwrap();
             if !range.is_empty() {
@@ -4222,9 +4241,7 @@ impl EntityInputHandler for LiteMarkApp {
                     '"' => Some('"'),
                     '\'' => Some('\''),
                     '`' => Some('`'),
-                    '*' => Some('*'),
-                    '_' => Some('_'),
-                    '~' => Some('~'),
+                    '*' | '_' | '~' if markdown_tab => Some(ch),
                     _ => None,
                 };
                 if let Some(close_ch) = closing {
@@ -4292,7 +4309,7 @@ impl EntityInputHandler for LiteMarkApp {
             }
         }
 
-        let mode = self.settings.view_mode;
+        let mode = self.effective_view_mode();
         if let Some(tab) = self.active_tab_mut() {
             tab.insert_text_in_mode(range, text, mode);
         }
@@ -6148,20 +6165,20 @@ impl Render for LiteMarkApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &EditorLeft, window, cx| {
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| tab.move_left_in_mode(false, mode));
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorRight, window, cx| {
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| tab.move_right_in_mode(false, mode));
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorUp, window, cx| {
                 let paint = this.editor_paint.clone();
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
                     if mode == ViewMode::Wysiwyg
@@ -6183,7 +6200,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorDown, window, cx| {
                 let paint = this.editor_paint.clone();
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
                     if mode == ViewMode::Wysiwyg
@@ -6204,20 +6221,20 @@ impl Render for LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectLeft, window, cx| {
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| tab.move_left_in_mode(true, mode));
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectRight, window, cx| {
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| tab.move_right_in_mode(true, mode));
                 window.refresh();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &EditorSelectUp, window, cx| {
                 let paint = this.editor_paint.clone();
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
                     let parsed = tab.parsed();
@@ -6233,7 +6250,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorSelectDown, window, cx| {
                 let paint = this.editor_paint.clone();
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| {
                     let p = paint.borrow();
                     let parsed = tab.parsed();
@@ -6249,7 +6266,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorHome, window, cx| {
                 let paint = this.editor_paint.clone();
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| {
                     if mode == ViewMode::Wysiwyg {
                         let p = paint.borrow();
@@ -6266,7 +6283,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorEnd, window, cx| {
                 let paint = this.editor_paint.clone();
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| {
                     if mode == ViewMode::Wysiwyg {
                         let p = paint.borrow();
@@ -6283,7 +6300,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorSelectHome, window, cx| {
                 let paint = this.editor_paint.clone();
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| {
                     if mode == ViewMode::Wysiwyg {
                         let p = paint.borrow();
@@ -6300,7 +6317,7 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &EditorSelectEnd, window, cx| {
                 let paint = this.editor_paint.clone();
-                let mode = this.settings.view_mode;
+                let mode = this.effective_view_mode();
                 this.editor_move(cx, |tab| {
                     if mode == ViewMode::Wysiwyg {
                         let p = paint.borrow();
@@ -6741,7 +6758,7 @@ impl Render for LiteMarkApp {
                             selected_words: stats_selection,
                             width: window_width,
                             zoom_level: self.settings.zoom_level,
-                            view_mode: self.settings.view_mode,
+                            view_mode: self.effective_view_mode(),
                             on_zoom_in: on_zoom_in.clone(),
                             on_zoom_out: on_zoom_out.clone(),
                             on_reset_zoom: on_reset_zoom.clone(),

@@ -996,7 +996,11 @@ where
                                                 .items_center()
                                                 .gap(px(6.0))
                                                 .child(render_icon(
-                                                    "file-text",
+                                                    if file.file_type.is_code() {
+                                                        "file-code"
+                                                    } else {
+                                                        "file-text"
+                                                    },
                                                     14.0,
                                                     if is_active {
                                                         theme.row_icon_active
