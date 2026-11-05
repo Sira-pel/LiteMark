@@ -1601,7 +1601,10 @@ impl LiteMarkApp {
 
     /// Feeds touchpad movement to the momentum tracker; wheel notches reset it.
     fn note_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // macOS already sends its own inertial events after the lift, and
+        // Windows only reports line steps, so this is for Linux touchpads.
         match ev.delta {
+            _ if !cfg!(target_os = "linux") => {}
             ScrollDelta::Pixels(d) => {
                 self.scroll_momentum
                     .on_event(std::time::Instant::now(), f32::from(d.y));

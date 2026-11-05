@@ -228,6 +228,8 @@ fn enter_at_the_bottom_scrolls_the_new_line_into_view() {
     }
 }
 
+// Momentum is Linux-only: macOS scrolls with its own inertia, Windows has line steps.
+#[cfg(target_os = "linux")]
 #[std_test]
 fn touchpad_flick_keeps_scrolling_after_the_events_stop() {
     let content = long_doc();
