@@ -39,6 +39,12 @@ fn toggle_modifier(m: Modifiers) -> bool {
     if cfg!(target_os = "macos") { m.platform } else { m.control }
 }
 
+/// Modifier that turns a sidebar drag into a copy: Ctrl on Linux and Windows,
+/// Option on macOS (Ctrl+click is a right-click there).
+fn copy_modifier(m: Modifiers) -> bool {
+    if cfg!(target_os = "macos") { m.alt } else { m.control }
+}
+
 /// Thin vertical guide line that joins nested rows under their folder.
 /// `left` is measured from the row's own left edge.
 fn tree_guide(theme: &Theme, left: f32) -> Div {
@@ -543,7 +549,7 @@ where
                 .on_drop({
                     let drop_item = on_drop_item.clone();
                     move |drag: &SidebarDrag, window, cx| {
-                        let copy = window.modifiers().control;
+                        let copy = copy_modifier(window.modifiers());
                         drop_item(drag.targets.clone(), None, copy, cx);
                     }
                 })
@@ -743,7 +749,7 @@ where
                                             let fid = folder_id.clone();
                                             let drop_item = on_drop_item.clone();
                                             move |drag: &SidebarDrag, window, cx| {
-                                                let copy = window.modifiers().control;
+                                                let copy = copy_modifier(window.modifiers());
                                                 drop_item(
                                                     drag.targets.clone(),
                                                     Some(fid.clone()),

@@ -15,7 +15,8 @@ where
     let mac = cfg!(target_os = "macos");
     let cmd = if mac { "Cmd" } else { "Ctrl" };
     let sec = |k: &str| k.replace("Ctrl", cmd);
-    let shortcuts: Vec<(String, &str)> = vec![
+    let nav = |other: &str, mac_label: &str| (if mac { mac_label } else { other }).to_string();
+    let mut shortcuts: Vec<(String, &str)> = vec![
         (sec("Ctrl + B"), "Toggle Bold"),
         (sec("Ctrl + I"), "Toggle Italic"),
         (sec("Ctrl + U"), "Toggle Underline"),
@@ -41,13 +42,14 @@ where
         (sec("Ctrl + Z"), "Undo"),
         (sec("Ctrl + Y / Ctrl + Shift + Z"), "Redo"),
         (sec("Ctrl + A"), "Select All"),
-        ("Ctrl + Left / Right".to_string(), "Jump Word Left / Right"),
-        ("Ctrl + Shift + Left / Right".to_string(), "Select Word Left / Right"),
+        (nav("Ctrl + Left / Right", "Alt + Left / Right"), "Jump Word Left / Right"),
+        (nav("Ctrl + Shift + Left / Right", "Alt + Shift + Left / Right"), "Select Word Left / Right"),
         ("Ctrl + Shift + Up / Down".to_string(), "Select Line Up / Down"),
-        ("Ctrl + Home / End".to_string(), "Jump to Document Start / End"),
-        ("Ctrl + Backspace / Delete".to_string(), "Delete Word Left / Right"),
-        ("Ctrl + Shift + Backspace / Delete".to_string(), "Delete to Line Start / End"),
-        (if mac { "Alt + Up / Down".to_string() } else { "Ctrl + Up / Down".to_string() }, "Move Line Up / Down"),
+        (nav("Ctrl + Home / End", "Cmd + Up / Down"), "Jump to Document Start / End"),
+        (nav("Ctrl + Backspace / Delete", "Alt + Backspace / Delete"), "Delete Word Left / Right"),
+        (nav("Ctrl + Shift + Backspace / Delete", "Cmd + Backspace / Delete"), "Delete to Line Start / End"),
+        ("Alt + Up / Down".to_string(), "Move Line Up / Down"),
+        ("Ctrl + Tab / Ctrl + Shift + Tab".to_string(), "Next / Previous Tab"),
         ("Tab / Shift + Tab".to_string(), "Indent / Outdent List or Line"),
         ("Shift + Enter".to_string(), "New Line Without List or Quote Continuation"),
         (sec("Ctrl + Enter"), "Add Table Row Below"),
@@ -60,6 +62,15 @@ where
         ("F11".to_string(), "Toggle Zen Mode"),
         ("Escape".to_string(), "Exit Zen Mode / Close Modals & Menus"),
     ];
+    if mac {
+        shortcuts.extend([
+            ("Ctrl + A / E".to_string(), "Line Start / End"),
+            ("Ctrl + K".to_string(), "Delete to Line End"),
+            ("Cmd + ,".to_string(), "Open Settings Menu"),
+            ("Cmd + M".to_string(), "Minimize Window"),
+            ("Cmd + Q".to_string(), "Quit"),
+        ]);
+    }
 
 
     let cls = on_close.clone();

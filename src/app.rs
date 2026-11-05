@@ -909,6 +909,23 @@ impl LiteMarkApp {
             .map_or(global, |tab| tab.file_type.effective_view_mode(global))
     }
 
+    /// Activate the next (`delta` = 1) or previous (-1) tab, wrapping around.
+    fn cycle_tab(&mut self, delta: isize) {
+        let len = self.tabs.len() as isize;
+        if len < 2 {
+            return;
+        }
+        let cur = self
+            .tabs
+            .iter()
+            .position(|t| t.id == self.active_tab_id)
+            .unwrap_or(0) as isize;
+        let next = (cur + delta).rem_euclid(len) as usize;
+        self.active_tab_id = self.tabs[next].id.clone();
+        self.sync_selection_to_active_tab();
+        self.refresh_find();
+    }
+
     pub fn handle_new_tab(&mut self) {
         let new_id = self.tab_ids.alloc();
         let number = new_id.trim_start_matches("tab-");
@@ -6039,6 +6056,14 @@ impl Render for LiteMarkApp {
             .on_action(cx.listener(|this, _: &DeleteNote, _window, cx| {
                 this.delete_selected(cx);
             }))
+            .on_action(cx.listener(|this, _: &NextTab, _window, cx| {
+                this.cycle_tab(1);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PrevTab, _window, cx| {
+                this.cycle_tab(-1);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &CloseActiveTab, _window, cx| {
                 let id = this.active_tab_id.clone();
                 this.handle_close_tab(id);
@@ -6059,6 +6084,14 @@ impl Render for LiteMarkApp {
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
                 this.handle_toggle_sidebar();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|_this, _: &MinimizeWindow, window, _cx| {
+                window.minimize_window();
+            }))
+            .on_action(cx.listener(|this, _: &QuitApp, _window, cx| {
+                // Same path as the window close button (prompts on unsaved tabs).
+                this.request_close_window();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleZenMode, _window, cx| {
