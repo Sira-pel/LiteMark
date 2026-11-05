@@ -86,6 +86,9 @@ impl ScrollMomentum {
     }
 }
 
+/// Handler for scroll-wheel and touchpad events over the editor.
+pub type ScrollHandler = Box<dyn Fn(&ScrollWheelEvent, &mut Window, &mut App)>;
+
 pub struct EditorProps {
     pub zoom_level: usize,
     pub show_zoom_hud: bool,
@@ -93,7 +96,7 @@ pub struct EditorProps {
     pub editor_element: AnyElement,
     pub scroll: ScrollHandle,
     /// Called for every scroll-wheel / touchpad event over the editor.
-    pub on_scroll: Option<Box<dyn Fn(&ScrollWheelEvent, &mut Window, &mut App)>>,
+    pub on_scroll: Option<ScrollHandler>,
 }
 
 pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
