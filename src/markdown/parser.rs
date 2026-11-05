@@ -165,6 +165,11 @@ fn source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
     let mut start = 0usize;
     let mut index = 0usize;
     while index < bytes.len() {
+        // Jump straight to the next line ending.
+        match memchr::memchr2(b'\n', b'\r', &bytes[index..]) {
+            Some(skip) => index += skip,
+            None => break,
+        }
         // A line ending is LF, a lone CR, or CRLF (CommonMark 0.31.2).
         if bytes[index] == b'\n' {
             lines.push(SourceLine {
@@ -174,7 +179,7 @@ fn source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
             });
             index += 1;
             start = index;
-        } else if bytes[index] == b'\r' {
+        } else {
             let end = if index + 1 < bytes.len() && bytes[index + 1] == b'\n' {
                 index + 2
             } else {
@@ -187,8 +192,6 @@ fn source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
             });
             index = end;
             start = end;
-        } else {
-            index += 1;
         }
     }
     if start < bytes.len() {
@@ -575,10 +578,11 @@ fn code_span_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
     ranges
 }
 
+/// `ranges` must be sorted and non-overlapping (as `code_span_ranges` and
+/// `merge_ranges` return them).
 fn index_in_ranges(ranges: &[std::ops::Range<usize>], index: usize) -> bool {
-    ranges
-        .iter()
-        .any(|range| index >= range.start && index < range.end)
+    let after = ranges.partition_point(|range| range.start <= index);
+    after > 0 && index < ranges[after - 1].end
 }
 
 fn separator_pipe(bytes: &[u8], code: &[std::ops::Range<usize>], index: usize) -> bool {
@@ -628,8 +632,8 @@ fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
     while start < end {
         let cell_start = start;
         while start < end && !separator_pipe(bytes, &code, start) {
-            if let Some(span) = code.iter().find(|span| span.start == start) {
-                start = span.end;
+            if let Ok(at) = code.binary_search_by_key(&start, |span| span.start) {
+                start = code[at].end;
             } else {
                 start += 1;
             }
@@ -970,11 +974,15 @@ struct DetectedTable {
     last: usize,
     delimiter: usize,
     source: std::ops::Range<usize>,
-    alignments: Vec<TableColumnAlign>,
+    alignments: Arc<[TableColumnAlign]>,
 }
 
 fn table_block(lines: &[SourceLine<'_>], start: usize) -> Option<TableBlock> {
-    if start + 1 >= lines.len() || line_breaks_table(lines[start].text) {
+    // A header row needs a pipe; most lines have none, so check that first.
+    if start + 1 >= lines.len()
+        || memchr::memchr(b'|', lines[start].text.as_bytes()).is_none()
+        || line_breaks_table(lines[start].text)
+    {
         return None;
     }
     let header = lines[start].text;
@@ -1038,8 +1046,9 @@ pub struct TableRowBody {
     pub cells: Vec<std::ops::Range<usize>>,
     /// Full inner byte ranges between pipes (`pipe[k]+1..pipe[k+1]`)
     pub raw_cells: Vec<std::ops::Range<usize>>,
-    /// Column alignments parsed from the table's delimiter row
-    pub alignments: Vec<TableColumnAlign>,
+    /// Column alignments parsed from the table's delimiter row, shared by
+    /// every row of the table
+    pub alignments: Arc<[TableColumnAlign]>,
     /// Full table block byte range in the document
     pub table_source: std::ops::Range<usize>,
 }
@@ -1300,6 +1309,14 @@ impl RowOffsetMap {
             visible_start: line_start,
         }
     }
+}
+
+/// Shared empty `link_hits`, so lines without links don't each allocate one.
+fn no_links() -> Arc<Vec<(std::ops::Range<usize>, String)>> {
+    thread_local! {
+        static EMPTY: Arc<Vec<(std::ops::Range<usize>, String)>> = Arc::default();
+    }
+    EMPTY.with(Arc::clone)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1770,43 +1787,59 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
     // WYSIWYG display with the offset map carrying the caret across it.
     // Backslashes inside code spans stay visible: code content is literal.
     let bytes = input.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() {
-            let abs = base + i..base + i + 1;
-            let in_code = inline_pairs.iter().any(|p| {
-                p.kind == InlineTagKind::Code
-                    && p.inner.start <= abs.start
-                    && abs.end <= p.inner.end
-            });
-            if !in_code {
-                raw_hidden.push(abs.clone());
-                // The text segment covering the escape keeps the escaped
-                // character only; the backslash is hidden.
-                let mut rebuilt: Vec<StyledSegment> = Vec::new();
-                for s in styled_segments.drain(..) {
-                    if s.source.start < abs.end && s.source.end > abs.start {
-                        if s.source.start < abs.start {
-                            rebuilt.push(StyledSegment {
-                                source: s.source.start..abs.start,
-                                ..s.clone()
-                            });
-                        }
-                        if s.source.end > abs.end {
-                            rebuilt.push(StyledSegment {
-                                source: abs.end..s.source.end,
-                                ..s.clone()
-                            });
-                        }
-                    } else {
-                        rebuilt.push(s);
-                    }
+    if bytes.contains(&b'\\') {
+        let code_inner = merge_ranges(
+            inline_pairs
+                .iter()
+                .filter(|p| p.kind == InlineTagKind::Code)
+                .map(|p| p.inner.clone())
+                .collect(),
+        );
+        // Absolute offsets of hidden backslashes, ascending.
+        let mut escapes: Vec<usize> = Vec::new();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() {
+                let abs = base + i;
+                if !index_in_ranges(&code_inner, abs) {
+                    raw_hidden.push(abs..abs + 1);
+                    escapes.push(abs);
                 }
-                styled_segments = rebuilt;
+                i += 2;
+            } else {
+                i += 1;
             }
-            i += 2;
-        } else {
-            i += 1;
+        }
+        if !escapes.is_empty() {
+            // The text segment covering an escape keeps the escaped character
+            // only; the backslash is cut out of it.
+            let mut rebuilt: Vec<StyledSegment> = Vec::with_capacity(styled_segments.len());
+            for s in styled_segments.drain(..) {
+                let first = escapes.partition_point(|&e| e < s.source.start);
+                let inside = &escapes[first..];
+                let count = inside.partition_point(|&e| e < s.source.end);
+                if count == 0 {
+                    rebuilt.push(s);
+                    continue;
+                }
+                let mut cursor = s.source.start;
+                for &e in &inside[..count] {
+                    if e > cursor {
+                        rebuilt.push(StyledSegment {
+                            source: cursor..e,
+                            ..s.clone()
+                        });
+                    }
+                    cursor = e + 1;
+                }
+                if s.source.end > cursor {
+                    rebuilt.push(StyledSegment {
+                        source: cursor..s.source.end,
+                        ..s
+                    });
+                }
+            }
+            styled_segments = rebuilt;
         }
     }
 
@@ -1814,26 +1847,44 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
     (raw_hidden, inline_pairs, styled_segments)
 }
 
+/// Up to this many pairs on a line, pair lookups scan the list directly:
+/// for a handful of pairs that beats building an index.
+const SMALL_PAIRS: usize = 16;
+
 /// Fill `group_open_start` / `group_close_end` so stacked markers that share
 /// an `inner` range (`***`, `~~**`, `<u>**`) are O(1) to look up later.
 fn finalize_pair_groups(pairs: &mut [InlinePair]) {
-    for i in 0..pairs.len() {
-        if pairs[i].kind == InlineTagKind::Link {
-            pairs[i].group_open_start = pairs[i].open_delim.start;
-            pairs[i].group_close_end = pairs[i].close_delim.end;
-            continue;
-        }
-        let inner = pairs[i].inner.clone();
-        let mut open = pairs[i].open_delim.start;
-        let mut close = pairs[i].close_delim.end;
-        for p in pairs.iter() {
-            if p.kind != InlineTagKind::Link && p.inner == inner {
-                open = open.min(p.open_delim.start);
-                close = close.max(p.close_delim.end);
+    if pairs.len() <= SMALL_PAIRS {
+        for i in 0..pairs.len() {
+            let (mut open, mut close) = (pairs[i].open_delim.start, pairs[i].close_delim.end);
+            if pairs[i].kind != InlineTagKind::Link {
+                for p in pairs.iter() {
+                    if p.kind != InlineTagKind::Link && p.inner == pairs[i].inner {
+                        open = open.min(p.open_delim.start);
+                        close = close.max(p.close_delim.end);
+                    }
+                }
             }
+            pairs[i].group_open_start = open;
+            pairs[i].group_close_end = close;
         }
-        pairs[i].group_open_start = open;
-        pairs[i].group_close_end = close;
+        return;
+    }
+    let mut groups: std::collections::HashMap<(usize, usize), (usize, usize)> =
+        std::collections::HashMap::with_capacity(pairs.len());
+    for p in pairs.iter().filter(|p| p.kind != InlineTagKind::Link) {
+        let group = groups
+            .entry((p.inner.start, p.inner.end))
+            .or_insert((p.open_delim.start, p.close_delim.end));
+        group.0 = group.0.min(p.open_delim.start);
+        group.1 = group.1.max(p.close_delim.end);
+    }
+    for p in pairs.iter_mut() {
+        (p.group_open_start, p.group_close_end) = if p.kind == InlineTagKind::Link {
+            (p.open_delim.start, p.close_delim.end)
+        } else {
+            groups[&(p.inner.start, p.inner.end)]
+        };
     }
 }
 
@@ -1885,48 +1936,64 @@ fn synthesize_flanking_pairs(
     if runs.len() < 2 {
         return;
     }
-    fn in_code(inline_pairs: &[InlinePair], pos: usize) -> bool {
+    // A run is out of play when it starts inside a code span or was consumed
+    // as the opener or closer of a parsed pair. Every byte of a consumed run
+    // sits inside an open or close delim: a `***` split into `**` + `*` is
+    // covered, but an extra leftover backtick in ``a``` is not. Both are
+    // checked against sorted, merged ranges so long lines stay linear.
+    let code_inner = merge_ranges(
         inline_pairs
             .iter()
-            .any(|p| p.kind == InlineTagKind::Code && p.inner.start <= pos && pos < p.inner.end)
-    }
-    // A run consumed as the opener or closer of a parsed pair is not
-    // eligible for re-pairing. `run` is absolute (`base + start..base + end`)
-    // so it can be compared with `inline_pairs`. Every byte of the run must
-    // sit inside an open or close delim: a `***` split into `**` + `*` is
-    // covered, but an extra leftover backtick in ``a``` is not.
-    fn consumed(inline_pairs: &[InlinePair], run: std::ops::Range<usize>) -> bool {
-        if run.start >= run.end {
-            return false;
-        }
-        let mut pos = run.start;
-        while pos < run.end {
-            let cover = inline_pairs.iter().find_map(|p| {
-                if p.open_delim.start <= pos && pos < p.open_delim.end {
-                    Some(p.open_delim.end)
-                } else if p.close_delim.start <= pos && pos < p.close_delim.end {
-                    Some(p.close_delim.end)
-                } else {
-                    None
-                }
-            });
-            match cover {
-                Some(end) => pos = end.max(pos + 1),
-                None => return false,
-            }
-        }
-        true
-    }
-    let mut used = vec![false; runs.len()];
-    for open_idx in 0..runs.len() {
-        let abs_open = base + runs[open_idx].0..base + runs[open_idx].1;
-        if used[open_idx]
-            || in_code(inline_pairs, abs_open.start)
-            || consumed(inline_pairs, abs_open)
+            .filter(|p| p.kind == InlineTagKind::Code)
+            .map(|p| p.inner.clone())
+            .collect(),
+    );
+    let delims = merge_ranges(
+        inline_pairs
+            .iter()
+            .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
+            .collect(),
+    );
+    let consumed = |run: std::ops::Range<usize>| {
+        let after = delims.partition_point(|d| d.start <= run.start);
+        after > 0 && run.end <= delims[after - 1].end
+    };
+    let mut blocked: Vec<bool> = runs
+        .iter()
+        .map(|&(s, e, _)| index_in_ranges(&code_inner, base + s) || consumed(base + s..base + e))
+        .collect();
+    // Closer candidates by delimiter: emphasis keyed by exact run length,
+    // backticks (any length) under length 0. Relaxed flanking: only the
+    // whitespace conditions apply, so a closer cannot follow whitespace. The
+    // punctuation conditions and the odd-match rule are exactly what
+    // rejected these runs in the first place.
+    let closer_slot = |ch: u8, len: usize| match (ch, len) {
+        (b'*', 1) => Some(0),
+        (b'*', 2) => Some(1),
+        (b'~', 2) => Some(2),
+        (b'`', _) => Some(3),
+        _ => None,
+    };
+    let mut closers: [Vec<usize>; 4] = Default::default();
+    for (k, &(s, e, ch)) in runs.iter().enumerate() {
+        if input[..s]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
         {
             continue;
         }
+        if let Some(slot) = closer_slot(ch, e - s) {
+            closers[slot].push(k);
+        }
+    }
+    let mut used = vec![false; runs.len()];
+    for open_idx in 0..runs.len() {
+        if used[open_idx] || blocked[open_idx] {
+            continue;
+        }
         let (o_start, o_end, ch) = runs[open_idx];
+        let o_len = o_end - o_start;
         // An opener must be followed by something (not whitespace).
         if input[o_end..]
             .chars()
@@ -1935,182 +2002,171 @@ fn synthesize_flanking_pairs(
         {
             continue;
         }
-        for close_idx in open_idx + 1..runs.len() {
-            let abs_close = base + runs[close_idx].0..base + runs[close_idx].1;
-            if used[close_idx]
-                || in_code(inline_pairs, abs_close.start)
-                || consumed(inline_pairs, abs_close)
-            {
-                continue;
-            }
-            let (c_start, c_end, c_ch) = runs[close_idx];
-            if c_ch != ch || c_start == o_end {
-                continue;
-            }
-            // Equal-length emphasis runs; code fences pair with a longer
-            // later run (the content's own trailing backticks merged with
-            // the closer), taking its tail as the closer. Single-backtick
-            // openers are not re-paired: unequal single/double backticks in
-            // ordinary text stay literal.
-            if ch == b'`' {
-                if o_end - o_start < 2 || c_end - c_start <= o_end - o_start {
-                    continue;
+        // Equal-length emphasis runs (`~~` only for strike, at most two);
+        // code fences pair with a longer later run (the content's own
+        // trailing backticks merged with the closer), taking its tail as the
+        // closer. Single-backtick openers are not re-paired: unequal
+        // single/double backticks in ordinary text stay literal.
+        if ch == b'`' && o_len < 2 {
+            continue;
+        }
+        let Some(slot) = closer_slot(ch, o_len) else {
+            continue;
+        };
+        let candidates = &closers[slot];
+        let from = candidates.partition_point(|&k| k <= open_idx);
+        let found = candidates[from..].iter().copied().find(|&k| {
+            let (c_start, c_end, _) = runs[k];
+            !used[k] && !blocked[k] && c_start != o_end && (ch != b'`' || c_end - c_start > o_len)
+        });
+        let Some(close_idx) = found else {
+            continue;
+        };
+        let (c_start, c_end, _) = runs[close_idx];
+        let closer_start = if ch == b'`' && c_end - c_start > o_end - o_start {
+            c_end - (o_end - o_start)
+        } else {
+            c_start
+        };
+        let len = if ch == b'`' {
+            o_end - o_start
+        } else {
+            c_end - c_start
+        };
+        let kind = if ch == b'`' {
+            InlineTagKind::Code
+        } else if ch == b'~' {
+            InlineTagKind::Strike
+        } else if len == 2 {
+            InlineTagKind::Bold
+        } else {
+            InlineTagKind::Italic
+        };
+        let inner = if ch == b'`' {
+            base + o_end..base + closer_start
+        } else {
+            base + o_end..base + c_start
+        };
+        used[open_idx] = true;
+        used[close_idx] = true;
+        raw_hidden.push(base + o_start..base + o_end);
+        raw_hidden.push(base + closer_start..base + c_end);
+        inline_pairs.push(InlinePair::new(
+            kind,
+            base + o_start..base + o_end,
+            inner.clone(),
+            base + closer_start..base + c_end,
+        ));
+        let or_kind = |s: &mut StyledSegment| match kind {
+            InlineTagKind::Bold => s.bold = true,
+            InlineTagKind::Italic => s.italic = true,
+            InlineTagKind::Underline => s.underline = true,
+            InlineTagKind::Strike => s.strike = true,
+            InlineTagKind::Code => s.code = true,
+            InlineTagKind::Link => {}
+        };
+        // Keep segments already inside the new span (nested bold, underline,
+        // links) and OR the synthesized style onto each. Only fill a gap
+        // when the inner range had no segments at all.
+        let mut rebuilt: Vec<StyledSegment> = Vec::new();
+        let mut inner_covered = false;
+        for s in styled_segments.drain(..) {
+            if s.source.start < inner.end && s.source.end > inner.start {
+                if s.source.start < inner.start {
+                    rebuilt.push(StyledSegment {
+                        source: s.source.start..inner.start,
+                        ..s.clone()
+                    });
                 }
-            } else if c_end - c_start != o_end - o_start
-                || (ch == b'~' && c_end - c_start != 2)
-                || c_end - c_start > 2
-            {
-                continue;
+                let mid_start = s.source.start.max(inner.start);
+                let mid_end = s.source.end.min(inner.end);
+                if mid_end > mid_start {
+                    let mut mid = s.clone();
+                    mid.source = mid_start..mid_end;
+                    or_kind(&mut mid);
+                    rebuilt.push(mid);
+                    inner_covered = true;
+                }
+                if s.source.end > inner.end {
+                    rebuilt.push(StyledSegment {
+                        source: inner.end..s.source.end,
+                        ..s
+                    });
+                }
+            } else {
+                rebuilt.push(s);
             }
-            // Relaxed flanking: only the whitespace conditions apply. The
-            // punctuation conditions and the odd-match rule are exactly what
-            // rejected these runs in the first place. The closer cannot be
-            // preceded by whitespace (`input[c_start..]` is the delimiter).
-            if input[..c_start]
-                .chars()
-                .next_back()
-                .is_some_and(char::is_whitespace)
-            {
-                continue;
-            }
-            let closer_start = if ch == b'`' && c_end - c_start > o_end - o_start {
-                c_end - (o_end - o_start)
-            } else {
-                c_start
-            };
-            let len = if ch == b'`' {
-                o_end - o_start
-            } else {
-                c_end - c_start
-            };
-            let kind = if ch == b'`' {
-                InlineTagKind::Code
-            } else if ch == b'~' {
-                InlineTagKind::Strike
-            } else if len == 2 {
-                InlineTagKind::Bold
-            } else {
-                InlineTagKind::Italic
-            };
-            let inner = if ch == b'`' {
-                base + o_end..base + closer_start
-            } else {
-                base + o_end..base + c_start
-            };
-            used[open_idx] = true;
-            used[close_idx] = true;
-            raw_hidden.push(base + o_start..base + o_end);
-            raw_hidden.push(base + closer_start..base + c_end);
-            inline_pairs.push(InlinePair::new(
-                kind,
-                base + o_start..base + o_end,
-                inner.clone(),
-                base + closer_start..base + c_end,
-            ));
-            let or_kind = |s: &mut StyledSegment| match kind {
-                InlineTagKind::Bold => s.bold = true,
-                InlineTagKind::Italic => s.italic = true,
-                InlineTagKind::Underline => s.underline = true,
-                InlineTagKind::Strike => s.strike = true,
-                InlineTagKind::Code => s.code = true,
-                InlineTagKind::Link => {}
-            };
-            // Keep segments already inside the new span (nested bold, underline,
-            // links) and OR the synthesized style onto each. Only fill a gap
-            // when the inner range had no segments at all.
-            let mut rebuilt: Vec<StyledSegment> = Vec::new();
-            let mut inner_covered = false;
-            for s in styled_segments.drain(..) {
-                if s.source.start < inner.end && s.source.end > inner.start {
-                    if s.source.start < inner.start {
-                        rebuilt.push(StyledSegment {
-                            source: s.source.start..inner.start,
+        }
+        // Marker runs are hidden: cut them out of every segment before
+        // merging, so leftover closer ticks are not glued onto the text
+        // that follows (` ``a```b`c` ` must keep `b` separate from `` ` ``).
+        for run in [
+            base + o_start..base + o_end,
+            base + closer_start..base + c_end,
+        ] {
+            let mut next = Vec::new();
+            for s in std::mem::take(&mut rebuilt) {
+                if s.source.start < run.end && s.source.end > run.start {
+                    if s.source.start < run.start {
+                        next.push(StyledSegment {
+                            source: s.source.start..run.start,
                             ..s.clone()
                         });
                     }
-                    let mid_start = s.source.start.max(inner.start);
-                    let mid_end = s.source.end.min(inner.end);
-                    if mid_end > mid_start {
-                        let mut mid = s.clone();
-                        mid.source = mid_start..mid_end;
-                        or_kind(&mut mid);
-                        rebuilt.push(mid);
-                        inner_covered = true;
-                    }
-                    if s.source.end > inner.end {
-                        rebuilt.push(StyledSegment {
-                            source: inner.end..s.source.end,
+                    if s.source.end > run.end {
+                        next.push(StyledSegment {
+                            source: run.end..s.source.end,
                             ..s
                         });
                     }
                 } else {
-                    rebuilt.push(s);
+                    next.push(s);
                 }
             }
-            // Marker runs are hidden: cut them out of every segment before
-            // merging, so leftover closer ticks are not glued onto the text
-            // that follows (` ``a```b`c` ` must keep `b` separate from `` ` ``).
-            for run in [
-                base + o_start..base + o_end,
-                base + closer_start..base + c_end,
-            ] {
-                let mut next = Vec::new();
-                for s in std::mem::take(&mut rebuilt) {
-                    if s.source.start < run.end && s.source.end > run.start {
-                        if s.source.start < run.start {
-                            next.push(StyledSegment {
-                                source: s.source.start..run.start,
-                                ..s.clone()
-                            });
-                        }
-                        if s.source.end > run.end {
-                            next.push(StyledSegment {
-                                source: run.end..s.source.end,
-                                ..s
-                            });
-                        }
-                    } else {
-                        next.push(s);
-                    }
-                }
-                rebuilt = next;
-            }
-            rebuilt.sort_by_key(|s| s.source.start);
-            let mut i = 0;
-            while i + 1 < rebuilt.len() {
-                let same = rebuilt[i].source.end == rebuilt[i + 1].source.start
-                    && rebuilt[i].bold == rebuilt[i + 1].bold
-                    && rebuilt[i].italic == rebuilt[i + 1].italic
-                    && rebuilt[i].underline == rebuilt[i + 1].underline
-                    && rebuilt[i].strike == rebuilt[i + 1].strike
-                    && rebuilt[i].code == rebuilt[i + 1].code
-                    && rebuilt[i].link_url == rebuilt[i + 1].link_url;
-                if same {
-                    rebuilt[i].source.end = rebuilt[i + 1].source.end;
-                    rebuilt.remove(i + 1);
-                } else {
-                    i += 1;
+            rebuilt = next;
+        }
+        rebuilt.sort_by_key(|s| s.source.start);
+        styled_segments.reserve(rebuilt.len());
+        for s in rebuilt {
+            if let Some(last) = styled_segments.last_mut() {
+                if last.source.end == s.source.start
+                    && last.bold == s.bold
+                    && last.italic == s.italic
+                    && last.underline == s.underline
+                    && last.strike == s.strike
+                    && last.code == s.code
+                    && last.link_url == s.link_url
+                {
+                    last.source.end = s.source.end;
+                    continue;
                 }
             }
-            *styled_segments = rebuilt;
-            if !inner_covered {
-                let mut seg = StyledSegment {
-                    source: inner.clone(),
-                    bold: false,
-                    italic: false,
-                    underline: false,
-                    strike: false,
-                    code: false,
-                    link_url: None,
-                };
-                or_kind(&mut seg);
-                let pos = styled_segments
-                    .iter()
-                    .position(|s| s.source.start > inner.start)
-                    .unwrap_or(styled_segments.len());
-                styled_segments.insert(pos, seg);
+            styled_segments.push(s);
+        }
+        if !inner_covered {
+            let mut seg = StyledSegment {
+                source: inner.clone(),
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                code: false,
+                link_url: None,
+            };
+            or_kind(&mut seg);
+            let pos = styled_segments
+                .iter()
+                .position(|s| s.source.start > inner.start)
+                .unwrap_or(styled_segments.len());
+            styled_segments.insert(pos, seg);
+        }
+        if kind == InlineTagKind::Code {
+            // Runs inside the new code span no longer open or close.
+            let first = runs.partition_point(|r| base + r.0 < inner.start);
+            let last = runs.partition_point(|r| base + r.0 < inner.end);
+            for flag in &mut blocked[first..last] {
+                *flag = true;
             }
-            break;
         }
     }
 }
@@ -2122,17 +2178,36 @@ fn synthesize_flanking_pairs(
 /// the real content range, so caret mapping, exits, and splits see the actual
 /// text. Display and hidden ranges are unaffected.
 fn normalize_shared_run_pairs(inline_pairs: &mut [InlinePair]) {
+    // Pairs by their outer extent, in index order; delims never change here.
+    // Few pairs (the usual line) are scanned directly instead.
+    let mut by_outer: std::collections::HashMap<(usize, usize), Vec<usize>> =
+        std::collections::HashMap::new();
+    if inline_pairs.len() > SMALL_PAIRS {
+        for (j, p) in inline_pairs.iter().enumerate() {
+            by_outer
+                .entry((p.open_delim.start, p.close_delim.end))
+                .or_default()
+                .push(j);
+        }
+    }
     loop {
         let mut changed = false;
         for i in 0..inline_pairs.len() {
             let inner = inline_pairs[i].inner.clone();
-            let nested = (0..inline_pairs.len()).find(|&j| {
+            let fits = |j: usize| {
                 j != i
                     && inline_pairs[j].open_delim.start == inner.start
                     && inline_pairs[j].close_delim.end == inner.end
                     && inline_pairs[j].inner.start > inner.start
                     && inline_pairs[j].inner.end < inner.end
-            });
+            };
+            let nested = if inline_pairs.len() > SMALL_PAIRS {
+                by_outer
+                    .get(&(inner.start, inner.end))
+                    .and_then(|candidates| candidates.iter().copied().find(|&j| fits(j)))
+            } else {
+                (0..inline_pairs.len()).find(|&j| fits(j))
+            };
             if let Some(j) = nested {
                 inline_pairs[i].inner = inline_pairs[j].inner.clone();
                 changed = true;
@@ -2483,7 +2558,7 @@ fn fence_marker_line(
         inline_pairs: Vec::new(),
         display_text,
         offset_map: Arc::new(offset_map),
-        link_hits: Arc::default(),
+        link_hits: no_links(),
         styled_segments: Vec::new(),
     }
 }
@@ -2507,7 +2582,7 @@ fn code_content_line(
             inline_pairs: Vec::new(),
             display_text: line.to_string(),
             offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
-            link_hits: Arc::default(),
+            link_hits: no_links(),
             styled_segments: vec![StyledSegment {
                 source,
                 bold: false,
@@ -2544,7 +2619,7 @@ fn code_content_line(
         inline_pairs: Vec::new(),
         display_text,
         offset_map: Arc::new(offset_map),
-        link_hits: Arc::default(),
+        link_hits: no_links(),
         styled_segments,
     }
 }
@@ -2586,7 +2661,7 @@ fn atx_line(
         inline_pairs,
         display_text,
         offset_map: Arc::new(offset_map),
-        link_hits: Arc::default(),
+        link_hits: no_links(),
         styled_segments,
     }
 }
@@ -3206,7 +3281,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 inline_pairs: Vec::new(),
                 display_text: line.to_string(),
                 offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
-                link_hits: Arc::default(),
+                link_hits: no_links(),
                 styled_segments: Vec::new(),
             });
             continue;
@@ -3228,7 +3303,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 inline_pairs: Vec::new(),
                 display_text,
                 offset_map: Arc::new(offset_map),
-                link_hits: Arc::default(),
+                link_hits: no_links(),
                 styled_segments: Vec::new(),
             });
             continue;
@@ -3245,7 +3320,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     last: block.last,
                     delimiter: block.delimiter,
                     source: byte_start..(last_line.start + last_line.text.len()),
-                    alignments: block.alignments,
+                    alignments: block.alignments.into(),
                 }
             });
         }
@@ -3264,7 +3339,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     inline_pairs: Vec::new(),
                     display_text,
                     offset_map: Arc::new(offset_map),
-                    link_hits: Arc::default(),
+                    link_hits: no_links(),
                     styled_segments: Vec::new(),
                 });
                 continue;
@@ -3318,7 +3393,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                         body: Box::new(TableRowBody {
                             cells,
                             raw_cells,
-                            alignments: tbl.alignments.clone(),
+                            alignments: Arc::clone(&tbl.alignments),
                             table_source: tbl.source.clone(),
                         }),
                     },
@@ -3327,7 +3402,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                     inline_pairs: row_pairs,
                     display_text: line.to_string(),
                     offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
-                    link_hits: Arc::default(),
+                    link_hits: no_links(),
                     styled_segments: row_segments,
                 });
                 continue;
@@ -3389,7 +3464,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             inline_pairs,
             display_text,
             offset_map: Arc::new(offset_map),
-            link_hits: Arc::default(),
+            link_hits: no_links(),
             styled_segments,
         });
     }
@@ -3558,7 +3633,7 @@ mod tests {
                     inline_pairs: Vec::new(),
                     display_text: String::new(),
                     offset_map: Arc::new(RowOffsetMap::identity(0, 0)),
-                    link_hits: Arc::default(),
+                    link_hits: no_links(),
                     styled_segments: Vec::new(),
                 });
                 check_all(kinds, seq, next_tracker, depth + 1);
@@ -3698,7 +3773,7 @@ mod tests {
                 assert_eq!(&md[cells[0].clone()], "a \\| b");
                 assert_eq!(&md[cells[1].clone()], "c");
                 assert_eq!(
-                    alignments,
+                    &alignments[..],
                     &[TableColumnAlign::None, TableColumnAlign::None]
                 );
             }
