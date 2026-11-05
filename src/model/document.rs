@@ -1151,6 +1151,20 @@ impl DocumentTab {
             return;
         }
 
+        // 5b. A whitespace-only line right under indented code (left by the
+        // previous Enter): Enter clears it and ends the block, the way Enter
+        // on an empty list item ends the list.
+        if trimmed_start.is_empty() && !indent.is_empty() && range.is_empty() {
+            let above = parsed
+                .line_at_offset(line_start)
+                .and_then(|line| line.line_index.checked_sub(1))
+                .and_then(|index| parsed.lines.get(index));
+            if above.is_some_and(|line| is_indented_code(&parsed, line)) {
+                self.edit(line_start..line_end_pos, "");
+                return;
+            }
+        }
+
         // 6. Indented code/text: maintain indentation
         if !indent.is_empty() && !trimmed_start.is_empty() {
             let ins = format!("\n{}", indent);
@@ -2512,6 +2526,33 @@ impl DocumentTab {
             self.edit(open_fence.start..full_end, &replacement);
             self.caret.range = floor_boundary(&self.content, open_fence.start)
                 ..floor_boundary(&self.content, open_fence.start + unwrapped_len);
+            self.caret.reversed = false;
+            self.refresh_cursor();
+            return;
+        }
+
+        // Indented code: turn the whole block into a backtick fence and drop
+        // the four-column indent that made it code, so it is not kept as
+        // text inside the fence.
+        if let Some(lines) = indented_code_block_at(&parsed, range.start) {
+            let first = lines.first().expect("block has a line");
+            let last = lines.last().expect("block has a line");
+            let block = first.source.start..last.source.end;
+            let mut body = String::with_capacity(block.len());
+            for (index, line) in lines.iter().enumerate() {
+                if matches!(line.kind, LineKind::CodeLine) {
+                    body.push_str(&self.content[line.prefix_range.end..line.source.end]);
+                }
+                if let Some(next) = lines.get(index + 1) {
+                    body.push_str(&self.content[line.source.end..next.source.start]);
+                }
+            }
+            let nl = self.line_break(block.start);
+            let replacement = format!("```{nl}{body}{nl}```");
+            self.edit(block.clone(), &replacement);
+            let inner = block.start + 3 + nl.len();
+            self.caret.range = floor_boundary(&self.content, inner)
+                ..floor_boundary(&self.content, inner + body.len());
             self.caret.reversed = false;
             self.refresh_cursor();
             return;
@@ -4491,6 +4532,49 @@ fn range_has_non_link_pairs(parsed: &ParsedDocument, range: Range<usize>) -> boo
                 && span_close_end(parsed, p) > range.start
         })
     })
+}
+
+/// A code line that comes from indentation, not from inside a fence.
+fn is_indented_code(parsed: &ParsedDocument, line: &ParsedLine) -> bool {
+    matches!(line.kind, LineKind::CodeLine)
+        && !parsed
+            .code_blocks
+            .iter()
+            .any(|(open, close)| line.source.start >= open.start && line.source.start <= close.end)
+}
+
+/// The indented code block around `offset`: its consecutive code lines plus
+/// the blank lines between them (CommonMark example 117), or `None` when
+/// `offset` is not on an indented code line.
+fn indented_code_block_at(parsed: &ParsedDocument, offset: usize) -> Option<&[ParsedLine]> {
+    let at = parsed.line_at_offset(offset)?.line_index;
+    let lines = &parsed.lines;
+    let code = |index: usize| is_indented_code(parsed, &lines[index]);
+    if !code(at) {
+        return None;
+    }
+    let blank = |index: usize| matches!(lines[index].kind, LineKind::Empty);
+    let mut first = at;
+    loop {
+        if first >= 1 && code(first - 1) {
+            first -= 1;
+        } else if first >= 2 && blank(first - 1) && code(first - 2) {
+            first -= 2;
+        } else {
+            break;
+        }
+    }
+    let mut last = at;
+    loop {
+        if last + 1 < lines.len() && code(last + 1) {
+            last += 1;
+        } else if last + 2 < lines.len() && blank(last + 1) && code(last + 2) {
+            last += 2;
+        } else {
+            break;
+        }
+    }
+    Some(&lines[first..=last])
 }
 
 fn line_pair_refs(parsed: &ParsedDocument, offset: usize) -> &[InlinePair] {
@@ -12529,6 +12613,64 @@ mod clear_formatting_tests {
             );
             assert_eq!(FileType::Markdown.effective_view_mode(global), global);
         }
+    }
+
+    /// Ctrl+Shift+C on indented code makes one backtick fence from the whole
+    /// block (blank lines between chunks included) and drops the four-column
+    /// indent; deeper indent and the file's line endings are kept.
+    #[test]
+    fn code_block_toggle_turns_indented_code_into_a_fence() {
+        let cases = [
+            (
+                "para\n\n    a\n\n    b\n",
+                13,
+                "para\n\n```\na\n\nb\n```\n",
+                "a\n\nb",
+            ),
+            (
+                "    foo\n        bar",
+                2,
+                "```\nfoo\n    bar\n```",
+                "foo\n    bar",
+            ),
+            ("    a\r\n    b", 5, "```\r\na\r\nb\r\n```", "a\r\nb"),
+            ("\tx\n", 1, "```\nx\n```\n", "x"),
+        ];
+        for (source, caret, expected, selected) in cases {
+            let mut doc = DocumentTab::new("c".into(), "c.md".into(), source.into(), None, None);
+            doc.place(caret, false);
+            doc.apply_format("codeblock");
+            assert_eq!(doc.content, expected, "{source:?}");
+            assert_eq!(
+                &doc.content[doc.caret.range.clone()],
+                selected,
+                "{source:?}"
+            );
+        }
+    }
+
+    /// Enter on the whitespace-only line a previous Enter left under indented
+    /// code clears it and ends the block. Elsewhere it is a plain newline.
+    #[test]
+    fn second_enter_ends_an_indented_code_block() {
+        let mut doc = DocumentTab::new(
+            "c".into(),
+            "c.md".into(),
+            "para\n\n    code".into(),
+            None,
+            None,
+        );
+        doc.place(doc.content.len(), false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "para\n\n    code\n    ");
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "para\n\n    code\n");
+        assert_eq!(doc.cursor_offset(), doc.content.len());
+
+        let mut text = DocumentTab::new("t".into(), "t.md".into(), "foo\n    ".into(), None, None);
+        text.place(text.content.len(), false);
+        text.smart_newline(false);
+        assert_eq!(text.content, "foo\n    \n");
     }
 
     #[test]
