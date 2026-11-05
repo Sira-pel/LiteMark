@@ -1563,6 +1563,14 @@ fn parse_inline_syntax(input: &str, base: usize) -> InlineSyntax {
     if input.is_empty() {
         return (Vec::new(), Vec::new(), Vec::new());
     }
+    // Block structure is decided before this point, so leading indentation
+    // is only text. Pulldown would read four columns of it as indented code
+    // and drop every inline format (`    <u>x</u>`, a lazy continuation line).
+    let body = input.trim_start_matches([' ', '\t']);
+    if body.len() < input.len() {
+        let lead = input.len() - body.len();
+        return parse_inline_syntax(body, base + lead);
+    }
     if is_plain_inline(input) {
         let plain = StyledSegment {
             source: base..base + input.len(),
@@ -2220,8 +2228,10 @@ fn normalize_shared_run_pairs(inline_pairs: &mut [InlinePair]) {
 }
 
 struct OpenFence {
-    /// Column-0..3 backtick fence. A shorter run does not close it.
+    /// Column-0..3 fence. A shorter run does not close it.
     strict: bool,
+    /// `` ` `` or `~`. Only the same character closes the fence.
+    marker: u8,
     len: usize,
     indent: usize,
     open_range: std::ops::Range<usize>,
@@ -2301,18 +2311,22 @@ fn leading_spaces(line: &str) -> Option<usize> {
     Some(index)
 }
 
-/// Top-level backtick fence at column 0–3. Tildes are not fences.
-fn strict_backtick_open(line: &str) -> Option<(usize, usize, Option<String>)> {
+/// Top-level fence at column 0–3: a run of three or more backticks or tildes.
+/// A backtick fence's info string may not contain a backtick; a tilde
+/// fence's may contain anything (CommonMark examples 119–147).
+/// Returns (marker, run length, indent, info).
+fn strict_fence_open(line: &str) -> Option<(u8, usize, usize, Option<String>)> {
     let indent = leading_spaces(line)?;
     if indent > 3 {
         return None;
     }
     let bytes = line.as_bytes();
-    if indent >= bytes.len() || bytes[indent] != b'`' {
+    let marker = *bytes.get(indent)?;
+    if marker != b'`' && marker != b'~' {
         return None;
     }
     let mut end = indent;
-    while end < bytes.len() && bytes[end] == b'`' {
+    while end < bytes.len() && bytes[end] == marker {
         end += 1;
     }
     let len = end - indent;
@@ -2320,7 +2334,7 @@ fn strict_backtick_open(line: &str) -> Option<(usize, usize, Option<String>)> {
         return None;
     }
     let rest = &line[end..];
-    if rest.contains('`') {
+    if marker == b'`' && rest.contains('`') {
         return None;
     }
     let info = rest.trim_matches(|ch: char| ch == ' ' || ch == '\t');
@@ -2329,7 +2343,7 @@ fn strict_backtick_open(line: &str) -> Option<(usize, usize, Option<String>)> {
     } else {
         Some(info.to_string())
     };
-    Some((len, indent, info))
+    Some((marker, len, indent, info))
 }
 
 /// ` ``` aa ``` ` at column 0–3 is not a fence. Callers must not fall through to red's trim rule.
@@ -3184,13 +3198,16 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         let trimmed_start = line.trim_start();
         let indent_len = line.len() - trimmed_start.len();
 
-        // Fences. Top-level backtick fences follow CommonMark. A fence in a
-        // list item or quote, a tab-indented fence, and a tilde line keep red.
+        // Fences. Top-level backtick and tilde fences follow CommonMark. A
+        // fence in a list item or quote, and a tab-indented backtick fence,
+        // keep red's trimmed-marker rule.
         if open_fence.is_some() {
             list_walk.note_block(line);
             let closes = open_fence.as_ref().is_some_and(|fence| {
                 if fence.strict {
-                    is_closing_fence(line, b'`', fence.len, 3)
+                    is_closing_fence(line, fence.marker, fence.len, 3)
+                } else if fence.marker == b'~' {
+                    trimmed.starts_with("~~~")
                 } else {
                     trimmed.starts_with("```")
                 }
@@ -3219,15 +3236,17 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             }
             continue;
         }
-        let open_top = if list_quote_tracker.is_in_list_or_quote() || backtick_info_rejects_fence(line) {
-            None
-        } else {
-            strict_backtick_open(line)
-        };
-        if let Some((len, indent, language)) = open_top {
+        let open_top =
+            if list_quote_tracker.is_in_list_or_quote() || backtick_info_rejects_fence(line) {
+                None
+            } else {
+                strict_fence_open(line)
+            };
+        if let Some((marker, len, indent, language)) = open_top {
             list_walk.note_block(line);
             open_fence = Some(OpenFence {
                 strict: true,
+                marker,
                 len,
                 indent,
                 open_range: sline.start..sline.end,
@@ -3244,6 +3263,45 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             push_line!(parsed);
             continue;
         }
+        // Indented code: four or more columns at document level. It cannot
+        // interrupt a paragraph, so the line before must end a block (or be
+        // indented code itself); after paragraph, list or quote text the line
+        // is a lazy continuation. Inside a list item the indent belongs to
+        // the item. The first four columns are hidden like a fence's indent.
+        let after_block = lines.last().is_none_or(|prev: &ParsedLine| {
+            matches!(
+                prev.kind,
+                LineKind::Empty
+                    | LineKind::Heading { .. }
+                    | LineKind::HorizontalRule
+                    | LineKind::CodeLine
+                    | LineKind::CodeFence { opening: false, .. }
+            )
+        });
+        // `\t- foo` stays a list item, as `take_list` accepts it (red parity).
+        let indented_code = after_block
+            && !trimmed.is_empty()
+            && leading_column(line) >= 4
+            && list_walk.thematic_parent_col(line) == 0
+            && !(single_tab_marker(line) && scan_list_marker(line).is_some());
+        // Inside an indented code block (blank lines included) a ```` line is
+        // code. Red's trimmed-backtick rule below would open a fence there and
+        // swallow the rest of the document. A fence is open only in the
+        // branch above, so a code line before the blanks is indented code.
+        let continues_indented_code = indented_code
+            && lines
+                .iter()
+                .rev()
+                .find(|prev| !matches!(prev.kind, LineKind::Empty))
+                .is_some_and(|prev| matches!(prev.kind, LineKind::CodeLine));
+        if continues_indented_code {
+            list_walk.note_block(line);
+            let strip = prefix_through_column(line, 4);
+            let parsed = code_content_line(i, line_source, line, strip);
+            push_line!(parsed);
+            continue;
+        }
+
         let skip_rejected = !list_quote_tracker.is_in_list_or_quote() && backtick_info_rejects_fence(line);
         if trimmed.starts_with("```") && !skip_rejected {
             list_walk.note_block(line);
@@ -3253,6 +3311,34 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 .filter(|info| !info.is_empty());
             open_fence = Some(OpenFence {
                 strict: false,
+                marker: b'`',
+                len: 3,
+                indent: 0,
+                open_range: sline.start..sline.end,
+            });
+            let parsed = fence_marker_line(
+                i,
+                line_source,
+                line,
+                LineKind::CodeFence {
+                    language: lang,
+                    opening: true,
+                },
+            );
+            push_line!(parsed);
+            continue;
+        }
+        // A tilde fence in a list item or quote follows the same trimmed rule
+        // as a backtick one there. At document level a tilde line indented
+        // four columns is indented code, not a fence.
+        if list_quote_tracker.is_in_list_or_quote() && trimmed.starts_with("~~~") {
+            list_walk.note_block(line);
+            let lang = Some(trimmed.trim_start_matches('~').trim())
+                .filter(|info| !info.is_empty())
+                .map(str::to_string);
+            open_fence = Some(OpenFence {
+                strict: false,
+                marker: b'~',
                 len: 3,
                 indent: 0,
                 open_range: sline.start..sline.end,
@@ -3284,6 +3370,14 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 link_hits: no_links(),
                 styled_segments: Vec::new(),
             });
+            continue;
+        }
+
+        if indented_code {
+            list_walk.note_block(line);
+            let strip = prefix_through_column(line, 4);
+            let parsed = code_content_line(i, line_source, line, strip);
+            push_line!(parsed);
             continue;
         }
 
@@ -4224,9 +4318,9 @@ mod tests {
                 ],
             ),
             (
-                "ex69-four-spaces-not-atx",
+                "ex69-four-spaces-is-code",
                 "    # foo",
-                vec![leaf("p", "    # foo", "    # foo")],
+                vec![leaf_marks("code", "# foo", "    # foo", "C:# foo")],
             ),
             (
                 "ex71-closing-hash",
@@ -4601,12 +4695,146 @@ mod tests {
                 ],
             ),
             (
-                "tilde-lines-stay-paragraphs",
+                "tilde-fence",
                 "~~~\ncode\n~~~",
                 vec![
-                    leaf("p", "~~~", "~~~"),
-                    leaf("p", "code", "code"),
-                    leaf("p", "~~~", "~~~"),
+                    leaf("fence-open", "", "~~~"),
+                    leaf_marks("code", "code", "code", "C:code"),
+                    leaf("fence-close", "", "~~~"),
+                ],
+            ),
+            (
+                "ex119-tilde-fence",
+                "~~~\n<\n >\n~~~",
+                vec![
+                    leaf("fence-open", "", "~~~"),
+                    leaf_marks("code", "<", "<", "C:<"),
+                    leaf_marks("code", " >", " >", "C: >"),
+                    leaf("fence-close", "", "~~~"),
+                ],
+            ),
+            (
+                "ex122-backticks-do-not-close-tilde",
+                "~~~\naaa\n```\n~~~",
+                vec![
+                    leaf("fence-open", "", "~~~"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "```", "```", "C:```"),
+                    leaf("fence-close", "", "~~~"),
+                ],
+            ),
+            (
+                "ex124-shorter-tilde-run-is-code",
+                "~~~~\naaa\n~~~\n~~~~",
+                vec![
+                    leaf("fence-open", "", "~~~~"),
+                    leaf_marks("code", "aaa", "aaa", "C:aaa"),
+                    leaf_marks("code", "~~~", "~~~", "C:~~~"),
+                    leaf("fence-close", "", "~~~~"),
+                ],
+            ),
+            (
+                "ex146-tilde-info-may-hold-backticks",
+                "~~~ aa ``` ~~~\nfoo\n~~~",
+                vec![
+                    leaf("fence-open:aa ``` ~~~", "", "~~~ aa ``` ~~~"),
+                    leaf_marks("code", "foo", "foo", "C:foo"),
+                    leaf("fence-close", "", "~~~"),
+                ],
+            ),
+            (
+                "tilde-fence-unclosed-runs-to-end",
+                "~~~\nfoo",
+                vec![
+                    leaf("fence-open", "", "~~~"),
+                    leaf_marks("code", "foo", "foo", "C:foo"),
+                ],
+            ),
+            (
+                "ex107-indented-code",
+                "    a simple\n      indented code block",
+                vec![
+                    leaf_marks("code", "a simple", "    a simple", "C:a simple"),
+                    leaf_marks(
+                        "code",
+                        "  indented code block",
+                        "      indented code block",
+                        "C:  indented code block",
+                    ),
+                ],
+            ),
+            (
+                "ex110-indented-code-cannot-interrupt-paragraph",
+                "Foo\n    bar",
+                vec![leaf("p", "Foo", "Foo"), leaf("p", "    bar", "    bar")],
+            ),
+            (
+                "ex111-paragraph-ends-indented-code",
+                "    foo\nbar",
+                vec![
+                    leaf_marks("code", "foo", "    foo", "C:foo"),
+                    leaf("p", "bar", "bar"),
+                ],
+            ),
+            (
+                "indented-code-after-heading",
+                "# Heading\n    foo",
+                vec![
+                    leaf("h1", "Heading", "# Heading"),
+                    leaf_marks("code", "foo", "    foo", "C:foo"),
+                ],
+            ),
+            (
+                "ex113-indent-past-four-is-kept",
+                "        foo\n    bar",
+                vec![
+                    leaf_marks("code", "    foo", "        foo", "C:    foo"),
+                    leaf_marks("code", "bar", "    bar", "C:bar"),
+                ],
+            ),
+            (
+                "ex117-blank-line-inside-indented-code",
+                "    chunk1\n\n    chunk2",
+                vec![
+                    leaf_marks("code", "chunk1", "    chunk1", "C:chunk1"),
+                    leaf("empty", "", ""),
+                    leaf_marks("code", "chunk2", "    chunk2", "C:chunk2"),
+                ],
+            ),
+            (
+                "backtick-line-inside-indented-code-stays-code",
+                "    x\n    ```\n    y",
+                vec![
+                    leaf_marks("code", "x", "    x", "C:x"),
+                    leaf_marks("code", "```", "    ```", "C:```"),
+                    leaf_marks("code", "y", "    y", "C:y"),
+                ],
+            ),
+            (
+                "backtick-line-after-blank-in-indented-code-stays-code",
+                "    x\n\n    ```\ny",
+                vec![
+                    leaf_marks("code", "x", "    x", "C:x"),
+                    leaf("empty", "", ""),
+                    leaf_marks("code", "```", "    ```", "C:```"),
+                    leaf("p", "y", "y"),
+                ],
+            ),
+            (
+                "list-content-is-not-indented-code",
+                "- foo\n\n    bar",
+                vec![
+                    leaf("ul:0", "foo", "- foo"),
+                    leaf("empty", "", ""),
+                    leaf("p", "    bar", "    bar"),
+                ],
+            ),
+            (
+                "four-space-continuation-parses-inline",
+                "foo\n    **bar** `c`",
+                vec![
+                    leaf("p", "foo", "foo"),
+                    leaf_marks("p", "    bar c", "    **bar** `c`", "B:bar,C:c"),
                 ],
             ),
             (
@@ -5014,21 +5242,22 @@ paren305[2] Empty display=\"\" strike=- link=- map=ok"
         );
     }
 
-    /// A marker at column 4 or later is not a list item unless a parent item contains it.
+    /// A marker at column 4 or later is not a list item unless a parent item
+    /// contains it: at document level the line is indented code.
     #[test]
     fn marker_at_column_four_is_not_a_list_item() {
         let tabbed = observe_doc("tab", " \t63.\tnot\n");
         assert_eq!(
             tabbed,
             "\
-tab[0] Paragraph display=\" \\t63.\\tnot\" strike=- link=- map=ok
+tab[0] CodeLine display=\"63.\\tnot\" strike=- link=- map=ok
 tab[1] Empty display=\"\" strike=- link=- map=ok"
         );
         let indented = observe_doc("code", "    - code\n");
         assert_eq!(
             indented,
             "\
-code[0] Paragraph display=\"    - code\" strike=- link=- map=ok
+code[0] CodeLine display=\"- code\" strike=- link=- map=ok
 code[1] Empty display=\"\" strike=- link=- map=ok"
         );
         let nested = observe_doc("nest", "10) foo\n    - bar\n");
@@ -5275,13 +5504,12 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
         ));
     }
 
-    /// R6-9. Four spaces before `---` is indented text once a bare CR is a
-    /// line break. This parser has no indented-code block (BASE shows
-    /// `    indented` as a paragraph). Pulldown, which does not split CR,
-    /// returns one code block for the unsplit bytes. The line must not be a
-    /// rule: display keeps `    ---`, then paragraph `next`.
+    /// R6-9. Four spaces before `---` is indented code once a bare CR is a
+    /// line break, never a rule. Pulldown, which does not split CR,
+    /// returns one code block for the unsplit bytes. The editor shows `---`
+    /// as a code line, then paragraph `next`.
     #[test]
-    fn four_space_dash_rule_after_bare_cr_stays_text() {
+    fn four_space_dash_rule_after_bare_cr_is_code() {
         let src = "    ---\rnext\r";
         let doc = parse_document(src);
         assert!(
@@ -5289,23 +5517,54 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             "kind {:?}",
             doc.lines[0].kind
         );
-        assert!(matches!(doc.lines[0].kind, LineKind::Paragraph));
-        assert_eq!(doc.lines[0].display_text, "    ---");
+        assert!(matches!(doc.lines[0].kind, LineKind::CodeLine));
+        assert_eq!(doc.lines[0].display_text, "---");
         assert_eq!(&src[doc.lines[0].source.clone()], "    ---");
         assert!(matches!(doc.lines[1].kind, LineKind::Paragraph));
         assert_eq!(doc.lines[1].display_text, "next");
         assert_eq!(&src[doc.lines[1].source.clone()], "next");
     }
 
+    /// A line that stays text despite four columns of indent (a paragraph or
+    /// quote continuation, list content) parses every inline format, not
+    /// only the `**` that the flanking fallback used to catch.
+    #[test]
+    fn four_space_text_lines_parse_every_inline_format() {
+        for src in [
+            "foo\n    <u>x</u> `y` ~~z~~ *w*",
+            "- item\n    <u>x</u> `y` ~~z~~ *w*",
+            "> q\n    <u>x</u> `y` ~~z~~ *w*",
+            "foo\n\t<u>x</u> `y` ~~z~~ *w*",
+        ] {
+            let doc = parse_document(src);
+            let line = &doc.lines[1];
+            assert!(
+                matches!(line.kind, LineKind::Paragraph),
+                "{src:?}: {:?}",
+                line.kind
+            );
+            let flags = |text: &str| {
+                line.styled_segments
+                    .iter()
+                    .find(|s| &src[s.source.clone()] == text)
+                    .map(|s| (s.underline, s.code, s.strike, s.italic))
+            };
+            assert_eq!(flags("x"), Some((true, false, false, false)), "{src:?}");
+            assert_eq!(flags("y"), Some((false, true, false, false)), "{src:?}");
+            assert_eq!(flags("z"), Some((false, false, true, false)), "{src:?}");
+            assert_eq!(flags("w"), Some((false, false, false, true)), "{src:?}");
+        }
+    }
+
     /// A blank line leaves the item open. Four spaces is two past `- `'s
-    /// content column, so the line is a rule. The same bytes at column 0
-    /// stay a paragraph.
+    /// content column, so the line is a rule. The same bytes at document
+    /// level are indented code.
     #[test]
     fn four_space_rule_inside_an_open_list_is_a_rule() {
         let top = "    ---\nnext\n";
         let top_doc = parse_document(top);
-        assert!(matches!(top_doc.lines[0].kind, LineKind::Paragraph));
-        assert_eq!(top_doc.lines[0].display_text, "    ---");
+        assert!(matches!(top_doc.lines[0].kind, LineKind::CodeLine));
+        assert_eq!(top_doc.lines[0].display_text, "---");
 
         let cases = [
             ("- item\n\n    ---\n", 2),
@@ -5330,13 +5589,13 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
 
     /// K1. A tab inside an open list is a column stop of 4, same as BASE
     /// `leading_column`. Extra indent past the item content column is 2, so
-    /// the line is a rule. A tab at column 0 stays a paragraph.
+    /// the line is a rule. A tab at column 0 is indented code.
     #[test]
     fn tab_rule_inside_an_open_list_is_a_rule() {
         let top = "\t---\n";
         let top_doc = parse_document(top);
-        assert!(matches!(top_doc.lines[0].kind, LineKind::Paragraph));
-        assert_eq!(top_doc.lines[0].display_text, "\t---");
+        assert!(matches!(top_doc.lines[0].kind, LineKind::CodeLine));
+        assert_eq!(top_doc.lines[0].display_text, "---");
         assert_eq!(&top[top_doc.lines[0].source.clone()], "\t---");
 
         let cases = [
@@ -6038,7 +6297,7 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
         );
         // pulldown 0.12.2: code-open: / code-line / code-close.
         // HTML after the table: <pre><code>code\n</code></pre>
-        // Main's leaf rule keeps tilde lines as paragraphs, not fences.
+        // The tilde fence ends the table and holds `code`, as pulldown does.
         check(
             "tilde-fence",
             "| a | b |\n| --- | --- |\n| c | d |\n~~~\ncode\n~~~",
@@ -6046,9 +6305,9 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
                 r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
                 r#"line[1] TableDelimiter display="" code=[]"#,
                 r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-                r#"line[3] Paragraph display="~~~" code=[]"#,
-                r#"line[4] Paragraph display="code" code=[]"#,
-                r#"line[5] Paragraph display="~~~" code=[]"#,
+                r#"line[3] CodeFence display="" code=[]"#,
+                r#"line[4] CodeLine display="code" code=["code"]"#,
+                r#"line[5] CodeFence display="" code=[]"#,
             ],
             false,
         );
@@ -6233,9 +6492,9 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             "indent4-table",
             "    | a | b |\n    | --- | --- |\n    | c | d |",
             &[
-                r#"line[0] Paragraph display="    | a | b |" code=[]"#,
-                r#"line[1] Paragraph display="    | --- | --- |" code=[]"#,
-                r#"line[2] Paragraph display="    | c | d |" code=[]"#,
+                r#"line[0] CodeLine display="| a | b |" code=["| a | b |"]"#,
+                r#"line[1] CodeLine display="| --- | --- |" code=["| --- | --- |"]"#,
+                r#"line[2] CodeLine display="| c | d |" code=["| c | d |"]"#,
             ],
             false,
         );
@@ -6502,9 +6761,9 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             "indent4-bare",
             "    a | b\n    --- | ---\n    c | d",
             &[
-                r#"line[0] Paragraph display="    a | b" code=[]"#,
-                r#"line[1] Paragraph display="    --- | ---" code=[]"#,
-                r#"line[2] Paragraph display="    c | d" code=[]"#,
+                r#"line[0] CodeLine display="a | b" code=["a | b"]"#,
+                r#"line[1] CodeLine display="--- | ---" code=["--- | ---"]"#,
+                r#"line[2] CodeLine display="c | d" code=["c | d"]"#,
             ],
             false,
         );
@@ -6627,7 +6886,9 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             ],
             false,
         );
-        // Main's leaf rule keeps tilde lines as paragraphs, not code.
+        // `    ~~~` right after a row is not indented code (it cannot follow
+        // the table without a blank line), so it stays text; the column-0
+        // `~~~` below opens a fence that runs to the end.
         check(
             "indent4-tilde",
             "| a | b |\n| --- | --- |\n| c | d |\n    ~~~\ncode\n~~~",
@@ -6637,7 +6898,7 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
                 r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
                 r#"line[3] Paragraph display="    ~~~" code=[]"#,
                 r#"line[4] Paragraph display="code" code=[]"#,
-                r#"line[5] Paragraph display="~~~" code=[]"#,
+                r#"line[5] CodeFence display="" code=[]"#,
             ],
             false,
         );
@@ -6718,19 +6979,18 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
             ],
             false,
         );
-        // Main's leaf rule keeps tilde lines as paragraphs, so the table
-        // between them stays a table even though pulldown fenced it.
+        // A tilde fence holds the table text as code, as pulldown does.
         check(
             "inside-tilde",
             "~~~\n| a | b |\n| --- | --- |\n| c | d |\n~~~",
             &[
-                r#"line[0] Paragraph display="~~~" code=[]"#,
-                r#"line[1] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
-                r#"line[2] TableDelimiter display="" code=[]"#,
-                r#"line[3] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-                r#"line[4] Paragraph display="~~~" code=[]"#,
+                r#"line[0] CodeFence display="" code=[]"#,
+                r#"line[1] CodeLine display="| a | b |" code=["| a | b |"]"#,
+                r#"line[2] CodeLine display="| --- | --- |" code=["| --- | --- |"]"#,
+                r#"line[3] CodeLine display="| c | d |" code=["| c | d |"]"#,
+                r#"line[4] CodeFence display="" code=[]"#,
             ],
-            true,
+            false,
         );
         check(
             "tail-vtab",
