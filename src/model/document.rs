@@ -1084,6 +1084,14 @@ impl DocumentTab {
                     self.edit(line_start..remove_end, "");
                 }
             } else {
+                if range.is_empty() && cursor < line_start + item.prefix_end() {
+                    // Caret at or inside the marker: open a blank line above
+                    // instead of copying the marker onto the moved text.
+                    self.edit(line_start..line_start, "\n");
+                    self.caret.move_to(cursor + 1);
+                    self.refresh_cursor();
+                    return;
+                }
                 let kept = &line[..item.indent_bytes];
                 let cont = item.continuation(kept);
                 if self.split_inline_span_newline(&range, &cont) {
@@ -1105,6 +1113,10 @@ impl DocumentTab {
                 } else {
                     self.edit(line_start..line_end_pos, "");
                 }
+            } else if range.is_empty() && cursor < line_start + indent.len() + 2 {
+                self.edit(line_start..line_start, "\n");
+                self.caret.move_to(cursor + 1);
+                self.refresh_cursor();
             } else {
                 let ins = format!("\n{}> ", indent);
                 if self.split_inline_span_newline(&range, &ins) {
@@ -1121,6 +1133,14 @@ impl DocumentTab {
                 .iter()
                 .any(|p| trimmed_start.starts_with(p));
         if is_heading {
+            let text_start = line_start + block_prefix_in(&self.content, line_start);
+            if range.is_empty() && cursor <= text_start && !line[text_start - line_start..].trim().is_empty() {
+                // Before the heading text: push the heading down, keep it a heading.
+                self.edit(line_start..line_start, "\n");
+                self.caret.move_to(cursor + 1);
+                self.refresh_cursor();
+                return;
+            }
             if self.split_inline_span_newline(&range, "\n") {
                 return;
             }
@@ -3253,11 +3273,43 @@ impl DocumentTab {
                     }
                 }
                 let vend = visible_line_end(pline, self.view_mode);
-                if cursor == vend && vend < pline.source.end {
+                if cursor == vend
+                    && (vend < pline.source.end
+                        || line_ending_len(&self.content, pline.source.end) > 0)
+                {
                     let after = pline.source.end;
                     let break_len = line_ending_len(&self.content, after);
                     if break_len > 0 {
-                        self.edit(after..after + break_len, "");
+                        // The joined line's hidden marker would show as text.
+                        let text_line = |k: &LineKind| {
+                            matches!(
+                                k,
+                                LineKind::Paragraph
+                                    | LineKind::Heading { .. }
+                                    | LineKind::Blockquote
+                                    | LineKind::ListItem { .. }
+                            )
+                        };
+                        let next_is_block = parsed
+                            .lines
+                            .get(pline.line_index + 1)
+                            .is_some_and(|n| {
+                                matches!(
+                                    n.kind,
+                                    LineKind::Heading { .. }
+                                        | LineKind::Blockquote
+                                        | LineKind::ListItem { .. }
+                                )
+                            });
+                        let own_text = pline.source.start
+                            + block_prefix_in(&self.content, pline.source.start);
+                        let strip = if text_line(&pline.kind) && next_is_block && own_text < cursor
+                        {
+                            block_prefix_in(&self.content, after + break_len)
+                        } else {
+                            0
+                        };
+                        self.edit(after..after + break_len + strip, "");
                     }
                     return;
                 }
@@ -12825,5 +12877,64 @@ mod clear_formatting_tests {
         tail.caret.move_to(tail.content.len());
         tail.smart_newline(false);
         assert_eq!(tail.content, "a\nb\r\nc\r\n");
+    }
+
+    /// Enter with the caret before a list or quote marker opens a line above
+    /// and leaves the marker alone.
+    #[test]
+    fn enter_at_line_start_of_list_or_quote_does_not_copy_the_marker() {
+        for (text, want) in [
+            ("- item", "\n- item"),
+            ("1. one", "\n1. one"),
+            ("- [ ] t", "\n- [ ] t"),
+            ("> quote", "\n> quote"),
+        ] {
+            let mut doc = DocumentTab::new("t".into(), "t.md".into(), text.into(), None, None);
+            doc.place(0, false);
+            doc.smart_newline(false);
+            assert_eq!(doc.content, want);
+            assert_eq!(doc.cursor_offset(), 1);
+        }
+    }
+
+    #[test]
+    fn delete_at_line_end_in_wysiwyg_drops_the_next_lines_marker() {
+        for (text, want) in [
+            ("- a\n- b", "- ab"),
+            ("1. a\n2. b", "1. ab"),
+            ("> a\n> b", "> ab"),
+            ("a\n- b", "ab"),
+            ("a\n\n- b", "a\n- b"),
+        ] {
+            let mut doc = DocumentTab::new("t".into(), "t.md".into(), text.into(), None, None);
+            doc.place(text.find('\n').unwrap(), false);
+            doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+            assert_eq!(doc.content, want, "{text:?}");
+        }
+        // Raw view edits the text literally.
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), "- a\n- b".into(), None, None);
+        doc.place(3, false);
+        doc.delete_forward_in_mode(ViewMode::Raw);
+        assert_eq!(doc.content, "- a- b");
+    }
+
+    #[test]
+    fn enter_before_heading_text_pushes_the_heading_down() {
+        for (text, at) in [("# Head", 2), ("## Sub", 3), ("# Head", 0)] {
+            let mut doc = DocumentTab::new("t".into(), "t.md".into(), text.into(), None, None);
+            doc.place(at, false);
+            doc.smart_newline(false);
+            assert_eq!(doc.content, format!("\n{text}"));
+            assert_eq!(doc.cursor_offset(), at + 1);
+        }
+        // Mid-heading and end-of-heading still split / continue as before.
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), "# Head".into(), None, None);
+        doc.place(4, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "# He\nad");
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), "# Head".into(), None, None);
+        doc.place(6, false);
+        doc.smart_newline(false);
+        assert_eq!(doc.content, "# Head\n");
     }
 }

@@ -167,3 +167,28 @@ fn arrow_down_from_a_far_caret_moves_one_line() {
     let line_2501 = content.find("line 2501\n").expect("line");
     assert_eq!(caret, line_2501);
 }
+
+#[std_test]
+fn up_and_down_keep_the_column_across_a_short_line() {
+    for mode in [ViewMode::Raw, ViewMode::Wysiwyg] {
+        let content = "abcdefgh\nab\nabcdefgh\n";
+        let (view, mut cx) = harness(content, mode);
+        let caret = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| {
+            view.read_with(cx, |app, _| app.active_tab().expect("tab").caret.cursor())
+        };
+        place_caret(&view, &mut cx, 6);
+        cx.dispatch_action(EditorDown);
+        assert_eq!(caret(&view, &cx), 11, "short line clamps to its end");
+        cx.dispatch_action(EditorDown);
+        assert_eq!(caret(&view, &cx), 12 + 6, "{mode:?}: column is kept going down");
+        cx.dispatch_action(EditorUp);
+        cx.dispatch_action(EditorUp);
+        assert_eq!(caret(&view, &cx), 6, "{mode:?}: and going back up");
+
+        // A horizontal move forgets the remembered column.
+        cx.dispatch_action(EditorDown);
+        cx.dispatch_action(EditorLeft);
+        cx.dispatch_action(EditorDown);
+        assert_eq!(caret(&view, &cx), 12 + 1, "{mode:?}: left resets it");
+    }
+}

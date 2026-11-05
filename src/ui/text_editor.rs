@@ -569,7 +569,14 @@ pub fn move_vertical_visual_in(
     } else {
         let display_idx = current_row.offset_map.source_to_display(cursor);
         let x_in_row = current_row.shaped.x_for_index(display_idx);
-        (current_row.origin.x + x_in_row, None)
+        let own_x = current_row.origin.x + x_in_row;
+        // Keep aiming for the column the run of Up/Down started from, so a
+        // short line in between does not pull the caret left for good.
+        let sticky = caret
+            .preferred_x
+            .filter(|(at, _)| *at == cursor)
+            .map(|(_, x)| px(x as f32 / 16.0));
+        (sticky.unwrap_or(own_x), None)
     };
 
     // If moving vertically inside the same wrapped cell:
@@ -682,6 +689,9 @@ pub fn move_vertical_visual_in(
         caret.select_to(target_source);
     } else {
         caret.move_to(target_source);
+    }
+    if target_row.cells.is_empty() && current_row.cells.is_empty() {
+        caret.preferred_x = Some((caret.cursor(), (f32::from(target_screen_x) * 16.0) as i32));
     }
     true
 }

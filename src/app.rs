@@ -4324,7 +4324,8 @@ impl EntityInputHandler for LiteMarkApp {
                     '(' => Some("()"),
                     '[' => Some("[]"),
                     '{' => Some("{}"),
-                    '`' if markdown_tab => Some("``"),
+                    // A third backtick starts a fence: no closer.
+                    '`' if markdown_tab && !content[..cursor].ends_with("``") => Some("``"),
                     '"' => {
                         let prev_is_alnum = cursor > 0
                             && content[..cursor]
@@ -7199,3 +7200,7 @@ mod viewport_culling_tests;
 #[cfg(test)]
 #[path = "note_drop_tests.rs"]
 mod note_drop_tests;
+
+#[cfg(test)]
+#[path = "typing_tests.rs"]
+mod typing_tests;
