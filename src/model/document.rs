@@ -1725,8 +1725,11 @@ impl DocumentTab {
                     continue;
                 }
                 match &pline.kind {
+                    // Code block bodies show markers literally, so a select-all
+                    // toggle leaves them alone like the fences around them.
                     LineKind::TableDelimiter
                     | LineKind::CodeFence { .. }
+                    | LineKind::CodeLine
                     | LineKind::HorizontalRule => {
                         continue;
                     }
@@ -1759,8 +1762,19 @@ impl DocumentTab {
                     }
                     _ => {
                         let content_start = pline.prefix_range.end.max(pline.source.start);
+                        // A heading's closing-hash run (`# Title #`) is hidden
+                        // syntax; wrapping it would make the `#` visible text.
+                        let content_end = match pline.kind {
+                            LineKind::Heading { .. } => {
+                                let text = self.content[pline.source.clone()]
+                                    .trim_end_matches(['\n', '\r']);
+                                crate::markdown::parser::atx_content_range(text)
+                                    .map_or(pline.source.end, |c| pline.source.start + c.end)
+                            }
+                            _ => pline.source.end,
+                        };
                         let l_start = range.start.max(content_start);
-                        let l_end = range.end.min(pline.source.end);
+                        let l_end = range.end.min(content_end);
                         if l_start >= l_end {
                             continue;
                         }
@@ -1783,140 +1797,162 @@ impl DocumentTab {
             }
 
             if tag_kind != InlineTagKind::Link {
-                let global_all_have_format = !candidate_ranges.is_empty()
-                    && candidate_ranges.iter().all(|p_range| {
-                        let pline = match parsed.line_at_offset(p_range.start) {
-                            Some(l) => l,
-                            None => return false,
+                // Rewrite each line (or table cell) on its own. Inline pairs never
+                // cross lines, and one span over several lines would put markers
+                // before list, task and quote prefixes and across paragraphs.
+                let rewrite_ranges: Vec<Range<usize>> = candidate_ranges.clone();
+                let rewrite = |on: bool| -> Vec<Option<InlineRewrite>> {
+                    rewrite_ranges
+                        .iter()
+                        .map(|p_range| {
+                            let p_start = p_range.start;
+                            let p_end = p_range.end;
+                            let pline = match parsed.line_at_offset(p_start) {
+                                Some(l) => l,
+                                None => return None,
+                            };
+
+                            let mut group_pairs = collect_group_pairs(&parsed, p_start..p_end);
+
+                            let (replace_start, replace_end) = if group_pairs.is_empty() {
+                                (p_start, p_end)
+                            } else {
+                                let r_start = group_pairs
+                                    .iter()
+                                    .map(|p| p.open_delim.start)
+                                    .min()
+                                    .unwrap()
+                                    .min(p_start);
+                                let r_end = group_pairs
+                                    .iter()
+                                    .map(|p| span_close_end(&parsed, p))
+                                    .max()
+                                    .unwrap()
+                                    .max(p_end);
+                                (r_start, r_end)
+                            };
+                            let (replace_start, replace_end) = expand_replace_to_matching_neighbors(
+                                &self.content,
+                                &parsed,
+                                pline,
+                                p_start..p_end,
+                                replace_start..replace_end,
+                                tag_kind,
+                                on,
+                            );
+                            // Neighbor expansion may pull in spans that did not overlap
+                            // the selection (`aa` next to `**bb cc**`). Skip those
+                            // delimiters so they are rewritten instead of kept as text.
+                            add_contained_pairs(
+                                &parsed,
+                                replace_start..replace_end,
+                                &mut group_pairs,
+                            );
+
+                            let simple_wrap = group_pairs.is_empty()
+                                && replace_start == p_start
+                                && replace_end == p_end;
+                            let slices: Vec<StyledSlice> = if simple_wrap {
+                                let mut flags = FormatFlags::default();
+                                apply_toggle(&mut flags, tag_kind, on);
+                                vec![StyledSlice {
+                                    text: self.content[p_start..p_end].to_string(),
+                                    flags,
+                                    is_selected: true,
+                                }]
+                            } else {
+                                let skip: Vec<Range<usize>> = group_pairs
+                                    .iter()
+                                    .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
+                                    .collect();
+                                let segs: Vec<&StyledSegment> = parsed
+                                    .lines_overlapping(replace_start..replace_end)
+                                    .iter()
+                                    .flat_map(|l| l.styled_segments.iter())
+                                    .collect();
+                                let local_pairs =
+                                    nearby_pair_refs(&parsed, replace_start..replace_end);
+                                collect_rewrite_slices(
+                                    &self.content,
+                                    &local_pairs,
+                                    &segs,
+                                    replace_start..replace_end,
+                                    p_start..p_end,
+                                    &skip,
+                                    Some((tag_kind, on)),
+                                )
+                            };
+                            let glued_left = replace_start > 0
+                                && self.content[..replace_start]
+                                    .chars()
+                                    .next_back()
+                                    .is_some_and(|c| !c.is_whitespace());
+                            // Each line is rewritten on its own, so ask the whole
+                            // selection whether it crosses a line break.
+                            let include_wraps = self.content[orig_sel.clone()].contains('\n');
+                            let (rendered_str, sel_in_rendered) =
+                                render_styled_slices_with_selection_opts(
+                                    &slices,
+                                    glued_left,
+                                    include_wraps,
+                                );
+                            Some((
+                                replace_start..replace_end,
+                                rendered_str,
+                                sel_in_rendered,
+                                p_start,
+                            ))
+                        })
+                        .collect()
+                };
+
+                // Lines the parser cannot show in this format (a `~~~` fence it
+                // reads as text, an indented line that drops `<u>`) are left
+                // alone. Writing markers there would not render, and the next
+                // press would wrap them again instead of toggling off.
+                let trial_on = rewrite(true);
+                let can_format =
+                    verify_inline_rewrites(&self.content, &parsed, &trial_on, tag_kind, true);
+                if !can_format.iter().any(|ok| *ok) {
+                    return;
+                }
+
+                // Whitespace between two spans (`**a** **b**`) is unformatted
+                // but invisible, so it must not make a second press re-apply
+                // the format instead of removing it.
+                let global_all_have_format = rewrite_ranges
+                    .iter()
+                    .zip(&can_format)
+                    .filter(|(_, ok)| **ok)
+                    .all(|(p_range, _)| {
+                        let Some(pline) = parsed.line_at_offset(p_range.start) else {
+                            return false;
                         };
-                        let overlapping_segs: Vec<&StyledSegment> = pline
-                            .styled_segments
-                            .iter()
-                            .filter(|s| s.source.start < p_range.end && s.source.end > p_range.start)
-                            .collect();
-                        !overlapping_segs.is_empty()
-                            && overlapping_segs.iter().all(|s| match tag_kind {
-                                InlineTagKind::Bold => s.bold,
-                                InlineTagKind::Italic => s.italic,
-                                InlineTagKind::Underline => s.underline,
-                                InlineTagKind::Strike => s.strike,
-                                InlineTagKind::Code => s.code,
-                                InlineTagKind::Link => false,
-                            })
+                        let mut segs = pline.styled_segments.iter().filter(|s| {
+                            s.source.start < p_range.end
+                                && s.source.end > p_range.start
+                                && !self.content[s.source.clone()].trim().is_empty()
+                        });
+                        let mut any = false;
+                        segs.all(|s| {
+                            any = true;
+                            segment_flags(s).get(tag_kind)
+                        }) && any
                     });
                 let should_turn_on = self.force_inline_toggle.unwrap_or(!global_all_have_format);
 
-                let mut candidate_results = Vec::new();
-                let in_table = candidate_ranges.iter().any(|r| {
-                    parsed.line_at_offset(r.start).is_some_and(|l| {
-                        matches!(l.kind, LineKind::TableRow { .. })
-                    })
-                });
-                let rewrite_ranges: Vec<Range<usize>> = if !in_table && candidate_ranges.len() > 1 {
-                    let combined = candidate_ranges[0].start
-                        ..candidate_ranges
-                            .last()
-                            .map(|r| r.end)
-                            .unwrap_or(candidate_ranges[0].end);
-                    let has_pairs = range_has_non_link_pairs(&parsed, combined.clone());
-                    // Combine across lines only when rewriting existing spans
-                    // (m5). Plain select-all still wraps each line separately.
-                    if has_pairs {
-                        vec![combined]
-                    } else {
-                        candidate_ranges.clone()
-                    }
+                let (results, ok) = if should_turn_on {
+                    (trial_on, can_format)
                 } else {
-                    candidate_ranges.clone()
+                    let off = rewrite(false);
+                    let ok = verify_inline_rewrites(&self.content, &parsed, &off, tag_kind, false);
+                    (off, ok)
                 };
-
-                for p_range in &rewrite_ranges {
-                    let p_start = p_range.start;
-                    let p_end = p_range.end;
-                    let pline = match parsed.line_at_offset(p_start) {
-                        Some(l) => l,
-                        None => continue,
-                    };
-
-                    let mut group_pairs = collect_group_pairs(&parsed, p_start..p_end);
-
-                    let (replace_start, replace_end) = if group_pairs.is_empty() {
-                        (p_start, p_end)
-                    } else {
-                        let r_start = group_pairs
-                            .iter()
-                            .map(|p| p.open_delim.start)
-                            .min()
-                            .unwrap()
-                            .min(p_start);
-                        let r_end = group_pairs
-                            .iter()
-                            .map(|p| span_close_end(&parsed, p))
-                            .max()
-                            .unwrap()
-                            .max(p_end);
-                        (r_start, r_end)
-                    };
-                    let (replace_start, replace_end) = expand_replace_to_matching_neighbors(
-                        &self.content,
-                        &parsed,
-                        pline,
-                        p_start..p_end,
-                        replace_start..replace_end,
-                        tag_kind,
-                        should_turn_on,
-                    );
-                    // Neighbor expansion may pull in spans that did not overlap
-                    // the selection (`aa` next to `**bb cc**`). Skip those
-                    // delimiters so they are rewritten instead of kept as text.
-                    add_contained_pairs(&parsed, replace_start..replace_end, &mut group_pairs);
-
-                    let simple_wrap = group_pairs.is_empty()
-                        && replace_start == p_start
-                        && replace_end == p_end;
-                    let slices: Vec<StyledSlice> = if simple_wrap {
-                        let mut flags = FormatFlags::default();
-                        apply_toggle(&mut flags, tag_kind, should_turn_on);
-                        vec![StyledSlice {
-                            text: self.content[p_start..p_end].to_string(),
-                            flags,
-                            is_selected: true,
-                        }]
-                    } else {
-                        let skip: Vec<Range<usize>> = group_pairs
-                            .iter()
-                            .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
-                            .collect();
-                        let segs: Vec<&StyledSegment> = parsed
-                            .lines_overlapping(replace_start..replace_end)
-                            .iter()
-                            .flat_map(|l| l.styled_segments.iter())
-                            .collect();
-                        let local_pairs = nearby_pair_refs(&parsed, replace_start..replace_end);
-                        collect_rewrite_slices(
-                            &self.content,
-                            &local_pairs,
-                            &segs,
-                            replace_start..replace_end,
-                            p_start..p_end,
-                            &skip,
-                            Some((tag_kind, should_turn_on)),
-                        )
-                    };
-                    let glued_left = replace_start > 0
-                        && self.content[..replace_start]
-                            .chars()
-                            .next_back()
-                            .is_some_and(|c| !c.is_whitespace());
-                    let include_wraps = self.content[p_start..p_end].contains('\n');
-                    let (rendered_str, sel_in_rendered) =
-                        render_styled_slices_with_selection_opts(
-                            &slices,
-                            glued_left,
-                            include_wraps,
-                        );
-                    candidate_results.push((replace_start..replace_end, rendered_str, sel_in_rendered, p_start));
-                }
+                let mut candidate_results: Vec<InlineRewrite> = results
+                    .into_iter()
+                    .zip(ok)
+                    .filter_map(|(result, ok)| if ok { result } else { None })
+                    .collect();
 
                 if rewrite_ranges.len() == 1 && !candidate_results.is_empty() {
                     let (rep_range, rendered_str, sel_in_rendered, p_start) = candidate_results.remove(0);
@@ -1937,10 +1973,10 @@ impl DocumentTab {
                     return;
                 }
 
-                let edits: Vec<(Range<usize>, String)> = candidate_results
+                let edits: Vec<(Range<usize>, String, Range<usize>)> = candidate_results
                     .into_iter()
                     .filter(|(r, repl, _, _)| self.content[r.clone()] != *repl)
-                    .map(|(r, repl, _, _)| (r, repl))
+                    .map(|(r, repl, sel, _)| (r, repl, sel))
                     .collect();
 
                 if edits.is_empty() {
@@ -1955,7 +1991,7 @@ impl DocumentTab {
                     max_end - min_start + edits.len() * (prefix.len() + suffix.len()),
                 );
                 let mut cursor = min_start;
-                for (r, repl) in &edits {
+                for (r, repl, _) in &edits {
                     if r.start > cursor {
                         replacement.push_str(&self.content[cursor..r.start]);
                     }
@@ -1968,20 +2004,22 @@ impl DocumentTab {
 
                 self.edit(span_range, &replacement);
 
-                let map_offset = |offset: usize| -> usize {
-                    if offset <= min_start {
+                // A selection edge inside a rewritten span lands on the selected
+                // text's edge in the replacement, not at the end of the span.
+                let map_offset = |offset: usize, is_start: bool| -> usize {
+                    if offset < min_start {
                         return offset;
                     }
                     let mut mapped = min_start;
                     let mut orig_cursor = min_start;
-                    for (r, repl) in &edits {
-                        if offset <= r.start {
+                    for (r, repl, sel) in &edits {
+                        if offset < r.start {
                             mapped += offset - orig_cursor;
                             return mapped;
                         }
                         mapped += r.start - orig_cursor;
                         if offset <= r.end {
-                            mapped += repl.len();
+                            mapped += if is_start { sel.start } else { sel.end };
                             return mapped;
                         }
                         mapped += repl.len();
@@ -1992,8 +2030,8 @@ impl DocumentTab {
                     }
                     mapped
                 };
-                let new_start = map_offset(orig_sel.start);
-                let new_end = map_offset(orig_sel.end);
+                let new_start = map_offset(orig_sel.start, true);
+                let new_end = map_offset(orig_sel.end, false);
                 let new_start = floor_boundary(&self.content, new_start);
                 let new_end = floor_boundary(&self.content, new_end);
                 self.caret.range = new_start..new_end;
@@ -4483,16 +4521,6 @@ fn nearby_pair_refs(parsed: &ParsedDocument, range: Range<usize>) -> Vec<&Inline
         .collect()
 }
 
-fn range_has_non_link_pairs(parsed: &ParsedDocument, range: Range<usize>) -> bool {
-    parsed.lines_near(range.clone()).iter().any(|line| {
-        line.inline_pairs.iter().any(|p| {
-            p.kind != InlineTagKind::Link
-                && p.open_delim.start < range.end
-                && span_close_end(parsed, p) > range.start
-        })
-    })
-}
-
 fn line_pair_refs(parsed: &ParsedDocument, offset: usize) -> &[InlinePair] {
     parsed
         .line_at_offset(offset)
@@ -4629,6 +4657,17 @@ pub struct FormatFlags {
 }
 
 impl FormatFlags {
+    fn get(self, kind: InlineTagKind) -> bool {
+        match kind {
+            InlineTagKind::Bold => self.bold,
+            InlineTagKind::Italic => self.italic,
+            InlineTagKind::Underline => self.underline,
+            InlineTagKind::Strike => self.strike,
+            InlineTagKind::Code => self.code,
+            InlineTagKind::Link => false,
+        }
+    }
+
     fn any_set(self) -> bool {
         self.bold || self.italic || self.underline || self.strike || self.code
     }
@@ -5387,6 +5426,74 @@ fn segment_raw_range(content: &str, source: &Range<usize>) -> Range<usize> {
         start -= 1;
     }
     start..source.end
+}
+
+/// One line's inline toggle: (replaced source range, replacement, selected
+/// text inside the replacement, start of the selected text in the source).
+type InlineRewrite = (Range<usize>, String, Range<usize>, usize);
+
+/// Whether each rewrite parses the way it was meant to: the line keeps its
+/// block kind, and every visible segment of the selected text has the format
+/// when `on`, or lacks it when not. All rewrites are applied together and
+/// parsed once, so a line is judged in its real block context (a nested list,
+/// a quote). Rewrites must not overlap, which holds because each sits on its
+/// own line or table cell.
+fn verify_inline_rewrites(
+    content: &str,
+    parsed: &ParsedDocument,
+    rewrites: &[Option<InlineRewrite>],
+    kind: InlineTagKind,
+    on: bool,
+) -> Vec<bool> {
+    let mut next = String::with_capacity(content.len() + rewrites.len() * 8);
+    let mut cursor = 0;
+    let mut placed: Vec<Option<(usize, Range<usize>)>> = Vec::with_capacity(rewrites.len());
+    for rewrite in rewrites {
+        let Some((range, text, sel, _)) = rewrite else {
+            placed.push(None);
+            continue;
+        };
+        next.push_str(&content[cursor..range.start]);
+        let start = next.len();
+        next.push_str(text);
+        cursor = range.end;
+        placed.push(Some((range.start, start + sel.start..start + sel.end)));
+    }
+    next.push_str(&content[cursor..]);
+    let reparsed = crate::markdown::parse_document(&next);
+
+    placed
+        .into_iter()
+        .map(|place| {
+            let Some((old_start, sel)) = place else {
+                return false;
+            };
+            let (Some(old_line), Some(new_line)) =
+                (parsed.line_at_offset(old_start), reparsed.line_at_offset(sel.start))
+            else {
+                return false;
+            };
+            if std::mem::discriminant(&old_line.kind) != std::mem::discriminant(&new_line.kind) {
+                return false;
+            }
+            let mut any = false;
+            let all_match = new_line
+                .styled_segments
+                .iter()
+                .filter(|s| {
+                    s.source.start < sel.end
+                        && s.source.end > sel.start
+                        && !next[s.source.clone()].trim().is_empty()
+                })
+                .all(|s| {
+                    any = true;
+                    segment_flags(s).get(kind) == on
+                });
+            // Turning off only needs no segment left formatted: a line may show
+            // nothing once its markers go (`~~~`, a `[^1]: note` definition).
+            all_match && (any || !on)
+        })
+        .collect()
 }
 
 fn apply_toggle(flags: &mut FormatFlags, kind: InlineTagKind, on: bool) {
@@ -7798,6 +7905,134 @@ mod tests {
         doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
         assert_eq!(doc.content, " world");
         assert!(doc.pending_formats.bold);
+    }
+
+    /// Select-all then an inline toggle formats each block inside its prefix,
+    /// leaves code blocks alone, and a second press removes the format from
+    /// everything without touching the other formats.
+    #[test]
+    fn select_all_inline_toggle_formats_each_block_and_toggles_back() {
+        fn has(seg: &StyledSegment, cmd: &str) -> bool {
+            match cmd {
+                "bold" => seg.bold,
+                "italic" => seg.italic,
+                "underline" => seg.underline,
+                _ => seg.strike,
+            }
+        }
+        fn shape(content: &str) -> Vec<(String, String)> {
+            crate::markdown::parse_document(content)
+                .lines
+                .iter()
+                .map(|l| {
+                    (
+                        format!("{:?}", std::mem::discriminant(&l.kind)),
+                        l.display_text.clone(),
+                    )
+                })
+                .collect()
+        }
+        fn press(doc: &mut DocumentTab, cmd: &str, mode: ViewMode) {
+            doc.caret.range = 0..doc.content.len();
+            doc.apply_format_in_mode(cmd, mode);
+        }
+        let welcome = crate::services::fs_service::INITIAL_MARKDOWN;
+        let plain = "# Title\n\nPlain paragraph.\n\n- item one\n- [ ] task\n\n> quote\n\n```\ncode here\n```\n";
+        let code_block = "```\nfn main() {\n    println!(\"Hello from LiteMark!\");\n}\n```\n";
+
+        for cmd in ["bold", "italic", "underline", "strike"] {
+            for mode in [ViewMode::Wysiwyg, ViewMode::Raw] {
+                for original in [welcome, plain] {
+                    let ctx = format!("{cmd} {mode:?} on {original:?}");
+                    let mut doc =
+                        DocumentTab::new("p".into(), "p.md".into(), original.into(), None, None);
+                    doc.view_mode = mode;
+
+                    press(&mut doc, cmd, mode);
+                    let on = doc.content.clone();
+                    assert_eq!(
+                        shape(&on),
+                        shape(original),
+                        "block structure changed: {ctx}\n{on}"
+                    );
+                    if original == welcome {
+                        assert!(on.ends_with(code_block), "code block touched: {ctx}\n{on}");
+                    }
+                    let parsed = crate::markdown::parse_document(&on);
+                    for line in &parsed.lines {
+                        if matches!(line.kind, LineKind::CodeLine | LineKind::CodeFence { .. }) {
+                            continue;
+                        }
+                        for seg in &line.styled_segments {
+                            let text = &on[seg.source.clone()];
+                            assert!(
+                                text.trim().is_empty() || has(seg, cmd),
+                                "{text:?} not formatted: {ctx}\n{on}"
+                            );
+                        }
+                    }
+
+                    press(&mut doc, cmd, mode);
+                    let off = doc.content.clone();
+                    assert_eq!(shape(&off), shape(original), "second press: {ctx}\n{off}");
+                    let parsed = crate::markdown::parse_document(&off);
+                    assert!(
+                        parsed
+                            .lines
+                            .iter()
+                            .flat_map(|l| &l.styled_segments)
+                            .all(|s| !has(s, cmd)),
+                        "second press left {cmd}: {ctx}\n{off}"
+                    );
+                    if original == plain {
+                        assert_eq!(off, plain, "second press did not restore: {ctx}");
+                    }
+
+                    press(&mut doc, cmd, mode);
+                    assert_eq!(doc.content, on, "third press differs from first: {ctx}");
+                }
+            }
+        }
+    }
+
+    /// Select-all toggles leave a heading's closing hashes outside the
+    /// markers, and skip lines the parser would not show in the format, so a
+    /// second press turns the format off instead of nesting it.
+    #[test]
+    fn select_all_inline_toggle_skips_what_cannot_render() {
+        // (source, command, after first press, after second press)
+        let cases = [
+            ("# Title #\n", "bold", "# **Title** #\n", "# Title #\n"),
+            ("## A ##\n", "strike", "## ~~A~~ ##\n", "## A ##\n"),
+            // Four leading spaces: the parser reads `**` there but not `<u>`.
+            (
+                "para\n\n    code line\n",
+                "underline",
+                "<u>para</u>\n\n    code line\n",
+                "para\n\n    code line\n",
+            ),
+            // A `~~~` fence is plain text to the parser; `~~` would fuse with it.
+            ("~~~\ncode\n~~~\n", "strike", "~~~\n~~code~~\n~~~\n", "~~~\ncode\n~~~\n"),
+            ("~~~\ncode\n~~~\n", "bold", "**~~~**\n**code**\n**~~~**\n", "~~~\ncode\n~~~\n"),
+            (
+                "text[^1]\n\n[^1]: note\n",
+                "italic",
+                "*text[^1]*\n\n*[^1]: note*\n",
+                "text[^1]\n\n[^1]: note\n",
+            ),
+        ];
+        for (source, cmd, first, second) in cases {
+            for mode in [ViewMode::Wysiwyg, ViewMode::Raw] {
+                let mut doc = DocumentTab::new("p".into(), "p.md".into(), source.into(), None, None);
+                doc.view_mode = mode;
+                doc.caret.range = 0..doc.content.len();
+                doc.apply_format_in_mode(cmd, mode);
+                assert_eq!(doc.content, first, "first {cmd} {mode:?} on {source:?}");
+                doc.caret.range = 0..doc.content.len();
+                doc.apply_format_in_mode(cmd, mode);
+                assert_eq!(doc.content, second, "second {cmd} {mode:?} on {source:?}");
+            }
+        }
     }
 
     /// Inline code is always the innermost format with its backticks adjacent
