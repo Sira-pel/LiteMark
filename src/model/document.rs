@@ -1725,8 +1725,11 @@ impl DocumentTab {
                     continue;
                 }
                 match &pline.kind {
+                    // Code block bodies show markers literally, so a select-all
+                    // toggle leaves them alone like the fences around them.
                     LineKind::TableDelimiter
                     | LineKind::CodeFence { .. }
+                    | LineKind::CodeLine
                     | LineKind::HorizontalRule => {
                         continue;
                     }
@@ -1789,10 +1792,17 @@ impl DocumentTab {
                             Some(l) => l,
                             None => return false,
                         };
+                        // Whitespace between two spans (`**a** **b**`) is unformatted
+                        // but invisible, so it must not make a second press re-apply
+                        // the format instead of removing it.
                         let overlapping_segs: Vec<&StyledSegment> = pline
                             .styled_segments
                             .iter()
-                            .filter(|s| s.source.start < p_range.end && s.source.end > p_range.start)
+                            .filter(|s| {
+                                s.source.start < p_range.end
+                                    && s.source.end > p_range.start
+                                    && !self.content[s.source.clone()].trim().is_empty()
+                            })
                             .collect();
                         !overlapping_segs.is_empty()
                             && overlapping_segs.iter().all(|s| match tag_kind {
@@ -1807,28 +1817,10 @@ impl DocumentTab {
                 let should_turn_on = self.force_inline_toggle.unwrap_or(!global_all_have_format);
 
                 let mut candidate_results = Vec::new();
-                let in_table = candidate_ranges.iter().any(|r| {
-                    parsed.line_at_offset(r.start).is_some_and(|l| {
-                        matches!(l.kind, LineKind::TableRow { .. })
-                    })
-                });
-                let rewrite_ranges: Vec<Range<usize>> = if !in_table && candidate_ranges.len() > 1 {
-                    let combined = candidate_ranges[0].start
-                        ..candidate_ranges
-                            .last()
-                            .map(|r| r.end)
-                            .unwrap_or(candidate_ranges[0].end);
-                    let has_pairs = range_has_non_link_pairs(&parsed, combined.clone());
-                    // Combine across lines only when rewriting existing spans
-                    // (m5). Plain select-all still wraps each line separately.
-                    if has_pairs {
-                        vec![combined]
-                    } else {
-                        candidate_ranges.clone()
-                    }
-                } else {
-                    candidate_ranges.clone()
-                };
+                // Rewrite each line (or table cell) on its own. Inline pairs never
+                // cross lines, and one span over several lines would put markers
+                // before list, task and quote prefixes and across paragraphs.
+                let rewrite_ranges: Vec<Range<usize>> = candidate_ranges.clone();
 
                 for p_range in &rewrite_ranges {
                     let p_start = p_range.start;
@@ -1908,7 +1900,9 @@ impl DocumentTab {
                             .chars()
                             .next_back()
                             .is_some_and(|c| !c.is_whitespace());
-                    let include_wraps = self.content[p_start..p_end].contains('\n');
+                    // Each line is rewritten on its own, so ask the whole
+                    // selection whether it crosses a line break.
+                    let include_wraps = self.content[orig_sel.clone()].contains('\n');
                     let (rendered_str, sel_in_rendered) =
                         render_styled_slices_with_selection_opts(
                             &slices,
@@ -1937,10 +1931,10 @@ impl DocumentTab {
                     return;
                 }
 
-                let edits: Vec<(Range<usize>, String)> = candidate_results
+                let edits: Vec<(Range<usize>, String, Range<usize>)> = candidate_results
                     .into_iter()
                     .filter(|(r, repl, _, _)| self.content[r.clone()] != *repl)
-                    .map(|(r, repl, _, _)| (r, repl))
+                    .map(|(r, repl, sel, _)| (r, repl, sel))
                     .collect();
 
                 if edits.is_empty() {
@@ -1955,7 +1949,7 @@ impl DocumentTab {
                     max_end - min_start + edits.len() * (prefix.len() + suffix.len()),
                 );
                 let mut cursor = min_start;
-                for (r, repl) in &edits {
+                for (r, repl, _) in &edits {
                     if r.start > cursor {
                         replacement.push_str(&self.content[cursor..r.start]);
                     }
@@ -1968,20 +1962,22 @@ impl DocumentTab {
 
                 self.edit(span_range, &replacement);
 
-                let map_offset = |offset: usize| -> usize {
-                    if offset <= min_start {
+                // A selection edge inside a rewritten span lands on the selected
+                // text's edge in the replacement, not at the end of the span.
+                let map_offset = |offset: usize, is_start: bool| -> usize {
+                    if offset < min_start {
                         return offset;
                     }
                     let mut mapped = min_start;
                     let mut orig_cursor = min_start;
-                    for (r, repl) in &edits {
-                        if offset <= r.start {
+                    for (r, repl, sel) in &edits {
+                        if offset < r.start {
                             mapped += offset - orig_cursor;
                             return mapped;
                         }
                         mapped += r.start - orig_cursor;
                         if offset <= r.end {
-                            mapped += repl.len();
+                            mapped += if is_start { sel.start } else { sel.end };
                             return mapped;
                         }
                         mapped += repl.len();
@@ -1992,8 +1988,8 @@ impl DocumentTab {
                     }
                     mapped
                 };
-                let new_start = map_offset(orig_sel.start);
-                let new_end = map_offset(orig_sel.end);
+                let new_start = map_offset(orig_sel.start, true);
+                let new_end = map_offset(orig_sel.end, false);
                 let new_start = floor_boundary(&self.content, new_start);
                 let new_end = floor_boundary(&self.content, new_end);
                 self.caret.range = new_start..new_end;
@@ -4481,16 +4477,6 @@ fn nearby_pair_refs(parsed: &ParsedDocument, range: Range<usize>) -> Vec<&Inline
         .iter()
         .flat_map(|l| l.inline_pairs.iter())
         .collect()
-}
-
-fn range_has_non_link_pairs(parsed: &ParsedDocument, range: Range<usize>) -> bool {
-    parsed.lines_near(range.clone()).iter().any(|line| {
-        line.inline_pairs.iter().any(|p| {
-            p.kind != InlineTagKind::Link
-                && p.open_delim.start < range.end
-                && span_close_end(parsed, p) > range.start
-        })
-    })
 }
 
 fn line_pair_refs(parsed: &ParsedDocument, offset: usize) -> &[InlinePair] {
@@ -7802,6 +7788,94 @@ mod tests {
 
     /// Inline code is always the innermost format with its backticks adjacent
     /// to the text, and no other delimiters are ever emitted inside a code
+    /// Select-all then an inline toggle formats each block inside its prefix,
+    /// leaves code blocks alone, and a second press removes the format from
+    /// everything without touching the other formats.
+    #[test]
+    fn select_all_inline_toggle_formats_each_block_and_toggles_back() {
+        fn has(seg: &StyledSegment, cmd: &str) -> bool {
+            match cmd {
+                "bold" => seg.bold,
+                "italic" => seg.italic,
+                "underline" => seg.underline,
+                _ => seg.strike,
+            }
+        }
+        fn shape(content: &str) -> Vec<(String, String)> {
+            crate::markdown::parse_document(content)
+                .lines
+                .iter()
+                .map(|l| {
+                    (
+                        format!("{:?}", std::mem::discriminant(&l.kind)),
+                        l.display_text.clone(),
+                    )
+                })
+                .collect()
+        }
+        fn press(doc: &mut DocumentTab, cmd: &str, mode: ViewMode) {
+            doc.caret.range = 0..doc.content.len();
+            doc.apply_format_in_mode(cmd, mode);
+        }
+        let welcome = crate::services::fs_service::INITIAL_MARKDOWN;
+        let plain = "# Title\n\nPlain paragraph.\n\n- item one\n- [ ] task\n\n> quote\n\n```\ncode here\n```\n";
+        let code_block = "```\nfn main() {\n    println!(\"Hello from LiteMark!\");\n}\n```\n";
+
+        for cmd in ["bold", "italic", "underline", "strike"] {
+            for mode in [ViewMode::Wysiwyg, ViewMode::Raw] {
+                for original in [welcome, plain] {
+                    let ctx = format!("{cmd} {mode:?} on {original:?}");
+                    let mut doc =
+                        DocumentTab::new("p".into(), "p.md".into(), original.into(), None, None);
+                    doc.view_mode = mode;
+
+                    press(&mut doc, cmd, mode);
+                    let on = doc.content.clone();
+                    assert_eq!(
+                        shape(&on),
+                        shape(original),
+                        "block structure changed: {ctx}\n{on}"
+                    );
+                    if original == welcome {
+                        assert!(on.ends_with(code_block), "code block touched: {ctx}\n{on}");
+                    }
+                    let parsed = crate::markdown::parse_document(&on);
+                    for line in &parsed.lines {
+                        if matches!(line.kind, LineKind::CodeLine | LineKind::CodeFence { .. }) {
+                            continue;
+                        }
+                        for seg in &line.styled_segments {
+                            let text = &on[seg.source.clone()];
+                            assert!(
+                                text.trim().is_empty() || has(seg, cmd),
+                                "{text:?} not formatted: {ctx}\n{on}"
+                            );
+                        }
+                    }
+
+                    press(&mut doc, cmd, mode);
+                    let off = doc.content.clone();
+                    assert_eq!(shape(&off), shape(original), "second press: {ctx}\n{off}");
+                    let parsed = crate::markdown::parse_document(&off);
+                    assert!(
+                        parsed
+                            .lines
+                            .iter()
+                            .flat_map(|l| &l.styled_segments)
+                            .all(|s| !has(s, cmd)),
+                        "second press left {cmd}: {ctx}\n{off}"
+                    );
+                    if original == plain {
+                        assert_eq!(off, plain, "second press did not restore: {ctx}");
+                    }
+
+                    press(&mut doc, cmd, mode);
+                    assert_eq!(doc.content, on, "third press differs from first: {ctx}");
+                }
+            }
+        }
+    }
+
     /// span: when a non-code format turns off mid-typing, the code span
     /// closes, the format closes, and the code span reopens
     /// (`**`hi`**`yo`). Covers every pair and triple containing code.
