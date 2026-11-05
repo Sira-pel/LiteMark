@@ -175,17 +175,11 @@ fn main() {
                 KeyBinding::new("secondary-enter", EditorTableRowBelow, Some("Editor")),
                 KeyBinding::new("tab", IndentAction, Some("Editor")),
                 KeyBinding::new("shift-tab", OutdentAction, Some("Editor")),
-                // Ctrl+Up/Down is Mission Control on macOS.
-                KeyBinding::new(
-                    if cfg!(target_os = "macos") { "alt-up" } else { "ctrl-up" },
-                    EditorMoveLineUp,
-                    Some("Editor"),
-                ),
-                KeyBinding::new(
-                    if cfg!(target_os = "macos") { "alt-down" } else { "ctrl-down" },
-                    EditorMoveLineDown,
-                    Some("Editor"),
-                ),
+                // Alt+Up/Down (Ctrl+Up/Down is Mission Control on macOS).
+                KeyBinding::new("alt-up", EditorMoveLineUp, Some("Editor")),
+                KeyBinding::new("alt-down", EditorMoveLineDown, Some("Editor")),
+                KeyBinding::new("ctrl-tab", NextTab, None),
+                KeyBinding::new("ctrl-shift-tab", PrevTab, None),
                 KeyBinding::new("secondary-b", ToggleBold, Some("Editor")),
                 KeyBinding::new("secondary-i", ToggleItalic, Some("Editor")),
                 KeyBinding::new("secondary-u", ToggleUnderline, Some("Editor")),
@@ -224,6 +218,66 @@ fn main() {
                 KeyBinding::new("shift-enter", FindPrevMatch, Some("LineField")),
             ]);
 
+            // macOS text navigation (Option = word, Cmd = line/document).
+            // Ctrl+Arrows are Mission Control there and Macs have no Home/End.
+            if cfg!(target_os = "macos") {
+                for ctx in ["Editor", "LineField"] {
+                    let c = Some(ctx);
+                    cx.bind_keys([
+                        KeyBinding::new("alt-left", EditorWordLeft, c),
+                        KeyBinding::new("alt-right", EditorWordRight, c),
+                        KeyBinding::new("alt-shift-left", EditorSelectWordLeft, c),
+                        KeyBinding::new("alt-shift-right", EditorSelectWordRight, c),
+                        KeyBinding::new("cmd-left", EditorHome, c),
+                        KeyBinding::new("cmd-right", EditorEnd, c),
+                        KeyBinding::new("cmd-shift-left", EditorSelectHome, c),
+                        KeyBinding::new("cmd-shift-right", EditorSelectEnd, c),
+                        KeyBinding::new("alt-backspace", EditorDeleteWordLeft, c),
+                        KeyBinding::new("alt-delete", EditorDeleteWordRight, c),
+                        KeyBinding::new("cmd-backspace", EditorDeleteLineStart, c),
+                        KeyBinding::new("cmd-delete", EditorDeleteLineEnd, c),
+                    ]);
+                }
+                cx.bind_keys([
+                    KeyBinding::new("cmd-up", EditorDocStart, Some("Editor")),
+                    KeyBinding::new("cmd-down", EditorDocEnd, Some("Editor")),
+                    KeyBinding::new("cmd-shift-up", EditorSelectDocStart, Some("Editor")),
+                    KeyBinding::new("cmd-shift-down", EditorSelectDocEnd, Some("Editor")),
+                    KeyBinding::new("cmd-up", EditorHome, Some("LineField")),
+                    KeyBinding::new("cmd-down", EditorEnd, Some("LineField")),
+                    KeyBinding::new("cmd-shift-up", EditorSelectHome, Some("LineField")),
+                    KeyBinding::new("cmd-shift-down", EditorSelectEnd, Some("LineField")),
+                ]);
+
+                // Emacs-style Ctrl chords every native macOS text field supports.
+                for ctx in ["Editor", "LineField"] {
+                    let c = Some(ctx);
+                    cx.bind_keys([
+                        KeyBinding::new("ctrl-a", EditorHome, c),
+                        KeyBinding::new("ctrl-e", EditorEnd, c),
+                        KeyBinding::new("ctrl-k", EditorDeleteLineEnd, c),
+                        KeyBinding::new("ctrl-f", EditorRight, c),
+                        KeyBinding::new("ctrl-b", EditorLeft, c),
+                    ]);
+                }
+                cx.bind_keys([
+                    KeyBinding::new("ctrl-n", EditorDown, Some("Editor")),
+                    KeyBinding::new("ctrl-p", EditorUp, Some("Editor")),
+                    KeyBinding::new("cmd-,", OpenSettingsMenu, None),
+                    KeyBinding::new("cmd-m", MinimizeWindow, None),
+                ]);
+
+                // Cmd+Q, and quit once the last window is gone (macOS keeps
+                // the process alive otherwise).
+                cx.bind_keys([KeyBinding::new("cmd-q", QuitApp, None)]);
+                cx.on_window_closed(|cx| {
+                    if cx.windows().is_empty() {
+                        cx.quit();
+                    }
+                })
+                .detach();
+            }
+
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -234,7 +288,7 @@ fn main() {
                     window_decorations: Some(WindowDecorations::Client),
                     window_min_size: Some(size(px(360.0), px(360.0))),
                     app_id: Some("litemark".into()),
-                    titlebar: None,
+                    titlebar: window_titlebar(),
                     ..Default::default()
                 },
                 move |_, cx| cx.new(|cx| LiteMarkApp::new(initial_file.clone(), cx)),
@@ -243,3 +297,20 @@ fn main() {
         });
 }
 
+
+/// macOS only builds a resizable/zoomable window when a titlebar is given;
+/// with `None` the style mask lacks the resizable and miniaturizable flags, so
+/// `zoom_window()` and `minimize_window()` silently do nothing. Keep the
+/// titlebar transparent (our header bar draws the controls) and park the
+/// native traffic lights off-screen. Other platforms keep `None`.
+fn window_titlebar() -> Option<TitlebarOptions> {
+    if cfg!(target_os = "macos") {
+        Some(TitlebarOptions {
+            title: Some("LiteMark".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(-100.0), px(-100.0))),
+        })
+    } else {
+        None
+    }
+}

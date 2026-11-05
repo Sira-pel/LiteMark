@@ -110,7 +110,6 @@ pub fn display_shortcut(label: &str) -> SharedString {
     if cfg!(target_os = "macos") {
         match label {
             "Ctrl + H" | "Ctrl+H" => return "Cmd + Option + F".into(),
-            "Ctrl + Up / Down" => return "Option + Up / Down".into(),
             _ => {}
         }
     }

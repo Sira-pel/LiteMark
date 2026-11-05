@@ -4,6 +4,10 @@ actions!(
     litemark,
     [
         ToggleBold,
+        QuitApp,
+        NextTab,
+        PrevTab,
+        MinimizeWindow,
         ToggleItalic,
         ToggleUnderline,
         ToggleStrikethrough,
