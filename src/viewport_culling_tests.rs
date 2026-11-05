@@ -227,3 +227,45 @@ fn enter_at_the_bottom_scrolls_the_new_line_into_view() {
         assert!(row_bottom <= view_bottom && row_bottom >= view_top, "{mode:?}: up arrow lost the caret");
     }
 }
+
+#[std_test]
+fn touchpad_flick_keeps_scrolling_after_the_events_stop() {
+    let content = long_doc();
+    let (view, mut cx) = harness(&content, ViewMode::Raw);
+    let y_of = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| {
+        view.read_with(cx, |app, _| f32::from(app.editor_scroll.offset().y))
+    };
+    let pos = view.read_with(&cx, |app, _| app.editor_scroll.bounds().center());
+    for _ in 0..12 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: pos,
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-14.0))),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+    let at_release = y_of(&view, &cx);
+    assert!(at_release < -100.0, "the flick itself scrolled: {at_release}");
+    let mut last = at_release;
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        last = y_of(&view, &cx);
+    }
+    assert!(last < at_release - 50.0, "coasted on: {at_release} -> {last}");
+
+    // A fresh touch stops it dead.
+    cx.simulate_event(ScrollWheelEvent {
+        position: pos,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(2.0))),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::Moved,
+    });
+    let stopped = y_of(&view, &cx);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(y_of(&view, &cx), stopped);
+}

@@ -148,6 +148,7 @@ pub struct LiteMarkApp {
     /// real edit or caret move scrolls (not the wheel or a repaint).
     caret_followed: Option<(String, Range<usize>, usize)>,
     caret_follow_waits: u8,
+    scroll_momentum: crate::ui::editor::ScrollMomentum,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
     pub find_hits: Vec<Range<usize>>,
@@ -469,6 +470,7 @@ impl LiteMarkApp {
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
             caret_follow_waits: 0,
+            scroll_momentum: Default::default(),
             find_field,
             replace_field,
             find_hits: Vec::new(),
@@ -588,6 +590,7 @@ impl LiteMarkApp {
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
             caret_follow_waits: 0,
+            scroll_momentum: Default::default(),
             find_field: Self::dummy_line_field(cx, "find-field"),
             replace_field: Self::dummy_line_field(cx, "replace-field"),
             find_hits: Vec::new(),
@@ -1593,6 +1596,39 @@ impl LiteMarkApp {
             self.not_found = true;
         } else {
             self.scroll_selection_into_view();
+        }
+    }
+
+    /// Feeds touchpad movement to the momentum tracker; wheel notches reset it.
+    fn note_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        match ev.delta {
+            ScrollDelta::Pixels(d) => {
+                self.scroll_momentum
+                    .on_event(std::time::Instant::now(), f32::from(d.y));
+                cx.notify(); // render asks for the animation frames
+            }
+            ScrollDelta::Lines(_) => self.scroll_momentum.cancel(),
+        }
+    }
+
+    /// Touchpad momentum: one frame of the coast after the fingers lift.
+    fn coast_scroll(&mut self, window: &mut Window) {
+        if self.scroll_momentum.is_idle() {
+            return;
+        }
+        let step = self.scroll_momentum.tick(std::time::Instant::now());
+        if let Some(step) = step {
+            let offset = self.editor_scroll.offset();
+            let max = self.editor_scroll.max_offset().height;
+            let y = (offset.y + px(step)).clamp(-max, px(0.0));
+            if y == offset.y {
+                self.scroll_momentum.cancel(); // hit the top or bottom
+            } else {
+                self.editor_scroll.set_offset(point(offset.x, y));
+            }
+        }
+        if !self.scroll_momentum.is_idle() {
+            window.request_animation_frame();
         }
     }
 
@@ -4555,6 +4591,7 @@ impl Render for LiteMarkApp {
         if self.follow_caret() == Some(true) {
             window.request_animation_frame();
         }
+        self.coast_scroll(window);
         self.install_close_hook(window, cx);
         if self.allow_window_close {
             window.remove_window();
@@ -6828,6 +6865,11 @@ impl Render for LiteMarkApp {
                                     zoom_level: self.settings.zoom_level,
                                     show_zoom_hud: self.show_zoom_hud,
                                     scroll: self.editor_scroll.clone(),
+                                    on_scroll: Some(Box::new(cx.listener(
+                                        |this, ev: &ScrollWheelEvent, window, cx| {
+                                            this.note_scroll(ev, window, cx)
+                                        },
+                                    ))),
                                     editor_element: self.editor_surface(
                                         cx,
                                         &theme,
@@ -6916,6 +6958,9 @@ impl Render for LiteMarkApp {
                             zoom_level: self.settings.zoom_level,
                             show_zoom_hud: self.show_zoom_hud,
                             scroll: self.editor_scroll.clone(),
+                            on_scroll: Some(Box::new(cx.listener(
+                                |this, ev: &ScrollWheelEvent, window, cx| this.note_scroll(ev, window, cx),
+                            ))),
                             editor_element: self.editor_surface(cx, &theme, false),
                         },
                         &theme,
