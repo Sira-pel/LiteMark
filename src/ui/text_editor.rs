@@ -81,14 +81,17 @@ pub struct TableGeom {
     pub viewport: Option<Bounds<Pixels>>,
 }
 
+/// Measured tables, keyed by `table_width_key` (the table's text and fonts).
+/// Not keyed by byte range: an edit above a table moves its range without
+/// changing it, and must not force it to be measured and shaped again.
 #[derive(Clone, Default)]
 pub struct TableWidthCache {
-    pub entries: std::collections::HashMap<Range<usize>, TableWidthEntry>,
+    pub entries: std::collections::HashMap<u64, TableWidthEntry>,
 }
 
-/// Key, content width, column widths, and the row heights of the last frame
-/// that shaped the whole table.
-pub type TableWidthEntry = (u64, Pixels, Vec<Pixels>, Vec<Pixels>);
+/// Content width, column widths, and the row heights of the last frame that
+/// shaped the whole table.
+pub type TableWidthEntry = (Pixels, Vec<Pixels>, Vec<Pixels>);
 
 /// The vertical span worth shaping this frame: the visible part of the editor
 /// plus one screen above and below, so scrolling and drag-selecting past the
@@ -1318,8 +1321,24 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
         }
 
+        // Each table's cache key, hashed once per frame.
+        let table_keys: std::collections::HashMap<Range<usize>, u64> = table_rows
+            .keys()
+            .map(|source| {
+                let key = table_width_key(
+                    self.content.get(source.clone()).unwrap_or(""),
+                    &self.font_family,
+                    &self.mono_font_family,
+                    self.font_size,
+                );
+                (source.clone(), key)
+            })
+            .collect();
         let mut table_width_cache = std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
-        table_width_cache.entries.retain(|k, _| table_rows.contains_key(k));
+        let live_keys: std::collections::HashSet<u64> = table_keys.values().copied().collect();
+        table_width_cache
+            .entries
+            .retain(|k, _| live_keys.contains(k));
 
         let mut table_col_widths: std::collections::HashMap<Range<usize>, Vec<Pixels>> =
             std::collections::HashMap::new();
@@ -1366,24 +1385,19 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     table_source,
                     ..
                 } = &**body;
+                let table_key = table_keys.get(table_source).copied().unwrap_or_default();
                 let shape_table = *table_shaped.entry(table_source.clone()).or_insert_with(|| {
                     let lines = table_rows
                         .get(table_source)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
-                    let key = table_width_key(
-                        self.content.get(table_source.clone()).unwrap_or(""),
-                        &self.font_family,
-                        &self.mono_font_family,
-                        self.font_size,
-                    );
                     let heights = table_width_cache
                         .entries
-                        .get(table_source)
-                        .filter(|(hash, width, _, heights)| {
-                            *hash == key && *width == content_width && heights.len() == lines.len()
+                        .get(&table_key)
+                        .filter(|(width, _, heights)| {
+                            *width == content_width && heights.len() == lines.len()
                         })
-                        .map(|(_, _, _, heights)| heights);
+                        .map(|(_, _, heights)| heights);
                     let Some(heights) = heights else {
                         return true;
                     };
@@ -1401,8 +1415,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let row_ix = table_cached_rows.entry(table_source.clone()).or_insert(0);
                     let row_height = table_width_cache
                         .entries
-                        .get(table_source)
-                        .and_then(|(_, _, _, heights)| heights.get(*row_ix).copied())
+                        .get(&table_key)
+                        .and_then(|(_, _, heights)| heights.get(*row_ix).copied())
                         .unwrap_or(row_line_height);
                     *row_ix += 1;
                     rows.push(PaintRow {
@@ -1423,17 +1437,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let col_widths = table_col_widths
                     .entry(table_source.clone())
                     .or_insert_with(|| {
-                        let table_text = self.content.get(table_source.clone()).unwrap_or("");
-                        let table_hash = table_width_key(
-                            table_text,
-                            &self.font_family,
-                            &self.mono_font_family,
-                            self.font_size,
-                        );
-                        if let Some((cached_hash, cached_width, widths, _)) =
-                            table_width_cache.entries.get(table_source)
+                        if let Some((cached_width, widths, _)) =
+                            table_width_cache.entries.get(&table_key)
                         {
-                            if *cached_hash == table_hash && *cached_width == content_width {
+                            if *cached_width == content_width {
                                 return widths.clone();
                             }
                         }
@@ -1469,10 +1476,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 .width
                         };
                         let widths = compute_table_column_widths(lines, content_width, &mut measure);
-                        table_width_cache.entries.insert(
-                            table_source.clone(),
-                            (table_hash, content_width, widths.clone(), Vec::new()),
-                        );
+                        table_width_cache
+                            .entries
+                            .insert(table_key, (content_width, widths.clone(), Vec::new()));
                         widths
                     });
 
@@ -2180,8 +2186,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
 
         for (source, heights) in table_heights {
-            if let Some(entry) = table_width_cache.entries.get_mut(&source) {
-                entry.3 = heights;
+            let entry = table_keys
+                .get(&source)
+                .and_then(|key| table_width_cache.entries.get_mut(key));
+            if let Some(entry) = entry {
+                entry.2 = heights;
             }
         }
 

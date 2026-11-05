@@ -271,3 +271,29 @@ fn touchpad_flick_keeps_scrolling_after_the_events_stop() {
     cx.run_until_parked();
     assert_eq!(y_of(&view, &cx), stopped);
 }
+
+#[std_test]
+fn typing_above_tables_keeps_far_tables_unshaped() {
+    let content: String = (0..200)
+        .map(|i| format!("| a{i} | b |\n| - | - |\n| 1 | 2 |\n\n"))
+        .collect();
+    let (view, mut cx) = harness(&content, ViewMode::Wysiwyg);
+    let rows_before = geometry(&view, &cx).len();
+    let far_table_rows = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| {
+        let shaped = shaped_rows(view, cx);
+        shaped.into_iter().filter(|&row| row > rows_before / 2).count()
+    };
+    assert_eq!(far_table_rows(&view, &cx), 0, "far tables start unshaped");
+
+    // Typing at the top moves every table's byte range but not its text.
+    view.update(&mut cx, |app, _cx| {
+        let tab = app.active_tab_mut().expect("tab");
+        tab.insert_text_in_mode(0..0, "x", ViewMode::Wysiwyg);
+    });
+    redraw(&mut cx);
+    assert_eq!(
+        far_table_rows(&view, &cx),
+        0,
+        "an edit above a table must not shape it again"
+    );
+}
