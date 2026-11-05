@@ -223,6 +223,9 @@ pub struct ActiveFormats {
     pub h1: bool,
     pub h2: bool,
     pub h3: bool,
+    pub h4: bool,
+    pub h5: bool,
+    pub h6: bool,
     pub ul: bool,
     pub ol: bool,
     pub checklist: bool,
@@ -1486,6 +1489,9 @@ impl DocumentTab {
             "h1" => Some(BlockFormatTarget::Heading(1)),
             "h2" => Some(BlockFormatTarget::Heading(2)),
             "h3" => Some(BlockFormatTarget::Heading(3)),
+            "h4" => Some(BlockFormatTarget::Heading(4)),
+            "h5" => Some(BlockFormatTarget::Heading(5)),
+            "h6" => Some(BlockFormatTarget::Heading(6)),
             "ul" => Some(BlockFormatTarget::BulletList),
             "ol" => Some(BlockFormatTarget::OrderedList),
             "checklist" => Some(BlockFormatTarget::TaskList),
@@ -2439,7 +2445,10 @@ impl DocumentTab {
                 let new_prefix = match target {
                     BlockFormatTarget::Heading(1) => "# ".to_string(),
                     BlockFormatTarget::Heading(2) => "## ".to_string(),
-                    BlockFormatTarget::Heading(_) => "### ".to_string(),
+                    BlockFormatTarget::Heading(3) => "### ".to_string(),
+                    BlockFormatTarget::Heading(4) => "#### ".to_string(),
+                    BlockFormatTarget::Heading(5) => "##### ".to_string(),
+                    BlockFormatTarget::Heading(_) => "###### ".to_string(),
                     BlockFormatTarget::BulletList => "- ".to_string(),
                     BlockFormatTarget::OrderedList => format!("{}. ", idx + 1),
                     BlockFormatTarget::TaskList => "- [ ] ".to_string(),
@@ -5986,7 +5995,10 @@ fn compute_active_formats(
         match line.kind {
             LineKind::Heading { level: 1 } => fmt.h1 = true,
             LineKind::Heading { level: 2 } => fmt.h2 = true,
-            LineKind::Heading { level: 3.. } => fmt.h3 = true,
+            LineKind::Heading { level: 3 } => fmt.h3 = true,
+            LineKind::Heading { level: 4 } => fmt.h4 = true,
+            LineKind::Heading { level: 5 } => fmt.h5 = true,
+            LineKind::Heading { level: 6.. } => fmt.h6 = true,
             LineKind::ListItem { ordered, task, .. } => {
                 if task.is_some() {
                     fmt.checklist = true;
@@ -6983,6 +6995,9 @@ mod tests {
             ("h1", "# My line"),
             ("h2", "## My line"),
             ("h3", "### My line"),
+            ("h4", "#### My line"),
+            ("h5", "##### My line"),
+            ("h6", "###### My line"),
             ("ul", "- My line"),
             ("ol", "1. My line"),
             ("checklist", "- [ ] My line"),
