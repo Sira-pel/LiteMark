@@ -213,6 +213,8 @@ where
                             let sel = on_select.clone();
                             let cls = on_close_tab.clone();
                             let tid_for_close = tab.id.clone();
+                            let cls_middle = on_close_tab.clone();
+                            let tid_middle = tab.id.clone();
 
                             div()
                                 .id(SharedString::from(format!("tab-{}", tab_id)))
@@ -244,6 +246,11 @@ where
                                 })
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(move |_, _, cx| sel(tab_id.clone(), cx))
+                                // Middle-click closes the tab, like browsers do.
+                                .on_mouse_up(MouseButton::Middle, move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    cls_middle(tid_middle.clone(), cx);
+                                })
                                 .child(
                                     div()
                                         .flex_shrink_0()

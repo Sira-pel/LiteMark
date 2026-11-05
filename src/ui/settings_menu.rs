@@ -27,6 +27,7 @@ where
 
 pub fn render_settings_button<FTogOpen>(
     is_open: bool,
+    update_available: bool,
     on_toggle_open: FTogOpen,
     theme: &Theme,
 ) -> impl IntoElement
@@ -37,6 +38,7 @@ where
 
     div()
         .id("toolbar-settings-gear")
+        .relative()
         .flex()
         .items_center()
         .justify_center()
@@ -50,6 +52,18 @@ where
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| tog(cx))
         .child(render_icon("settings", 16.0, if is_open { theme.text_strong } else { theme.text_muted }))
+        .when(update_available, |s| {
+            s.child(
+                div()
+                    .absolute()
+                    .top(px(4.0))
+                    .right(px(4.0))
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .rounded_full()
+                    .bg(rgb(0x3b82f6)),
+            )
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -62,6 +76,7 @@ pub fn build_settings_menu_items(
     on_open_about: impl Fn(&mut App) + 'static + Clone,
     check_for_updates: bool,
     on_toggle_update_checks: impl Fn(&mut App) + 'static + Clone,
+    on_check_now: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
     let t_dark = on_set_theme.clone();
     let t_light = on_set_theme.clone();
@@ -107,7 +122,11 @@ pub fn build_settings_menu_items(
             action: std::sync::Arc::new(|_, _| {}),
         },
         MenuItem::divider(),
-        MenuItem::check("Check for updates", check_for_updates, None, {
+        MenuItem::action("Check for updates now", None, None, {
+            let c = on_check_now.clone();
+            move |_, cx| c(cx)
+        }),
+        MenuItem::check("Check automatically", check_for_updates, None, {
             let t = on_toggle_update_checks.clone();
             move |_, cx| t(cx)
         }),
@@ -139,6 +158,7 @@ mod tests {
             |_| {},
             |_| {},
             true,
+            |_| {},
             |_| {},
         );
 
@@ -179,8 +199,9 @@ mod tests {
                 |_| {},
                 enabled,
                 |_| {},
+                |_| {},
             );
-            let item = items.iter().find(|i| i.label == "Check for updates").expect("item exists");
+            let item = items.iter().find(|i| i.label == "Check automatically").expect("item exists");
             assert!(matches!(item.kind, MenuItemKind::Check(c) if c == enabled));
         }
     }
