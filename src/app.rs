@@ -5966,6 +5966,21 @@ impl Render for LiteMarkApp {
                 window.refresh();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &Heading4, window, cx| {
+                this.handle_format_cmd("h4", cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Heading5, window, cx| {
+                this.handle_format_cmd("h5", cx);
+                window.refresh();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Heading6, window, cx| {
+                this.handle_format_cmd("h6", cx);
+                window.refresh();
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleBulletList, window, cx| {
                 this.handle_format_cmd("ul", cx);
                 window.refresh();

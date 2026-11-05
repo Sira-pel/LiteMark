@@ -233,10 +233,21 @@ where
     }
 }
 
+/// Heading levels offered in the dropdown and the narrow overflow menu:
+/// (label, icon, shortcut, format command).
+pub const HEADING_LEVELS: [(&str, &str, &str, &str); 6] = [
+    ("Heading 1", "heading-1", "Ctrl+1", "h1"),
+    ("Heading 2", "heading-2", "Ctrl+2", "h2"),
+    ("Heading 3", "heading-3", "Ctrl+3", "h3"),
+    ("Heading 4", "heading-4", "Ctrl+4", "h4"),
+    ("Heading 5", "heading-5", "Ctrl+5", "h5"),
+    ("Heading 6", "heading-6", "Ctrl+6", "h6"),
+];
+
 /// Width of the headings dropdown button: an icon plus a small chevron.
 pub const HEADING_BTN_W: f32 = 44.0;
 
-/// Headings dropdown button. It shows the active level (H1-H3) when the caret
+/// Headings dropdown button. It shows the active level (H1-H6) when the caret
 /// is in a heading and a plain "H" otherwise, with a chevron that says it
 /// opens a menu.
 fn heading_button(
@@ -245,16 +256,13 @@ fn heading_button(
     is_open: bool,
     on_toggle: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
-    let active = formats.h1 || formats.h2 || formats.h3;
-    let icon = if formats.h1 {
-        "heading-1"
-    } else if formats.h2 {
-        "heading-2"
-    } else if formats.h3 {
-        "heading-3"
-    } else {
-        "heading"
-    };
+    let level = [
+        formats.h1, formats.h2, formats.h3, formats.h4, formats.h5, formats.h6,
+    ]
+    .iter()
+    .position(|&on| on);
+    let active = level.is_some();
+    let icon = level.map_or("heading", |i| HEADING_LEVELS[i].1);
     let color = if active || is_open {
         theme.text_strong
     } else {
@@ -317,11 +325,7 @@ pub fn build_heading_menu_items(
     on_format: impl Fn(&'static str, &mut App) + 'static + Clone,
     on_close: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
-    [
-        ("Heading 1", "heading-1", "Ctrl+1", "h1"),
-        ("Heading 2", "heading-2", "Ctrl+2", "h2"),
-        ("Heading 3", "heading-3", "Ctrl+3", "h3"),
-    ]
+    HEADING_LEVELS
     .into_iter()
     .map(|(label, icon, shortcut, cmd)| {
         let f = on_format.clone();
@@ -385,24 +389,14 @@ pub fn build_overflow_menu_items(
 
     // On super small window (< 640px), Headings and Lists collapse into the overflow menu
     if is_narrow {
-        let f1 = on_format.clone();
-        let c1 = on_close.clone();
-        items.push(MenuItem::action("Heading 1", Some("heading-1"), Some("Ctrl+1"), move |_, cx| {
-            f1("h1", cx);
-            c1(cx);
-        }));
-        let f2 = on_format.clone();
-        let c2 = on_close.clone();
-        items.push(MenuItem::action("Heading 2", Some("heading-2"), Some("Ctrl+2"), move |_, cx| {
-            f2("h2", cx);
-            c2(cx);
-        }));
-        let f3 = on_format.clone();
-        let c3 = on_close.clone();
-        items.push(MenuItem::action("Heading 3", Some("heading-3"), Some("Ctrl+3"), move |_, cx| {
-            f3("h3", cx);
-            c3(cx);
-        }));
+        for (label, icon, shortcut, cmd) in HEADING_LEVELS {
+            let f = on_format.clone();
+            let c = on_close.clone();
+            items.push(MenuItem::action(label, Some(icon), Some(shortcut), move |_, cx| {
+                f(cmd, cx);
+                c(cx);
+            }));
+        }
         items.push(MenuItem::divider());
 
         let f4 = on_format.clone();
@@ -527,6 +521,7 @@ mod tests {
         assert!(labels_narrow.contains(&"Heading 1"));
         assert!(labels_narrow.contains(&"Heading 2"));
         assert!(labels_narrow.contains(&"Heading 3"));
+        assert!(labels_narrow.contains(&"Heading 6"));
         assert!(labels_narrow.contains(&"Bullet list"));
         assert!(labels_narrow.contains(&"Numbered list"));
         assert!(labels_narrow.contains(&"Task list"));

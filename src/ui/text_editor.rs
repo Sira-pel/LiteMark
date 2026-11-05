@@ -2382,9 +2382,18 @@ fn wysiwyg_line_metrics(
             let fs = base_font_size * 1.35;
             (fs, fs * 1.45, base_font_size * 0.4, px(0.0))
         }
+        LineKind::Heading { level: 4 } => {
+            let fs = base_font_size * 1.2;
+            (fs, fs * 1.5, base_font_size * 0.3, px(0.0))
+        }
+        LineKind::Heading { level: 5 } => {
+            let fs = base_font_size * 1.1;
+            (fs, fs * 1.55, base_font_size * 0.22, px(0.0))
+        }
+        // H6 is body-sized; `wysiwyg_slice_runs` mutes its colour instead.
         LineKind::Heading { .. } => {
-            let fs = base_font_size * 1.15;
-            (fs, fs * 1.5, base_font_size * 0.2, px(0.0))
+            let fs = base_font_size;
+            (fs, fs * 1.6, base_font_size * 0.15, px(0.0))
         }
         LineKind::ListItem { indent_cols, .. } => (
             base_font_size,
@@ -2480,6 +2489,7 @@ fn wysiwyg_slice_runs(
     let (default_weight, default_color, use_mono) = match &parsed_line.kind {
         LineKind::Heading { level: 1 } => (FontWeight::NORMAL, colors.h1_color, false),
         LineKind::Heading { level: 2 } => (FontWeight::NORMAL, colors.h2_color, false),
+        LineKind::Heading { level: 6.. } => (FontWeight::NORMAL, colors.muted_color, false),
         LineKind::Heading { .. } => (FontWeight::NORMAL, colors.strong_color, false),
         LineKind::CodeLine | LineKind::CodeFence { .. } => {
             (FontWeight::NORMAL, colors.code_color, true)
@@ -3808,6 +3818,10 @@ mod tests {
             // H3 stays at least 30% above body text.
             assert!(size(3) >= px(base) * 1.3, "base {base} h3 vs body");
             assert!(size(4) > px(base), "base {base} h4 vs body");
+            // H4-H6 keep stepping down, ending at body size.
+            assert!(size(4) > size(5) && size(5) > size(6), "base {base} h4-h6");
+            assert!(size(6) >= px(base), "base {base} h6 vs body");
+            assert!(gap(3) > gap(4) && gap(4) > gap(5) && gap(5) > gap(6), "base {base} gaps");
         }
     }
     #[test]
