@@ -9176,7 +9176,9 @@ mod tests {
             "The number of windows in my house is\n14) The number of doors is 6."
         );
 
-        // Column 4 marker is text. Enter does not continue a list.
+        // Column 4 marker is indented code, not a list. Enter keeps the
+        // indent and does not continue a list. Home in WYSIWYG lands after
+        // the hidden four-column indent, so typing stays in the code block.
         let indented = " \t63.\tnot";
         let mut ind_enter = place_end(indented);
         assert_eq!(ind_enter.cursor_offset(), indented.len());
@@ -9185,9 +9187,9 @@ mod tests {
         let mut ind_type =
             DocumentTab::new("t".into(), "t.md".into(), indented.to_string(), None, None);
         ind_type.move_home_in_mode(false, ViewMode::Wysiwyg);
-        assert_eq!(ind_type.cursor_offset(), 0);
-        ind_type.edit(0..0, "Z");
-        assert_eq!(ind_type.content, "Z \t63.\tnot");
+        assert_eq!(ind_type.cursor_offset(), 2);
+        ind_type.edit(2..2, "Z");
+        assert_eq!(ind_type.content, " \tZ63.\tnot");
         let mut ind_bs = place_end(indented);
         ind_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
         assert_eq!(ind_bs.content, " \t63.\tno");
