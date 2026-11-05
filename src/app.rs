@@ -159,6 +159,8 @@ pub struct LiteMarkApp {
     pub selecting: bool,
     pub zoom_epoch: u64,
     pub toast_epoch: u64,
+    /// An update check is running; further checks are ignored until it ends.
+    update_check_running: bool,
     pub available_update: Option<ReleaseInfo>,
     pub pending_find_focus: bool,
     pub pending_rename_focus: bool,
@@ -481,6 +483,7 @@ impl LiteMarkApp {
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
+            update_check_running: false,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
@@ -601,6 +604,7 @@ impl LiteMarkApp {
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
+            update_check_running: false,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
@@ -738,6 +742,10 @@ impl LiteMarkApp {
         {
             return;
         }
+        if self.update_check_running {
+            return;
+        }
+        self.update_check_running = true;
         if manual {
             self.show_toast("Checking for updates…", cx);
         }
@@ -747,6 +755,7 @@ impl LiteMarkApp {
                 .spawn(async { fetch_latest_release() })
                 .await;
             this.update(cx, |this, cx| {
+                this.update_check_running = false;
                 let Some(release) = release else {
                     if manual {
                         this.show_toast("Couldn't check for updates", cx);
