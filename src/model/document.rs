@@ -7907,8 +7907,6 @@ mod tests {
         assert!(doc.pending_formats.bold);
     }
 
-    /// Inline code is always the innermost format with its backticks adjacent
-    /// to the text, and no other delimiters are ever emitted inside a code
     /// Select-all then an inline toggle formats each block inside its prefix,
     /// leaves code blocks alone, and a second press removes the format from
     /// everything without touching the other formats.
@@ -8037,6 +8035,8 @@ mod tests {
         }
     }
 
+    /// Inline code is always the innermost format with its backticks adjacent
+    /// to the text, and no other delimiters are ever emitted inside a code
     /// span: when a non-code format turns off mid-typing, the code span
     /// closes, the format closes, and the code span reopens
     /// (`**`hi`**`yo`). Covers every pair and triple containing code.
