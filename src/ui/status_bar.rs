@@ -44,18 +44,26 @@ where
     let show_chars = props.width >= px(460.0);
     let show_words = props.width >= px(340.0);
 
+    let divider = || div().w(px(1.0)).h(px(14.0)).bg(theme.border_primary);
+    let text_item = |label: &'static str| div().px(px(8.0)).child(label);
+    let mode_icon = match props.view_mode {
+        ViewMode::Wysiwyg => "file-text",
+        ViewMode::Raw => "code",
+    };
+
     div()
         .flex()
         .items_center()
         .justify_between()
         .h(sz::STATUS)
-        .px(px(10.0))
+        .pl(px(14.0))
+        .pr(px(6.0))
         .bg(theme.bg_editor)
         .border_t_1()
         .border_color(theme.border_primary)
         .text_color(theme.text_muted)
-        .text_size(px(11.5))
-        .font_family(Theme::FONT_MONO)
+        .text_size(px(12.0))
+        .font_family(Theme::FONT_PROSE)
         .flex_shrink_0()
         // Left document metrics
         .child(
@@ -81,38 +89,38 @@ where
             div()
                 .flex()
                 .items_center()
-                .gap(px(8.0))
-                // Zoom chip in menu_bg
+                .gap(px(4.0))
+                .when(show_encoding, |d| {
+                    d.child(text_item("UTF-8"))
+                        .child(text_item("LF"))
+                        .child(divider())
+                })
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(2.0))
-                        .px(px(6.0))
-                        .py(px(2.0))
-                        .rounded(sz::R_SM)
-                        .border_1()
-                        .border_color(theme.border_primary)
-                        .bg(theme.menu_bg)
                         .child({
                             let z_out = on_zoom_out.clone();
                             div()
                                 .id("sb-zoom-out")
-                                .p(px(2.0))
+                                .p(px(3.0))
                                 .rounded(sz::R_SM)
                                 .cursor_pointer()
                                 .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                                 .on_click(move |_, _, cx| z_out(cx))
-                                .child(render_icon("zoom-out", 12.0, theme.text_muted))
+                                .child(render_icon("zoom-out", 13.0, theme.text_muted))
                         })
                         .child({
                             let z_reset = on_reset_zoom.clone();
                             div()
                                 .id("sb-zoom-reset")
                                 .px(px(4.0))
+                                .py(px(2.0))
+                                .rounded(sz::R_SM)
                                 .cursor_pointer()
                                 .text_color(if props.zoom_level != 100 { theme.text_hi } else { theme.text_muted })
-                                .hover(|h| h.text_color(theme.text_primary))
+                                .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                                 .on_click(move |_, _, cx| z_reset(cx))
                                 .child(format!("{}%", props.zoom_level))
                         })
@@ -120,40 +128,30 @@ where
                             let z_in = on_zoom_in.clone();
                             div()
                                 .id("sb-zoom-in")
-                                .p(px(2.0))
+                                .p(px(3.0))
                                 .rounded(sz::R_SM)
                                 .cursor_pointer()
                                 .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                                 .on_click(move |_, _, cx| z_in(cx))
-                                .child(render_icon("zoom-in", 12.0, theme.text_muted))
+                                .child(render_icon("zoom-in", 13.0, theme.text_muted))
                         })
                 )
-                .when(show_encoding, |d| {
-                    d.child(div().text_color(theme.text_faint).child("·"))
-                        .child("UTF-8")
-                        .child(div().text_color(theme.text_faint).child("·"))
-                        .child("LF")
-                })
-                .child(
-                    div()
-                        .text_color(theme.text_faint)
-                        .child("·")
-                )
-                // WYSIWYG / Raw toggle pill
+                .child(divider())
+                // WYSIWYG / Raw mode toggle
                 .child({
                     let t_mode = on_toggle_mode.clone();
                     div()
                         .id("sb-toggle-view-mode")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
                         .px(px(8.0))
-                        .py(px(2.0))
+                        .py(px(3.0))
                         .rounded(sz::R_SM)
-                        .border_1()
-                        .border_color(theme.pill_border)
-                        .bg(theme.tile_hover)
-                        .text_color(theme.pill_text)
                         .cursor_pointer()
                         .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                         .on_click(move |_, _, cx| t_mode(cx))
+                        .child(render_icon(mode_icon, 13.0, theme.text_muted))
                         .child(props.view_mode.label())
                 })
         )

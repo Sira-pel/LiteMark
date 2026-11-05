@@ -1,96 +1,69 @@
-# LiteMark
+<h1 align="center">LiteMark</h1>
 
-LiteMark is a native Markdown and text editor. It is in **beta** (0.x): it works, but it has had little testing outside the author's machine, so keep backups of important notes and please report bugs. It edits Markdown and plain text in a raw view or a WYSIWYG view, and stores notes in a folder (by default `~/Documents/Notes`).
+<p align="center">
+  A fast, native Markdown and text editor with a raw view and a WYSIWYG view.<br>
+  Offline by default. Your notes stay in a plain folder.
+</p>
+
+<p align="center">
+  <img src="docs/screenshot-dark.png" alt="LiteMark in dark mode" width="49%">
+  <img src="docs/screenshot-light.png" alt="LiteMark in light mode" width="49%">
+</p>
+
+> **Beta (0.x).** LiteMark works, but it has had little testing outside the author's machine. Keep backups of important notes and please [report bugs](https://github.com/Sira-pel/LiteMark/issues).
+
+## Download
+
+| Platform | Package |
+| --- | --- |
+| Windows (x64) | [LiteMark-windows-x64-setup.exe](https://github.com/Sira-pel/LiteMark/releases/latest/download/LiteMark-windows-x64-setup.exe) |
+| macOS (Apple silicon) | [LiteMark-macos-arm64.dmg](https://github.com/Sira-pel/LiteMark/releases/latest/download/LiteMark-macos-arm64.dmg) |
+| macOS (Intel) | [LiteMark-macos-x64.dmg](https://github.com/Sira-pel/LiteMark/releases/latest/download/LiteMark-macos-x64.dmg) |
+| Linux (Debian/Ubuntu) | [litemark_amd64.deb](https://github.com/Sira-pel/LiteMark/releases/latest/download/litemark_amd64.deb) |
+
+All versions are on the [Releases page](https://github.com/Sira-pel/LiteMark/releases).
+
+<details>
+<summary>Installation notes</summary>
+
+- **Windows:** run the installer. It installs for your user by default. It is not code-signed, so SmartScreen may warn: choose "More info", then "Run anyway".
+- **macOS:** open the `.dmg` and drag LiteMark to Applications. The app is not notarized, so the first time, right-click it and choose Open.
+- **Linux:** `sudo apt install ./litemark_amd64.deb`. To update, install the newer package the same way. Your notes and settings are kept. Open and save dialogs need `xdg-desktop-portal` with a GTK or GNOME backend.
+
+Windows and macOS builds are produced by CI and have had little hands-on testing.
+
+</details>
 
 ## Features
 
-- Raw Markdown and a WYSIWYG view of the same document. Line numbers are available in the raw view.
-- Headings, bold, italic, underline, strikethrough, links, lists, task lists, quotes, inline code, and code blocks.
-- Tables: a size picker, and a right-click menu to add or delete rows and columns and to set column alignment.
-- Find and replace, with match case.
-- A notes sidebar for creating notes and folders, renaming, and moving items to the trash. Trashing a note with unsaved edits asks first.
-- Open `.md`, `.txt`, and `.pdf` files. A PDF is opened as extracted text.
-- Export the current document as HTML, Markdown, or plain text.
-- Saves write a temporary file and rename it into place. Saving a new path does not replace an existing file.
-- Tabs, undo and redo, zoom, word wrap, centered or left-aligned text, dark / light / system theme, and zen mode.
-- Settings are stored in the user config directory as `litemark/settings.json`.
+- **Two views of one document:** raw Markdown or WYSIWYG, with optional line numbers in raw view.
+- **Rich formatting:** headings, bold, italic, underline, strikethrough, links, lists, task lists, quotes, inline code, code blocks and tables.
+- **Notes sidebar:** create, rename, move and trash notes and folders. Notes live in `~/Documents/Notes` by default.
+- **Find and replace** with match case.
+- **Files:** open `.md`, `.txt` and `.pdf` (as extracted text). Export to HTML, Markdown or plain text.
+- **Safe saving:** writes go to a temporary file and are renamed into place.
+- **Comfortable to use:** tabs, undo and redo, zoom, word wrap, dark / light / system theme and zen mode.
 
-## Updates and network use
+## Privacy
 
-LiteMark works fully offline. The only network request it makes is the update check. It is on by default, so the app contacts GitHub (api.github.com) on startup unless you turn it off:
-
-- On startup, in the background, it asks the GitHub Releases API for the latest version. It checks at most once every 24 hours.
-- If a newer version exists, a small notice appears with a Download button that opens the release page. Closing the notice hides it for that version.
-- Nothing is downloaded or installed automatically, and no notes, settings, or identifiers are sent.
-- If you are offline, or GitHub cannot be reached, nothing is shown.
-- Turn it off in the settings menu (gear icon) by unchecking "Check for updates", or set `"check_for_updates": false` in `settings.json`.
-
-## Screenshots
-
-_Placeholder. Screenshots are not in the repository yet._
-
-## Install
-
-Download the package for your system from the [Releases page](https://github.com/Sira-pel/LiteMark/releases/latest). Windows and macOS builds are new and untested by hand; please report problems.
-
-### Windows
-
-Run `LiteMark-<version>-windows-x64-setup.exe`. It installs for your user by default. The installer is not code-signed, so Windows SmartScreen may warn: choose "More info", then "Run anyway".
-
-### macOS
-
-Open `LiteMark-<version>-macos-arm64.dmg` (Apple silicon) or `-macos-x64.dmg` (Intel) and drag LiteMark to Applications. The app is not notarized, so the first time, right-click it and choose Open. On macOS the command shortcuts use Cmd instead of Ctrl.
-
-### Linux (.deb)
-
-Download the latest `litemark_<version>_amd64.deb` from the [Releases page](https://github.com/Sira-pel/LiteMark/releases/latest), then install it:
-
-```bash
-sudo apt install ./litemark_<version>_amd64.deb
-```
-
-To update, download and install the newer `.deb` the same way. Your notes and settings are kept.
-
-### Build from this repository
-
-- Windows: `powershell scripts/build-windows.ps1` (needs Rust and Inno Setup 6).
-- macOS: `bash scripts/build-macos.sh` (needs Rust and Xcode command line tools).
-
-### Build the .deb yourself
-
-The packaging script builds an amd64 package. `dpkg-dev` must be installed so the script can run `dpkg-shlibdeps`. The version comes from `Cargo.toml`.
-
-```bash
-sudo apt install -y dpkg-dev
-bash scripts/build-deb.sh
-sudo apt install ./build/litemark_*_amd64.deb
-```
-
-The package recommends `xdg-desktop-portal` and a GTK or GNOME portal backend. Open and save dialogs use that portal.
-
-## Build from source
-
-Rust 1.85 or newer (stable). Dependencies in the lockfile use the 2024 edition, so an older toolchain will not compile this tree.
-
-```bash
-sudo apt update
-sudo apt install -y build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfreetype6-dev
-cargo build
-cargo test
-cargo run --release
-```
-
-`libxkbcommon-x11-dev` is required at link time. It provides the unversioned `libxkbcommon-x11.so`.
-
-## Runtime
-
-- A GPU with a Vulkan driver (`libvulkan1`).
-- X11 or Wayland (`libwayland-client0` on Wayland).
-- `libxcb1`, `libxkbcommon0`, and `libxkbcommon-x11-0`.
-- Fontconfig (`libfontconfig1`) and FreeType (`libfreetype6`).
-- `xdg-desktop-portal` and either `xdg-desktop-portal-gnome` or `xdg-desktop-portal-gtk` for file dialogs.
+LiteMark works offline. Its only network request is an optional update check against the GitHub Releases API, at most once every 24 hours. No notes, settings or identifiers are sent, and nothing is downloaded automatically. Turn it off under the gear menu ("Check for updates") or with `"check_for_updates": false` in `settings.json`.
 
 ## Keyboard shortcuts
+
+Press **F1** in the app for the full list. Common ones:
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl+N / Ctrl+T | New note / new tab |
+| Ctrl+O / Ctrl+S | Open / save |
+| Ctrl+F / Ctrl+H | Find / find and replace |
+| Ctrl+B / I / U | Bold / italic / underline |
+| Ctrl+Shift+M | Toggle raw and WYSIWYG |
+| Ctrl+\ | Toggle the sidebar |
+| F11 | Zen mode |
+
+<details>
+<summary>All shortcuts</summary>
 
 | Shortcut | Action |
 | --- | --- |
@@ -121,28 +94,23 @@ cargo run --release
 | F11 | Zen mode |
 | Escape | Leave zen mode, or close a dialog |
 
-## Limitations
+On macOS, Cmd replaces Ctrl.
 
-- Windows and macOS builds are new. They are built by CI and have had little hands-on testing.
-- The Windows installer and the macOS app are not code-signed or notarized.
-- PDF export is not implemented.
-- Opening a PDF extracts its text. The original pages are not drawn.
-- `scripts/build-deb.sh` produces an amd64 package.
+</details>
+
+## Known limitations
+
+- PDF export is not implemented, and opening a PDF shows extracted text only.
+- Windows and macOS builds are not code-signed or notarized.
 - Updates are not installed automatically; the app only tells you when a new release is out.
 
-## Releasing
+## Building
 
-Use plain `0.x.y` versions while in beta. Do not tick GitHub's "pre-release" box: the in-app update check only sees the latest non-pre-release. The update check ignores `-beta` style suffixes, so avoid them in version numbers.
-
-1. Set `version` in `Cargo.toml` and commit it.
-2. Tag the commit and push the tag:
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for building from source, packaging and releasing. In short, with Rust 1.85+:
 
 ```bash
-git tag v0.9.1
-git push origin v0.9.1
+cargo run --release
 ```
-
-The [release workflow](.github/workflows/release.yml) checks that the tag matches `Cargo.toml`, builds the `.deb`, and publishes a GitHub Release with the package and a SHA-256 checksum attached.
 
 ## License
 

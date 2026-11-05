@@ -4581,6 +4581,9 @@ impl Render for LiteMarkApp {
         self.search_field.update(cx, |field, _cx| {
             field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
         });
+        self.create_field.update(cx, |field, _cx| {
+            field.set_colors(text_color, placeholder_color, field_bg, field_border);
+        });
 
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.ensure_stats();
