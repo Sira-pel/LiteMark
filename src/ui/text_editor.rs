@@ -127,6 +127,10 @@ pub struct EditorPaint {
     pub bounds: Option<Bounds<Pixels>>,
     pub table_width_cache: TableWidthCache,
     pub tables: Vec<TableGeom>,
+    /// Length and selection of the content the rows were laid out for, so a
+    /// caller can tell whether the geometry matches the current document.
+    pub painted_len: usize,
+    pub painted_selection: Range<usize>,
 }
 
 impl Default for EditorPaint {
@@ -139,6 +143,8 @@ impl Default for EditorPaint {
             bounds: None,
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            painted_len: 0,
+            painted_selection: 0..0,
         }
     }
 }
@@ -2285,6 +2291,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             let mut paint = self.paint.borrow_mut();
             paint.line_height = prepaint.line_height;
             paint.total_height = prepaint.total_height;
+            paint.painted_len = self.content.len();
+            paint.painted_selection = self.selection.clone();
             paint.bounds = Some(bounds);
             // Painting is done with the rows, so hand them over instead of
             // deep-copying every shaped line each frame.
@@ -3078,6 +3086,8 @@ mod tests {
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(400.0), px(100.0)))),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            painted_len: 0,
+            painted_selection: 0..0,
         };
 
         let mut caret = Caret::default();
@@ -3169,6 +3179,8 @@ mod tests {
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)))),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            painted_len: 0,
+            painted_selection: 0..0,
         };
 
         // Click on Line 0 (y = 10px)
@@ -3235,6 +3247,8 @@ mod tests {
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)))),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            painted_len: 0,
+            painted_selection: 0..0,
         };
 
         let mut caret = Caret::default();
@@ -3326,6 +3340,8 @@ mod tests {
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(112.0)))),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            painted_len: 0,
+            painted_selection: 0..0,
         };
 
         // Click in Cell 1 on Line 1 at y = 35px (Line 0 is 0..28px, Line 1 is 28..56px)
@@ -3520,6 +3536,8 @@ mod tests {
             bounds: Some(Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(28.0)))),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            painted_len: 0,
+            painted_selection: 0..0,
         };
 
         let mut caret = Caret::default();

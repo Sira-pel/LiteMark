@@ -192,3 +192,38 @@ fn up_and_down_keep_the_column_across_a_short_line() {
         assert_eq!(caret(&view, &cx), 12 + 1, "{mode:?}: left resets it");
     }
 }
+
+fn caret_row_in_view(view: &Entity<LiteMarkApp>, cx: &VisualTestContext) -> (Pixels, Pixels, Pixels) {
+    view.read_with(cx, |app, _| {
+        let cursor = app.active_tab().expect("tab").caret.cursor();
+        let paint = app.editor_paint.borrow();
+        let row = paint.rows.iter().rev().find(|r| r.byte_start <= cursor).expect("row");
+        let b = app.editor_scroll.bounds();
+        (row.origin.y + row.line_height, b.bottom(), b.top())
+    })
+}
+
+#[std_test]
+fn enter_at_the_bottom_scrolls_the_new_line_into_view() {
+    for mode in [ViewMode::Raw, ViewMode::Wysiwyg] {
+        let content: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let (view, mut cx) = harness(&content, mode);
+        place_caret(&view, &mut cx, content.len());
+        for i in 0..60 {
+            cx.dispatch_action(EditorNewline);
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let (row_bottom, view_bottom, _) = caret_row_in_view(&view, &cx);
+            assert!(row_bottom <= view_bottom, "{mode:?}: newline {i} fell below the editor");
+        }
+        // Moving up past the top edge follows too.
+        for _ in 0..90 {
+            cx.dispatch_action(EditorUp);
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+        let (_, _, view_top) = caret_row_in_view(&view, &cx);
+        let (row_bottom, view_bottom, _) = caret_row_in_view(&view, &cx);
+        assert!(row_bottom <= view_bottom && row_bottom >= view_top, "{mode:?}: up arrow lost the caret");
+    }
+}
