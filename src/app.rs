@@ -144,6 +144,11 @@ pub struct LiteMarkApp {
     /// instead of cloning the whole document each time.
     content_snapshot: Option<(String, u64, usize, SharedString)>,
     pub editor_scroll: ScrollHandle,
+    /// Tab, caret and length the editor last scrolled to follow, so only a
+    /// real edit or caret move scrolls (not the wheel or a repaint).
+    caret_followed: Option<(String, Range<usize>, usize)>,
+    caret_follow_waits: u8,
+    scroll_momentum: crate::ui::editor::ScrollMomentum,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
     pub find_hits: Vec<Range<usize>>,
@@ -463,6 +468,9 @@ impl LiteMarkApp {
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             content_snapshot: None,
             editor_scroll: ScrollHandle::new(),
+            caret_followed: None,
+            caret_follow_waits: 0,
+            scroll_momentum: Default::default(),
             find_field,
             replace_field,
             find_hits: Vec::new(),
@@ -580,6 +588,9 @@ impl LiteMarkApp {
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             content_snapshot: None,
             editor_scroll: ScrollHandle::new(),
+            caret_followed: None,
+            caret_follow_waits: 0,
+            scroll_momentum: Default::default(),
             find_field: Self::dummy_line_field(cx, "find-field"),
             replace_field: Self::dummy_line_field(cx, "replace-field"),
             find_hits: Vec::new(),
@@ -1586,6 +1597,94 @@ impl LiteMarkApp {
         } else {
             self.scroll_selection_into_view();
         }
+    }
+
+    /// Feeds touchpad movement to the momentum tracker; wheel notches reset it.
+    fn note_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // macOS already sends its own inertial events after the lift, and
+        // Windows only reports line steps, so this is for Linux touchpads.
+        match ev.delta {
+            _ if !cfg!(target_os = "linux") => {}
+            ScrollDelta::Pixels(d) => {
+                self.scroll_momentum
+                    .on_event(std::time::Instant::now(), f32::from(d.y));
+                cx.notify(); // render asks for the animation frames
+            }
+            ScrollDelta::Lines(_) => self.scroll_momentum.cancel(),
+        }
+    }
+
+    /// Touchpad momentum: one frame of the coast after the fingers lift.
+    fn coast_scroll(&mut self, window: &mut Window) {
+        if self.scroll_momentum.is_idle() {
+            return;
+        }
+        let step = self.scroll_momentum.tick(std::time::Instant::now());
+        if let Some(step) = step {
+            let offset = self.editor_scroll.offset();
+            let max = self.editor_scroll.max_offset().height;
+            let y = (offset.y + px(step)).clamp(-max, px(0.0));
+            if y == offset.y {
+                self.scroll_momentum.cancel(); // hit the top or bottom
+            } else {
+                self.editor_scroll.set_offset(point(offset.x, y));
+            }
+        }
+        if !self.scroll_momentum.is_idle() {
+            window.request_animation_frame();
+        }
+    }
+
+    /// Keeps the caret on screen after typing, Enter or caret moves. Waits
+    /// for a paint of the current text before measuring. `Some(true)` means
+    /// that paint has not happened yet and another frame should be asked for.
+    fn follow_caret(&mut self) -> Option<bool> {
+        let tab = self.active_tab()?;
+        let key = (
+            tab.id.clone(),
+            tab.selection_range(),
+            tab.content.len(),
+        );
+        if self.caret_followed.as_ref() == Some(&key) {
+            return None;
+        }
+        let cursor = tab.caret.cursor();
+        let paint = self.editor_paint.borrow();
+        if (paint.painted_len != key.2 || paint.painted_selection != key.1)
+            && self.caret_follow_waits < 3
+        {
+            self.caret_follow_waits += 1;
+            return Some(true); // geometry is from an older frame; look again
+        }
+        self.caret_follow_waits = 0;
+        let row = paint
+            .rows
+            .iter()
+            .rev()
+            .find(|row| row.byte_start <= cursor)
+            .or_else(|| paint.rows.first());
+        let view = self.editor_scroll.bounds();
+        if let Some(row) = row.filter(|_| view.size.height > px(0.0)) {
+            // Minimal scroll, keeping one line of context past the edge.
+            let margin = row.line_height;
+            let (top, bottom) = (view.top() + margin, view.bottom() - margin);
+            let delta = if row.origin.y + row.line_height > bottom {
+                Some(row.origin.y + row.line_height - bottom)
+            } else if row.origin.y < top {
+                Some(row.origin.y - top)
+            } else {
+                None
+            };
+            if let Some(delta) = delta {
+                let offset = self.editor_scroll.offset();
+                let max = self.editor_scroll.max_offset().height;
+                let y = (offset.y - delta).clamp(-max, px(0.0));
+                self.editor_scroll.set_offset(point(offset.x, y));
+            }
+        }
+        drop(paint);
+        self.caret_followed = Some(key);
+        Some(false)
     }
 
     /// Scrolls the editor so the row holding the selection start is visible.
@@ -4324,7 +4423,8 @@ impl EntityInputHandler for LiteMarkApp {
                     '(' => Some("()"),
                     '[' => Some("[]"),
                     '{' => Some("{}"),
-                    '`' if markdown_tab => Some("``"),
+                    // A third backtick starts a fence: no closer.
+                    '`' if markdown_tab && !content[..cursor].ends_with("``") => Some("``"),
                     '"' => {
                         let prev_is_alnum = cursor > 0
                             && content[..cursor]
@@ -4491,6 +4591,10 @@ impl EntityInputHandler for LiteMarkApp {
 impl Render for LiteMarkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::resolve(self.settings.theme, window.appearance());
+        if self.follow_caret() == Some(true) {
+            window.request_animation_frame();
+        }
+        self.coast_scroll(window);
         self.install_close_hook(window, cx);
         if self.allow_window_close {
             window.remove_window();
@@ -6767,6 +6871,11 @@ impl Render for LiteMarkApp {
                                     zoom_level: self.settings.zoom_level,
                                     show_zoom_hud: self.show_zoom_hud,
                                     scroll: self.editor_scroll.clone(),
+                                    on_scroll: Some(Box::new(cx.listener(
+                                        |this, ev: &ScrollWheelEvent, window, cx| {
+                                            this.note_scroll(ev, window, cx)
+                                        },
+                                    ))),
                                     editor_element: self.editor_surface(
                                         cx,
                                         &theme,
@@ -6855,6 +6964,9 @@ impl Render for LiteMarkApp {
                             zoom_level: self.settings.zoom_level,
                             show_zoom_hud: self.show_zoom_hud,
                             scroll: self.editor_scroll.clone(),
+                            on_scroll: Some(Box::new(cx.listener(
+                                |this, ev: &ScrollWheelEvent, window, cx| this.note_scroll(ev, window, cx),
+                            ))),
                             editor_element: self.editor_surface(cx, &theme, false),
                         },
                         &theme,
@@ -7202,3 +7314,7 @@ mod viewport_culling_tests;
 #[cfg(test)]
 #[path = "note_drop_tests.rs"]
 mod note_drop_tests;
+
+#[cfg(test)]
+#[path = "typing_tests.rs"]
+mod typing_tests;

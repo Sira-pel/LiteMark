@@ -268,6 +268,9 @@ pub struct Caret {
     pub reversed: bool,
     /// Preferred 1-based column for vertical movement.
     pub preferred_col: Option<usize>,
+    /// Horizontal position (1/16 px) that Up/Down aim for, valid only while
+    /// the caret still sits at the offset the vertical move put it on.
+    pub preferred_x: Option<(usize, i32)>,
 }
 
 impl Default for Caret {
@@ -276,6 +279,7 @@ impl Default for Caret {
             range: 0..0,
             reversed: false,
             preferred_col: None,
+            preferred_x: None,
         }
     }
 }
@@ -293,6 +297,7 @@ impl Caret {
         self.range = offset..offset;
         self.reversed = false;
         self.preferred_col = None;
+        self.preferred_x = None;
     }
 
     /// Extend the selection to `offset`, keeping the anchor (the end that is not the caret).
@@ -312,6 +317,7 @@ impl Caret {
             self.reversed = false;
         }
         self.preferred_col = None;
+        self.preferred_x = None;
     }
 
     /// Clamp both ends to `content` and snap them onto char boundaries.

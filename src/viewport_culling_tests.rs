@@ -167,3 +167,107 @@ fn arrow_down_from_a_far_caret_moves_one_line() {
     let line_2501 = content.find("line 2501\n").expect("line");
     assert_eq!(caret, line_2501);
 }
+
+#[std_test]
+fn up_and_down_keep_the_column_across_a_short_line() {
+    for mode in [ViewMode::Raw, ViewMode::Wysiwyg] {
+        let content = "abcdefgh\nab\nabcdefgh\n";
+        let (view, mut cx) = harness(content, mode);
+        let caret = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| {
+            view.read_with(cx, |app, _| app.active_tab().expect("tab").caret.cursor())
+        };
+        place_caret(&view, &mut cx, 6);
+        cx.dispatch_action(EditorDown);
+        assert_eq!(caret(&view, &cx), 11, "short line clamps to its end");
+        cx.dispatch_action(EditorDown);
+        assert_eq!(caret(&view, &cx), 12 + 6, "{mode:?}: column is kept going down");
+        cx.dispatch_action(EditorUp);
+        cx.dispatch_action(EditorUp);
+        assert_eq!(caret(&view, &cx), 6, "{mode:?}: and going back up");
+
+        // A horizontal move forgets the remembered column.
+        cx.dispatch_action(EditorDown);
+        cx.dispatch_action(EditorLeft);
+        cx.dispatch_action(EditorDown);
+        assert_eq!(caret(&view, &cx), 12 + 1, "{mode:?}: left resets it");
+    }
+}
+
+fn caret_row_in_view(view: &Entity<LiteMarkApp>, cx: &VisualTestContext) -> (Pixels, Pixels, Pixels) {
+    view.read_with(cx, |app, _| {
+        let cursor = app.active_tab().expect("tab").caret.cursor();
+        let paint = app.editor_paint.borrow();
+        let row = paint.rows.iter().rev().find(|r| r.byte_start <= cursor).expect("row");
+        let b = app.editor_scroll.bounds();
+        (row.origin.y + row.line_height, b.bottom(), b.top())
+    })
+}
+
+#[std_test]
+fn enter_at_the_bottom_scrolls_the_new_line_into_view() {
+    for mode in [ViewMode::Raw, ViewMode::Wysiwyg] {
+        let content: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let (view, mut cx) = harness(&content, mode);
+        place_caret(&view, &mut cx, content.len());
+        for i in 0..60 {
+            cx.dispatch_action(EditorNewline);
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let (row_bottom, view_bottom, _) = caret_row_in_view(&view, &cx);
+            assert!(row_bottom <= view_bottom, "{mode:?}: newline {i} fell below the editor");
+        }
+        // Moving up past the top edge follows too.
+        for _ in 0..90 {
+            cx.dispatch_action(EditorUp);
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+        let (_, _, view_top) = caret_row_in_view(&view, &cx);
+        let (row_bottom, view_bottom, _) = caret_row_in_view(&view, &cx);
+        assert!(row_bottom <= view_bottom && row_bottom >= view_top, "{mode:?}: up arrow lost the caret");
+    }
+}
+
+// Momentum is Linux-only: macOS scrolls with its own inertia, Windows has line steps.
+#[cfg(target_os = "linux")]
+#[std_test]
+fn touchpad_flick_keeps_scrolling_after_the_events_stop() {
+    let content = long_doc();
+    let (view, mut cx) = harness(&content, ViewMode::Raw);
+    let y_of = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| {
+        view.read_with(cx, |app, _| f32::from(app.editor_scroll.offset().y))
+    };
+    let pos = view.read_with(&cx, |app, _| app.editor_scroll.bounds().center());
+    for _ in 0..12 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: pos,
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-14.0))),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+    let at_release = y_of(&view, &cx);
+    assert!(at_release < -100.0, "the flick itself scrolled: {at_release}");
+    let mut last = at_release;
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        last = y_of(&view, &cx);
+    }
+    assert!(last < at_release - 50.0, "coasted on: {at_release} -> {last}");
+
+    // A fresh touch stops it dead.
+    cx.simulate_event(ScrollWheelEvent {
+        position: pos,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(2.0))),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::Moved,
+    });
+    let stopped = y_of(&view, &cx);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(y_of(&view, &cx), stopped);
+}
