@@ -159,6 +159,8 @@ pub struct LiteMarkApp {
     pub selecting: bool,
     pub zoom_epoch: u64,
     pub toast_epoch: u64,
+    /// An update check is running; further checks are ignored until it ends.
+    update_check_running: bool,
     pub available_update: Option<ReleaseInfo>,
     pub pending_find_focus: bool,
     pub pending_rename_focus: bool,
@@ -426,7 +428,7 @@ impl LiteMarkApp {
 
         let initial_selected = initial_tab.workspace_file_id.clone();
 
-        let app = Self {
+        let mut app = Self {
             tabs: vec![initial_tab],
             active_tab_id: first_id,
             selected_target: initial_selected.map(SidebarTarget::File),
@@ -481,6 +483,7 @@ impl LiteMarkApp {
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
+            update_check_running: false,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
@@ -601,6 +604,7 @@ impl LiteMarkApp {
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
+            update_check_running: false,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
@@ -722,30 +726,60 @@ impl LiteMarkApp {
 
     /// Look for a newer release in the background, at most once a day.
     /// Offline or failed checks are silent and retried on the next launch.
-    fn start_update_check(&self, cx: &mut Context<Self>) {
+    fn start_update_check(&mut self, cx: &mut Context<Self>) {
+        self.run_update_check(false, cx);
+    }
+
+    /// `manual` checks ignore the auto-check setting, the once-per-interval
+    /// limit and an earlier dismissal, and always report the outcome.
+    fn run_update_check(&mut self, manual: bool, cx: &mut Context<Self>) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        if !self.settings.check_for_updates
-            || !check_is_due(self.settings.last_update_check, now)
+        if !manual
+            && (!self.settings.check_for_updates
+                || !check_is_due(self.settings.last_update_check, now))
         {
             return;
+        }
+        if self.update_check_running {
+            return;
+        }
+        self.update_check_running = true;
+        if manual {
+            self.show_toast("Checking for updates…", cx);
         }
         cx.spawn(async move |this, cx| {
             let release = cx
                 .background_executor()
                 .spawn(async { fetch_latest_release() })
                 .await;
-            let Some(release) = release else {
-                return;
-            };
             this.update(cx, |this, cx| {
+                this.update_check_running = false;
+                let Some(release) = release else {
+                    if manual {
+                        this.show_toast("Couldn't check for updates", cx);
+                    }
+                    return;
+                };
                 this.settings.last_update_check = Some(now);
-                this.settings.save();
-                let dismissed = this.settings.dismissed_update.as_deref() == Some(&release.version);
-                if is_newer(current_version(), &release.version) && !dismissed {
-                    this.available_update = Some(release);
+                let newer = is_newer(current_version(), &release.version);
+                if manual {
+                    if newer {
+                        this.settings.dismissed_update = None;
+                        this.saved_toast = None;
+                        this.available_update = Some(release);
+                    } else {
+                        this.show_toast("You're up to date", cx);
+                    }
+                } else {
+                    let dismissed =
+                        this.settings.dismissed_update.as_deref() == Some(&release.version);
+                    if newer && !dismissed {
+                        this.available_update = Some(release);
+                    }
                 }
+                this.settings.save();
                 cx.notify();
             })
             .ok();
@@ -4999,6 +5033,15 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_check_updates_now = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.run_update_check(true, cx);
+                });
+            }
+        };
+
         let on_open_about = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -5634,6 +5677,7 @@ impl Render for LiteMarkApp {
 
         let settings_gear_element = render_settings_button(
             self.open_menu == Some(MenuId::Settings),
+            self.available_update.is_some(),
             on_toggle_settings.clone(),
             &theme,
         )
@@ -5746,6 +5790,7 @@ impl Render for LiteMarkApp {
                         on_open_about.clone(),
                         self.settings.check_for_updates,
                         on_toggle_update_checks.clone(),
+                        on_check_updates_now.clone(),
                     ),
                 ),
                 MenuId::Hamburger => {
@@ -7006,55 +7051,71 @@ impl Render for LiteMarkApp {
                     s.child(
                         div()
                             .absolute()
-                            .bottom(px(84.0))
-                            .right(px(24.0))
-                            .px(px(14.0))
-                            .py(px(8.0))
-                            .rounded(px(8.0))
+                            .top(px(76.0))
+                            .right(px(16.0))
+                            .w(px(300.0))
+                            .p(px(14.0))
+                            .rounded(px(10.0))
                             .bg(theme.bg_surface)
                             .border_1()
                             .border_color(theme.border_primary)
                             .shadow_2xl()
                             .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .text_size(px(12.0))
-                            .text_color(theme.text_primary)
-                            .child(format!("LiteMark {} is available", release.version))
+                            .flex_col()
+                            .gap(px(6.0))
                             .child(
                                 div()
-                                    .id("update-download")
-                                    .px(px(8.0))
-                                    .py(px(3.0))
-                                    .rounded(px(5.0))
-                                    .cursor_pointer()
+                                    .text_size(px(14.0))
                                     .text_color(theme.text_strong)
-                                    .bg(theme.bg_active)
-                                    .hover(|h| h.bg(theme.bg_hover))
-                                    .on_click(move |_, _, cx| cx.open_url(&url))
-                                    .child("Download"),
+                                    .child(format!("LiteMark {} is available", release.version)),
                             )
                             .child(
                                 div()
-                                    .id("update-dismiss")
+                                    .text_size(px(13.0))
+                                    .text_color(theme.text_muted)
+                                    .child(format!("Current: {}", current_version())),
+                            )
+                            .child(
+                                div()
                                     .flex()
                                     .items_center()
-                                    .justify_center()
-                                    .w(px(20.0))
-                                    .h(px(20.0))
-                                    .rounded(px(5.0))
-                                    .cursor_pointer()
-                                    .hover(|h| h.bg(theme.bg_hover))
-                                    .on_click(move |_, _, cx| {
-                                        let version = version.clone();
-                                        view.update(cx, |this, cx| {
-                                            this.settings.dismissed_update = Some(version);
-                                            this.settings.save();
-                                            this.available_update = None;
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(render_icon("x", 14.0, theme.text_muted)),
+                                    .justify_between()
+                                    .mt(px(6.0))
+                                    .child(
+                                        div()
+                                            .id("update-download")
+                                            .px(px(14.0))
+                                            .py(px(6.0))
+                                            .rounded(px(6.0))
+                                            .cursor_pointer()
+                                            .text_size(px(13.0))
+                                            .text_color(theme.text_strong)
+                                            .bg(theme.bg_active)
+                                            .hover(|h| h.bg(theme.selection_bg))
+                                            .on_click(move |_, _, cx| cx.open_url(&url))
+                                            .child("Download"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("update-dismiss")
+                                            .px(px(8.0))
+                                            .py(px(6.0))
+                                            .rounded(px(6.0))
+                                            .cursor_pointer()
+                                            .text_size(px(13.0))
+                                            .text_color(theme.text_muted)
+                                            .hover(|h| h.bg(theme.bg_hover))
+                                            .on_click(move |_, _, cx| {
+                                                let version = version.clone();
+                                                view.update(cx, |this, cx| {
+                                                    this.settings.dismissed_update = Some(version);
+                                                    this.settings.save();
+                                                    this.available_update = None;
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child("Dismiss"),
+                                    ),
                             ),
                     )
                 },
