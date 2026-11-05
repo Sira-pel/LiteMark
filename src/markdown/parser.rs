@@ -3263,6 +3263,45 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             push_line!(parsed);
             continue;
         }
+        // Indented code: four or more columns at document level. It cannot
+        // interrupt a paragraph, so the line before must end a block (or be
+        // indented code itself); after paragraph, list or quote text the line
+        // is a lazy continuation. Inside a list item the indent belongs to
+        // the item. The first four columns are hidden like a fence's indent.
+        let after_block = lines.last().is_none_or(|prev: &ParsedLine| {
+            matches!(
+                prev.kind,
+                LineKind::Empty
+                    | LineKind::Heading { .. }
+                    | LineKind::HorizontalRule
+                    | LineKind::CodeLine
+                    | LineKind::CodeFence { opening: false, .. }
+            )
+        });
+        // `\t- foo` stays a list item, as `take_list` accepts it (red parity).
+        let indented_code = after_block
+            && !trimmed.is_empty()
+            && leading_column(line) >= 4
+            && list_walk.thematic_parent_col(line) == 0
+            && !(single_tab_marker(line) && scan_list_marker(line).is_some());
+        // Inside an indented code block (blank lines included) a ```` line is
+        // code. Red's trimmed-backtick rule below would open a fence there and
+        // swallow the rest of the document. A fence is open only in the
+        // branch above, so a code line before the blanks is indented code.
+        let continues_indented_code = indented_code
+            && lines
+                .iter()
+                .rev()
+                .find(|prev| !matches!(prev.kind, LineKind::Empty))
+                .is_some_and(|prev| matches!(prev.kind, LineKind::CodeLine));
+        if continues_indented_code {
+            list_walk.note_block(line);
+            let strip = prefix_through_column(line, 4);
+            let parsed = code_content_line(i, line_source, line, strip);
+            push_line!(parsed);
+            continue;
+        }
+
         let skip_rejected = !list_quote_tracker.is_in_list_or_quote() && backtick_info_rejects_fence(line);
         if trimmed.starts_with("```") && !skip_rejected {
             list_walk.note_block(line);
@@ -3334,27 +3373,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             continue;
         }
 
-        // Indented code: four or more columns at document level. It cannot
-        // interrupt a paragraph, so the line before must end a block (or be
-        // indented code itself); after paragraph, list or quote text the line
-        // is a lazy continuation. Inside a list item the indent belongs to
-        // the item. The first four columns are hidden like a fence's indent.
-        let after_block = lines.last().is_none_or(|prev: &ParsedLine| {
-            matches!(
-                prev.kind,
-                LineKind::Empty
-                    | LineKind::Heading { .. }
-                    | LineKind::HorizontalRule
-                    | LineKind::CodeLine
-                    | LineKind::CodeFence { opening: false, .. }
-            )
-        });
-        // `\t- foo` stays a list item, as `take_list` accepts it (red parity).
-        if after_block
-            && leading_column(line) >= 4
-            && list_walk.thematic_parent_col(line) == 0
-            && !(single_tab_marker(line) && scan_list_marker(line).is_some())
-        {
+        if indented_code {
             list_walk.note_block(line);
             let strip = prefix_through_column(line, 4);
             let parsed = code_content_line(i, line_source, line, strip);
@@ -4780,6 +4799,25 @@ mod tests {
                     leaf_marks("code", "chunk1", "    chunk1", "C:chunk1"),
                     leaf("empty", "", ""),
                     leaf_marks("code", "chunk2", "    chunk2", "C:chunk2"),
+                ],
+            ),
+            (
+                "backtick-line-inside-indented-code-stays-code",
+                "    x\n    ```\n    y",
+                vec![
+                    leaf_marks("code", "x", "    x", "C:x"),
+                    leaf_marks("code", "```", "    ```", "C:```"),
+                    leaf_marks("code", "y", "    y", "C:y"),
+                ],
+            ),
+            (
+                "backtick-line-after-blank-in-indented-code-stays-code",
+                "    x\n\n    ```\ny",
+                vec![
+                    leaf_marks("code", "x", "    x", "C:x"),
+                    leaf("empty", "", ""),
+                    leaf_marks("code", "```", "    ```", "C:```"),
+                    leaf("p", "y", "y"),
                 ],
             ),
             (

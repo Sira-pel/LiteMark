@@ -2547,10 +2547,14 @@ impl DocumentTab {
                     body.push_str(&self.content[line.source.end..next.source.start]);
                 }
             }
+            // A fence longer than any backtick run in the code, so a ```
+            // line inside cannot close it early (CommonMark example 123).
+            let longest_run = body.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
+            let fence = "`".repeat(longest_run.max(2) + 1);
             let nl = self.line_break(block.start);
-            let replacement = format!("```{nl}{body}{nl}```");
+            let replacement = format!("{fence}{nl}{body}{nl}{fence}");
             self.edit(block.clone(), &replacement);
-            let inner = block.start + 3 + nl.len();
+            let inner = block.start + fence.len() + nl.len();
             self.caret.range = floor_boundary(&self.content, inner)
                 ..floor_boundary(&self.content, inner + body.len());
             self.caret.reversed = false;
@@ -4544,8 +4548,8 @@ fn is_indented_code(parsed: &ParsedDocument, line: &ParsedLine) -> bool {
 }
 
 /// The indented code block around `offset`: its consecutive code lines plus
-/// the blank lines between them (CommonMark example 117), or `None` when
-/// `offset` is not on an indented code line.
+/// any run of blank lines between them (CommonMark example 117), or `None`
+/// when `offset` is not on an indented code line.
 fn indented_code_block_at(parsed: &ParsedDocument, offset: usize) -> Option<&[ParsedLine]> {
     let at = parsed.line_at_offset(offset)?.line_index;
     let lines = &parsed.lines;
@@ -4555,23 +4559,19 @@ fn indented_code_block_at(parsed: &ParsedDocument, offset: usize) -> Option<&[Pa
     }
     let blank = |index: usize| matches!(lines[index].kind, LineKind::Empty);
     let mut first = at;
-    loop {
-        if first >= 1 && code(first - 1) {
-            first -= 1;
-        } else if first >= 2 && blank(first - 1) && code(first - 2) {
-            first -= 2;
-        } else {
-            break;
+    let mut probe = at;
+    while probe > 0 && (code(probe - 1) || blank(probe - 1)) {
+        probe -= 1;
+        if code(probe) {
+            first = probe;
         }
     }
     let mut last = at;
-    loop {
-        if last + 1 < lines.len() && code(last + 1) {
-            last += 1;
-        } else if last + 2 < lines.len() && blank(last + 1) && code(last + 2) {
-            last += 2;
-        } else {
-            break;
+    let mut probe = at;
+    while probe + 1 < lines.len() && (code(probe + 1) || blank(probe + 1)) {
+        probe += 1;
+        if code(probe) {
+            last = probe;
         }
     }
     Some(&lines[first..=last])
@@ -12635,6 +12635,15 @@ mod clear_formatting_tests {
             ),
             ("    a\r\n    b", 5, "```\r\na\r\nb\r\n```", "a\r\nb"),
             ("\tx\n", 1, "```\nx\n```\n", "x"),
+            // A ``` line in the code needs a longer fence.
+            (
+                "    a\n    ```\n    b",
+                5,
+                "````\na\n```\nb\n````",
+                "a\n```\nb",
+            ),
+            // Two blank lines between chunks are still one block.
+            ("    a\n\n\n    b\n", 5, "```\na\n\n\nb\n```\n", "a\n\n\nb"),
         ];
         for (source, caret, expected, selected) in cases {
             let mut doc = DocumentTab::new("c".into(), "c.md".into(), source.into(), None, None);
