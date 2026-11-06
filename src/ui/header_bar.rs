@@ -103,24 +103,32 @@ where
         // Double-click zooms. A plain click only arms a drag. X11 has to
         // receive `_NET_WM_MOVERESIZE` while the button is still down, so the
         // first move with the left button pressed starts the move immediately.
+        // Windows waits for the system drag threshold instead (see
+        // `title_drag_past_threshold`). Tabs and buttons stop propagation, so
+        // these handlers only see presses on the bar's empty space.
         .on_mouse_down(MouseButton::Left, {
             let drag_armed = drag_armed.clone();
             move |event, window, cx| {
                 if title_bar_pointer(event.click_count) == TitleBarPointer::Zoom {
                     drag_armed.set(false);
-                    window.zoom_window();
-                    window.refresh();
+                    zoom_title_bar(window);
                 } else {
                     drag_armed.set(true);
+                    arm_title_drag();
                 }
                 cx.stop_propagation();
             }
         })
+        // The up and move handlers only run while the pointer is over the
+        // bar, so a release outside it disarms too. Otherwise a stale arm
+        // would turn a later drag that crosses the bar into a window move.
         .on_mouse_up(MouseButton::Left, {
             let drag_armed = drag_armed.clone();
-            move |_, _, _| {
-                drag_armed.set(false);
-            }
+            move |_, _, _| drag_armed.set(false)
+        })
+        .on_mouse_up_out(MouseButton::Left, {
+            let drag_armed = drag_armed.clone();
+            move |_, _, _| drag_armed.set(false)
         })
         .on_mouse_move({
             let drag_armed = drag_armed.clone();
@@ -128,14 +136,17 @@ where
                 let armed = drag_armed.get();
                 let button_is_left = event.pressed_button == Some(MouseButton::Left);
                 if title_drag_should_move(armed, button_is_left) {
-                    drag_armed.set(false);
-                    window.start_window_move();
-                    cx.stop_propagation();
+                    if title_drag_past_threshold() {
+                        drag_armed.set(false);
+                        start_title_drag(window);
+                        cx.stop_propagation();
+                    }
                 } else if armed && !button_is_left {
                     drag_armed.set(false);
                 }
             }
         })
+        // gpui only implements this on Linux; elsewhere it does nothing.
         .on_mouse_down(MouseButton::Right, |e, window, cx| {
             window.show_window_menu(e.position);
             cx.stop_propagation();
@@ -251,23 +262,19 @@ where
                                     cx.stop_propagation();
                                     cls_middle(tid_middle.clone(), cx);
                                 })
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .child(render_icon(
-                                            if tab.is_code {
-                                                "file-code"
-                                            } else {
-                                                "file-text"
-                                            },
-                                            14.0,
-                                            if is_active {
-                                                theme.text_hi
-                                            } else {
-                                                theme.text_muted
-                                            },
-                                        ))
-                                )
+                                .child(div().flex_shrink_0().child(render_icon(
+                                    if tab.is_code {
+                                        "file-code"
+                                    } else {
+                                        "file-text"
+                                    },
+                                    14.0,
+                                    if is_active {
+                                        theme.text_hi
+                                    } else {
+                                        theme.text_muted
+                                    },
+                                )))
                                 .child(
                                     div()
                                         .max_w(px(200.0))
@@ -345,7 +352,9 @@ where
                                         .h(sz::PLUS)
                                         .rounded(sz::R_MD)
                                         .cursor_pointer()
-                                        .hover(|h| h.bg(theme.header_hover).text_color(theme.text_hi))
+                                        .hover(|h| {
+                                            h.bg(theme.header_hover).text_color(theme.text_hi)
+                                        })
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
                                         })
@@ -353,15 +362,16 @@ where
                                         .child(render_icon("plus", 14.0, theme.text_muted)),
                                 )
                         }),
-                )
+                ),
         )
-        // Center spacer (flex_1): clicking here drags the window
+        // Center spacer (flex_1): empty space, so pressing here drags the
+        // window through the title bar's handlers above.
         .child(
             div()
                 .id("title-bar-spacer")
                 .flex_1()
                 .min_w(px(0.0))
-                .h_full()
+                .h_full(),
         )
         // Right: Window Controls (36x28, radius 6, 4px gaps, 8px from right edge)
         .child(
@@ -448,6 +458,45 @@ pub fn title_bar_pointer(click_count: usize) -> TitleBarPointer {
     } else {
         TitleBarPointer::ArmDrag
     }
+}
+
+/// Maximizes or restores from the title bar. On Windows gpui's `zoom_window`
+/// only ever maximizes, so ask the OS directly.
+fn zoom_title_bar(window: &mut Window) {
+    #[cfg(windows)]
+    super::win_caption::toggle_maximize(window);
+    #[cfg(not(windows))]
+    {
+        window.zoom_window();
+        window.refresh();
+    }
+}
+
+/// Remembers where a title-bar drag was armed (used for the Windows drag
+/// threshold).
+fn arm_title_drag() {
+    #[cfg(windows)]
+    super::win_caption::arm_drag();
+}
+
+/// Windows starts the move only past the system drag threshold, like native
+/// title bars, so a pixel of jitter doesn't start the OS move loop and
+/// swallow the second click of a double-click. X11 needs the move while the
+/// button is still down, so elsewhere any motion counts.
+fn title_drag_past_threshold() -> bool {
+    #[cfg(windows)]
+    return super::win_caption::drag_past_threshold();
+    #[cfg(not(windows))]
+    true
+}
+
+/// Starts the OS window move. gpui's `start_window_move` does nothing on
+/// Windows, so ask the OS directly there.
+fn start_title_drag(window: &mut Window) {
+    #[cfg(windows)]
+    super::win_caption::start_window_move(window);
+    #[cfg(not(windows))]
+    window.start_window_move();
 }
 
 /// Start `_NET_WM_MOVERESIZE` on the first move while the button is still held.
@@ -877,6 +926,9 @@ mod tests {
         // At narrow viewport of 360.0, available space for tabs = 360 - 124 - 48 = 188.0
         let min_narrow_viewport = px(360.0);
         let available_for_tabs = min_narrow_viewport - wc_span - left_fixed;
-        assert!(available_for_tabs > px(100.0), "Tabs strip has space to shrink while window controls remain fully intact");
+        assert!(
+            available_for_tabs > px(100.0),
+            "Tabs strip has space to shrink while window controls remain fully intact"
+        );
     }
 }

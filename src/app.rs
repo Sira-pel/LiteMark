@@ -688,6 +688,16 @@ impl LiteMarkApp {
         self.error_message = Some(message.into());
     }
 
+    /// For a failed write: save, export, create, rename, move, copy or
+    /// trash. On Windows an access-denied error gets the Controlled Folder
+    /// Access hint. Reads don't use this, since that feature only blocks
+    /// writes.
+    fn show_file_error(&mut self, message: impl Into<String>) {
+        self.show_error(crate::services::fs_service::with_access_denied_hint(
+            message.into(),
+        ));
+    }
+
     fn show_toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.saved_toast = Some(message.into());
         self.toast_epoch = self.toast_epoch.wrapping_add(1);

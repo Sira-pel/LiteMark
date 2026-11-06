@@ -331,7 +331,7 @@ impl LiteMarkApp {
         }
         match self.save_tab(&id) {
             Ok(title) => self.show_toast(format!("Saved {title}"), cx),
-            Err(err) => self.show_error(err),
+            Err(err) => self.show_file_error(err),
         }
     }
 
@@ -415,7 +415,7 @@ impl LiteMarkApp {
                 ),
                 cx,
             ),
-            Err(err) => self.show_error(format!("Couldn't export: {err}")),
+            Err(err) => self.show_file_error(format!("Couldn't export: {err}")),
         }
     }
 
@@ -679,7 +679,7 @@ impl LiteMarkApp {
                 }
                 self.rescan_workspace();
             }
-            Err(err) => self.show_error(format!("Couldn't save {}: {err}", path.display())),
+            Err(err) => self.show_file_error(format!("Couldn't save {}: {err}", path.display())),
         }
     }
 
@@ -753,7 +753,7 @@ impl LiteMarkApp {
         };
         if let Err(err) = result {
             self.create_draft = Some(draft);
-            self.show_error(err);
+            self.show_file_error(err);
         }
         cx.notify();
     }

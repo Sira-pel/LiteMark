@@ -96,7 +96,7 @@ impl LiteMarkApp {
                 self.show_toast(format!("{verb} {done} {noun} to {dest_name}"), cx)
             }
             None => {}
-            Some(err) => self.show_error(format!("{verb} {done}, {failed} failed: {err}")),
+            Some(err) => self.show_file_error(format!("{verb} {done}, {failed} failed: {err}")),
         }
     }
 
@@ -110,7 +110,7 @@ impl LiteMarkApp {
         match self.drop_one(target, folder_id, copy, true) {
             DropOutcome::Done(message) => self.show_toast(message, cx),
             DropOutcome::Skipped => {}
-            DropOutcome::Failed(err) => self.show_error(err),
+            DropOutcome::Failed(err) => self.show_file_error(err),
         }
     }
 

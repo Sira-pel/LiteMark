@@ -295,7 +295,7 @@ impl LiteMarkApp {
                                 self.finish_close_saved(&id);
                             }
                             Err(err) => {
-                                self.show_error(err);
+                                self.show_file_error(err);
                                 self.show_prompt(Prompt::CloseTab { id });
                             }
                         }
@@ -352,7 +352,7 @@ impl LiteMarkApp {
                     };
                     let ids = self.dirty_tab_ids_for_path(&path);
                     if let Err(err) = self.save_ids(&ids) {
-                        self.show_error(err);
+                        self.show_file_error(err);
                         self.show_prompt(Prompt::TrashDirtyFile { id });
                         return;
                     }
@@ -379,7 +379,7 @@ impl LiteMarkApp {
                     };
                     let ids = self.dirty_tab_ids_under(&prefix);
                     if let Err(err) = self.save_ids(&ids) {
-                        self.show_error(err);
+                        self.show_file_error(err);
                         self.show_prompt(Prompt::TrashDirtyFolder { id });
                         return;
                     }

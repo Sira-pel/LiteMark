@@ -3094,6 +3094,7 @@ dependencies = [
  "lopdf",
  "memchr",
  "pulldown-cmark",
+ "raw-window-handle",
  "rfd",
  "rust-embed",
  "serde",

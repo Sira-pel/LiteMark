@@ -45,7 +45,7 @@ impl LiteMarkApp {
                 .unwrap_or_default();
             match copy_note_into_workspace(&old_path, &new_dir, &content) {
                 Ok(new_path) => migrated = Some(new_path),
-                Err(err) => self.show_error(format!("Couldn't copy note: {err}")),
+                Err(err) => self.show_file_error(format!("Couldn't copy note: {err}")),
             }
         }
         let left = self.workspace.folder_path.clone();
@@ -315,7 +315,7 @@ impl LiteMarkApp {
                     None => {}
                 }
             }
-            Err(err) => self.show_error(err),
+            Err(err) => self.show_file_error(err),
         }
         cx.notify();
     }
@@ -338,7 +338,7 @@ impl LiteMarkApp {
         match self.save_all_dirty() {
             Ok(()) => self.allow_window_close = true,
             Err(err) => {
-                self.show_error(err);
+                self.show_file_error(err);
                 self.show_prompt(Prompt::CloseWindow);
             }
         }
@@ -400,7 +400,7 @@ impl LiteMarkApp {
                 }
             }
             Err(err) => {
-                self.show_error(format!("Couldn't rename: {err}"));
+                self.show_file_error(format!("Couldn't rename: {err}"));
                 self.rename_target = Some(target);
             }
         }
@@ -556,7 +556,7 @@ impl LiteMarkApp {
             Some(bulk) => self.record_bulk(&bulk, result, cx),
             None => {
                 if let Some(err) = failed {
-                    self.show_error(err);
+                    self.show_file_error(err);
                 }
             }
         }
@@ -585,7 +585,7 @@ impl LiteMarkApp {
             cx.notify();
         }
         if let Some(message) = message {
-            self.show_error(message);
+            self.show_file_error(message);
         }
     }
 
