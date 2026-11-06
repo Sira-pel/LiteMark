@@ -355,10 +355,14 @@ where
                         }),
                 )
         )
-        // Center spacer (flex_1): clicking here drags the window
+        // Center spacer (flex_1): clicking here drags the window. Windows has
+        // no `start_window_move`, so the spacer also reports itself as the
+        // caption (`HTCAPTION`) and the OS handles the move, double-click
+        // zoom and window menu. Other platforms ignore the area.
         .child(
             div()
                 .id("title-bar-spacer")
+                .window_control_area(WindowControlArea::Drag)
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
