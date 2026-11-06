@@ -961,7 +961,7 @@ impl LiteMarkApp {
         }
         match self.save_tab(&id) {
             Ok(title) => self.show_toast(format!("Saved {title}"), cx),
-            Err(err) => self.show_error(err),
+            Err(err) => self.show_file_error(err),
         }
     }
 
@@ -1045,7 +1045,7 @@ impl LiteMarkApp {
                 ),
                 cx,
             ),
-            Err(err) => self.show_error(format!("Couldn't export: {err}")),
+            Err(err) => self.show_file_error(format!("Couldn't export: {err}")),
         }
     }
 
@@ -1309,7 +1309,7 @@ impl LiteMarkApp {
                 }
                 self.rescan_workspace();
             }
-            Err(err) => self.show_error(format!("Couldn't save {}: {err}", path.display())),
+            Err(err) => self.show_file_error(format!("Couldn't save {}: {err}", path.display())),
         }
     }
 
@@ -1383,7 +1383,7 @@ impl LiteMarkApp {
         };
         if let Err(err) = result {
             self.create_draft = Some(draft);
-            self.show_error(err);
+            self.show_file_error(err);
         }
         cx.notify();
     }
@@ -1541,7 +1541,15 @@ impl LiteMarkApp {
     }
 
     fn show_error(&mut self, message: impl Into<String>) {
-        self.error_message = Some(crate::services::fs_service::with_access_denied_hint(
+        self.error_message = Some(message.into());
+    }
+
+    /// For a failed write: save, export, create, rename, move, copy or
+    /// trash. On Windows an access-denied error gets the Controlled Folder
+    /// Access hint. Reads don't use this, since that feature only blocks
+    /// writes.
+    fn show_file_error(&mut self, message: impl Into<String>) {
+        self.show_error(crate::services::fs_service::with_access_denied_hint(
             message.into(),
         ));
     }
@@ -2466,7 +2474,7 @@ impl LiteMarkApp {
                 self.show_toast(format!("{verb} {done} {noun} to {dest_name}"), cx)
             }
             None => {}
-            Some(err) => self.show_error(format!("{verb} {done}, {failed} failed: {err}")),
+            Some(err) => self.show_file_error(format!("{verb} {done}, {failed} failed: {err}")),
         }
     }
 
@@ -2480,7 +2488,7 @@ impl LiteMarkApp {
         match self.drop_one(target, folder_id, copy, true) {
             DropOutcome::Done(message) => self.show_toast(message, cx),
             DropOutcome::Skipped => {}
-            DropOutcome::Failed(err) => self.show_error(err),
+            DropOutcome::Failed(err) => self.show_file_error(err),
         }
     }
 
@@ -2685,7 +2693,7 @@ impl LiteMarkApp {
                 .unwrap_or_default();
             match copy_note_into_workspace(&old_path, &new_dir, &content) {
                 Ok(new_path) => migrated = Some(new_path),
-                Err(err) => self.show_error(format!("Couldn't copy note: {err}")),
+                Err(err) => self.show_file_error(format!("Couldn't copy note: {err}")),
             }
         }
         let left = self.workspace.folder_path.clone();
@@ -2955,7 +2963,7 @@ impl LiteMarkApp {
                     None => {}
                 }
             }
-            Err(err) => self.show_error(err),
+            Err(err) => self.show_file_error(err),
         }
         cx.notify();
     }
@@ -2978,7 +2986,7 @@ impl LiteMarkApp {
         match self.save_all_dirty() {
             Ok(()) => self.allow_window_close = true,
             Err(err) => {
-                self.show_error(err);
+                self.show_file_error(err);
                 self.show_prompt(Prompt::CloseWindow);
             }
         }
@@ -3040,7 +3048,7 @@ impl LiteMarkApp {
                 }
             }
             Err(err) => {
-                self.show_error(format!("Couldn't rename: {err}"));
+                self.show_file_error(format!("Couldn't rename: {err}"));
                 self.rename_target = Some(target);
             }
         }
@@ -3196,7 +3204,7 @@ impl LiteMarkApp {
             Some(bulk) => self.record_bulk(&bulk, result, cx),
             None => {
                 if let Some(err) = failed {
-                    self.show_error(err);
+                    self.show_file_error(err);
                 }
             }
         }
@@ -3225,7 +3233,7 @@ impl LiteMarkApp {
             cx.notify();
         }
         if let Some(message) = message {
-            self.show_error(message);
+            self.show_file_error(message);
         }
     }
 
@@ -3588,7 +3596,7 @@ impl LiteMarkApp {
                                 self.finish_close_saved(&id);
                             }
                             Err(err) => {
-                                self.show_error(err);
+                                self.show_file_error(err);
                                 self.show_prompt(Prompt::CloseTab { id });
                             }
                         }
@@ -3645,7 +3653,7 @@ impl LiteMarkApp {
                     };
                     let ids = self.dirty_tab_ids_for_path(&path);
                     if let Err(err) = self.save_ids(&ids) {
-                        self.show_error(err);
+                        self.show_file_error(err);
                         self.show_prompt(Prompt::TrashDirtyFile { id });
                         return;
                     }
@@ -3672,7 +3680,7 @@ impl LiteMarkApp {
                     };
                     let ids = self.dirty_tab_ids_under(&prefix);
                     if let Err(err) = self.save_ids(&ids) {
-                        self.show_error(err);
+                        self.show_file_error(err);
                         self.show_prompt(Prompt::TrashDirtyFolder { id });
                         return;
                     }
