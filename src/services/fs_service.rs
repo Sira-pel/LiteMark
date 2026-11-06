@@ -604,7 +604,9 @@ Allow an app through Controlled folder access, or choose another folder.";
 fn is_access_denied(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     message.contains("access is denied")
-        || message.contains("os error 5")
+        // With the parenthesis, so codes like 53 (network path not found)
+        // don't match.
+        || message.contains("(os error 5)")
         || message.contains("permission denied")
 }
 
@@ -1252,6 +1254,9 @@ mod tests {
         assert!(is_access_denied("Couldn't save C:\\a.md: Access is denied. (os error 5)"));
         assert!(is_access_denied("Permission denied (os error 13)"));
         assert!(!is_access_denied("Couldn't save: No such file or directory (os error 2)"));
+        assert!(is_access_denied("Couldn't save: (os error 5)"));
+        assert!(!is_access_denied("Couldn't open: The network path was not found. (os error 53)"));
+        assert!(!is_access_denied("Couldn't open: (os error 50)"));
     }
 
     #[test]
