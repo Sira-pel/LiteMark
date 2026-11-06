@@ -1,4 +1,26 @@
+//! Randomized check that incremental re-parsing matches a full parse.
+//!
+//! `DocumentTab` re-parses only the changed part of a document after each
+//! edit. This probe takes a few seed documents and applies random WYSIWYG
+//! edits to them: typing, deleting, inline format toggles, undo and newlines.
+//! After every step it checks that `t.parsed()` equals
+//! `parse_document(&t.content)`. It also counts panics. Any mismatch
+//! (DIVERGE) or panic (PANIC) fails the test.
+//!
+//! It is `#[ignore]`d because it takes about 20 seconds. Run it with:
+//!
+//! ```text
+//! cargo test --bin litemark incremental_parse_matches_full_parse -- --ignored
+//! ```
+//!
+//! - `DIFF_SEED=<u64 or 0x-hex>`: change the random seed. A failing run
+//!   replays exactly with the same seed.
+//! - `DIFF_OUT=<path>`: write a log of every step (seed/run/step, op, status,
+//!   caret, content) to that file.
+
 use super::*;
+
+/// Small xorshift generator, so a run is reproducible from its seed alone.
 struct R(u64);
 impl R {
     fn n(&mut self, m: usize) -> usize {
@@ -9,8 +31,8 @@ impl R {
     }
 }
 #[test]
-#[ignore]
-fn diffrun() {
+#[ignore = "slow randomized probe (~20 s); run with --ignored"]
+fn incremental_parse_matches_full_parse() {
     let seeds = [
         "abc **x**\n---\nnext *i*\n===\n\n[foo]: http://a\nsee [foo] and [bar]\n\n1. one\nlazy *t*\n\n<div>\nraw **b**\n</div>\n    indented code\n",
         "Hello **bold** and *it* <u>u</u> ~~s~~ `c` [l](http://x) 😀 tiếng ខ្មែរ\n",
