@@ -103,42 +103,48 @@ where
         // Double-click zooms. A plain click only arms a drag. X11 has to
         // receive `_NET_WM_MOVERESIZE` while the button is still down, so the
         // first move with the left button pressed starts the move immediately.
-        .on_mouse_down(MouseButton::Left, {
-            let drag_armed = drag_armed.clone();
-            move |event, window, cx| {
-                if title_bar_pointer(event.click_count) == TitleBarPointer::Zoom {
-                    drag_armed.set(false);
-                    window.zoom_window();
-                    window.refresh();
-                } else {
-                    drag_armed.set(true);
-                }
-                cx.stop_propagation();
-            }
-        })
-        .on_mouse_up(MouseButton::Left, {
-            let drag_armed = drag_armed.clone();
-            move |_, _, _| {
-                drag_armed.set(false);
-            }
-        })
-        .on_mouse_move({
-            let drag_armed = drag_armed.clone();
-            move |event, window, cx| {
-                let armed = drag_armed.get();
-                let button_is_left = event.pressed_button == Some(MouseButton::Left);
-                if title_drag_should_move(armed, button_is_left) {
-                    drag_armed.set(false);
-                    window.start_window_move();
+        //
+        // Not on Windows: there the spacer is a native caption (see below), and
+        // gpui hands caption clicks to these handlers first. Stopping
+        // propagation makes gpui skip the OS move, double-click zoom and menu.
+        .when(!cfg!(target_os = "windows"), |bar| {
+            bar.on_mouse_down(MouseButton::Left, {
+                let drag_armed = drag_armed.clone();
+                move |event, window, cx| {
+                    if title_bar_pointer(event.click_count) == TitleBarPointer::Zoom {
+                        drag_armed.set(false);
+                        window.zoom_window();
+                        window.refresh();
+                    } else {
+                        drag_armed.set(true);
+                    }
                     cx.stop_propagation();
-                } else if armed && !button_is_left {
+                }
+            })
+            .on_mouse_up(MouseButton::Left, {
+                let drag_armed = drag_armed.clone();
+                move |_, _, _| {
                     drag_armed.set(false);
                 }
-            }
-        })
-        .on_mouse_down(MouseButton::Right, |e, window, cx| {
-            window.show_window_menu(e.position);
-            cx.stop_propagation();
+            })
+            .on_mouse_move({
+                let drag_armed = drag_armed.clone();
+                move |event, window, cx| {
+                    let armed = drag_armed.get();
+                    let button_is_left = event.pressed_button == Some(MouseButton::Left);
+                    if title_drag_should_move(armed, button_is_left) {
+                        drag_armed.set(false);
+                        window.start_window_move();
+                        cx.stop_propagation();
+                    } else if armed && !button_is_left {
+                        drag_armed.set(false);
+                    }
+                }
+            })
+            .on_mouse_down(MouseButton::Right, |e, window, cx| {
+                window.show_window_menu(e.position);
+                cx.stop_propagation();
+            })
         })
         // Hairline along the bottom (broken under active tab)
         .child(
