@@ -1,4 +1,27 @@
+//! Randomized check that incremental re-parsing matches a full parse.
+//!
+//! `DocumentTab` re-parses only the changed part of a document after each
+//! edit. This probe takes a few seed documents and applies random WYSIWYG
+//! edits to them: typing, deleting, inline format toggles, undo and newlines.
+//! After every step it checks that `t.parsed()` equals
+//! `parse_document(&t.content)`. It also counts panics. Any mismatch
+//! (DIVERGE) or panic (PANIC) fails the test.
+//!
+//! It is `#[ignore]`d because it takes about 10–25 seconds. Run it with:
+//!
+//! ```text
+//! cargo test --bin litemark incremental_parse_matches_full_parse -- --ignored
+//! ```
+//!
+//! - `DIFF_SEED=<u64 or 0x-hex>`: change the random seed. A failing run
+//!   replays exactly with the same seed. An unparseable value panics; an
+//!   empty one means the default seed.
+//! - `DIFF_OUT=<path>`: write a log of every step (seed/run/step, op, status,
+//!   caret, content) to that file.
+
 use super::*;
+
+/// Small xorshift generator, so a run is reproducible from its seed alone.
 struct R(u64);
 impl R {
     fn n(&mut self, m: usize) -> usize {
@@ -9,8 +32,8 @@ impl R {
     }
 }
 #[test]
-#[ignore]
-fn diffrun() {
+#[ignore = "slow randomized probe (~10-25 s); run with --ignored"]
+fn incremental_parse_matches_full_parse() {
     let seeds = [
         "abc **x**\n---\nnext *i*\n===\n\n[foo]: http://a\nsee [foo] and [bar]\n\n1. one\nlazy *t*\n\n<div>\nraw **b**\n</div>\n    indented code\n",
         "Hello **bold** and *it* <u>u</u> ~~s~~ `c` [l](http://x) 😀 tiếng ខ្មែរ\n",
@@ -24,17 +47,22 @@ fn diffrun() {
     let cmds = ["bold", "italic", "underline", "strike", "code", "link"];
     let mut out = String::new();
     let mut bad = 0usize;
-    let base_seed: u64 = std::env::var("DIFF_SEED")
-        .ok()
-        .and_then(|s| {
-            let s = s.trim();
-            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+    let base_seed: u64 = match std::env::var("DIFF_SEED") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let s = raw.trim();
+            let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
                 u64::from_str_radix(hex, 16).ok()
             } else {
                 s.parse().ok()
-            }
-        })
-        .unwrap_or(0x9E3779B97F4A7C15);
+            };
+            // A bad value must not fall back to the default seed: that
+            // would look like a replay of the requested seed.
+            parsed.unwrap_or_else(|| {
+                panic!("DIFF_SEED={raw:?} is not a u64 (decimal or 0x-hex)")
+            })
+        }
+        _ => 0x9E3779B97F4A7C15,
+    };
     for (si, seed) in seeds.iter().enumerate() {
         for run in 0..150u64 {
             let mut r = R(base_seed ^ (si as u64 * 1000 + run + 1));
