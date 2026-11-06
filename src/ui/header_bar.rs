@@ -369,7 +369,8 @@ where
                 .id("title-bar-spacer")
                 .when(cfg!(target_os = "windows"), |spacer| {
                     // Like the other platforms, a press only arms the drag and
-                    // the first move starts it. Starting on the press itself
+                    // a move past the system drag threshold starts it.
+                    // Starting on the press itself, or on a pixel of jitter,
                     // lets the OS move loop swallow the second click of a
                     // double-click.
                     spacer
@@ -382,13 +383,28 @@ where
                                     super::win_caption::toggle_maximize(window);
                                 } else {
                                     drag_armed.set(true);
+                                    #[cfg(windows)]
+                                    super::win_caption::arm_drag();
                                 }
                                 #[cfg(not(windows))]
                                 let _ = window;
                                 cx.stop_propagation();
                             }
                         })
+                        // The spacer's own up and move handlers only run while
+                        // the pointer is over it, so a press or release
+                        // elsewhere disarms too. Otherwise a stale arm would
+                        // turn a later tab drag that crosses the spacer into a
+                        // window move.
                         .on_mouse_up(MouseButton::Left, {
+                            let drag_armed = drag_armed.clone();
+                            move |_, _, _| drag_armed.set(false)
+                        })
+                        .on_mouse_up_out(MouseButton::Left, {
+                            let drag_armed = drag_armed.clone();
+                            move |_, _, _| drag_armed.set(false)
+                        })
+                        .on_mouse_down_out({
                             let drag_armed = drag_armed.clone();
                             move |_, _, _| drag_armed.set(false)
                         })
@@ -396,7 +412,14 @@ where
                             let drag_armed = drag_armed.clone();
                             move |event, window, cx| {
                                 let button_is_left = event.pressed_button == Some(MouseButton::Left);
+                                #[cfg(windows)]
+                                let past_threshold = super::win_caption::drag_past_threshold();
+                                #[cfg(not(windows))]
+                                let past_threshold = true;
                                 if title_drag_should_move(drag_armed.get(), button_is_left) {
+                                    if !past_threshold {
+                                        return;
+                                    }
                                     drag_armed.set(false);
                                     #[cfg(windows)]
                                     super::win_caption::start_window_move(window);
