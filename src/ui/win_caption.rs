@@ -104,7 +104,11 @@ pub fn toggle_maximize(window: &Window) {
     let Some(hwnd) = hwnd(window) else { return };
     // SAFETY: as in `start_window_move`.
     unsafe {
-        let command = if IsZoomed(hwnd) != 0 { SW_RESTORE } else { SW_MAXIMIZE };
+        let command = if IsZoomed(hwnd) != 0 {
+            SW_RESTORE
+        } else {
+            SW_MAXIMIZE
+        };
         ShowWindowAsync(hwnd, command);
     }
 }
