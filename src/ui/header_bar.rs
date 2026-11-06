@@ -104,9 +104,8 @@ where
         // receive `_NET_WM_MOVERESIZE` while the button is still down, so the
         // first move with the left button pressed starts the move immediately.
         //
-        // Not on Windows: there the spacer is a native caption (see below), and
-        // gpui hands caption clicks to these handlers first. Stopping
-        // propagation makes gpui skip the OS move, double-click zoom and menu.
+        // Not on Windows: `start_window_move` does nothing there and
+        // `zoom_window` only maximizes. The spacer below handles it instead.
         .when(!cfg!(target_os = "windows"), |bar| {
             bar.on_mouse_down(MouseButton::Left, {
                 let drag_armed = drag_armed.clone();
@@ -362,13 +361,54 @@ where
                 )
         )
         // Center spacer (flex_1): clicking here drags the window. Windows has
-        // no `start_window_move`, so the spacer also reports itself as the
-        // caption (`HTCAPTION`) and the OS handles the move, double-click
-        // zoom and window menu. Other platforms ignore the area.
+        // no `start_window_move`, so the spacer asks the OS for the move
+        // itself and maximizes or restores on a double-click. Elsewhere the
+        // title bar's handlers above do this.
         .child(
             div()
                 .id("title-bar-spacer")
-                .window_control_area(WindowControlArea::Drag)
+                .when(cfg!(target_os = "windows"), |spacer| {
+                    // Like the other platforms, a press only arms the drag and
+                    // the first move starts it. Starting on the press itself
+                    // lets the OS move loop swallow the second click of a
+                    // double-click.
+                    spacer
+                        .on_mouse_down(MouseButton::Left, {
+                            let drag_armed = drag_armed.clone();
+                            move |event, window, cx| {
+                                if title_bar_pointer(event.click_count) == TitleBarPointer::Zoom {
+                                    drag_armed.set(false);
+                                    #[cfg(windows)]
+                                    super::win_caption::toggle_maximize(window);
+                                } else {
+                                    drag_armed.set(true);
+                                }
+                                #[cfg(not(windows))]
+                                let _ = window;
+                                cx.stop_propagation();
+                            }
+                        })
+                        .on_mouse_up(MouseButton::Left, {
+                            let drag_armed = drag_armed.clone();
+                            move |_, _, _| drag_armed.set(false)
+                        })
+                        .on_mouse_move({
+                            let drag_armed = drag_armed.clone();
+                            move |event, window, cx| {
+                                let button_is_left = event.pressed_button == Some(MouseButton::Left);
+                                if title_drag_should_move(drag_armed.get(), button_is_left) {
+                                    drag_armed.set(false);
+                                    #[cfg(windows)]
+                                    super::win_caption::start_window_move(window);
+                                    #[cfg(not(windows))]
+                                    let _ = window;
+                                    cx.stop_propagation();
+                                } else if drag_armed.get() && !button_is_left {
+                                    drag_armed.set(false);
+                                }
+                            }
+                        })
+                })
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
