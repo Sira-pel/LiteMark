@@ -593,6 +593,32 @@ fn uzers_or_uid() -> u32 {
         .unwrap_or(0)
 }
 
+/// Windows says "Access is denied. (os error 5)" both for real permission
+/// problems and when Controlled Folder Access (Ransomware protection) blocks
+/// an app it doesn't know from writing to Documents, Desktop and similar
+/// folders. The raw message doesn't help someone who hits the second case.
+const ACCESS_DENIED_HINT: &str = "Windows may be blocking LiteMark from this folder. \
+Allow it under Windows Security > Virus & threat protection > Ransomware protection > \
+Allow an app through Controlled folder access, or choose another folder.";
+
+fn is_access_denied(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("access is denied")
+        || message.contains("os error 5")
+        || message.contains("permission denied")
+}
+
+/// The message to show for a failed file operation. On Windows an access
+/// denied error gets a hint about Controlled Folder Access; anything else is
+/// returned unchanged.
+pub fn with_access_denied_hint(message: String) -> String {
+    if cfg!(windows) && is_access_denied(&message) && !message.contains(ACCESS_DENIED_HINT) {
+        format!("{message} {ACCESS_DENIED_HINT}")
+    } else {
+        message
+    }
+}
+
 pub fn file_dialog_error() -> Option<String> {
     file_dialog_block_reason(probe_file_dialog()).map(str::to_string)
 }
@@ -1219,6 +1245,29 @@ mod tests {
         assert_eq!(FileType::from_filename(".env"), FileType::Code);
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn access_denied_is_recognized() {
+        assert!(is_access_denied("Couldn't save C:\\a.md: Access is denied. (os error 5)"));
+        assert!(is_access_denied("Permission denied (os error 13)"));
+        assert!(!is_access_denied("Couldn't save: No such file or directory (os error 2)"));
+    }
+
+    #[test]
+    fn hint_is_added_on_windows_only_for_access_denied() {
+        let denied = "Couldn't save a.md: Access is denied. (os error 5)".to_string();
+        let other = "Couldn't save a.md: No such file or directory (os error 2)".to_string();
+        assert_eq!(with_access_denied_hint(other.clone()), other);
+        let shown = with_access_denied_hint(denied.clone());
+        if cfg!(windows) {
+            assert!(shown.starts_with(&denied));
+            assert!(shown.contains("Controlled folder access"));
+            // Showing the same error twice must not stack hints.
+            assert_eq!(with_access_denied_hint(shown.clone()), shown);
+        } else {
+            assert_eq!(shown, denied);
+        }
     }
 
     #[test]

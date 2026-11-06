@@ -1541,7 +1541,9 @@ impl LiteMarkApp {
     }
 
     fn show_error(&mut self, message: impl Into<String>) {
-        self.error_message = Some(message.into());
+        self.error_message = Some(crate::services::fs_service::with_access_denied_hint(
+            message.into(),
+        ));
     }
 
     fn show_toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
