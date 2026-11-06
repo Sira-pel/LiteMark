@@ -12,6 +12,8 @@ pub mod sidebar;
 pub mod status_bar;
 pub mod table_chrome;
 pub mod text_editor;
+#[cfg(windows)]
+pub mod win_caption;
 
 pub use editor::*;
 pub use find_replace_bar::*;
