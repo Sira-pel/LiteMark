@@ -8,19 +8,24 @@ Audited commit: `ea03a57` (main).
 
 ## Resume log
 
-The audit was resumed on 2026-11-12 with at most two agents at a time. This section is updated and pushed
-after every step, so if work stops (for example at a usage limit) the state below is where to pick up.
+Paused again on 2026-11-12, shortly after resuming. Lanes B and C were restarted and then stopped a few
+minutes in, before either wrote a findings file. Nothing new is confirmed.
 
 | Step | State |
 |---|---|
-| Lane B (parser, document model) | Restarted, running; findings go to `lane-B-parser-model.md` |
-| Lane C (filesystem, security) | Restarted, running; findings go to `lane-C-filesystem-security.md` |
-| Lane D (performance, code quality) | Not started; runs alone after B and C so timings are not disturbed |
+| Lane B (parser, document model) | Stopped early, no findings. One partial result, below |
+| Lane C (filesystem, security) | Stopped early, no findings, nothing to keep |
+| Lane D (performance, code quality) | Not started; run it alone so timings are not disturbed |
 | Senior review of lanes A to D | Not started |
 | Final table (at most 25 findings) and PR grouping | Not started |
 
-To resume: a lane with no findings file in this folder has to be run again from the start. Build needs
-`libxkbcommon-dev` and `libxkbcommon-x11-dev` on Linux; `cargo test --no-run` took about 3 minutes cold.
+Partial result from lane B: the ignored randomized probe `diff_probe::incremental_parse_matches_full_parse`
+passed with `DIFF_SEED` set to 1, 2, 3, 7, 42 and 1234 (about 18 s each, rustc 1.97). No divergence between
+the incremental and the full parse on those seeds. Seed 99999 was started and not finished.
+
+To resume: run lanes B, C and D from the start, at most two agents at a time, then the senior review.
+The Linux build needs `libxkbcommon-dev` and `libxkbcommon-x11-dev`; `cargo test --no-run` takes about
+3 minutes cold. The lane A numbers were taken with rustc 1.99; this session had 1.97.
 
 ## Scope of the audit
 
