@@ -610,6 +610,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_replace_row = !this.show_replace_row;
+                    this.pending_find_focus = true;
                     cx.notify();
                 });
             }
@@ -1357,7 +1358,6 @@ impl Render for LiteMarkApp {
                                 on_close: on_find_close.clone(),
                                 on_toggle_case: on_toggle_case.clone(),
                                 show_replace: self.show_replace_row,
-                                width: window_width,
                                 on_toggle_replace: on_toggle_replace.clone(),
                             },
                             &theme,
@@ -1904,6 +1904,9 @@ impl LiteMarkApp {
         if self.allow_window_close {
             window.remove_window();
         }
+        if self.show_find_replace && !self.show_replace_row && self.field_focus == TextInput::Replace {
+            self.field_focus = TextInput::Find;
+        }
         if !self.show_find_replace
             && matches!(self.field_focus, TextInput::Find | TextInput::Replace)
         {
@@ -1981,11 +1984,13 @@ impl LiteMarkApp {
         let placeholder_color = theme.placeholder;
         let field_bg = theme.bg_input;
         let field_border = theme.border_primary;
+        // The find panel draws its own input boxes, so the find and replace
+        // fields stay transparent.
         self.find_field.update(cx, |field, _cx| {
-            field.set_colors(text_color, placeholder_color, field_bg, field_border);
+            field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
         });
         self.replace_field.update(cx, |field, _cx| {
-            field.set_colors(text_color, placeholder_color, field_bg, field_border);
+            field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
         });
         self.search_field.update(cx, |field, _cx| {
             field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
