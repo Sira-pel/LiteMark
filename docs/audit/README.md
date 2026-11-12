@@ -6,6 +6,22 @@ check yet, so treat every item as a lead, not a confirmed defect. No source code
 
 Audited commit: `ea03a57` (main).
 
+## Resume log
+
+The audit was resumed on 2026-11-12 with at most two agents at a time. This section is updated and pushed
+after every step, so if work stops (for example at a usage limit) the state below is where to pick up.
+
+| Step | State |
+|---|---|
+| Lane B (parser, document model) | Restarted, running; findings go to `lane-B-parser-model.md` |
+| Lane C (filesystem, security) | Restarted, running; findings go to `lane-C-filesystem-security.md` |
+| Lane D (performance, code quality) | Not started; runs alone after B and C so timings are not disturbed |
+| Senior review of lanes A to D | Not started |
+| Final table (at most 25 findings) and PR grouping | Not started |
+
+To resume: a lane with no findings file in this folder has to be run again from the start. Build needs
+`libxkbcommon-dev` and `libxkbcommon-x11-dev` on Linux; `cargo test --no-run` took about 3 minutes cold.
+
 ## Scope of the audit
 
 1. Logic bugs: panics, off-by-one, empty input, CRLF and bare `\r`, Unicode, very large files, stale state.
