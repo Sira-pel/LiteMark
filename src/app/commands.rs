@@ -200,7 +200,9 @@ impl LiteMarkApp {
     pub(super) fn line_field_for_focus(&self) -> Option<Entity<LineField>> {
         match self.field_focus {
             TextInput::Find if self.show_find_replace => Some(self.find_field.clone()),
-            TextInput::Replace if self.show_find_replace => Some(self.replace_field.clone()),
+            TextInput::Replace if self.show_find_replace && self.show_replace_row => {
+                Some(self.replace_field.clone())
+            }
             TextInput::Rename
                 if self.rename_target.is_some() || self.save_as_tab.is_some() =>
             {
