@@ -8,24 +8,23 @@ Audited commit: `ea03a57` (main).
 
 ## Resume log
 
-Paused again on 2026-11-12, shortly after resuming. Lanes B and C were restarted and then stopped a few
-minutes in, before either wrote a findings file. Nothing new is confirmed.
+Last updated 2026-11-13. Lanes B and C were restarted and both stopped when the usage limit was hit.
 
 | Step | State |
 |---|---|
-| Lane B (parser, document model) | Stopped early, no findings. One partial result, below |
-| Lane C (filesystem, security) | Stopped early, no findings, nothing to keep |
+| Lane B (parser, document model) | Stopped at the usage limit before writing a findings file |
+| Lane C (filesystem, security) | 12 findings written: [lane-C-filesystem-security.md](lane-C-filesystem-security.md). The agent was still running one more probe (save naming) when it stopped. Not yet reviewed |
 | Lane D (performance, code quality) | Not started; run it alone so timings are not disturbed |
 | Senior review of lanes A to D | Not started |
 | Final table (at most 25 findings) and PR grouping | Not started |
 
 Partial result from lane B: the ignored randomized probe `diff_probe::incremental_parse_matches_full_parse`
 passed with `DIFF_SEED` set to 1, 2, 3, 7, 42 and 1234 (about 18 s each, rustc 1.97). No divergence between
-the incremental and the full parse on those seeds. Seed 99999 was started and not finished.
+the incremental and the full parse on those seeds.
 
-To resume: run lanes B, C and D from the start, at most two agents at a time, then the senior review.
-The Linux build needs `libxkbcommon-dev` and `libxkbcommon-x11-dev`; `cargo test --no-run` takes about
-3 minutes cold. The lane A numbers were taken with rustc 1.99; this session had 1.97.
+To resume: finish lane B, run lane D, then the senior review, at most two agents at a time. The Linux build
+needs `libxkbcommon-dev` and `libxkbcommon-x11-dev`; `cargo test --no-run` takes about 3 minutes cold. The
+lane A numbers were taken with rustc 1.99; later lanes used 1.97.
 
 ## Scope of the audit
 
