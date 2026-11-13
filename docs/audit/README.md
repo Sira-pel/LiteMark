@@ -8,13 +8,13 @@ Audited commit: `ea03a57` (main).
 
 ## Resume log
 
-Last updated 2026-11-13. Lanes B and C were restarted and both stopped when the usage limit was hit.
+Last updated 2026-11-13. Lanes B and C are done. Lane D hit the usage limit part-way and was resumed.
 
 | Step | State |
 |---|---|
 | Lane B (parser, document model) | **Done**, 8 findings, not yet reviewed: [lane-B-parser-model.md](lane-B-parser-model.md) |
 | Lane C (filesystem, security) | **Done**, 12 findings, not yet reviewed: [lane-C-filesystem-security.md](lane-C-filesystem-security.md) |
-| Lane D (performance, code quality) | Running |
+| Lane D (performance, code quality) | Stopped at the usage limit after its first measurements (keystroke, idle-frame and bulk-operation timings taken, no findings written yet); resumed after the reset |
 | Senior review of lanes A to D | Not started |
 | Final table (at most 25 findings) and PR grouping | Not started |
 
