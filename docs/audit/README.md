@@ -12,8 +12,8 @@ Last updated 2026-11-13. Lanes B and C were restarted and both stopped when the 
 
 | Step | State |
 |---|---|
-| Lane B (parser, document model) | Stopped at the usage limit before writing a findings file |
-| Lane C (filesystem, security) | 12 findings written: [lane-C-filesystem-security.md](lane-C-filesystem-security.md). The agent was still running one more probe (save naming) when it stopped. Not yet reviewed |
+| Lane B (parser, document model) | Resumed after the limit reset, running |
+| Lane C (filesystem, security) | **Done**, 12 findings, not yet reviewed: [lane-C-filesystem-security.md](lane-C-filesystem-security.md) |
 | Lane D (performance, code quality) | Not started; run it alone so timings are not disturbed |
 | Senior review of lanes A to D | Not started |
 | Final table (at most 25 findings) and PR grouping | Not started |

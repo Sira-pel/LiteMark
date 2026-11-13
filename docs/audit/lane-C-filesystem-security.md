@@ -245,6 +245,15 @@ Limits: Windows and macOS behaviour could not be run. A case-insensitive filesys
   stack 1024 KiB: thread has overflowed its stack / fatal runtime error: stack overflow, aborting
   ```
   In the repo's own (debug) test binary the same tree overflows the 2 MiB test thread.
+  ```rust
+  // scratch main.rs: local type shells, then
+  // include!("scan_verbatim.rs");      // fs_service.rs:637-728
+  // include!("filetype_verbatim.rs");  // document.rs:43-85
+  let mut p = root.clone();
+  for _ in 0..5000 { p.push("d"); if fs::create_dir(&p).is_err() { break; } }   // stops at PATH_MAX
+  let run = move || println!("{} folders", scan_workspace_dir(&root, true).folders.len());
+  std::thread::Builder::new().stack_size(1024 * 1024).spawn(run).unwrap().join().unwrap();
+  ```
 - Suggested fix: walk with an explicit stack (`Vec<PathBuf>`) and stop at a fixed depth (for example 64) and a
   fixed entry count, with a "folder too large, showing the first N items" note.
 
@@ -379,6 +388,14 @@ Limits: Windows and macOS behaviour could not be run. A case-insensitive filesys
   typed ".." -> saved at Some("workspace/.. 2"); inside workspace = Some(true); error = None
   typed "<tmp>/abs-target" -> saved at Some("abs-target.md"); inside workspace = Some(false); error = None
   sanitize_name("CON") = "CON"   sanitize_name("a:b.md") = "a:b.md"   sanitize_name("x\ny.md") = "x\ny.md"
+  ```
+  ```rust
+  // inside view.update(&mut cx, |app, cx| { ... }) on LiteMarkApp::test_new("text", cx)
+  app.workspace = scan_workspace_dir(&ws, true);          // ws = <tmp>/workspace
+  let id = app.active_tab_id.clone();
+  app.begin_save_naming(&id, cx);
+  app.commit_save_naming(Some("../escaped".to_string()), cx);
+  println!("{:?} {:?}", app.active_tab().unwrap().file_path, app.error_message);
   ```
 - Suggested fix: run the typed name through `sanitize_name` in `commit_save_naming`, and extend
   `sanitize_name` to replace control characters and `<>:"|?*` and to reject Windows reserved device names.
