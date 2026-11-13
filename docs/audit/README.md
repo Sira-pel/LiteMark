@@ -8,23 +8,33 @@ Audited commit: `ea03a57` (main).
 
 ## Resume log
 
-Last updated 2026-11-13. Lanes B and C are done. Lane D hit the usage limit part-way and was resumed.
+Last updated 2026-11-13. Stopped on request. Nothing is running.
 
 | Step | State |
 |---|---|
-| Lane B (parser, document model) | **Done**, 8 findings, not yet reviewed: [lane-B-parser-model.md](lane-B-parser-model.md) |
-| Lane C (filesystem, security) | **Done**, 12 findings, not yet reviewed: [lane-C-filesystem-security.md](lane-C-filesystem-security.md) |
-| Lane D (performance, code quality) | Stopped at the usage limit after its first measurements (keystroke, idle-frame and bulk-operation timings taken, no findings written yet); resumed after the reset |
+| Lane A (tooling, CI, FFI) | Done, 9 findings: [lane-A-tooling-ffi-ci.md](lane-A-tooling-ffi-ci.md) |
+| Lane B (parser, document model) | Done, 8 findings: [lane-B-parser-model.md](lane-B-parser-model.md) |
+| Lane C (filesystem, security) | Done, 12 findings: [lane-C-filesystem-security.md](lane-C-filesystem-security.md) |
+| Lane D (performance, code quality) | Partial: release-build measurements taken, not written up as findings: [lane-D-performance-quality.md](lane-D-performance-quality.md) |
 | Senior review of lanes A to D | Not started |
 | Final table (at most 25 findings) and PR grouping | Not started |
 
-Partial result from lane B: the ignored randomized probe `diff_probe::incremental_parse_matches_full_parse`
-passed with `DIFF_SEED` set to 1, 2, 3, 7, 42 and 1234 (about 18 s each, rustc 1.97). No divergence between
-the incremental and the full parse on those seeds.
+No finding in any lane has been reviewed yet. The summary table further down covers lane A only and is out
+of date in two places: lane C raised the link-click item to High and lowered the settings item to Low.
 
-To resume: finish lane B, run lane D, then the senior review, at most two agents at a time. The Linux build
-needs `libxkbcommon-dev` and `libxkbcommon-x11-dev`; `cargo test --no-run` takes about 3 minutes cold. The
-lane A numbers were taken with rustc 1.99; later lanes used 1.97.
+What to do next, in order:
+
+1. Finish lane D: turn the measurements into findings with benchmark code, and measure what was skipped
+   (startup, memory per tab, UI-thread blocking). This can be folded into step 2 to save a run.
+2. Senior review: re-run every repro in lanes A to D, drop what does not hold, settle severities.
+3. Write the final table of at most 25 findings and the grouping into small fix PRs, security first.
+4. Start the fix PRs. Likely first ones: PDF limits and lopdf upgrade, link-scheme allowlist, the heading
+   panic on non-ASCII indentation.
+
+Practical notes: run at most two agents at a time, and have each agent write its file as it goes (a usage
+limit stopped the lanes three times). Agents in a worktree cannot write to the main checkout, so collect
+their file from the worktree or a scratch copy. The Linux build needs `libxkbcommon-dev` and
+`libxkbcommon-x11-dev`; a cold debug build takes about 3 minutes. Lane A used rustc 1.99, later lanes 1.97.
 
 ## Scope of the audit
 
