@@ -12,9 +12,9 @@ Last updated 2026-11-13. Lanes B and C were restarted and both stopped when the 
 
 | Step | State |
 |---|---|
-| Lane B (parser, document model) | Resumed after the limit reset, running |
+| Lane B (parser, document model) | **Done**, 8 findings, not yet reviewed: [lane-B-parser-model.md](lane-B-parser-model.md) |
 | Lane C (filesystem, security) | **Done**, 12 findings, not yet reviewed: [lane-C-filesystem-security.md](lane-C-filesystem-security.md) |
-| Lane D (performance, code quality) | Not started; run it alone so timings are not disturbed |
+| Lane D (performance, code quality) | Running |
 | Senior review of lanes A to D | Not started |
 | Final table (at most 25 findings) and PR grouping | Not started |
 
