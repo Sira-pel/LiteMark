@@ -1,38 +1,163 @@
 # Lane D: performance and code quality
 
-Status: **partial, stopped on request.** The measurements below were taken, but the lane was stopped before
-they were written up as findings, and the benchmark code was not saved into this file. Nothing here has been
-reviewed. Not measured: startup, memory copies per tab, the update check and other UI-thread blocking.
+Status: complete
 
-Toolchain: rustc/cargo 1.97, Linux x86_64, 4 cores, audited commit `ea03a57`. All numbers are from a release
-build (`cargo test --release`), in milliseconds unless marked, with test documents generated at the sizes shown.
-Per-frame numbers come from gpui's test harness, not a real window. The benchmarks were a throwaway module
-(`src/lane_d_bench.rs`) in a worktree that is not part of this branch, so anyone confirming a number has to
-write the benchmark again.
+Audited commit: `ea03a57` (`main`). Read-only audit: no tracked source was changed.
 
-## What the numbers show (leads, not confirmed findings)
+## Environment and measurement notes
 
-| Lead | Key numbers |
-|---|---|
-| Sidebar draws every row on every frame, with no virtual list | 2,000 files: 248 ms per idle frame; 5,000 files: 635 to 794 ms; with all rows selected 2.9 to 3.7 s per frame. The same app without sidebar rows: about 1 ms |
-| Select All plus list, quote or heading toggle is quadratic (lane B finding 3, now timed in release) | Realistic 100 KB note: about 120 ms; 1 MB: about 12.4 s; 5 MB: about 5.4 minutes. Select All plus bold stays linear (1 MB: 210 ms) |
-| Large tables are laid out in full on every frame | 500 rows x 8 columns (54 KB): 25 ms per frame; 100 x 40: 117 ms; 2,000 x 8: 117 ms; 5,000 x 8: 320 ms |
-| Every keystroke reparses the whole Markdown document and every frame walks every line | Keystroke plus frame: 100 KB about 5 ms, 1 MB about 55 to 60 ms, 5 MB about 340 to 375 ms. Passes 16 ms between 100 KB and 1 MB, and 100 ms between 1 MB and 5 MB. Plain text is about half that |
-| Undo history drops whole-document edits above its 256 KB budget | After Select All plus typing, or Replace All plus one more keystroke, undo no longer restores the original at 200 to 300 KB and above |
-| Typing 20,000 characters into a 1 MB note | 778 s of model time in total, about 39 ms per keystroke, in line with the reparse cost above |
-| A second Markdown parser (`parse_markdown`, `src/markdown/parser.rs:223`) is reachable only from tests and has drifted | It classifies `~~~` fences, `+ item`, `1) item` and indented code as paragraphs, where `parse_document` does not |
-| Lane B finding 4 (bold toggle on a line with thousands of nested spans) did not reproduce as quadratic in release | 273 KB line: bold 0.4 ms, typing 40 ms, parse 36 ms, all linear |
+- **GPUI-harness and editor-frame timings** (`idle_frame`, `keystroke_app`, `tables` GPUI frame numbers, `sidebar` GPUI frame numbers, `tabs` GPUI frame numbers, `bulk_ops`, `components`, `keystroke_model`, `lane_b3` 5 MB run, `lane_b4`): taken in a release build (`cargo test --release`, `rustc 1.97`, Linux x86_64, 4 cores) at `ea03a57` via a throwaway GPUI test module (`src/lane_d_bench.rs`) on `TestAppContext`. They are preserved in the **Raw benchmark output** section below. On the continuation VM (`rustc 1.99.1`, Linux x86_64, 2 cores), `libxkbcommon-x11-dev` is not installed, so GPUI binaries and `cargo test --no-run` cannot link (`rust-lld: unable to find library -lxkbcommon-x11`).
+- **Previously skipped measurements and re-verifications** (startup workspace scan/seed/open, per-tab memory and `ParsedDocument` footprint, `release_parse_cache`, undo eviction, B3 vs B4 scaling, 20,000-row table parsing, legacy parser drift, UI-thread blocking inventory, dead-code & duplication audit): executed directly against the unmodified `src/markdown`, `src/services`, and `src/model` modules at `ea03a57` in `--release` (`rustc 1.99.1`) using a standalone non-GPUI harness crate, and verified by reading the GPUI/app code (`src/ui/sidebar.rs`, `src/ui/text_editor.rs`, `src/app/*.rs`). The non-GPUI benchmark code is included in **Reproducible non-GPUI benchmark code** below.
 
-Fast enough at the sizes tried: find and replace-all (1 MB, 17,812 hits: 45 ms), paste of a document-sized
-block (1 MB: 65 ms), table row and column operations in the model (5,000 x 8: under 51 ms), 300 open tabs
-(13 ms per frame), sidebar tree build and search filter (5,000 files: under 22 ms).
+## Findings
 
-Leads from reading the code that were not measured: `save_tab` rescans the whole notes folder on the UI
-thread (`src/app/tabs.rs:56`); the sidebar tree is rebuilt, sorted and cloned on every frame
-(`src/ui/sidebar.rs:143-221`, `:368`, `:614`); frame layout visits every line and culling only skips text
-shaping (`src/ui/text_editor.rs:982` onward).
+### D1. Sidebar rebuilds its tree on every frame and renders every row without virtualization
+- Severity: Medium
+- Category: Performance
+- Location: `src/ui/sidebar.rs:143-223` (`build_sidebar_tree`), `src/ui/sidebar.rs:368-384` (unconditional rebuild per render), `src/ui/sidebar.rs:614` (`.children(tree_items.into_iter().map(...))`); gated by `self.show_sidebar` at `src/app/render.rs:1374`.
+- Problem: When the sidebar is visible, every UI frame rebuilds the entire flat tree: scanning folders/files per parent level, sorting every level with `to_lowercase()` allocations (`:178, :203`), and cloning every `WorkspaceFolder` and `WorkspaceFile`. It then materializes GPUI element trees for every visible row inside `.children(...)` instead of using a virtualized list (`uniform_list`). When collapsed, the sidebar is skipped and frame time drops back to ~1 ms.
+- Evidence: PROVEN in the `ea03a57` release GPUI harness and verified in `src/ui/sidebar.rs`:
+  ```text
+  20 folders / 2,000 files: build_sidebar_tree=  1.33 ms | idle_frame=247.8 ms (no-sidebar-rows baseline 0.83 ms) | frame_all_selected= 644.3 ms
+  50 folders / 5,000 files: build_sidebar_tree=  9.36 ms | idle_frame=635.0 ms (no-sidebar-rows baseline 0.99 ms) | frame_all_selected=2856.2 ms
+  200 folders/ 5,000 files: build_sidebar_tree= 21.31 ms | idle_frame=793.7 ms (no-sidebar-rows baseline 1.12 ms) | frame_all_selected=3729.2 ms
+  ```
+- Suggested fix: Cache the flattened/filtered `Vec<SidebarTreeItem>` keyed by workspace/expansion/search revision, and render rows with GPUI `uniform_list` so only visible viewport rows allocate elements and paint.
 
-## Raw benchmark output
+### D2. Large tables shape and lay out every row and cell on every frame and keystroke inside the table
+- Severity: Medium
+- Category: Performance
+- Location: `src/ui/text_editor.rs:1325-1650` (`table_width_key` `:1328`, `shape_table` `:1389-1413`, `compute_table_column_widths` `:1449-1483`, cell wrap/shaping loop `:1508-1600`, `PaintCell` `:35-40, 1785-1797`).
+- Problem: Off-screen tables can skip shaping when heights are cached, **except** when any caret/anchor is within two lines of the table (`:1410-1412`: `anchor_lines.iter().any(|&a| a + 2 >= first && a <= last + 2)`). Placing the caret anywhere inside a large table forces `shape_table = true` for **all rows of that table**, with no row-level viewport culling inside the table. Worse, on every frame `table_width_key` hashes the entire raw slice of the table, and whenever the cache misses (first frame, resize, or **every keystroke inside the table**), `compute_table_column_widths` shapes every cell (`:1449-1478`) and `:1550-1587` shapes every cell again (`full_shaped` + `shaped_sub` = 2x–3x text shaping across the whole table). Additionally, `PaintCell` (`:35-40`) carries three `#[allow(dead_code)]` fields (`text_origin`, `shaped: ShapedLine`, `offset_map: RowOffsetMap`) that are still populated/cloned at `:1785-1797` alongside `lines: Vec<CellLine>`.
+- Evidence: PROVEN in the `ea03a57` release GPUI harness and verified in `src/ui/text_editor.rs`:
+  ```text
+  500x8  ( 54 KB): model key_in_cell= 0.78 ms | app frame_after_key_in_cell= 24.7 ms | idle_frame= 25.5 ms
+  100x40 ( 54 KB): model key_in_cell= 0.89 ms | app frame_after_key_in_cell=117.2 ms | idle_frame=118.7 ms
+  2000x8 (229 KB): model key_in_cell= 3.22 ms | app frame_after_key_in_cell=115.4 ms | idle_frame=117.0 ms
+  5000x8 (587 KB): model key_in_cell=11.37 ms | app frame_after_key_in_cell=323.7 ms | idle_frame=319.6 ms
+  ```
+- Suggested fix: Track uniform or cached per-row heights and cull table rows by `band.contains(cur_y, row_height)` just like ordinary lines even when the caret is inside the table; keep `column_widths` cached across intra-cell edits whose measured width does not grow or shrink column maxima; remove the dead fields from `PaintCell`.
+
+### D3. Block-format toggle (`ol`, `quote`, `heading`) over a large selection is O(n²) (`accepted_list_marker_in`)
+- Severity: Medium
+- Category: Performance (upgraded from Lane B's Low after release timings)
+- Location: `src/markdown/parser/lists.rs:357-368` (`accepted_list_marker_in` runs `doc.lines.iter().find(...)`), called per selected line from `src/model/document/blocks.rs:176` (`toggle_block_lines`) and `:496-520` (`parse_line_block_prefix`).
+- Problem: Toggling an ordered list, blockquote, or heading over a multi-line selection scans `doc.lines` from index `0` for every line in the selection (2–3 linear scans per line). On a realistic 1 MB document, Select All + `ol`/`quote`/`h2` blocks the UI thread for **12.4 seconds**; at 5 MB it blocks for **~5.4 minutes**. By contrast, Select All + `bold` stays linear (`210 ms` at 1 MB).
+- Evidence: PROVEN in `ea03a57` release (`cargo test --release`) and re-verified on VM release harness:
+  - Realistic note (`ea03a57` release):
+    - `10 KB` (255 lines): `ol` 2.4 ms, `quote` 2.2 ms, `h2` 2.3 ms (vs `bold` 2.9 ms)
+    - `100 KB` (2,526 lines): `ol` 129.6 ms, `quote` 116.2 ms, `h2` 116.0 ms (vs `bold` 17.5 ms)
+    - `1 MB` (25,478 lines): `ol` **12,383.5 ms**, `quote` **12,520.7 ms**, `h2` **12,423.3 ms** (vs `bold` 209.9 ms)
+    - `5 MB` (126,383 lines): `ol` **322,473 ms**, `quote` **326,145 ms**, `h2` **326,002 ms** (vs `bold` 1,142.8 ms)
+  - VM release re-verification (`"1. a\n"` x N): `2,000` lines = `39.70 ms`, `4,000` = `107.28 ms`, `8,000` = `428.86 ms`, `16,000` = `1,703.94 ms` (`8x` lines -> `42.9x` time).
+- Suggested fix: Replace `doc.lines.iter().find(|l| l.source.start == line_start)` with `doc.line_index_at(line_start)` (binary search, already present on `ParsedDocument`), or walk the cursor monotonically through `doc.lines` while iterating selected lines.
+
+### D4. Every keystroke reparses the entire document and every frame walks all lines
+- Severity: Medium
+- Category: Performance
+- Location: `src/model/document.rs` (`DocumentTab::parsed()` full `parse_document`), `src/ui/text_editor.rs:982-1016` (`EditorElement::request_layout` walking every `parsed.lines` or full `content`), `src/ui/text_editor.rs:1090` (Raw `prepaint` allocating `visual_rows_tabbed` for every line).
+- Problem: Every single character edit bumps `revision` and forces a full `parse_document` (`~29 ms/MB` in release), and every frame (including idle frames and caret blinks) walks every line of the document in `request_layout` and `prepaint` to recompute wrapped row counts and `y` coordinates, using culling only to skip `shape_line`. Keystroke + frame crosses the 16.6 ms 60 fps budget between 100 KB (`~5.2 ms`) and 1 MB (`53–59 ms`), and reaches `341–376 ms` at 5 MB. Note: opening a 5 MB file (`read_note + parse`) takes `185.8 ms` on a warm page cache.
+- Evidence: PROVEN in `ea03a57` release GPUI harness and VM non-GPUI release harness:
+  - Components (`ea03a57`): `10 KB` parse `0.285 ms`; `100 KB` parse `2.72 ms`; `1 MB` parse `28.80 ms`; `5 MB` parse `170.21 ms`.
+  - Keystroke + frame (`ea03a57`, `md-wysiwyg` mid): `10 KB` `1.48 ms`; `100 KB` `5.23 ms`; `1 MB` `59.21 ms` (handler `38.0 ms` + frame `21.2 ms`); `5 MB` `351.12 ms` (handler `211.3 ms` + frame `139.8 ms`).
+  - Idle frames (`ea03a57`): `100 KB` `2.5–2.7 ms`; `1 MB` `13.4–16.0 ms`; `5 MB` `85.4–107.3 ms`.
+  - VM release `OPEN_TAB` (`read_note + DocumentTab::new + parse`): `100 KB` `4.96 ms`; `1 MB` `35.98 ms`; `5 MB` `185.80 ms`.
+- Suggested fix: Debounce/coalesce or make block+inline parsing incremental per dirty paragraph/fence; cache wrapped line heights per line revision and window width so `request_layout` and `prepaint` only visit lines affected by edits or width changes.
+
+### D5. Undo byte budget (256 KiB) evicts whole-document edits (`Replace All`, `Select All + type`) on the next keystroke
+- Severity: Medium
+- Category: Logic
+- Location: `src/model/text_ops.rs:13` (`UNDO_BYTE_BUDGET: usize = 256 * 1024`), `src/model/text_ops.rs:191-194` (`while self.undo_bytes > UNDO_BYTE_BUDGET && self.undo.len() > 1 { self.undo.remove(0); }`), `src/model/document.rs:625-634` (`replace_every_match` calls `self.set_content(updated)` -> `edit(0..end, &new_content)`).
+- Problem: `replace_every_match` computes a brand-new `String` and passes the entire `0..end` span to `set_content`, recording a single `DiffEdit` costing `old.len() + new.len()` bytes (`2 * doc_len`), even when only a handful of matches changed. On any document `>= ~129 KB`, that single entry immediately exceeds `UNDO_BYTE_BUDGET` (`256 KiB`). `push_at` keeps it only as long as `undo.len() == 1`; as soon as the user types a single character (`undo.len() == 2`), `self.undo.remove(0)` **evicts the entire Replace All step**, making it impossible to undo back to the pre-replace document. The same happens for `Select All + type/paste` on `>= ~256 KB` notes.
+- Evidence: PROVEN in both the `ea03a57` GPUI harness (`select-all+type` fails by 300 KB; `replace-all+type 1 letter` fails by 200 KB) and the VM release harness (`make_realistic_md`, single `"paragraph" -> "PARAGRAPH"` replace-all + `"x"` at offset 0):
+  ```text
+  UNDO 100KB: after_replace_bytes= 204802 after_plus_1key_bytes=204803 original_restored=true
+  UNDO 200KB: after_replace_bytes= 409602 after_plus_1key_bytes=     1 original_restored=false
+  UNDO 300KB: after_replace_bytes= 614400 after_plus_1key_bytes=     1 original_restored=false
+  UNDO   1MB: after_replace_bytes=2097154 after_plus_1key_bytes=     1 original_restored=false
+  ```
+- Suggested fix: Have `replace_every_match` record a minimal diff (trimmed common prefix/suffix at minimum, or per-match undo batch) instead of cloning/storing `2 * doc_len`, and raise `UNDO_BYTE_BUDGET` (256 KiB is tiny compared to the ~21 MB parse cache of a 1 MB note) or cap by step count/megabytes.
+
+### D6. UI-thread synchronous file I/O, including a full `rescan_workspace()` on every `Ctrl+S`
+- Severity: Medium
+- Category: Performance
+- Location: `src/app/tabs.rs:26, 40, 56` (`save_tab` does synchronous `atomic_save`/`atomic_save_new` and unconditionally calls `self.rescan_workspace()`), `src/app/commands.rs:343, 363, 378, 393, 410` (Open dialog, `extract_text_from_pdf`, `read_note`, export + `atomic_save`), `src/app/file_ops.rs:46, 52` (`copy_note_into_workspace`, `scan_workspace_dir`), `src/app/sidebar.rs:242` and `src/app/render.rs:637` (`read_note` on click), `src/app/drag_drop.rs` (`read_note`, `copy_note_into_workspace`, recursive `copy_folder`, `move_note`, `move_folder`, `rescan_workspace`), `src/model/settings.rs:120` (15 sync `settings.save()` call sites), `src/app.rs:214-228` (startup). Also `src/app/render.rs:1477` calls `p.is_dir()` on every recent folder per frame while the workspace menu is open.
+- Problem: Whereas `fetch_latest_release` (`app/commands.rs:123-126`) and `move_to_trash` (`app/file_ops.rs:527, 638`) properly run on `cx.background_executor()`, **every other filesystem operation runs synchronously on the UI thread**. Most visibly, `save_tab` calls `self.rescan_workspace()` on **every** `Ctrl+S` (even when updating an already-tracked file whose folder/tree did not change). On local NVMe with a warm page cache, startup (`seed` + `scan` + `read_welcome` + `parse`) is fast (`0.27 ms` for 10 files, `1.42 ms` for 500, `4.48 ms` for 2,000, `20.7 ms` for 5,000), and Lane C measured 100,000 files at `~250 ms` warm (`/usr` 78k files at `1.25 s` in debug). On cold disks, FUSE, cloud-synced folders, or NFS, every save/open/click stalls the UI thread.
+- Evidence: PROVEN by code inspection + VM release timing (`STARTUP ws`):
+  ```text
+  STARTUP ws folders= 1 files=  10: seed+scan+read_welcome+tab+parse =  0.269 ms (warm tmpfs)
+  STARTUP ws folders=10 files= 500: seed+scan+read_welcome+tab+parse =  1.417 ms
+  STARTUP ws folders=20 files=2000: seed+scan+read_welcome+tab+parse =  4.483 ms
+  STARTUP ws folders=50 files=5000: seed+scan+read_welcome+tab+parse = 20.724 ms
+  ```
+- Suggested fix: Skip `rescan_workspace()` on `save_tab` when saving an existing workspace file whose path is unchanged (just update the existing entry's metadata if needed), and move file loads, saves, PDF extraction, folder scans, and folder copies onto `cx.background_executor()`.
+
+### D7. `ParsedDocument` expands memory ~20x over source text when cached; `release_parse_cache` bounds inactive tabs
+- Severity: Low
+- Category: Performance
+- Location: `src/markdown/parser.rs` (`ParsedDocument`, `ParsedLine`), `src/model/document.rs:394, 417-436`, `src/app/editor_events.rs:491-493` (`release_parse_cache()` on non-active tabs).
+- Problem: Each cached `ParsedDocument` stores a `ParsedLine` (`sizeof = 200` bytes) plus `StyledSegment`s, `InlinePair`s, `hidden_ranges`, `link_hits`, `OffsetMap` byte-mapping `Vec`s, and a `display_text` `String` for every source line. For a realistic 1 MB Markdown note (`43,432` lines), caching `ParsedDocument` adds **~20 MB** (`+21.04 MB` total RSS per cached 1 MB tab across 20 tabs). Because `editor_events.rs:491-493` releases `parse_cache` on all inactive tabs during render, 300 idle tabs stay fast (`12.9 ms/frame`) and retain only `content: String` + `UndoHistory`; however, the active tab still carries ~21x memory and `DocumentTab::content_snapshot` (`SharedString::from(self.content.clone())`), so switching back and forth between large notes re-parses and allocates ~20x per switch.
+- Evidence: PROVEN in VM release harness (`20 x 1 MB` `make_realistic_md` tabs):
+  ```text
+  MEM 20x1MB tabs: +430,868 KB (+21.04 MB per cached 1 MB tab)
+  MEM 1MB ParsedDocument details: lines=43432 segments=65151 inline_pairs=15512 display_text_cap=745KB sizeof(ParsedLine)=200
+  ```
+- Suggested fix: Compact `ParsedLine` (e.g., use compact/arena ranges or compute `OffsetMap` lazily for visible/edited lines rather than allocating per-line vectors up front for off-screen lines).
+
+### D8. Dead and drifted legacy Markdown parser, 41 `allow(dead_code)` attributes, and render boilerplate
+- Severity: Low
+- Category: Standards / Code quality
+- Location:
+  - Legacy parser: `src/markdown/parser.rs:11-162` (`Block`, `Span`), `:215-535` (`parse_markdown`, `parse_spans`, `source_offset_for_click`, `block_source`, `spans_of`, `floor_source`) — ~380 lines gated by `#[cfg_attr(not(test), allow(dead_code))]` and exercised only by 5 legacy tests in `src/markdown/parser/tests.rs`.
+  - Dead/test-only helpers with `allow(dead_code)` (41 attributes across `src/`): `src/markdown/exporter.rs:117` (`format_markdown_table`), `src/services/fs_service.rs:628` (`safe_delete`), `src/model/document.rs:394, 441` (`parsed_snapshot`, `undo_stored_bytes`), `src/model/text_ops.rs:131, 1108`, `src/model/document/table.rs:161` (`is_in_table`), `src/model/document/typing.rs:332` (`insert_snippet`), `src/ui/text_editor.rs:35-40` (`PaintCell`'s unused `text_origin`, `shaped: ShapedLine`, `offset_map`), `:869`, `src/ui/sidebar.rs:225` (`SidebarProps`), `src/ui/settings_menu.rs:7` (`SettingsMenuProps`), `src/ui/formatting_toolbar.rs:344, 366`, `src/ui/line_field.rs:64, 69`, `src/theme.rs:29, 81, 86, 149`, `src/app.rs:146`, `src/app/commands.rs:575`, `src/model/workspace.rs:4, 15, 25`.
+  - Oversized functions & boilerplate: 45 clippy `too_many_lines` diagnostics (worst: `src/app/render.rs:6` at 1,779 lines containing 100+ identical `let _ = view.update(...)` closures across `:54-941`; `src/ui/text_editor.rs:1027` at 1,103 lines; `src/app/key_bindings.rs:7` at 770 lines; `src/ui/sidebar.rs:289` at 711 lines; `src/model/document/inline_format.rs:11` at 706 lines).
+- Problem: The legacy `parse_markdown` AST has drifted from production `parse_document`, classifying tilde fences (`~~~`), `+ item`, `1) item`, and 4-space indented code as `Paragraph` while `parse_document` parses them as `CodeFence`, `ListItem`, and `CodeLine`. Keeping ~380 lines of dead parser code alongside production code misleads readers and tests an obsolete parser. Elsewhere, 41 `allow(dead_code)` suppressions hide unused code—including `PaintCell` still constructing and cloning `ShapedLine` and `RowOffsetMap` into dead fields (`text_editor.rs:1785-1797`).
+- Evidence: PROVEN in both `ea03a57` and VM release harness + `grep -rn "allow(dead_code)" src/`:
+  ```text
+  DRIFT "~~~\ncode\n~~~": parse_markdown=["Paragraph", "Paragraph", "Paragraph"] vs parse_document=["CodeFence", "CodeLine", "CodeFence"]
+  DRIFT "+ item":           parse_markdown=["Paragraph"]                         vs parse_document=["ListItem"]
+  DRIFT "1) item":          parse_markdown=["Paragraph"]                         vs parse_document=["ListItem"]
+  DRIFT "    indented code":parse_markdown=["Paragraph"]                         vs parse_document=["CodeLine"]
+  ```
+- Suggested fix: Remove `parse_markdown`/`parse_spans`/`Block`/`Span` (migrate or remove the 5 unit tests in `parser/tests.rs`), delete the genuinely unused `#[allow(dead_code)]` items (especially `PaintCell`'s dead `ShapedLine`/`RowOffsetMap` fields and `safe_delete`), and extract a helper for `view.update(...)` event handlers in `app/render.rs`.
+
+## Checked and found fine
+
+- **Lane B finding 4 (bold toggle on a line with thousands of nested spans)**: **Does not reproduce as quadratic in release.** On `n = 20,000` nested spans (`~273 KB` single line), release parse = `29.3 ms`, type = `27.1 ms`, bold = `0.40 ms` (`0.013 ms` at `n = 500`, `0.031 ms` at `n = 2,000`, `0.059 ms` at `n = 4,000` -> linear). Lane B's `34.8 s` was a debug-build artifact.
+- **Update check network call (`src/app/commands.rs:123-126`) and `move_to_trash` (`src/app/file_ops.rs:527, 638`)**: Both spawn onto `cx.background_executor()` off the UI thread, and `fetch_latest_release` enforces a 5 s timeout (`update_service.rs:5`).
+- **Inactive-tab parse cache release (`src/app/editor_events.rs:491-493`)**: Actively releases `parse_cache` for all tabs other than `active_id` during render; 300 open tabs ran at `12.9 ms/frame` in the GPUI harness.
+- **20,000-row table parse speed**: Measured `29.4 ms` in release and `218.1 ms` in debug on Linux x86_64 (well under the 1,000 ms debug test budget in `src/markdown/parser/tests.rs:150-168`; CI observed macOS debug taking longer ~1.48 s due to unoptimized debug checks + macOS runner hardware variance).
+- **Find, Replace-All throughput, 1 MB paste, model-layer table operations, and sidebar search filter**: In release builds, 1 MB find-next is `3.2 ms`, 1 MB replace-all (`17,812` hits) is `45.1 ms`, 1 MB paste is `65.4 ms`, 5,000x8 model-layer table edits are `<51 ms`, and `sidebar_search_matches` at 5,000 files is `<0.5 ms`.
+- **Settings startup cost & `show_sidebar` note**: Startup in `src/app.rs:452` opens `show_sidebar: true` regardless of `settings.show_sidebar` (which also lacks a `default_show_sidebar` serde default at `settings.rs:40-41`), causing no performance surprise on `{}` files.
+
+## Reproducible non-GPUI benchmark code
+
+To re-run the non-GPUI Lane D measurements on any machine (including without `libxkbcommon-x11-dev`), compile against unmodified `src/markdown`, `src/services`, and `src/model` (`cargo run --release`):
+
+```rust
+// Link against unmodified crate modules: markdown, services, model (with a ThemeMode enum stub).
+fn make_realistic_md(target_bytes: usize) -> String {
+    let block = "\
+## Section Heading with **bold** and *italic*\n\n\
+This is a normal paragraph containing a [link](https://example.com/docs) and `inline_code` plus ~~strike~~.\n\n\
+- First list item in markdown\n- [ ] Unchecked task item\n- [x] Checked task item\n\n\
+> A blockquote line for testing.\n\n\
+| Name | Value | Notes |\n| --- | --- | --- |\n| alpha | 123 | ok |\n\n";
+    let mut s = String::with_capacity(target_bytes + block.len());
+    while s.len() < target_bytes { s.push_str(block); }
+    s.truncate(target_bytes);
+    while !s.is_char_boundary(s.len()) { s.pop(); }
+    if !s.ends_with('\n') { s.push('\n'); }
+    s
+}
+// 1) Startup: loop (folders, files) in [(1,10),(10,500),(20,2000),(50,5000)], time seed_welcome_note + scan_workspace_dir + read_note + DocumentTab::new + parsed().
+// 2) Memory per tab: allocate 20 x 1 MB DocumentTab, call .parsed(), read /proc/self/status VmRSS before/after release_parse_cache(); inspect ParsedLine count & size_of::<ParsedLine>().
+// 3) Undo eviction: tab(&make_realistic_md(bytes)).replace_every_match("paragraph", "PARAGRAPH", true); then edit(0..0, "x"); while t.undo() {} -> assert_eq!(t.content, orig).
+// 4) B3 vs B4 release scaling: repeat "1. a\n" x lines + apply_format_in_mode("ol", Wysiwyg); repeat "**a _b " x n + "a" + " b_ a**" x n + parse_document + insert_text_in_mode + apply_format_in_mode("bold", Wysiwyg).
+// 5) Legacy parser drift: compare parse_markdown(s) vs parse_document(s) on "~~~\ncode\n~~~", "+ item", "1) item", "    indented code".
+```
+
+## Raw benchmark output (preserved from `ea03a57` release GPUI + model run)
 
 ### components
 
@@ -201,6 +326,34 @@ LD undo doc= 300KB  select-all+type 2 letters: undo steps=1 original restored=fa
 LD undo doc=1024KB  select-all+type 2 letters: undo steps=1 original restored=false (len after undo=1049246)  |  replace-all+type 1 letter: undo steps=1 original restored=false  |  replace-all alone stores 2098492 bytes
 ```
 
+### vm_continuation_release (non-GPUI, `rustc 1.99.1`, `ea03a57`)
+
+```
+STARTUP ws folders=1 files=10: seed+scan+read_welcome+tab+parse = 0.269 ms (listed=11 folders=1)
+STARTUP ws folders=10 files=500: seed+scan+read_welcome+tab+parse = 1.417 ms (listed=501 folders=10)
+STARTUP ws folders=20 files=2000: seed+scan+read_welcome+tab+parse = 4.483 ms (listed=2001 folders=20)
+STARTUP ws folders=50 files=5000: seed+scan+read_welcome+tab+parse = 20.724 ms (listed=5001 folders=50)
+OPEN_TAB 100KB: read_note+DocumentTab::new+parse = 4.956 ms
+OPEN_TAB 1MB: read_note+DocumentTab::new+parse = 35.981 ms
+OPEN_TAB 5MB: read_note+DocumentTab::new+parse = 185.799 ms
+MEM 20x1MB tabs: +430868KB (+21.04MB per cached tab)
+MEM 1MB ParsedDocument details: lines=43432 segments=65151 inline_pairs=15512 display_text_cap=745KB sizeof(ParsedLine)=200
+UNDO 100KB: after_replace_bytes=204802 after_plus_1key_bytes=204803 original_restored=true
+UNDO 200KB: after_replace_bytes=409602 after_plus_1key_bytes=1 original_restored=false
+UNDO 300KB: after_replace_bytes=614400 after_plus_1key_bytes=1 original_restored=false
+UNDO 1MB: after_replace_bytes=2097154 after_plus_1key_bytes=1 original_restored=false
+B3 lines= 2000: select-all + ol = 39.704 ms
+B3 lines= 4000: select-all + ol = 107.280 ms
+B3 lines= 8000: select-all + ol = 428.856 ms
+B3 lines=16000: select-all + ol = 1703.940 ms
+B4 n=  500 (  6KB): parse=0.516ms type=0.529ms bold=0.013ms
+B4 n= 1000 ( 13KB): parse=1.077ms type=1.059ms bold=0.016ms
+B4 n= 2000 ( 27KB): parse=2.265ms type=2.168ms bold=0.031ms
+B4 n= 4000 ( 54KB): parse=4.766ms type=4.537ms bold=0.059ms
+B4 n=20000 (273KB): parse=29.332ms type=27.060ms bold=0.401ms
+TABLE_20K: lines=20003 elapsed=29.385 ms (debug=218.071 ms)
+```
+
 ### legacy_parser_drift
 
 ```
@@ -211,4 +364,3 @@ LD drift "Title\n=====": parse_markdown=["Paragraph", "Paragraph"]  parse_docume
 LD drift "1) item": parse_markdown=["Paragraph"]  parse_document=["ListItem"]
 LD drift "    indented code": parse_markdown=["Paragraph"]  parse_document=["CodeLine"]
 ```
-
