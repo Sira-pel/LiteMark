@@ -369,6 +369,42 @@ fn doc_start_and_end_navigation() {
     assert_eq!(doc.selection_range(), 7..16);
 }
 
+/// Audit F04: `indent` counts Unicode whitespace in bytes, and the heading
+/// toggle cut it at byte 3, which can land inside a multi-byte character.
+#[test]
+fn heading_toggle_with_multibyte_indent_does_not_panic() {
+    for indent in [
+        "\u{a0}\u{a0}",
+        "  \u{a0}",
+        " \u{a0}\u{a0}",
+        "\u{3000}\u{3000}",
+        "\u{2009}",
+        "\u{a0}",
+    ] {
+        for level in ["h1", "h3", "h6"] {
+            let text = format!("{indent}Title\nParagraph");
+            let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), text, None, None);
+            doc.caret.move_to(indent.len() + 2);
+            doc.apply_format(level);
+            let first = doc.content.lines().next().unwrap().to_string();
+            let hashes = "#".repeat(level[1..].parse().unwrap());
+            assert!(
+                first.ends_with(&format!("{hashes} Title")),
+                "{indent:?} {level}: {first:?}"
+            );
+            assert!(doc.content.ends_with("\nParagraph"), "{:?}", doc.content);
+            assert!(doc.content.is_char_boundary(doc.caret.range.start));
+            // Toggling the same level again removes it without panicking.
+            doc.apply_format(level);
+            assert!(
+                !doc.content.lines().next().unwrap().contains('#'),
+                "{:?}",
+                doc.content
+            );
+        }
+    }
+}
+
 #[test]
 fn heading_toggle_and_level_switching() {
     let mut doc = DocumentTab::new(

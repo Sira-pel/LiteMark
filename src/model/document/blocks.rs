@@ -197,7 +197,10 @@ impl DocumentTab {
             let (indent, _existing, prefix_end) =
                 parse_line_block_prefix(&parsed, &self.content, line_at[idx]);
             let leading_spaces = if matches!(target, BlockFormatTarget::Heading(_)) {
-                &line[..indent.min(3)]
+                // A heading keeps at most 3 bytes of indent. `indent` also
+                // counts multi-byte whitespace (U+00A0, U+3000), so round
+                // down to a character boundary instead of cutting one.
+                &line[..floor_boundary(line, indent.min(3))]
             } else {
                 &line[..indent]
             };
