@@ -115,7 +115,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_open_file();
+                    this.handle_open_file(cx);
                     cx.notify();
                 });
             }
@@ -805,6 +805,15 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.workspace_menu_open = !this.workspace_menu_open;
+                    if this.workspace_menu_open {
+                        this.workspace_menu_recents = this
+                            .settings
+                            .recent_folders
+                            .iter()
+                            .filter(|p| p.is_dir())
+                            .cloned()
+                            .collect();
+                    }
                     this.sidebar_menu = None;
                     cx.notify();
                 });
@@ -938,6 +947,7 @@ impl Render for LiteMarkApp {
         };
 
         let window_width = window.viewport_size().width;
+        let sidebar_scroll_to_selected = std::mem::take(&mut self.sidebar_scroll_to_selected);
         let is_narrow = window_width < px(640.0);
 
         let menu_bar_element = render_menu_bar(
@@ -1387,6 +1397,8 @@ impl Render for LiteMarkApp {
                                             .active_multi()
                                             .map(|m| m.items.clone())
                                             .unwrap_or_default(),
+                                        scroll_handle: self.sidebar_scroll.clone(),
+                                        scroll_to_selected: sidebar_scroll_to_selected,
                                     },
                                     &theme,
                                 );
@@ -1465,10 +1477,9 @@ impl Render for LiteMarkApp {
                             })
                             .when(self.workspace_menu_open && self.show_sidebar, |parent| {
                 let recents: Vec<(String, PathBuf)> = self
-                    .settings
-                    .recent_folders
+                    .workspace_menu_recents
                     .iter()
-                    .filter(|p| p.is_dir() && **p != self.workspace.folder_path)
+                    .filter(|p| **p != self.workspace.folder_path)
                     .map(|p| {
                         let name = p
                             .file_name()

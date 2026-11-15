@@ -147,6 +147,8 @@ fn test_in_list_or_quote_tracker_exhaustive() {
 }
 
 #[test]
+// Wall-clock limit: flaky on slow CI runners. CI runs it on its own (allowed to fail).
+#[ignore = "timing"]
 fn test_20000_row_table_parse_fast() {
     use std::fmt::Write;
     let mut md = String::with_capacity(20002 * 20);

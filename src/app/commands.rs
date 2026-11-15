@@ -346,13 +346,23 @@ impl LiteMarkApp {
             self.begin_save_naming(&id, cx);
             return;
         }
+        match self.disk_change_for(&id) {
+            DiskChange::Unchanged => {}
+            change => {
+                self.show_prompt(Prompt::ExternalChange {
+                    id,
+                    deleted: change == DiskChange::Deleted,
+                });
+                return;
+            }
+        }
         match self.save_tab(&id) {
             Ok(title) => self.show_toast(format!("Saved {title}"), cx),
             Err(err) => self.show_file_error(err),
         }
     }
 
-    pub fn handle_open_file(&mut self) {
+    pub fn handle_open_file(&mut self, cx: &mut Context<Self>) {
         if let Some(message) = file_dialog_error() {
             self.show_error(message);
             return;
@@ -377,25 +387,89 @@ impl LiteMarkApp {
                 self.prompt_selected_ix = 0;
                 return;
             }
-            match extract_text_from_pdf(&path) {
-                Ok((extracted_md, pages)) => {
-                    let new_id = self.tab_ids.alloc();
-                    let mut tab =
-                        DocumentTab::new(new_id.clone(), name, extracted_md, Some(path), None);
-                    tab.file_type = FileType::Pdf;
-                    tab.pdf_page_count = Some(pages);
-                    self.tabs.push(tab);
-                    self.active_tab_id = new_id;
-                    self.show_pdf_modal = true;
-                    self.prompt_selected_ix = 0;
-                }
-                Err(err) => self.show_error(format!("Couldn't open PDF: {err}")),
-            }
+            self.open_pdf_in_background(name, path, cx);
         } else {
             match read_note(&path) {
                 Ok(content) => self.open_loaded_tab(name, content, Some(path), None),
                 Err(err) => self.show_error(err),
             }
+        }
+    }
+
+    /// Extract a PDF's text off the UI thread, then open it as a read-only
+    /// tab. One PDF is extracted at a time.
+    fn open_pdf_in_background(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
+        if self.pdf_opening.is_some() {
+            self.show_toast("Still opening a PDF…", cx);
+            return;
+        }
+        self.pdf_opening = Some(path.clone());
+        self.show_toast(format!("Opening {name}…"), cx);
+        let started = PdfOpenStart {
+            tab_id: self.active_tab_id.clone(),
+            toast_epoch: self.toast_epoch,
+        };
+        let task = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { extract_text_from_pdf(&path) }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.finish_pdf_open(name, path, result, &started, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show a PDF whose text extraction just finished. The progress toast
+    /// goes only if no other toast replaced it, and the PDF takes over the
+    /// window only if the user is still on the tab they opened it from.
+    pub(super) fn finish_pdf_open(
+        &mut self,
+        name: String,
+        path: PathBuf,
+        result: Result<(String, usize), String>,
+        started: &PdfOpenStart,
+        cx: &mut Context<Self>,
+    ) {
+        self.pdf_opening = None;
+        if self.toast_epoch == started.toast_epoch {
+            self.saved_toast = None;
+        }
+        let (extracted_md, pages) = match result {
+            Ok(extracted) => extracted,
+            Err(err) => {
+                self.show_error(format!("Couldn't open PDF: {err}"));
+                return;
+            }
+        };
+        let still_there = self.active_tab_id == started.tab_id;
+        let paths: Vec<Option<&Path>> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.file_path.as_deref())
+            .collect();
+        let existing = tab_index_for_path(&paths, &path);
+        let opened_new = existing.is_none();
+        let id = if let Some(index) = existing {
+            self.tabs[index].id.clone()
+        } else {
+            let new_id = self.tab_ids.alloc();
+            let mut tab = DocumentTab::new(new_id.clone(), name.clone(), extracted_md, Some(path), None);
+            tab.file_type = FileType::Pdf;
+            tab.pdf_page_count = Some(pages);
+            self.tabs.push(tab);
+            new_id
+        };
+        if still_there {
+            self.active_tab_id = id;
+            self.show_pdf_modal = true;
+            self.prompt_selected_ix = 0;
+        } else if opened_new {
+            self.show_toast(format!("Opened {name} in a new tab"), cx);
         }
     }
 
@@ -682,6 +756,7 @@ impl LiteMarkApp {
                     }
                     type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
                     tab.is_modified = false;
+                    tab.disk_version = disk_version(&path, &tab.file_text());
                     let title = tab.title.clone();
                     self.show_toast(format!("Saved {title}"), cx);
                 }
@@ -883,4 +958,10 @@ impl LiteMarkApp {
             tab.select_all();
         }
     }
+}
+
+/// What was on screen when a PDF started opening.
+pub(super) struct PdfOpenStart {
+    pub(super) tab_id: String,
+    pub(super) toast_epoch: u64,
 }

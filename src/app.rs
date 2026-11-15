@@ -91,6 +91,12 @@ pub(crate) enum Prompt {
     /// A new workspace folder was picked; ask whether to copy the current
     /// note into it before switching.
     SwitchWorkspace { new_dir: PathBuf },
+    /// Ctrl+S on a tab whose file another program changed (or deleted)
+    /// since the tab read it.
+    ExternalChange {
+        id: String,
+        deleted: bool,
+    },
 }
 
 /// What to resume after an untitled tab is saved with a chosen name.
@@ -132,6 +138,11 @@ pub struct LiteMarkApp {
     /// True while the sidebar tree owns arrow-key navigation.
     pub sidebar_keyboard: bool,
     pub sidebar_focus_handle: FocusHandle,
+    /// Scroll position of the sidebar's virtualized list.
+    pub sidebar_scroll: UniformListScrollHandle,
+    /// Set when the keyboard moves the sidebar selection; the next frame
+    /// scrolls the selected row into view, from this side.
+    pub sidebar_scroll_to_selected: Option<ScrollStrategy>,
     pub zen_mode: bool,
     pub zen_notice: bool,
     pub saved_toast: Option<String>,
@@ -163,6 +174,9 @@ pub struct LiteMarkApp {
     caret_followed: Option<(String, Range<usize>, usize)>,
     caret_follow_waits: u8,
     scroll_momentum: crate::ui::editor::ScrollMomentum,
+    /// Clock for touchpad momentum. `None` is the real clock; tests set and
+    /// advance it so the coast doesn't depend on how fast the machine runs.
+    pub(crate) scroll_clock: Option<std::time::Instant>,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
     pub find_hits: Vec<Range<usize>>,
@@ -175,11 +189,16 @@ pub struct LiteMarkApp {
     pub toast_epoch: u64,
     /// An update check is running; further checks are ignored until it ends.
     update_check_running: bool,
+    /// The PDF whose text is being extracted in the background, if any.
+    pdf_opening: Option<PathBuf>,
     pub available_update: Option<ReleaseInfo>,
     pub pending_find_focus: bool,
     pub pending_rename_focus: bool,
     pub sidebar_menu: Option<SidebarMenu>,
     pub workspace_menu_open: bool,
+    /// Recent folders that still exist, checked when the workspace menu
+    /// opens rather than on every frame it is open.
+    workspace_menu_recents: Vec<PathBuf>,
     pub rename_target: Option<SidebarTarget>,
     pub rename_value: String,
     pub rename_field: Entity<LineField>,
@@ -229,7 +248,12 @@ impl LiteMarkApp {
                 .unwrap_or("Untitled.md")
                 .to_string();
             match read_note(&path) {
-                Ok(content) => DocumentTab::new(first_id.clone(), name, content, Some(path), None),
+                Ok(content) => {
+                    let mut tab = DocumentTab::new(first_id.clone(), name, content, None, None);
+                    tab.disk_version = disk_version(&path, &tab.file_text());
+                    tab.file_path = Some(path);
+                    tab
+                }
                 Err(err) => {
                     error_message = Some(err);
                     Self::welcome_tab(&workspace, first_id.clone())
@@ -238,6 +262,9 @@ impl LiteMarkApp {
         } else {
             Self::welcome_tab(&workspace, first_id.clone())
         };
+        if workspace.scan_truncated && error_message.is_none() {
+            error_message = Some(scan_truncated_message());
+        }
 
         let app_handle = cx.weak_entity();
         let find_field = cx.new({
@@ -465,6 +492,8 @@ impl LiteMarkApp {
             menu_items_cache: Vec::new(),
             sidebar_keyboard: false,
             sidebar_focus_handle: cx.focus_handle(),
+            sidebar_scroll: UniformListScrollHandle::new(),
+            sidebar_scroll_to_selected: None,
             zen_mode: false,
             zen_notice: false,
             saved_toast: None,
@@ -490,6 +519,7 @@ impl LiteMarkApp {
             caret_followed: None,
             caret_follow_waits: 0,
             scroll_momentum: Default::default(),
+            scroll_clock: None,
             find_field,
             replace_field,
             find_hits: Vec::new(),
@@ -501,11 +531,13 @@ impl LiteMarkApp {
             zoom_epoch: 0,
             toast_epoch: 0,
             update_check_running: false,
+            pdf_opening: None,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
             sidebar_menu: None,
             workspace_menu_open: false,
+            workspace_menu_recents: Vec::new(),
             rename_target: None,
             rename_value: String::new(),
             rename_field,
@@ -568,6 +600,7 @@ impl LiteMarkApp {
                 is_linked_to_local_disk: false,
                 folders: Vec::new(),
                 files: Vec::new(),
+                scan_truncated: false,
             },
             settings: EditorSettings {
                 check_for_updates: false,
@@ -586,6 +619,8 @@ impl LiteMarkApp {
             menu_items_cache: Vec::new(),
             sidebar_keyboard: false,
             sidebar_focus_handle: cx.focus_handle(),
+            sidebar_scroll: UniformListScrollHandle::new(),
+            sidebar_scroll_to_selected: None,
             zen_mode: false,
             zen_notice: false,
             saved_toast: None,
@@ -611,6 +646,7 @@ impl LiteMarkApp {
             caret_followed: None,
             caret_follow_waits: 0,
             scroll_momentum: Default::default(),
+            scroll_clock: None,
             find_field: Self::dummy_line_field(cx, "find-field"),
             replace_field: Self::dummy_line_field(cx, "replace-field"),
             find_hits: Vec::new(),
@@ -622,11 +658,13 @@ impl LiteMarkApp {
             zoom_epoch: 0,
             toast_epoch: 0,
             update_check_running: false,
+            pdf_opening: None,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
             sidebar_menu: None,
             workspace_menu_open: false,
+            workspace_menu_recents: Vec::new(),
             rename_target: None,
             rename_value: String::new(),
             rename_field: Self::dummy_line_field(cx, "rename-field"),
@@ -657,13 +695,15 @@ impl LiteMarkApp {
             .find(|file| file.name == "Welcome.md")
         {
             if let Ok(content) = read_note(&file.path) {
-                return DocumentTab::new(
+                let mut tab = DocumentTab::new(
                     id,
                     file.name.clone(),
                     content,
                     Some(file.path.clone()),
                     Some(file.id.clone()),
                 );
+                tab.disk_version = disk_version(&file.path, &tab.file_text());
+                return tab;
             }
         }
         DocumentTab::new(
@@ -772,9 +812,21 @@ mod viewport_culling_tests;
 mod note_drop_tests;
 
 #[cfg(test)]
+#[path = "disk_change_tests.rs"]
+mod disk_change_tests;
+
+#[cfg(test)]
 #[path = "typing_tests.rs"]
 mod typing_tests;
 
 #[cfg(test)]
 #[path = "find_panel_tests.rs"]
 mod find_panel_tests;
+
+#[cfg(test)]
+#[path = "pdf_open_tests.rs"]
+mod pdf_open_tests;
+
+#[cfg(test)]
+#[path = "sidebar_render_tests.rs"]
+mod sidebar_render_tests;

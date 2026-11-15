@@ -10,12 +10,16 @@ impl LiteMarkApp {
         match ev.delta {
             _ if !cfg!(target_os = "linux") => {}
             ScrollDelta::Pixels(d) => {
-                self.scroll_momentum
-                    .on_event(std::time::Instant::now(), f32::from(d.y));
+                let now = self.scroll_now();
+                self.scroll_momentum.on_event(now, f32::from(d.y));
                 cx.notify(); // render asks for the animation frames
             }
             ScrollDelta::Lines(_) => self.scroll_momentum.cancel(),
         }
+    }
+
+    fn scroll_now(&self) -> std::time::Instant {
+        self.scroll_clock.unwrap_or_else(std::time::Instant::now)
     }
 
     /// Touchpad momentum: one frame of the coast after the fingers lift.
@@ -23,12 +27,14 @@ impl LiteMarkApp {
         if self.scroll_momentum.is_idle() {
             return;
         }
-        let step = self.scroll_momentum.tick(std::time::Instant::now());
+        let now = self.scroll_now();
+        let step = self.scroll_momentum.tick(now);
         if let Some(step) = step {
             let offset = self.editor_scroll.offset();
             let max = self.editor_scroll.max_offset().height;
             let y = (offset.y + px(step)).clamp(-max, px(0.0));
-            if y == offset.y {
+            // A zero step (the first frame of a coast) is not the edge.
+            if y == offset.y && step != 0.0 {
                 self.scroll_momentum.cancel(); // hit the top or bottom
             } else {
                 self.editor_scroll.set_offset(point(offset.x, y));

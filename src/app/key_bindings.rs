@@ -115,7 +115,7 @@ impl LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenFile, _window, cx| {
-                this.handle_open_file();
+                this.handle_open_file(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &NewTab, _window, cx| {
@@ -427,6 +427,7 @@ impl LiteMarkApp {
                 if this.sidebar_keyboard {
                     if let Some(first) = this.sidebar_visible_targets().first().cloned() {
                         this.selected_target = Some(first);
+                        this.sidebar_scroll_to_selected = Some(ScrollStrategy::Top);
                         cx.notify();
                     }
                 } else if this.open_menu.is_some() && this.open_menu != Some(MenuId::Table) {
@@ -441,6 +442,7 @@ impl LiteMarkApp {
                 if this.sidebar_keyboard {
                     if let Some(last) = this.sidebar_visible_targets().last().cloned() {
                         this.selected_target = Some(last);
+                        this.sidebar_scroll_to_selected = Some(ScrollStrategy::Bottom);
                         cx.notify();
                     }
                 } else if this.open_menu.is_some() && this.open_menu != Some(MenuId::Table) {

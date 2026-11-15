@@ -38,6 +38,7 @@ impl LiteMarkApp {
     /// original file on disk is never removed.
     pub(super) fn apply_workspace_switch(&mut self, new_dir: PathBuf, migrate_from: Option<PathBuf>) {
         let mut migrated = None;
+        let mut copy_error = None;
         if let Some(old_path) = migrate_from {
             let content = self
                 .active_tab()
@@ -45,11 +46,18 @@ impl LiteMarkApp {
                 .unwrap_or_default();
             match copy_note_into_workspace(&old_path, &new_dir, &content) {
                 Ok(new_path) => migrated = Some(new_path),
-                Err(err) => self.show_file_error(format!("Couldn't copy note: {err}")),
+                Err(err) => {
+                    copy_error = Some(crate::services::fs_service::with_access_denied_hint(
+                        format!("Couldn't copy note: {err}"),
+                    ))
+                }
             }
         }
         let left = self.workspace.folder_path.clone();
         self.workspace = scan_workspace_dir(&new_dir, self.settings.show_code_files);
+        if let Some(message) = switch_error(copy_error, self.workspace.scan_truncated) {
+            self.show_error(message);
+        }
         self.settings.remember_folders(&left, &new_dir);
         self.save_settings();
         self.workspace_menu_open = false;
@@ -58,6 +66,7 @@ impl LiteMarkApp {
                 if let Some(name) = new_path.file_name().and_then(|n| n.to_str()) {
                     tab.title = name.to_string();
                 }
+                tab.disk_version = disk_version(&new_path, &tab.file_text());
                 tab.file_path = Some(new_path);
                 tab.is_modified = false;
             }
@@ -291,10 +300,9 @@ impl LiteMarkApp {
         let Some(tab_id) = self.save_as_tab.clone() else {
             return;
         };
-        let raw = name_override
-            .unwrap_or_else(|| self.rename_value.clone())
-            .trim()
-            .to_string();
+        // The same cleanup as New Note and Rename: no folders, `..` or
+        // absolute paths, and no names Windows can't hold.
+        let raw = sanitize_name(&name_override.unwrap_or_else(|| self.rename_value.clone()));
         if raw.is_empty() {
             self.show_error("Enter a name.");
             return;
@@ -329,19 +337,10 @@ impl LiteMarkApp {
 
     /// Continue the close-window flow after a tab was saved with a name:
     /// name the next untitled dirty tab, or finish the save-all.
+    /// Same as Save on the close-window prompt, so a note changed on disk
+    /// gets the "Changed on disk" prompt here too.
     pub(super) fn resume_close_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.first_unnamed_dirty_tab() {
-            self.pending_after_save = Some(PendingAfterSave::CloseWindow);
-            self.begin_save_naming(&id, cx);
-            return;
-        }
-        match self.save_all_dirty() {
-            Ok(()) => self.allow_window_close = true,
-            Err(err) => {
-                self.show_file_error(err);
-                self.show_prompt(Prompt::CloseWindow);
-            }
-        }
+        self.save_all_then_close(cx);
     }
 
     pub(super) fn commit_rename(&mut self, name_override: Option<String>, _cx: &mut Context<Self>) {
@@ -654,5 +653,33 @@ impl LiteMarkApp {
             self.save_tab(&id)?;
         }
         Ok(())
+    }
+}
+
+/// The error a folder switch shows. A failed copy comes first, since that is
+/// the one the user has to act on; a truncated listing is added after it.
+fn switch_error(copy_error: Option<String>, scan_truncated: bool) -> Option<String> {
+    let truncated = scan_truncated.then(scan_truncated_message);
+    match (copy_error, truncated) {
+        (Some(copy), Some(truncated)) => Some(format!("{copy}\n\n{truncated}")),
+        (copy, truncated) => copy.or(truncated),
+    }
+}
+
+#[cfg(test)]
+mod switch_error_tests {
+    use super::*;
+    // `use gpui::*` brings in a `test` attribute that is not Rust's `#[test]`.
+    use ::core::prelude::v1::test as std_test;
+
+    #[std_test]
+    fn a_truncated_scan_does_not_hide_a_failed_copy() {
+        let copy = "Couldn't copy note: disk full".to_string();
+        let both = switch_error(Some(copy.clone()), true).unwrap();
+        assert!(both.starts_with(&copy), "{both}");
+        assert!(both.ends_with(&scan_truncated_message()), "{both}");
+        assert_eq!(switch_error(Some(copy.clone()), false), Some(copy));
+        assert_eq!(switch_error(None, true), Some(scan_truncated_message()));
+        assert_eq!(switch_error(None, false), None);
     }
 }
