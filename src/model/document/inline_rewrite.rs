@@ -776,7 +776,10 @@ pub(super) fn segment_raw_range(content: &str, source: &Range<usize>) -> Range<u
     if start > 0
         && content.as_bytes().get(start - 1) == Some(&b'\\')
         && content[start..].chars().next().is_some_and(|c| c.is_ascii_punctuation())
-        && content.as_bytes().get(start - 2) != Some(&b'\\')
+        && start
+            .checked_sub(2)
+            .and_then(|at| content.as_bytes().get(at))
+            != Some(&b'\\')
     {
         start -= 1;
     }
