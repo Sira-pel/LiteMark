@@ -3376,6 +3376,24 @@ mod tests {
     }
 
     #[test]
+    fn selection_highlights_an_empty_row_it_spans() {
+        // "a\n\nb": the empty row is at offset 2, selected from 0..4.
+        let mut quads = Vec::new();
+        super::paint_ranges_mapped(
+            &mut quads,
+            point(px(0.0), px(0.0)),
+            px(20.0),
+            2,
+            2,
+            &RowOffsetMap::identity(2, 2),
+            &ShapedLine::default(),
+            &(0..4),
+            gpui::hsla(0.0, 0.0, 1.0, 0.5),
+        );
+        assert_eq!(quads.len(), 1);
+    }
+
+    #[test]
     fn test_column_sizing_short_stays_narrow_long_shares_remaining() {
         let md = "| ID | Status | Description |\n| --- | --- | --- |\n| 1 | OK | A very long description text that needs much more space than the short ID or Status columns |";
         let doc = parse_document(md);

@@ -244,6 +244,7 @@ pub struct LiteMarkApp {
 impl LiteMarkApp {
     pub fn new(initial_file: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let settings = EditorSettings::load();
+        let show_sidebar = settings.show_sidebar;
         // Told once here; save_settings stays quiet about it afterwards.
         let settings_save_failed = settings.save_blocked.is_some();
         let settings_warning = settings.save_blocked.clone();
@@ -492,7 +493,7 @@ impl LiteMarkApp {
             multi_selection: None,
             workspace,
             settings,
-            show_sidebar: false,
+            show_sidebar,
             show_find_replace: false,
             show_replace_row: false,
             show_shortcuts_modal: false,
