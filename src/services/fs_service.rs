@@ -695,16 +695,18 @@ pub fn safe_delete(path: &Path, is_dir: bool) -> io::Result<()> {
     }
 }
 
-/// Folders the scan never descends into: VCS metadata and build output.
 /// Extensions of common binary formats. Without this every unknown file
 /// counts as plain text, so images, video and disk images show up as notes.
+/// Short or generic extensions (`a`, `o`, `bin`, `dat`, `db`) are left out:
+/// plain-text files use them too, and hiding a note is worse than listing a
+/// binary file, which `read_note` refuses to open anyway.
 const BINARY_EXTENSIONS: &[&str] = &[
-    "7z", "a", "aac", "apk", "app", "avi", "avif", "bin", "bmp", "bz2", "class", "dat", "db", "deb",
-    "dll", "dmg", "doc", "docx", "dylib", "epub", "exe", "flac", "gif", "gz", "heic", "ico", "img",
-    "iso", "jar", "jpeg", "jpg", "m4a", "m4v", "mkv", "mov", "mp3", "mp4", "mpg", "msi", "o", "odt",
-    "ogg", "opus", "otf", "pkg", "png", "ppt", "pptx", "psd", "pyc", "rar", "rpm", "so", "sqlite",
-    "tar", "tgz", "tif", "tiff", "ttf", "vmdk", "wav", "webm", "webp", "woff", "woff2", "xls",
-    "xlsx", "xz", "zip", "zst",
+    "7z", "aac", "apk", "app", "avi", "avif", "bmp", "bz2", "class", "deb", "dll", "dmg", "doc",
+    "docx", "dylib", "epub", "exe", "flac", "gif", "gz", "heic", "ico", "img", "iso", "jar", "jpeg",
+    "jpg", "m4a", "m4v", "mkv", "mov", "mp3", "mp4", "mpg", "msi", "odt", "ogg", "opus", "otf",
+    "pkg", "png", "ppt", "pptx", "psd", "pyc", "rar", "rpm", "so", "sqlite", "tar", "tgz", "tif",
+    "tiff", "ttf", "vmdk", "wav", "webm", "webp", "woff", "woff2", "xls", "xlsx", "xz", "zip",
+    "zst",
 ];
 
 fn has_binary_extension(name: &str) -> bool {
@@ -713,16 +715,17 @@ fn has_binary_extension(name: &str) -> bool {
     })
 }
 
+/// Folders the scan never descends into: VCS metadata and build output.
 const SKIPPED_ENTRIES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store", "node_modules", "target"];
 
-/// List the notes folder. Dotfiles are listed; only `SKIPPED_ENTRIES` are left out.
-/// Code files are listed only when `show_code_files` is set.
 /// Modification time of `path` in Unix seconds, as the sidebar stores it.
 pub fn modified_secs(path: &Path) -> Option<u64> {
     let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
     modified.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
+/// List the notes folder. Dotfiles are listed; only `SKIPPED_ENTRIES` are left out.
+/// Code files are listed only when `show_code_files` is set.
 pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirectory {
     let folder_name = if let Some(name) = dir.file_name().and_then(|f| f.to_str()) {
         format!("📁 {}", name)
@@ -844,6 +847,17 @@ pub fn pick_directory() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_extensions_hide_media_but_not_generic_names() {
+        for name in ["photo.png", "Clip.MP4", "disk.iso", "notes.sqlite"] {
+            assert!(has_binary_extension(name), "{name}");
+        }
+        // Text files use these too; they stay listed.
+        for name in ["data.dat", "lib.a", "main.o", "notes.db", "config.bin", ".png", "README"] {
+            assert!(!has_binary_extension(name), "{name}");
+        }
+    }
 
     #[test]
     fn test_sanitize_name() {
