@@ -1,10 +1,10 @@
+use super::document::ViewMode;
+use crate::services::fs_service::atomic_save;
+use crate::theme::ThemeMode;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use crate::services::fs_service::atomic_save;
-use crate::theme::ThemeMode;
-use super::document::ViewMode;
 
 fn default_show_code_files() -> bool {
     true
@@ -187,7 +187,9 @@ impl EditorSettings {
     /// Pull out-of-range numbers back to what the UI can produce, so a
     /// hand-edited or damaged file can't make text invisible or enormous.
     fn clamped(mut self) -> Self {
-        self.zoom_level = self.zoom_level.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
+        self.zoom_level = self
+            .zoom_level
+            .clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
         self.base_font_size = if self.base_font_size.is_finite() {
             self.base_font_size
                 .clamp(*FONT_SIZE_RANGE.start(), *FONT_SIZE_RANGE.end())
@@ -224,9 +226,17 @@ impl EditorSettings {
             let mut source = fs::File::open(path)?;
             for n in 0..MAX_SETTINGS_BACKUPS {
                 let mut name = path.as_os_str().to_os_string();
-                name.push(if n == 0 { ".bak".to_string() } else { format!(".bak.{n}") });
+                name.push(if n == 0 {
+                    ".bak".to_string()
+                } else {
+                    format!(".bak.{n}")
+                });
                 let backup = PathBuf::from(name);
-                let mut dest = match fs::OpenOptions::new().write(true).create_new(true).open(&backup) {
+                let mut dest = match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&backup)
+                {
                     Ok(dest) => dest,
                     Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
                     Err(err) => return Err(err),
@@ -283,14 +293,18 @@ mod tests {
     #[test]
     fn test_content_alignment_serde() {
         let default_settings = EditorSettings::default();
-        assert_eq!(default_settings.content_alignment, ContentAlignment::Centered);
+        assert_eq!(
+            default_settings.content_alignment,
+            ContentAlignment::Centered
+        );
 
         let json = serde_json::to_string(&default_settings).expect("serialize");
         let parsed: EditorSettings = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.content_alignment, ContentAlignment::Centered);
 
         let custom = r#"{"content_alignment": "Left"}"#;
-        let parsed_custom: EditorSettings = serde_json::from_str(custom).expect("deserialize custom");
+        let parsed_custom: EditorSettings =
+            serde_json::from_str(custom).expect("deserialize custom");
         assert_eq!(parsed_custom.content_alignment, ContentAlignment::Left);
     }
 
@@ -323,7 +337,8 @@ mod tests {
     }
 
     fn temp_settings_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("litemark-settings-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("litemark-settings-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -461,7 +476,10 @@ mod tests {
         assert_eq!(loaded.zoom_level, *ZOOM_RANGE.end());
         assert_eq!(loaded.base_font_size, *FONT_SIZE_RANGE.start());
         fs::write(&path, r#"{"zoom_level": 0}"#).unwrap();
-        assert_eq!(EditorSettings::load_from(&path).zoom_level, *ZOOM_RANGE.start());
+        assert_eq!(
+            EditorSettings::load_from(&path).zoom_level,
+            *ZOOM_RANGE.start()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

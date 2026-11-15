@@ -1,8 +1,8 @@
+use super::primitives::render_icon;
+use crate::theme::{sz, Theme};
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
-use crate::theme::{sz, Theme};
-use super::primitives::render_icon;
 
 #[derive(Clone)]
 pub enum MenuItemKind {
@@ -107,11 +107,7 @@ impl MenuItem {
         }
     }
 
-    pub fn submenu(
-        label: &'static str,
-        icon: Option<&'static str>,
-        items: Vec<MenuItem>,
-    ) -> Self {
+    pub fn submenu(label: &'static str, icon: Option<&'static str>, items: Vec<MenuItem>) -> Self {
         Self {
             label,
             icon,
@@ -193,10 +189,21 @@ pub fn content_width(items: &[MenuItem]) -> Pixels {
         .filter(|it| !matches!(it.kind, MenuItemKind::Divider | MenuItemKind::Heading))
         .map(|it| {
             let label = it.label.chars().count() as f32 * 7.5;
-            let hint = it.hint.as_ref().map_or(0.0, |h| h.chars().count() as f32 * 6.5 + 18.0);
+            let hint = it
+                .hint
+                .as_ref()
+                .map_or(0.0, |h| h.chars().count() as f32 * 6.5 + 18.0);
             let shortcut = it.shortcut.map_or(0.0, |s| s.chars().count() as f32 * 7.0);
-            let chevron = if matches!(it.kind, MenuItemKind::Submenu(_)) { 20.0 } else { 0.0 };
-            let gaps = if hint > 0.0 && shortcut > 0.0 { 8.0 } else { 0.0 };
+            let chevron = if matches!(it.kind, MenuItemKind::Submenu(_)) {
+                20.0
+            } else {
+                0.0
+            };
+            let gaps = if hint > 0.0 && shortcut > 0.0 {
+                8.0
+            } else {
+                0.0
+            };
             // 24 = row px(12) * 2, 12 = gap between left and right sides
             label + hint + shortcut + chevron + gaps + 24.0 + 12.0
         })
@@ -248,30 +255,34 @@ where
     FClose: Fn(&mut App) + 'static + Clone,
     FSubmenu: Fn(Option<usize>, &mut App) + 'static + Clone,
 {
-    let has_checks = items.iter().any(|it| matches!(it.kind, MenuItemKind::Check(_) | MenuItemKind::Radio(_)));
+    let has_checks = items
+        .iter()
+        .any(|it| matches!(it.kind, MenuItemKind::Check(_) | MenuItemKind::Radio(_)));
 
-    let rows: Vec<AnyElement> = items.into_iter().enumerate().map(|(ix, item)| {
+    let rows: Vec<AnyElement> = items
+        .into_iter()
+        .enumerate()
+        .map(|(ix, item)| {
             match item.kind {
-                MenuItemKind::Divider => {
-                    div()
-                        .my(px(4.0))
-                        .mx(px(8.0))
-                        .h(px(1.0))
-                        .bg(theme.border_surface)
-                        .into_any_element()
-                }
-                MenuItemKind::Heading => {
-                    div()
-                        .px(px(12.0))
-                        .pt(px(6.0))
-                        .pb(px(4.0))
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_faint)
-                        .child(item.label)
-                        .into_any_element()
-                }
-                MenuItemKind::Action | MenuItemKind::Check(_) | MenuItemKind::Radio(_) | MenuItemKind::Submenu(_) => {
+                MenuItemKind::Divider => div()
+                    .my(px(4.0))
+                    .mx(px(8.0))
+                    .h(px(1.0))
+                    .bg(theme.border_surface)
+                    .into_any_element(),
+                MenuItemKind::Heading => div()
+                    .px(px(12.0))
+                    .pt(px(6.0))
+                    .pb(px(4.0))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_faint)
+                    .child(item.label)
+                    .into_any_element(),
+                MenuItemKind::Action
+                | MenuItemKind::Check(_)
+                | MenuItemKind::Radio(_)
+                | MenuItemKind::Submenu(_) => {
                     let act = item.action.clone();
                     let is_selected = selected_index == Some(ix);
                     let cls = on_close.clone();
@@ -295,24 +306,28 @@ where
                         .px(px(12.0))
                         .rounded(px(5.0))
                         .text_size(px(13.0))
-                        .when(is_disabled, |s| {
-                            s.text_color(theme.menu_disabled)
-                        })
+                        .when(is_disabled, |s| s.text_color(theme.menu_disabled))
                         .when(!is_disabled, |s| {
                             let sub = on_set_submenu.clone();
                             s.cursor_pointer()
-                                .text_color(if is_selected || is_sub_open { theme.text_strong } else { theme.text_primary })
-                                .when(is_selected || is_sub_open, |sel| sel.bg(theme.border_subtle))
+                                .text_color(if is_selected || is_sub_open {
+                                    theme.text_strong
+                                } else {
+                                    theme.text_primary
+                                })
+                                .when(is_selected || is_sub_open, |sel| {
+                                    sel.bg(theme.border_subtle)
+                                })
                                 .hover(|h| h.bg(theme.border_subtle).text_color(theme.text_strong))
                                 .when(!is_submenu, |act_s| {
                                     let cls = cls.clone();
                                     let sub = sub.clone();
-                                    act_s
-                                        .on_mouse_move(move |_, _, cx| sub(None, cx))
-                                        .on_click(move |_, window, cx| {
+                                    act_s.on_mouse_move(move |_, _, cx| sub(None, cx)).on_click(
+                                        move |_, window, cx| {
                                             (act)(window, cx);
                                             cls(cx);
-                                        })
+                                        },
+                                    )
                                 })
                                 .when(is_submenu, |sub_s| {
                                     let sub_clk = sub.clone();
@@ -340,11 +355,19 @@ where
                                     .justify_start()
                                     .when(is_checked, |ck| {
                                         ck.child(render_icon("check", 14.0, theme.text_hi))
-                                    })
+                                    }),
                             )
                         })
                         .when_some(item.icon, |s, icon| {
-                            s.child(render_icon(icon, 14.0, if is_disabled { theme.menu_disabled } else { theme.text_muted }))
+                            s.child(render_icon(
+                                icon,
+                                14.0,
+                                if is_disabled {
+                                    theme.menu_disabled
+                                } else {
+                                    theme.text_muted
+                                },
+                            ))
                         })
                         .child(div().truncate().child(item.label));
 
@@ -366,19 +389,31 @@ where
                                     .border_color(theme.border_surface)
                                     .text_size(px(11.0))
                                     .text_color(theme.menu_hint)
-                                    .child(hint)
+                                    .child(hint),
                             )
                         })
                         .when_some(item.shortcut, |s, sc| {
                             s.child(
                                 div()
                                     .text_size(px(12.0))
-                                    .text_color(if is_selected { theme.menu_shortcut_active } else { theme.menu_shortcut })
-                                    .child(super::primitives::display_shortcut(sc))
+                                    .text_color(if is_selected {
+                                        theme.menu_shortcut_active
+                                    } else {
+                                        theme.menu_shortcut
+                                    })
+                                    .child(super::primitives::display_shortcut(sc)),
                             )
                         })
                         .when(is_submenu, |s| {
-                            s.child(render_icon("chevron-right", 12.0, if is_sub_open { theme.text_strong } else { theme.text_muted }))
+                            s.child(render_icon(
+                                "chevron-right",
+                                12.0,
+                                if is_sub_open {
+                                    theme.text_strong
+                                } else {
+                                    theme.text_muted
+                                },
+                            ))
                         });
 
                     row = row.child(right_side);
@@ -431,14 +466,18 @@ where
             if let MenuItemKind::Submenu(ref sub_items) = item.kind {
                 let y_offset = calculate_submenu_y_offset(&items, sub_ix);
                 let sub_w = calculate_submenu_width(item).min(max_width);
-                let is_right_anchored = matches!(
-                    anchor_corner,
-                    Corner::TopRight | Corner::BottomRight
-                );
+                let is_right_anchored =
+                    matches!(anchor_corner, Corner::TopRight | Corner::BottomRight);
                 let (sub_anchor, sub_point) = if is_right_anchored {
-                    (Corner::TopRight, Point::new(point.x - width - SUBMENU_GAP, point.y + y_offset))
+                    (
+                        Corner::TopRight,
+                        Point::new(point.x - width - SUBMENU_GAP, point.y + y_offset),
+                    )
                 } else {
-                    (Corner::TopLeft, Point::new(point.x + width + SUBMENU_GAP, point.y + y_offset))
+                    (
+                        Corner::TopLeft,
+                        Point::new(point.x + width + SUBMENU_GAP, point.y + y_offset),
+                    )
                 };
                 let sub_cls = cls.clone();
                 let theme_clone = *theme;
@@ -459,8 +498,8 @@ where
                                     sub_cls,
                                     |_, _: &mut App| {},
                                     &theme_clone,
-                                ))
-                        )
+                                )),
+                        ),
                 )
             } else {
                 None
@@ -485,7 +524,7 @@ where
                 .on_mouse_down(MouseButton::Left, {
                     let cls = cls.clone();
                     move |_, _, cx| cls(cx)
-                })
+                }),
         )
         .child(
             deferred(
@@ -507,15 +546,13 @@ where
                                 props.on_close,
                                 on_set_submenu,
                                 theme,
-                            ))
-                    )
+                            )),
+                    ),
             )
-            .with_priority(1)
+            .with_priority(1),
         )
         .when_some(submenu_element, |s, sub| {
-            s.child(
-                deferred(sub).with_priority(2)
-            )
+            s.child(deferred(sub).with_priority(2))
         })
 }
 
@@ -595,12 +632,27 @@ pub fn build_table_context_menu_items(
 
     if has_selection {
         let f_cut = on_cut.clone();
-        items.push(MenuItem::action("Cut", None, Some("Ctrl+X"), move |_, cx| f_cut(cx)));
+        items.push(MenuItem::action(
+            "Cut",
+            None,
+            Some("Ctrl+X"),
+            move |_, cx| f_cut(cx),
+        ));
         let f_copy = on_copy.clone();
-        items.push(MenuItem::action("Copy", None, Some("Ctrl+C"), move |_, cx| f_copy(cx)));
+        items.push(MenuItem::action(
+            "Copy",
+            None,
+            Some("Ctrl+C"),
+            move |_, cx| f_copy(cx),
+        ));
     }
     let f_paste = on_paste.clone();
-    items.push(MenuItem::action("Paste", None, Some("Ctrl+V"), move |_, cx| f_paste(cx)));
+    items.push(MenuItem::action(
+        "Paste",
+        None,
+        Some("Ctrl+V"),
+        move |_, cx| f_paste(cx),
+    ));
 
     items
 }
@@ -616,15 +668,35 @@ pub fn build_editor_context_menu_items(
 
     if has_selection {
         let f_cut = on_cut.clone();
-        items.push(MenuItem::action("Cut", None, Some("Ctrl+X"), move |_, cx| f_cut(cx)));
+        items.push(MenuItem::action(
+            "Cut",
+            None,
+            Some("Ctrl+X"),
+            move |_, cx| f_cut(cx),
+        ));
         let f_copy = on_copy.clone();
-        items.push(MenuItem::action("Copy", None, Some("Ctrl+C"), move |_, cx| f_copy(cx)));
+        items.push(MenuItem::action(
+            "Copy",
+            None,
+            Some("Ctrl+C"),
+            move |_, cx| f_copy(cx),
+        ));
     }
     let f_paste = on_paste.clone();
-    items.push(MenuItem::action("Paste", None, Some("Ctrl+V"), move |_, cx| f_paste(cx)));
+    items.push(MenuItem::action(
+        "Paste",
+        None,
+        Some("Ctrl+V"),
+        move |_, cx| f_paste(cx),
+    ));
     items.push(MenuItem::divider());
     let f_sel = on_select_all.clone();
-    items.push(MenuItem::action("Select all", None, Some("Ctrl+A"), move |_, cx| f_sel(cx)));
+    items.push(MenuItem::action(
+        "Select all",
+        None,
+        Some("Ctrl+A"),
+        move |_, cx| f_sel(cx),
+    ));
 
     items
 }
@@ -655,31 +727,29 @@ where
             cls2(cx);
             cx.stop_propagation();
         })
-        .child(
-            deferred(
-                anchored()
-                    .position(position)
-                    .anchor(Corner::TopLeft)
-                    .snap_to_window_with_margin(POPUP_MARGIN)
-                    .child(
-                        div()
-                            .track_focus(&focus_handle)
-                            .key_context("Menu")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                            .child(render_menu_panel(
-                                "context-menu-panel".into(),
-                                width,
-                                items,
-                                None,
-                                None,
-                                on_close,
-                                |_, _: &mut App| {},
-                                theme,
-                            )),
-                    ),
-            ),
-        )
+        .child(deferred(
+            anchored()
+                .position(position)
+                .anchor(Corner::TopLeft)
+                .snap_to_window_with_margin(POPUP_MARGIN)
+                .child(
+                    div()
+                        .track_focus(&focus_handle)
+                        .key_context("Menu")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .child(render_menu_panel(
+                            "context-menu-panel".into(),
+                            width,
+                            items,
+                            None,
+                            None,
+                            on_close,
+                            |_, _: &mut App| {},
+                            theme,
+                        )),
+                ),
+        ))
 }
 
 pub fn render_table_picker_menu<FHover, FPick, FEditAction, FClose, FSubmenu>(
@@ -862,7 +932,9 @@ where
                                     .text_size(px(13.0))
                                     .text_color(theme.text_primary)
                                     .cursor_pointer()
-                                    .hover(|h| h.bg(theme.border_subtle).text_color(theme.text_strong))
+                                    .hover(|h| {
+                                        h.bg(theme.border_subtle).text_color(theme.text_strong)
+                                    })
                                     .on_mouse_move(move |_, _, cx| sub_close(None, cx))
                                     .on_click(move |_, _, cx| {
                                         pick(cols, rows, cx);
@@ -892,11 +964,15 @@ where
                                             })
                                             .when(is_sub_open, |sel| sel.bg(theme.border_subtle))
                                             .hover(|h| {
-                                                h.bg(theme.border_subtle).text_color(theme.text_strong)
+                                                h.bg(theme.border_subtle)
+                                                    .text_color(theme.text_strong)
                                             })
                                             .on_mouse_move(move |_, _, cx| sub_hov(Some(1), cx))
                                             .on_click(move |_, _, cx| {
-                                                sub_clk(if is_sub_open { None } else { Some(1) }, cx);
+                                                sub_clk(
+                                                    if is_sub_open { None } else { Some(1) },
+                                                    cx,
+                                                );
                                             })
                                     })
                                     .child("Edit table")
@@ -939,8 +1015,14 @@ mod tests {
         ];
 
         assert_eq!(calculate_submenu_y_offset(&items, 0), MENU_PANEL_PAD);
-        assert_eq!(calculate_submenu_y_offset(&items, 1), MENU_PANEL_PAD + MENU_ITEM_H);
-        assert_eq!(calculate_submenu_y_offset(&items, 2), MENU_PANEL_PAD + MENU_ITEM_H + MENU_DIVIDER_H);
+        assert_eq!(
+            calculate_submenu_y_offset(&items, 1),
+            MENU_PANEL_PAD + MENU_ITEM_H
+        );
+        assert_eq!(
+            calculate_submenu_y_offset(&items, 2),
+            MENU_PANEL_PAD + MENU_ITEM_H + MENU_DIVIDER_H
+        );
         assert_eq!(
             calculate_submenu_y_offset(&items, 3),
             MENU_PANEL_PAD + MENU_ITEM_H + MENU_DIVIDER_H + MENU_HEADING_H
@@ -949,10 +1031,14 @@ mod tests {
 
     #[test]
     fn test_calculate_submenu_width() {
-        let sub = MenuItem::submenu("Test", None, vec![
-            MenuItem::action("Short", None, None, |_, _| {}),
-            MenuItem::action("A somewhat longer item label", None, None, |_, _| {}),
-        ]);
+        let sub = MenuItem::submenu(
+            "Test",
+            None,
+            vec![
+                MenuItem::action("Short", None, None, |_, _| {}),
+                MenuItem::action("A somewhat longer item label", None, None, |_, _| {}),
+            ],
+        );
         let width = calculate_submenu_width(&sub);
         assert!(width >= px(160.0));
         assert!(width <= px(360.0));
@@ -962,13 +1048,8 @@ mod tests {
     fn test_build_table_context_menu_items() {
         use super::build_table_context_menu_items;
 
-        let items_without_sel = build_table_context_menu_items(
-            false,
-            |_| {},
-            |_| {},
-            |_| {},
-            |_, _| {},
-        );
+        let items_without_sel =
+            build_table_context_menu_items(false, |_| {}, |_| {}, |_| {}, |_, _| {});
         let labels: Vec<&str> = items_without_sel.iter().map(|it| it.label).collect();
         assert!(labels.contains(&"Add row above"));
         assert!(labels.contains(&"Add row below"));
@@ -984,13 +1065,8 @@ mod tests {
         assert!(!labels.contains(&"Cut"));
         assert!(!labels.contains(&"Copy"));
 
-        let items_with_sel = build_table_context_menu_items(
-            true,
-            |_| {},
-            |_| {},
-            |_| {},
-            |_, _| {},
-        );
+        let items_with_sel =
+            build_table_context_menu_items(true, |_| {}, |_| {}, |_| {}, |_, _| {});
         let labels_sel: Vec<&str> = items_with_sel.iter().map(|it| it.label).collect();
         assert!(labels_sel.contains(&"Cut"));
         assert!(labels_sel.contains(&"Copy"));
@@ -1002,13 +1078,7 @@ mod tests {
     fn test_build_editor_context_menu_items() {
         use super::build_editor_context_menu_items;
 
-        let items = build_editor_context_menu_items(
-            true,
-            |_| {},
-            |_| {},
-            |_| {},
-            |_| {},
-        );
+        let items = build_editor_context_menu_items(true, |_| {}, |_| {}, |_| {}, |_| {});
         let labels: Vec<&str> = items.iter().map(|it| it.label).collect();
         assert!(labels.contains(&"Cut"));
         assert!(labels.contains(&"Copy"));
@@ -1020,7 +1090,11 @@ mod tests {
     fn test_content_width_fits_hint_and_shortcut_and_is_capped() {
         use super::content_width;
         let plain = vec![MenuItem::action("Copy", None, None, |_, _| {})];
-        let rich = vec![MenuItem::disabled_action("Line numbers", Some("Ctrl+Shift+L"), Some("Raw only"))];
+        let rich = vec![MenuItem::disabled_action(
+            "Line numbers",
+            Some("Ctrl+Shift+L"),
+            Some("Raw only"),
+        )];
         assert!(content_width(&rich) > content_width(&plain));
         assert!(content_width(&rich) >= px(12.0 * 7.5 + 8.0 * 6.5 + 12.0 * 7.0));
         let long = vec![MenuItem::action(

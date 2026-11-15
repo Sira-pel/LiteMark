@@ -88,7 +88,11 @@ fn keyboard_selections_in_a_heading_format_like_a_paragraph() {
                 run(&mut p, ops);
                 h.apply_format_in_mode(cmd, M);
                 p.apply_format_in_mode(cmd, M);
-                assert_eq!(h.content, format!("{pre}{}", p.content), "{pre:?} {ops:?} {cmd}");
+                assert_eq!(
+                    h.content,
+                    format!("{pre}{}", p.content),
+                    "{pre:?} {ops:?} {cmd}"
+                );
             }
         }
     }

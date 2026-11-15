@@ -1,8 +1,8 @@
-use gpui::prelude::*;
-use gpui::*;
+use super::primitives::render_icon;
 use crate::model::ViewMode;
 use crate::theme::{sz, Theme};
-use super::primitives::render_icon;
+use gpui::prelude::*;
+use gpui::*;
 
 pub struct StatusBarProps<FZoomIn, FZoomOut, FResetZoom, FToggleMode>
 where
@@ -82,7 +82,7 @@ where
                             Some(words) => format!("{} of {} words", words, props.words),
                             None => format!("{} words", props.words),
                         })
-                })
+                }),
         )
         // Right controls
         .child(
@@ -119,7 +119,11 @@ where
                                 .py(px(2.0))
                                 .rounded(sz::R_SM)
                                 .cursor_pointer()
-                                .text_color(if props.zoom_level != 100 { theme.text_hi } else { theme.text_muted })
+                                .text_color(if props.zoom_level != 100 {
+                                    theme.text_hi
+                                } else {
+                                    theme.text_muted
+                                })
                                 .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                                 .on_click(move |_, _, cx| z_reset(cx))
                                 .child(format!("{}%", props.zoom_level))
@@ -134,7 +138,7 @@ where
                                 .hover(|h| h.bg(theme.bg_hover).text_color(theme.text_primary))
                                 .on_click(move |_, _, cx| z_in(cx))
                                 .child(render_icon("zoom-in", 13.0, theme.text_muted))
-                        })
+                        }),
                 )
                 .child(divider())
                 // WYSIWYG / Raw mode toggle
@@ -153,6 +157,6 @@ where
                         .on_click(move |_, _, cx| t_mode(cx))
                         .child(render_icon(mode_icon, 13.0, theme.text_muted))
                         .child(props.view_mode.label())
-                })
+                }),
         )
 }

@@ -649,7 +649,8 @@ pub fn move_vertical_collapsed(content: &str, caret: &mut Caret, delta: i32, ext
     } else {
         line + 1
     };
-    let offset = snap_off_ending_interior(content, offset_at_line_col(content, target_line, prefer));
+    let offset =
+        snap_off_ending_interior(content, offset_at_line_col(content, target_line, prefer));
     if extend {
         caret.select_to(offset);
     } else if !caret.range.is_empty() && delta < 0 {
@@ -1110,13 +1111,13 @@ fn push_wrapped(
             }
         }
 
-        let next = if let Some(b) = break_idx {
-            b
-        } else {
-            max_next
-        };
+        let next = if let Some(b) = break_idx { b } else { max_next };
 
-        let row_end = if next < chars.len() { chars[next].0 } else { end };
+        let row_end = if next < chars.len() {
+            chars[next].0
+        } else {
+            end
+        };
         rows.push((row_start, row_end));
         index = next;
     }
@@ -1201,7 +1202,14 @@ mod tests {
 
     #[test]
     fn visual_row_count_matches_visual_rows() {
-        let samples = ["", "a", "a\n", "abc def ghi\n\nxy", "ααα βββ γγγ δδδ", "averyveryverylongword end"];
+        let samples = [
+            "",
+            "a",
+            "a\n",
+            "abc def ghi\n\nxy",
+            "ααα βββ γγγ δδδ",
+            "averyveryverylongword end",
+        ];
         for text in samples {
             for cols in [0, 1, 3, 5, 8, 40, usize::MAX] {
                 assert_eq!(
@@ -1412,11 +1420,7 @@ mod tests {
         for index in 0..200 {
             let insert = format!("w{index}");
             let start = content.len();
-            history.push(DiffEdit::new(
-                start,
-                String::new(),
-                insert.clone(),
-            ));
+            history.push(DiffEdit::new(start, String::new(), insert.clone()));
             content.push_str(&insert);
         }
         let full_copies = content.len() * 200;
@@ -1480,10 +1484,7 @@ mod tests {
 
         let mut paused = UndoHistory::default();
         let mut paused_content = String::new();
-        paused.push_at(
-            DiffEdit::new(0, String::new(), "a".into()),
-            start,
-        );
+        paused.push_at(DiffEdit::new(0, String::new(), "a".into()), start);
         paused_content.push('a');
         paused.push_at(
             DiffEdit::new(1, String::new(), "b".into()),

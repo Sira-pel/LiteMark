@@ -83,10 +83,7 @@ impl LiteMarkApp {
             self.multi_selection = None;
             self.selected_target = None;
             self.sidebar_keyboard = false;
-        } else if self.show_sidebar
-            && !self.zen_mode
-            && window.viewport_size().width < px(600.0)
-        {
+        } else if self.show_sidebar && !self.zen_mode && window.viewport_size().width < px(600.0) {
             self.show_sidebar = false;
         } else if self.zen_mode {
             self.handle_exit_zen();
@@ -181,7 +178,8 @@ impl LiteMarkApp {
     /// Empty the search box and hand focus back to the editor.
     pub(super) fn clear_search(&mut self, cx: &mut Context<Self>) {
         self.search_query.clear();
-        self.search_field.update(cx, |field, _cx| field.set_text(""));
+        self.search_field
+            .update(cx, |field, _cx| field.set_text(""));
         self.field_focus = TextInput::Editor;
         self.field_owns_keys = false;
         self.applied_focus = None;
@@ -218,9 +216,7 @@ impl LiteMarkApp {
             TextInput::Replace if self.show_find_replace && self.show_replace_row => {
                 Some(self.replace_field.clone())
             }
-            TextInput::Rename
-                if self.rename_target.is_some() || self.save_as_tab.is_some() =>
-            {
+            TextInput::Rename if self.rename_target.is_some() || self.save_as_tab.is_some() => {
                 Some(self.rename_field.clone())
             }
             TextInput::Create if self.create_draft.is_some() => Some(self.create_field.clone()),
@@ -342,7 +338,11 @@ impl LiteMarkApp {
     pub fn handle_save(&mut self, cx: &mut Context<Self>) {
         let id = self.active_tab_id.clone();
         // Untitled quick notes (Ctrl+T) are named at save time.
-        if self.tabs.iter().any(|t| t.id == id && t.file_path.is_none()) {
+        if self
+            .tabs
+            .iter()
+            .any(|t| t.id == id && t.file_path.is_none())
+        {
             self.begin_save_naming(&id, cx);
             return;
         }
@@ -458,7 +458,8 @@ impl LiteMarkApp {
             self.tabs[index].id.clone()
         } else {
             let new_id = self.tab_ids.alloc();
-            let mut tab = DocumentTab::new(new_id.clone(), name.clone(), extracted_md, Some(path), None);
+            let mut tab =
+                DocumentTab::new(new_id.clone(), name.clone(), extracted_md, Some(path), None);
             tab.file_type = FileType::Pdf;
             tab.pdf_page_count = Some(pages);
             self.tabs.push(tab);
@@ -792,19 +793,18 @@ impl LiteMarkApp {
             self.show_sidebar = true;
         }
         if let Some(pid) = &parent {
-            if let Some(folder) = self
-                .workspace
-                .folders
-                .iter_mut()
-                .find(|f| &f.id == pid)
-            {
+            if let Some(folder) = self.workspace.folders.iter_mut().find(|f| &f.id == pid) {
                 folder.is_open = true;
             }
         }
         self.sidebar_menu = None;
         self.create_draft = Some(SidebarCreate { parent, is_folder });
         self.pending_create_focus = true;
-        let preset = if is_folder { "New Folder" } else { "Untitled.md" };
+        let preset = if is_folder {
+            "New Folder"
+        } else {
+            "Untitled.md"
+        };
         self.create_field.update(cx, |field, _cx| {
             field.set_text(preset);
         });

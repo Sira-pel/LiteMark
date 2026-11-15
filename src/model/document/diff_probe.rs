@@ -57,9 +57,7 @@ fn incremental_parse_matches_full_parse() {
             };
             // A bad value must not fall back to the default seed: that
             // would look like a replay of the requested seed.
-            parsed.unwrap_or_else(|| {
-                panic!("DIFF_SEED={raw:?} is not a u64 (decimal or 0x-hex)")
-            })
+            parsed.unwrap_or_else(|| panic!("DIFF_SEED={raw:?} is not a u64 (decimal or 0x-hex)"))
         }
         _ => 0x9E3779B97F4A7C15,
     };
@@ -71,45 +69,39 @@ fn incremental_parse_matches_full_parse() {
                 let len = t.content.len();
                 let a = floor_boundary(&t.content, r.n(len + 1));
                 let op = r.n(10);
-                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match op {
-                        0..=3 => {
-                            t.caret.move_to(a);
-                            let p = t.caret.cursor();
-                            t.insert_text_in_mode(
-                                p..p,
-                                toks[r.n(toks.len())],
-                                ViewMode::Wysiwyg,
-                            );
-                        }
-                        4 => {
-                            t.caret.move_to(a);
-                            t.apply_format_in_mode(cmds[r.n(6)], ViewMode::Wysiwyg);
-                        }
-                        5 => {
-                            let b = floor_boundary(&t.content, (a + r.n(12)).min(len));
-                            t.caret.move_to(a);
-                            t.caret.select_to(b);
-                            t.apply_format_in_mode(cmds[r.n(6)], ViewMode::Wysiwyg);
-                        }
-                        6 => {
-                            let b = floor_boundary(&t.content, (a + r.n(4)).min(len));
-                            t.insert_text_in_mode(a..b, "", ViewMode::Wysiwyg);
-                        }
-                        7 => {
-                            t.undo();
-                        }
-                        8 => {
-                            t.caret.move_to(a);
-                            let p = t.caret.cursor();
-                            t.apply_format_in_mode(cmds[r.n(6)], ViewMode::Wysiwyg);
-                            t.insert_text_in_mode(p..p, "zz", ViewMode::Wysiwyg);
-                        }
-                        _ => {
-                            t.caret.move_to(a);
-                            let p = t.caret.cursor();
-                            t.insert_text_in_mode(p..p, "\n", ViewMode::Wysiwyg);
-                        }
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match op {
+                    0..=3 => {
+                        t.caret.move_to(a);
+                        let p = t.caret.cursor();
+                        t.insert_text_in_mode(p..p, toks[r.n(toks.len())], ViewMode::Wysiwyg);
+                    }
+                    4 => {
+                        t.caret.move_to(a);
+                        t.apply_format_in_mode(cmds[r.n(6)], ViewMode::Wysiwyg);
+                    }
+                    5 => {
+                        let b = floor_boundary(&t.content, (a + r.n(12)).min(len));
+                        t.caret.move_to(a);
+                        t.caret.select_to(b);
+                        t.apply_format_in_mode(cmds[r.n(6)], ViewMode::Wysiwyg);
+                    }
+                    6 => {
+                        let b = floor_boundary(&t.content, (a + r.n(4)).min(len));
+                        t.insert_text_in_mode(a..b, "", ViewMode::Wysiwyg);
+                    }
+                    7 => {
+                        t.undo();
+                    }
+                    8 => {
+                        t.caret.move_to(a);
+                        let p = t.caret.cursor();
+                        t.apply_format_in_mode(cmds[r.n(6)], ViewMode::Wysiwyg);
+                        t.insert_text_in_mode(p..p, "zz", ViewMode::Wysiwyg);
+                    }
+                    _ => {
+                        t.caret.move_to(a);
+                        let p = t.caret.cursor();
+                        t.insert_text_in_mode(p..p, "\n", ViewMode::Wysiwyg);
                     }
                 }));
                 let st = if res.is_err() {

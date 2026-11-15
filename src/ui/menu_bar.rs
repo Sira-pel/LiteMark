@@ -343,46 +343,46 @@ pub fn build_view_menu_items(
         build_locked_raw_view_menu_items(word_wrap, on_toggle_word_wrap)
     } else {
         vec![
-        MenuItem::radio("WYSIWYG", is_wysiwyg, Some("Ctrl+Shift+M"), {
-            let f = on_set_view_mode.clone();
-            move |_, cx| f(ViewMode::Wysiwyg, cx)
-        }),
-        MenuItem::radio("Raw", !is_wysiwyg, None, {
-            let f = on_set_view_mode.clone();
-            move |_, cx| f(ViewMode::Raw, cx)
-        }),
-        MenuItem::divider(),
-        if is_wysiwyg {
-            MenuItem::disabled_action("Line numbers", Some("Ctrl+Shift+L"), Some("Raw only"))
-        } else {
-            MenuItem::check("Line numbers", show_line_numbers, Some("Ctrl+Shift+L"), {
-                let f = on_toggle_line_numbers.clone();
+            MenuItem::radio("WYSIWYG", is_wysiwyg, Some("Ctrl+Shift+M"), {
+                let f = on_set_view_mode.clone();
+                move |_, cx| f(ViewMode::Wysiwyg, cx)
+            }),
+            MenuItem::radio("Raw", !is_wysiwyg, None, {
+                let f = on_set_view_mode.clone();
+                move |_, cx| f(ViewMode::Raw, cx)
+            }),
+            MenuItem::divider(),
+            if is_wysiwyg {
+                MenuItem::disabled_action("Line numbers", Some("Ctrl+Shift+L"), Some("Raw only"))
+            } else {
+                MenuItem::check("Line numbers", show_line_numbers, Some("Ctrl+Shift+L"), {
+                    let f = on_toggle_line_numbers.clone();
+                    move |_, cx| f(cx)
+                })
+            },
+            MenuItem::check("Word wrap", word_wrap, None, {
+                let f = on_toggle_word_wrap.clone();
                 move |_, cx| f(cx)
-            })
-        },
-        MenuItem::check("Word wrap", word_wrap, None, {
-            let f = on_toggle_word_wrap.clone();
-            move |_, cx| f(cx)
-        }),
-        MenuItem::divider(),
-        MenuItem::radio(
-            "Centered text",
-            content_alignment == ContentAlignment::Centered,
-            None,
-            {
-                let f = on_set_content_alignment.clone();
-                move |_, cx| f(ContentAlignment::Centered, cx)
-            },
-        ),
-        MenuItem::radio(
-            "Left-aligned text",
-            content_alignment == ContentAlignment::Left,
-            None,
-            {
-                let f = on_set_content_alignment.clone();
-                move |_, cx| f(ContentAlignment::Left, cx)
-            },
-        ),
+            }),
+            MenuItem::divider(),
+            MenuItem::radio(
+                "Centered text",
+                content_alignment == ContentAlignment::Centered,
+                None,
+                {
+                    let f = on_set_content_alignment.clone();
+                    move |_, cx| f(ContentAlignment::Centered, cx)
+                },
+            ),
+            MenuItem::radio(
+                "Left-aligned text",
+                content_alignment == ContentAlignment::Left,
+                None,
+                {
+                    let f = on_set_content_alignment.clone();
+                    move |_, cx| f(ContentAlignment::Left, cx)
+                },
+            ),
         ]
     };
     items.extend(shared);

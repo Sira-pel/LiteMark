@@ -217,7 +217,10 @@ pub(super) fn marker_is_empty(line: &str, item: &ListMarker) -> bool {
 /// spaces, and a space followed by a tab, stay text.
 pub(super) fn single_tab_marker(line: &str) -> bool {
     let bytes = line.as_bytes();
-    bytes.first() == Some(&b'\t') && bytes.get(1).is_some_and(|byte| *byte != b' ' && *byte != b'\t')
+    bytes.first() == Some(&b'\t')
+        && bytes
+            .get(1)
+            .is_some_and(|byte| *byte != b' ' && *byte != b'\t')
 }
 
 /// A line the block parser records as a heading, rule, fence, quote, or table
@@ -366,8 +369,13 @@ pub fn accepted_list_marker_in(
     // `lines` is in source order, so binary search instead of a linear
     // `find`: callers run this once per selected line, and a scan from the
     // top made Select All + list/quote/heading toggles O(n²).
-    let ix = doc.lines.partition_point(|line| line.source.start < line_start);
-    let line = doc.lines.get(ix).filter(|line| line.source.start == line_start)?;
+    let ix = doc
+        .lines
+        .partition_point(|line| line.source.start < line_start);
+    let line = doc
+        .lines
+        .get(ix)
+        .filter(|line| line.source.start == line_start)?;
     if !matches!(line.kind, LineKind::ListItem { .. }) {
         return None;
     }

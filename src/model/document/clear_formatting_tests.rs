@@ -14,7 +14,10 @@ const S: &str = "Hello **bold** and *it* and <u>under</u> ~~st~~ `c` end";
 
 #[test]
 fn select_all_removes_every_format() {
-    assert_eq!(clear(S, 0..S.len()).0, "Hello bold and it and under st c end");
+    assert_eq!(
+        clear(S, 0..S.len()).0,
+        "Hello bold and it and under st c end"
+    );
 }
 
 #[test]

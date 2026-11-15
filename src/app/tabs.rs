@@ -131,7 +131,12 @@ impl LiteMarkApp {
         // tree, so update its timestamp instead of rescanning the whole
         // workspace on the UI thread on every Ctrl+S.
         let listed = (previous_path.as_ref() == Some(&saved_path))
-            .then(|| self.workspace.files.iter_mut().find(|file| file.path == saved_path))
+            .then(|| {
+                self.workspace
+                    .files
+                    .iter_mut()
+                    .find(|file| file.path == saved_path)
+            })
             .flatten();
         if let Some(file) = listed {
             file.updated_at = modified_secs(&saved_path).unwrap_or(file.updated_at);

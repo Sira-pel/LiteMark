@@ -871,11 +871,11 @@ pub fn file_dialog_error() -> Option<String> {
 /// binary file, which `read_note` refuses to open anyway.
 const BINARY_EXTENSIONS: &[&str] = &[
     "7z", "aac", "apk", "app", "avi", "avif", "bmp", "bz2", "class", "deb", "dll", "dmg", "doc",
-    "docx", "dylib", "epub", "exe", "flac", "gif", "gz", "heic", "ico", "img", "iso", "jar", "jpeg",
-    "jpg", "m4a", "m4v", "mkv", "mov", "mp3", "mp4", "mpg", "msi", "odt", "ogg", "opus", "otf",
-    "pkg", "png", "ppt", "pptx", "psd", "pyc", "rar", "rpm", "so", "sqlite", "tar", "tgz", "tif",
-    "tiff", "ttf", "vmdk", "wav", "webm", "webp", "woff", "woff2", "xls", "xlsx", "xz", "zip",
-    "zst",
+    "docx", "dylib", "epub", "exe", "flac", "gif", "gz", "heic", "ico", "img", "iso", "jar",
+    "jpeg", "jpg", "m4a", "m4v", "mkv", "mov", "mp3", "mp4", "mpg", "msi", "odt", "ogg", "opus",
+    "otf", "pkg", "png", "ppt", "pptx", "psd", "pyc", "rar", "rpm", "so", "sqlite", "tar", "tgz",
+    "tif", "tiff", "ttf", "vmdk", "wav", "webm", "webp", "woff", "woff2", "xls", "xlsx", "xz",
+    "zip", "zst",
 ];
 
 fn has_binary_extension(name: &str) -> bool {
@@ -890,7 +890,10 @@ const SKIPPED_ENTRIES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store", "node_mod
 /// Modification time of `path` in Unix seconds, as the sidebar stores it.
 pub fn modified_secs(path: &Path) -> Option<u64> {
     let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
-    modified.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+    modified
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 /// Folders nested deeper than this below the notes folder are not listed.
@@ -1118,7 +1121,15 @@ mod tests {
             assert!(has_binary_extension(name), "{name}");
         }
         // Text files use these too; they stay listed.
-        for name in ["data.dat", "lib.a", "main.o", "notes.db", "config.bin", ".png", "README"] {
+        for name in [
+            "data.dat",
+            "lib.a",
+            "main.o",
+            "notes.db",
+            "config.bin",
+            ".png",
+            "README",
+        ] {
             assert!(!has_binary_extension(name), "{name}");
         }
     }
@@ -1234,7 +1245,8 @@ mod tests {
 
     #[test]
     fn safe_rename_preserves_extension_when_omitted() {
-        let temp_dir = std::env::temp_dir().join(format!("litemark-rename-ext-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-rename-ext-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -1399,7 +1411,8 @@ mod tests {
     fn scan_does_not_follow_symlinks() {
         use std::os::unix::fs::symlink;
 
-        let temp_dir = std::env::temp_dir().join(format!("litemark-symlink-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-symlink-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -1441,8 +1454,14 @@ mod tests {
         let dst_parent = safe_create_folder(&root, "Dst").unwrap();
         let copied = copy_folder(&src, &dst_parent).unwrap();
         assert!(copied.is_dir());
-        assert_eq!(fs::read_to_string(copied.join("Note.md")).unwrap(), "content");
-        assert!(!copied.join("broken-link").exists(), "symlinks are not copied");
+        assert_eq!(
+            fs::read_to_string(copied.join("Note.md")).unwrap(),
+            "content"
+        );
+        assert!(
+            !copied.join("broken-link").exists(),
+            "symlinks are not copied"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1463,9 +1482,19 @@ mod tests {
         let scanned = scan_workspace_dir(&temp_dir, true);
 
         let file_paths: Vec<_> = scanned.files.iter().map(|f| f.path.clone()).collect();
-        assert!(file_paths.contains(&welcome), "existing root note must survive");
-        assert!(file_paths.contains(&nested_note), "nested note must survive");
-        assert_eq!(scanned.folders.len(), 2, "old and new folders are both listed");
+        assert!(
+            file_paths.contains(&welcome),
+            "existing root note must survive"
+        );
+        assert!(
+            file_paths.contains(&nested_note),
+            "nested note must survive"
+        );
+        assert_eq!(
+            scanned.folders.len(),
+            2,
+            "old and new folders are both listed"
+        );
 
         // Content is untouched.
         assert_eq!(fs::read_to_string(&welcome).unwrap(), "# Welcome");
@@ -1476,8 +1505,10 @@ mod tests {
 
     #[test]
     fn copy_note_into_workspace_handles_collisions() {
-        let src_dir = std::env::temp_dir().join(format!("litemark-copy-src-{}", std::process::id()));
-        let dst_dir = std::env::temp_dir().join(format!("litemark-copy-dst-{}", std::process::id()));
+        let src_dir =
+            std::env::temp_dir().join(format!("litemark-copy-src-{}", std::process::id()));
+        let dst_dir =
+            std::env::temp_dir().join(format!("litemark-copy-dst-{}", std::process::id()));
         let _ = fs::remove_dir_all(&src_dir);
         let _ = fs::remove_dir_all(&dst_dir);
         fs::create_dir_all(&src_dir).unwrap();
@@ -1500,8 +1531,7 @@ mod tests {
 
     #[test]
     fn move_note_relocates_and_uniquifies() {
-        let root =
-            std::env::temp_dir().join(format!("litemark-move-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("litemark-move-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let src_dir = root.join("src");
@@ -1778,7 +1808,11 @@ mod tests {
         fs::write(&from, "other").unwrap();
         let err = rename_noreplace_portable(&from, &to).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read_to_string(&to).unwrap(), "new", "existing file untouched");
+        assert_eq!(
+            fs::read_to_string(&to).unwrap(),
+            "new",
+            "existing file untouched"
+        );
         assert!(from.exists(), "source stays when the target is taken");
 
         let _ = fs::remove_dir_all(&dir);
@@ -1790,7 +1824,8 @@ mod tests {
 
     #[test]
     fn portable_rename_copy_keeps_content_and_permissions() {
-        let dir = std::env::temp_dir().join(format!("litemark-portable-copy-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("litemark-portable-copy-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let from = dir.join("from.md");
@@ -1808,14 +1843,18 @@ mod tests {
         assert!(!from.exists());
         assert_eq!(fs::read_to_string(&to).unwrap(), text);
         #[cfg(unix)]
-        assert_eq!(fs::metadata(&to).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&to).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn portable_rename_undoes_the_new_name_when_the_source_stays() {
-        let dir = std::env::temp_dir().join(format!("litemark-portable-undo-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("litemark-portable-undo-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let from = dir.join("from.md");
@@ -1832,7 +1871,10 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
             assert_eq!(fs::read_to_string(&from).unwrap(), "note", "source kept");
-            assert!(!to.exists(), "no duplicate left behind (copy path: {link_fails})");
+            assert!(
+                !to.exists(),
+                "no duplicate left behind (copy path: {link_fails})"
+            );
         }
 
         let _ = fs::remove_dir_all(&dir);
@@ -2000,7 +2042,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let fifo = dir.join("pipe.md");
-        let status = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
         assert!(status.success());
         let (tx, rx) = std::sync::mpsc::channel();
         let path = fifo.clone();
@@ -2036,7 +2081,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("litemark-binlist-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        for name in ["backup.iso", "photo.JPG", "notes.txt", "data.csv", "README", ".jpg"] {
+        for name in [
+            "backup.iso",
+            "photo.JPG",
+            "notes.txt",
+            "data.csv",
+            "README",
+            ".jpg",
+        ] {
             fs::write(dir.join(name), "x").unwrap();
         }
         let mut names: Vec<_> = scan_workspace_dir(&dir, false)
@@ -2132,11 +2184,17 @@ mod tests {
 
     #[test]
     fn access_denied_is_recognized() {
-        assert!(is_access_denied("Couldn't save C:\\a.md: Access is denied. (os error 5)"));
+        assert!(is_access_denied(
+            "Couldn't save C:\\a.md: Access is denied. (os error 5)"
+        ));
         assert!(is_access_denied("Permission denied (os error 13)"));
-        assert!(!is_access_denied("Couldn't save: No such file or directory (os error 2)"));
+        assert!(!is_access_denied(
+            "Couldn't save: No such file or directory (os error 2)"
+        ));
         assert!(is_access_denied("Couldn't save: (os error 5)"));
-        assert!(!is_access_denied("Couldn't open: The network path was not found. (os error 53)"));
+        assert!(!is_access_denied(
+            "Couldn't open: The network path was not found. (os error 53)"
+        ));
         assert!(!is_access_denied("Couldn't open: (os error 50)"));
     }
 

@@ -1,10 +1,10 @@
 use super::line_field::LineField;
 use super::primitives::{icon_button, render_icon};
+use crate::model::{sidebar_folder_search_matches, sidebar_search_matches};
 use crate::model::{WorkspaceDirectory, WorkspaceFile};
 use crate::theme::{sz, Theme};
 use gpui::prelude::*;
 use gpui::*;
-use crate::model::{sidebar_folder_search_matches, sidebar_search_matches};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarTarget {
@@ -36,13 +36,21 @@ fn drag_payload(
 /// Ctrl on Linux and Windows, Cmd on macOS (Super+click is the window
 /// manager's on many Linux desktops).
 fn toggle_modifier(m: Modifiers) -> bool {
-    if cfg!(target_os = "macos") { m.platform } else { m.control }
+    if cfg!(target_os = "macos") {
+        m.platform
+    } else {
+        m.control
+    }
 }
 
 /// Modifier that turns a sidebar drag into a copy: Ctrl on Linux and Windows,
 /// Option on macOS (Ctrl+click is a right-click there).
 fn copy_modifier(m: Modifiers) -> bool {
-    if cfg!(target_os = "macos") { m.alt } else { m.control }
+    if cfg!(target_os = "macos") {
+        m.alt
+    } else {
+        m.control
+    }
 }
 
 /// Thin vertical guide line that joins nested rows under their folder.
@@ -102,7 +110,11 @@ impl Render for DragItemGhost {
                     .shadow_lg()
                     .opacity(0.9)
                     .child(render_icon(
-                        if self.is_folder { "folder" } else { "file-text" },
+                        if self.is_folder {
+                            "folder"
+                        } else {
+                            "file-text"
+                        },
                         13.0,
                         theme.text_muted,
                     ))
@@ -134,10 +146,7 @@ pub enum SidebarTreeItem {
         depth: usize,
     },
     /// Inline name editor shown while creating a note or folder.
-    CreateInput {
-        depth: usize,
-        is_folder: bool,
-    },
+    CreateInput { depth: usize, is_folder: bool },
 }
 
 pub fn build_sidebar_tree(
@@ -145,8 +154,8 @@ pub fn build_sidebar_tree(
     files: &[crate::model::WorkspaceFile],
     creating: Option<&SidebarCreate>,
 ) -> Vec<SidebarTreeItem> {
-    use std::collections::{HashMap, HashSet};
     use crate::model::{WorkspaceFile, WorkspaceFolder};
+    use std::collections::{HashMap, HashSet};
 
     let folder_ids: HashSet<&str> = folders.iter().map(|f| f.id.as_str()).collect();
     // A parent that isn't in the tree puts the item at the root.
@@ -500,7 +509,11 @@ where
                                                 .child(workspace_title.clone()),
                                         )
                                         .child(render_icon(
-                                            if workspace_menu_open { "chevron-up" } else { "chevron-down" },
+                                            if workspace_menu_open {
+                                                "chevron-up"
+                                            } else {
+                                                "chevron-down"
+                                            },
                                             12.0,
                                             theme.text_primary,
                                         )),
@@ -542,26 +555,23 @@ where
                                 theme,
                                 move |_, _, cx| bc(None, true, cx),
                             )
-                        })
+                        }),
                 ),
         )
         // Search
         .child(
-            div()
-                .px(px(10.0))
-                .pb(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .h(px(30.0))
-                        .px(px(8.0))
-                        .rounded(sz::R_MD)
-                        .bg(theme.bg_input)
-                        .child(render_icon("search", 14.0, theme.text_muted))
-                        .child(div().flex_1().min_w_0().child(search_field.clone())),
-                ),
+            div().px(px(10.0)).pb(px(8.0)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .h(px(30.0))
+                    .px(px(8.0))
+                    .rounded(sz::R_MD)
+                    .bg(theme.bg_input)
+                    .child(render_icon("search", 14.0, theme.text_muted))
+                    .child(div().flex_1().min_w_0().child(search_field.clone())),
+            ),
         )
         // Files list
         .child(
@@ -610,9 +620,7 @@ where
                                     .text_size(px(12.0))
                                     .text_color(theme.text_hi)
                                     .hover(|h| h.underline())
-                                    .on_click(move |_, _, cx| {
-                                        bc(None, false, cx)
-                                    })
+                                    .on_click(move |_, _, cx| bc(None, false, cx))
                                     .child("New note (Ctrl+N)"),
                             ),
                     )
@@ -641,462 +649,513 @@ where
                     s.child(
                         uniform_list("sb-tree", row_count, move |range, _window, _cx| {
                             let theme = &row_theme;
-                            tree_items[range].iter().cloned().map(|item| {
-                            let row = match item {
-                                SidebarTreeItem::CreateInput { depth, is_folder } => {
-                                    let inset = if depth == 0 {
-                                        0.0
-                                    } else {
-                                        21.0 + depth as f32 * 14.0
-                                    };
-                                    div()
-                                        .id("sb-create-row")
-                                        .group("create-row")
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .h(sz::ROW_H)
-                                        .ml(px(inset))
-                                        .pl(px(5.0))
-                                        .pr(px(6.0))
-                                        .rounded(sz::R_MD)
-                                        .bg(theme.row_active)
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .child(render_icon(
-                                            if is_folder { "folder-plus" } else { "file-plus" },
-                                            14.0,
-                                            theme.text_hi,
-                                        ))
-                                        .child(create_field.clone())
-                                }
-                                SidebarTreeItem::Folder { folder, depth } => {
-                                    let folder_id = folder.id.clone();
-                                    let is_open = folder.is_open;
-                                    let in_multi = multi_ids.contains(&folder_id);
-                                    let is_selected = !in_multi
-                                        && selected_folder_id.as_deref() == Some(&folder_id);
-                                    let range = on_range_select.clone();
-                                    let toggle_sel = on_toggle_select.clone();
-                                    let create = on_begin_create.clone();
-                                    let delete = on_delete_folder.clone();
-                                    let on_context = on_context.clone();
-                                    let toggle = on_toggle_folder.clone();
-                                    let name = folder.name.clone();
-
-                                    div()
-                                        .id(SharedString::from(format!("folder-row-{}", folder_id)))
-                                        .group("folder-row")
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .h(sz::ROW_H)
-                                        .pl(px(8.0 + depth as f32 * 14.0))
-                                        .pr(px(6.0))
-                                        .rounded(sz::R_MD)
-                                        .cursor_pointer()
-                                        .relative()
-                                        .bg(if in_multi {
-                                            theme.row_multi
-                                        } else if is_selected {
-                                            theme.row_active
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .text_color(if is_selected || in_multi {
-                                            theme.text_strong
-                                        } else {
-                                            theme.row_text
-                                        })
-                                        .hover(|h| {
-                                            h.bg(if in_multi {
-                                                theme.row_multi
+                            tree_items[range]
+                                .iter()
+                                .cloned()
+                                .map(|item| {
+                                    let row = match item {
+                                        SidebarTreeItem::CreateInput { depth, is_folder } => {
+                                            let inset = if depth == 0 {
+                                                0.0
                                             } else {
-                                                theme.row_hover
-                                            })
-                                            .text_color(theme.text_primary)
-                                        })
-                                        .when(depth > 0, |s| s.child(tree_guide(theme, 14.0 + (depth as f32 - 1.0) * 14.0)))
-                                        .on_click({
-                                            let fid = folder_id.clone();
-                                            move |_, window, cx| {
-                                                cx.stop_propagation();
-                                                let m = window.modifiers();
-                                                if m.shift {
-                                                    range(SidebarTarget::Folder(fid.clone()), cx);
-                                                } else if toggle_modifier(m) {
-                                                    toggle_sel(SidebarTarget::Folder(fid.clone()), cx);
-                                                } else {
-                                                    toggle(fid.clone(), cx);
-                                                }
-                                            }
-                                        })
-                                        .on_mouse_down(MouseButton::Right, {
-                                            let id = folder_id.clone();
-                                            move |event, _, cx| {
-                                                cx.stop_propagation();
-                                                on_context(
-                                                    SidebarTarget::Folder(id.clone()),
-                                                    event.position,
-                                                    cx,
-                                                );
-                                            }
-                                        })
-                                        // Drop-target affordance while a note or
-                                        // folder is dragged.
-                                        .border_1()
-                                        .border_color(if dragging {
-                                            theme.text_faint
-                                        } else if in_multi {
-                                            theme.row_multi_border
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .on_drag(
-                                            drag_payload(
-                                                SidebarTarget::Folder(folder_id.clone()),
-                                                name.clone(),
-                                                in_multi,
-                                                &multi_targets,
-                                            ),
-                                            {
-                                                let theme = *theme;
-                                                move |value, point, _window, cx| {
-                                                    cx.new(|_| DragItemGhost {
-                                                        theme,
-                                                        is_folder: matches!(
-                                                            value.targets.as_slice(),
-                                                            [SidebarTarget::Folder(_)]
-                                                        ),
-                                                        name: value.name.clone().into(),
-                                                        grab_offset: point,
-                                                    })
-                                                }
-                                            },
-                                        )
-                                        .on_drop({
-                                            let fid = folder_id.clone();
-                                            let drop_item = on_drop_item.clone();
-                                            move |drag: &SidebarDrag, window, cx| {
-                                                let copy = copy_modifier(window.modifiers());
-                                                drop_item(
-                                                    drag.targets.clone(),
-                                                    Some(fid.clone()),
-                                                    copy,
-                                                    cx,
-                                                );
-                                            }
-                                        })
-                                        .child(
+                                                21.0 + depth as f32 * 14.0
+                                            };
                                             div()
+                                                .id("sb-create-row")
+                                                .group("create-row")
                                                 .flex()
-                                                .flex_1()
-                                                .min_w_0()
                                                 .items_center()
                                                 .gap(px(6.0))
+                                                .h(sz::ROW_H)
+                                                .ml(px(inset))
+                                                .pl(px(5.0))
+                                                .pr(px(6.0))
+                                                .rounded(sz::R_MD)
+                                                .bg(theme.row_active)
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation();
+                                                })
+                                                .child(render_icon(
+                                                    if is_folder {
+                                                        "folder-plus"
+                                                    } else {
+                                                        "file-plus"
+                                                    },
+                                                    14.0,
+                                                    theme.text_hi,
+                                                ))
+                                                .child(create_field.clone())
+                                        }
+                                        SidebarTreeItem::Folder { folder, depth } => {
+                                            let folder_id = folder.id.clone();
+                                            let is_open = folder.is_open;
+                                            let in_multi = multi_ids.contains(&folder_id);
+                                            let is_selected = !in_multi
+                                                && selected_folder_id.as_deref()
+                                                    == Some(&folder_id);
+                                            let range = on_range_select.clone();
+                                            let toggle_sel = on_toggle_select.clone();
+                                            let create = on_begin_create.clone();
+                                            let delete = on_delete_folder.clone();
+                                            let on_context = on_context.clone();
+                                            let toggle = on_toggle_folder.clone();
+                                            let name = folder.name.clone();
+
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "folder-row-{}",
+                                                    folder_id
+                                                )))
+                                                .group("folder-row")
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .h(sz::ROW_H)
+                                                .pl(px(8.0 + depth as f32 * 14.0))
+                                                .pr(px(6.0))
+                                                .rounded(sz::R_MD)
+                                                .cursor_pointer()
+                                                .relative()
+                                                .bg(if in_multi {
+                                                    theme.row_multi
+                                                } else if is_selected {
+                                                    theme.row_active
+                                                } else {
+                                                    rgba(0x00000000)
+                                                })
+                                                .text_color(if is_selected || in_multi {
+                                                    theme.text_strong
+                                                } else {
+                                                    theme.row_text
+                                                })
+                                                .hover(|h| {
+                                                    h.bg(if in_multi {
+                                                        theme.row_multi
+                                                    } else {
+                                                        theme.row_hover
+                                                    })
+                                                    .text_color(theme.text_primary)
+                                                })
+                                                .when(depth > 0, |s| {
+                                                    s.child(tree_guide(
+                                                        theme,
+                                                        14.0 + (depth as f32 - 1.0) * 14.0,
+                                                    ))
+                                                })
+                                                .on_click({
+                                                    let fid = folder_id.clone();
+                                                    move |_, window, cx| {
+                                                        cx.stop_propagation();
+                                                        let m = window.modifiers();
+                                                        if m.shift {
+                                                            range(
+                                                                SidebarTarget::Folder(fid.clone()),
+                                                                cx,
+                                                            );
+                                                        } else if toggle_modifier(m) {
+                                                            toggle_sel(
+                                                                SidebarTarget::Folder(fid.clone()),
+                                                                cx,
+                                                            );
+                                                        } else {
+                                                            toggle(fid.clone(), cx);
+                                                        }
+                                                    }
+                                                })
+                                                .on_mouse_down(MouseButton::Right, {
+                                                    let id = folder_id.clone();
+                                                    move |event, _, cx| {
+                                                        cx.stop_propagation();
+                                                        on_context(
+                                                            SidebarTarget::Folder(id.clone()),
+                                                            event.position,
+                                                            cx,
+                                                        );
+                                                    }
+                                                })
+                                                // Drop-target affordance while a note or
+                                                // folder is dragged.
+                                                .border_1()
+                                                .border_color(if dragging {
+                                                    theme.text_faint
+                                                } else if in_multi {
+                                                    theme.row_multi_border
+                                                } else {
+                                                    rgba(0x00000000)
+                                                })
+                                                .on_drag(
+                                                    drag_payload(
+                                                        SidebarTarget::Folder(folder_id.clone()),
+                                                        name.clone(),
+                                                        in_multi,
+                                                        &multi_targets,
+                                                    ),
+                                                    {
+                                                        let theme = *theme;
+                                                        move |value, point, _window, cx| {
+                                                            cx.new(|_| DragItemGhost {
+                                                                theme,
+                                                                is_folder: matches!(
+                                                                    value.targets.as_slice(),
+                                                                    [SidebarTarget::Folder(_)]
+                                                                ),
+                                                                name: value.name.clone().into(),
+                                                                grab_offset: point,
+                                                            })
+                                                        }
+                                                    },
+                                                )
+                                                .on_drop({
+                                                    let fid = folder_id.clone();
+                                                    let drop_item = on_drop_item.clone();
+                                                    move |drag: &SidebarDrag, window, cx| {
+                                                        let copy =
+                                                            copy_modifier(window.modifiers());
+                                                        drop_item(
+                                                            drag.targets.clone(),
+                                                            Some(fid.clone()),
+                                                            copy,
+                                                            cx,
+                                                        );
+                                                    }
+                                                })
                                                 .child(
                                                     div()
-                                                        .w(px(12.0))
-                                                        .h(px(12.0))
                                                         .flex()
+                                                        .flex_1()
+                                                        .min_w_0()
                                                         .items_center()
-                                                        .justify_center()
-                                                        .flex_shrink_0()
-                                                        .child(render_icon(
-                                                            if is_open {
-                                                                "chevron-down"
-                                                            } else {
-                                                                "chevron-right"
-                                                            },
-                                                            12.0,
-                                                            theme.text_muted,
-                                                        )),
+                                                        .gap(px(6.0))
+                                                        .child(
+                                                            div()
+                                                                .w(px(12.0))
+                                                                .h(px(12.0))
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .flex_shrink_0()
+                                                                .child(render_icon(
+                                                                    if is_open {
+                                                                        "chevron-down"
+                                                                    } else {
+                                                                        "chevron-right"
+                                                                    },
+                                                                    12.0,
+                                                                    theme.text_muted,
+                                                                )),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(13.0))
+                                                                .text_color(theme.row_text)
+                                                                .truncate()
+                                                                .child(name),
+                                                        ),
                                                 )
                                                 .child(
                                                     div()
-                                                        .text_size(px(13.0))
-                                                        .text_color(theme.row_text)
-                                                        .truncate()
-                                                        .child(name),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_shrink_0()
-                                                .items_center()
-                                                .gap(px(2.0))
-                                                .opacity(0.0)
-                                                .group_hover("folder-row", |s| s.opacity(1.0))
-                                                .child({
-                                                    let id = folder_id.clone();
-                                                    let create = create.clone();
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "folder-add-{}",
-                                                            id
-                                                        )))
-                                                        .cursor_pointer()
-                                                        .p(px(4.0))
-                                                        .rounded(sz::R_SM)
-                                                        .hover(|h| h.bg(theme.bg_hover))
-                                                        .on_click(move |_, _, cx| {
-                                                            cx.stop_propagation();
-                                                            create(Some(id.clone()), false, cx)
+                                                        .flex()
+                                                        .flex_shrink_0()
+                                                        .items_center()
+                                                        .gap(px(2.0))
+                                                        .opacity(0.0)
+                                                        .group_hover("folder-row", |s| {
+                                                            s.opacity(1.0)
                                                         })
-                                                        .child(render_icon(
-                                                            "file-plus",
-                                                            13.0,
-                                                            theme.text_muted,
-                                                        ))
-                                                })
-                                                .child({
-                                                    let id = folder_id.clone();
-                                                    let create = create.clone();
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "folder-mkdir-{}",
-                                                            id
-                                                        )))
-                                                        .cursor_pointer()
-                                                        .p(px(4.0))
-                                                        .rounded(sz::R_SM)
-                                                        .hover(|h| h.bg(theme.bg_hover))
-                                                        .on_click(move |_, _, cx| {
-                                                            cx.stop_propagation();
-                                                            create(Some(id.clone()), true, cx)
+                                                        .child({
+                                                            let id = folder_id.clone();
+                                                            let create = create.clone();
+                                                            div()
+                                                                .id(SharedString::from(format!(
+                                                                    "folder-add-{}",
+                                                                    id
+                                                                )))
+                                                                .cursor_pointer()
+                                                                .p(px(4.0))
+                                                                .rounded(sz::R_SM)
+                                                                .hover(|h| h.bg(theme.bg_hover))
+                                                                .on_click(move |_, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    create(
+                                                                        Some(id.clone()),
+                                                                        false,
+                                                                        cx,
+                                                                    )
+                                                                })
+                                                                .child(render_icon(
+                                                                    "file-plus",
+                                                                    13.0,
+                                                                    theme.text_muted,
+                                                                ))
                                                         })
-                                                        .child(render_icon(
-                                                            "folder-plus",
-                                                            13.0,
-                                                            theme.text_muted,
-                                                        ))
-                                                })
-                                                .child({
-                                                    let id = folder_id.clone();
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "folder-del-{}",
-                                                            id
-                                                        )))
-                                                        .cursor_pointer()
-                                                        .p(px(4.0))
-                                                        .rounded(sz::R_SM)
-                                                        .hover(|h| h.bg(theme.bg_hover))
-                                                        .on_click(move |_, _, cx| {
-                                                            cx.stop_propagation();
-                                                            delete(id.clone(), cx);
+                                                        .child({
+                                                            let id = folder_id.clone();
+                                                            let create = create.clone();
+                                                            div()
+                                                                .id(SharedString::from(format!(
+                                                                    "folder-mkdir-{}",
+                                                                    id
+                                                                )))
+                                                                .cursor_pointer()
+                                                                .p(px(4.0))
+                                                                .rounded(sz::R_SM)
+                                                                .hover(|h| h.bg(theme.bg_hover))
+                                                                .on_click(move |_, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    create(
+                                                                        Some(id.clone()),
+                                                                        true,
+                                                                        cx,
+                                                                    )
+                                                                })
+                                                                .child(render_icon(
+                                                                    "folder-plus",
+                                                                    13.0,
+                                                                    theme.text_muted,
+                                                                ))
                                                         })
-                                                        .child(render_icon(
-                                                            "trash-2",
-                                                            13.0,
-                                                            theme.text_muted,
-                                                        ))
-                                                }),
-                                        )
-                                }
-                                SidebarTreeItem::File { file, depth } => {
-                                    let in_multi = multi_ids.contains(&file.id);
-                                    let is_active = !in_multi
-                                        && selected_file_id.as_deref() == Some(&file.id);
-                                    let is_open = !in_multi
-                                        && !is_active
-                                        && open_file_id.as_deref() == Some(&file.id);
-                                    let display_name = file
-                                        .name
-                                        .strip_suffix(".md")
-                                        .unwrap_or(file.name.as_str())
-                                        .to_string();
-                                    let range = on_range_select.clone();
-                                    let toggle_sel = on_toggle_select.clone();
-                                    let is_modified =
-                                        modified_ids.contains(&file.id);
-                                    let file_clone = file.clone();
-                                    let sel = on_select.clone();
-                                    let del = on_delete_file.clone();
-                                    let on_context = on_context.clone();
-                                    let fid = file.id.clone();
-                                    // Root notes sit flush left (same edge as the
-                                    // folder rows themselves). Nested notes are
-                                    // inset so the highlight starts at the
-                                    // indicator bar. Either way the icon + text
-                                    // hug the bar (2px gap).
-                                    let inset = if depth == 0 {
-                                        0.0
-                                    } else {
-                                        12.0 + depth as f32 * 14.0
-                                    };
-
-                                    div()
-                                        .id(SharedString::from(file.id.clone()))
-                                        .group("note-row")
-                                        .relative()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .h(sz::ROW_H)
-                                        .ml(px(inset))
-                                        .pl(px(5.0))
-                                        .pr(px(6.0))
-                                        .rounded(sz::R_MD)
-                                        .cursor_pointer()
-                                        .border_1()
-                                        .border_color(if in_multi {
-                                            theme.row_multi_border
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .bg(if in_multi {
-                                            theme.row_multi
-                                        } else if is_active {
-                                            theme.row_active
-                                        } else if is_open {
-                                            theme.row_hover
-                                        } else {
-                                            rgba(0x00000000)
-                                        })
-                                        .text_color(if is_active || is_open || in_multi {
-                                            theme.text_strong
-                                        } else {
-                                            theme.row_text
-                                        })
-                                        .when(!is_active && !in_multi, |s| {
-                                            s.hover(|h| {
-                                                h.bg(theme.row_hover).text_color(theme.text_primary)
-                                            })
-                                        })
-                                        .when(depth > 0, |s| {
-                                            s.child(tree_guide(theme, 14.0 + (depth as f32 - 1.0) * 14.0 - inset))
-                                        })
-                                        .on_click(move |_, window, cx| {
-                                            cx.stop_propagation();
-                                            let m = window.modifiers();
-                                            if m.shift {
-                                                range(SidebarTarget::File(file_clone.id.clone()), cx);
-                                            } else if toggle_modifier(m) {
-                                                toggle_sel(SidebarTarget::File(file_clone.id.clone()), cx);
+                                                        .child({
+                                                            let id = folder_id.clone();
+                                                            div()
+                                                                .id(SharedString::from(format!(
+                                                                    "folder-del-{}",
+                                                                    id
+                                                                )))
+                                                                .cursor_pointer()
+                                                                .p(px(4.0))
+                                                                .rounded(sz::R_SM)
+                                                                .hover(|h| h.bg(theme.bg_hover))
+                                                                .on_click(move |_, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    delete(id.clone(), cx);
+                                                                })
+                                                                .child(render_icon(
+                                                                    "trash-2",
+                                                                    13.0,
+                                                                    theme.text_muted,
+                                                                ))
+                                                        }),
+                                                )
+                                        }
+                                        SidebarTreeItem::File { file, depth } => {
+                                            let in_multi = multi_ids.contains(&file.id);
+                                            let is_active = !in_multi
+                                                && selected_file_id.as_deref() == Some(&file.id);
+                                            let is_open = !in_multi
+                                                && !is_active
+                                                && open_file_id.as_deref() == Some(&file.id);
+                                            let display_name = file
+                                                .name
+                                                .strip_suffix(".md")
+                                                .unwrap_or(file.name.as_str())
+                                                .to_string();
+                                            let range = on_range_select.clone();
+                                            let toggle_sel = on_toggle_select.clone();
+                                            let is_modified = modified_ids.contains(&file.id);
+                                            let file_clone = file.clone();
+                                            let sel = on_select.clone();
+                                            let del = on_delete_file.clone();
+                                            let on_context = on_context.clone();
+                                            let fid = file.id.clone();
+                                            // Root notes sit flush left (same edge as the
+                                            // folder rows themselves). Nested notes are
+                                            // inset so the highlight starts at the
+                                            // indicator bar. Either way the icon + text
+                                            // hug the bar (2px gap).
+                                            let inset = if depth == 0 {
+                                                0.0
                                             } else {
-                                                sel(file_clone.clone(), cx);
-                                            }
-                                        })
-                                        .on_mouse_down(MouseButton::Right, {
-                                            let id = fid.clone();
-                                            move |event, _, cx| {
-                                                cx.stop_propagation();
-                                                on_context(
-                                                    SidebarTarget::File(id.clone()),
-                                                    event.position,
-                                                    cx,
-                                                );
-                                            }
-                                        })
-                                        .on_drag(
-                                            drag_payload(
-                                                SidebarTarget::File(fid.clone()),
-                                                file.name.clone(),
-                                                in_multi,
-                                                &multi_targets,
-                                            ),
-                                            {
-                                                let theme = *theme;
-                                                move |value, point, _window, cx| {
-                                                    cx.new(|_| DragItemGhost {
-                                                        theme,
-                                                        is_folder: matches!(
-                                                            value.targets.as_slice(),
-                                                            [SidebarTarget::Folder(_)]
-                                                        ),
-                                                        name: value.name.clone().into(),
-                                                        grab_offset: point,
-                                                    })
-                                                }
-                                            },
-                                        )
-                                        .child(
+                                                12.0 + depth as f32 * 14.0
+                                            };
+
                                             div()
+                                                .id(SharedString::from(file.id.clone()))
+                                                .group("note-row")
+                                                .relative()
                                                 .flex()
-                                                .flex_1()
-                                                .min_w_0()
                                                 .items_center()
-                                                .gap(px(6.0))
-                                                .child(render_icon(
-                                                    if file.file_type.is_code() {
-                                                        "file-code"
+                                                .justify_between()
+                                                .h(sz::ROW_H)
+                                                .ml(px(inset))
+                                                .pl(px(5.0))
+                                                .pr(px(6.0))
+                                                .rounded(sz::R_MD)
+                                                .cursor_pointer()
+                                                .border_1()
+                                                .border_color(if in_multi {
+                                                    theme.row_multi_border
+                                                } else {
+                                                    rgba(0x00000000)
+                                                })
+                                                .bg(if in_multi {
+                                                    theme.row_multi
+                                                } else if is_active {
+                                                    theme.row_active
+                                                } else if is_open {
+                                                    theme.row_hover
+                                                } else {
+                                                    rgba(0x00000000)
+                                                })
+                                                .text_color(if is_active || is_open || in_multi {
+                                                    theme.text_strong
+                                                } else {
+                                                    theme.row_text
+                                                })
+                                                .when(!is_active && !in_multi, |s| {
+                                                    s.hover(|h| {
+                                                        h.bg(theme.row_hover)
+                                                            .text_color(theme.text_primary)
+                                                    })
+                                                })
+                                                .when(depth > 0, |s| {
+                                                    s.child(tree_guide(
+                                                        theme,
+                                                        14.0 + (depth as f32 - 1.0) * 14.0 - inset,
+                                                    ))
+                                                })
+                                                .on_click(move |_, window, cx| {
+                                                    cx.stop_propagation();
+                                                    let m = window.modifiers();
+                                                    if m.shift {
+                                                        range(
+                                                            SidebarTarget::File(
+                                                                file_clone.id.clone(),
+                                                            ),
+                                                            cx,
+                                                        );
+                                                    } else if toggle_modifier(m) {
+                                                        toggle_sel(
+                                                            SidebarTarget::File(
+                                                                file_clone.id.clone(),
+                                                            ),
+                                                            cx,
+                                                        );
                                                     } else {
-                                                        "file-text"
+                                                        sel(file_clone.clone(), cx);
+                                                    }
+                                                })
+                                                .on_mouse_down(MouseButton::Right, {
+                                                    let id = fid.clone();
+                                                    move |event, _, cx| {
+                                                        cx.stop_propagation();
+                                                        on_context(
+                                                            SidebarTarget::File(id.clone()),
+                                                            event.position,
+                                                            cx,
+                                                        );
+                                                    }
+                                                })
+                                                .on_drag(
+                                                    drag_payload(
+                                                        SidebarTarget::File(fid.clone()),
+                                                        file.name.clone(),
+                                                        in_multi,
+                                                        &multi_targets,
+                                                    ),
+                                                    {
+                                                        let theme = *theme;
+                                                        move |value, point, _window, cx| {
+                                                            cx.new(|_| DragItemGhost {
+                                                                theme,
+                                                                is_folder: matches!(
+                                                                    value.targets.as_slice(),
+                                                                    [SidebarTarget::Folder(_)]
+                                                                ),
+                                                                name: value.name.clone().into(),
+                                                                grab_offset: point,
+                                                            })
+                                                        }
                                                     },
-                                                    14.0,
-                                                    if is_active {
-                                                        theme.row_icon_active
-                                                    } else {
-                                                        theme.text_muted
-                                                    },
-                                                ))
+                                                )
                                                 .child(
                                                     div()
-                                                        .text_size(px(13.0))
-                                                        .font_weight(if is_active || is_open {
-                                                            FontWeight::MEDIUM
-                                                        } else {
-                                                            FontWeight::NORMAL
-                                                        })
-                                                        .truncate()
-                                                        .child(display_name),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_shrink_0()
-                                                .items_center()
-                                                .gap(px(6.0))
-                                                .when(is_modified, |s| {
-                                                    s.child(
-                                                        div()
-                                                            .w(px(6.0))
-                                                            .h(px(6.0))
-                                                            .rounded_full()
-                                                            .bg(theme.text_hi),
-                                                    )
-                                                })
-                                                .child({
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "sb-del-{}",
-                                                            fid
-                                                        )))
-                                                        .opacity(0.0)
-                                                        .group_hover("note-row", |s| s.opacity(1.0))
-                                                        .w(px(24.0))
-                                                        .h(px(24.0))
-                                                        .rounded(sz::R_SM)
                                                         .flex()
+                                                        .flex_1()
+                                                        .min_w_0()
                                                         .items_center()
-                                                        .justify_center()
-                                                        .cursor_pointer()
-                                                        .hover(|h| {
-                                                            h.bg(theme.bg_hover)
-                                                                .text_color(theme.text_primary)
-                                                        })
-                                                        .on_click(move |_, _, cx| {
-                                                            cx.stop_propagation();
-                                                            del(fid.clone(), cx);
-                                                        })
+                                                        .gap(px(6.0))
                                                         .child(render_icon(
-                                                            "trash-2",
-                                                            13.0,
-                                                            theme.text_muted,
+                                                            if file.file_type.is_code() {
+                                                                "file-code"
+                                                            } else {
+                                                                "file-text"
+                                                            },
+                                                            14.0,
+                                                            if is_active {
+                                                                theme.row_icon_active
+                                                            } else {
+                                                                theme.text_muted
+                                                            },
                                                         ))
-                                                }),
-                                        )
-                                }
-                            };
-                            // Rows must share one height; the bottom pad is
-                            // the 2px gap the old flex column had.
-                            div().pb(px(2.0)).child(row)
-                            })
-                            .collect::<Vec<_>>()
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(13.0))
+                                                                .font_weight(
+                                                                    if is_active || is_open {
+                                                                        FontWeight::MEDIUM
+                                                                    } else {
+                                                                        FontWeight::NORMAL
+                                                                    },
+                                                                )
+                                                                .truncate()
+                                                                .child(display_name),
+                                                        ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_shrink_0()
+                                                        .items_center()
+                                                        .gap(px(6.0))
+                                                        .when(is_modified, |s| {
+                                                            s.child(
+                                                                div()
+                                                                    .w(px(6.0))
+                                                                    .h(px(6.0))
+                                                                    .rounded_full()
+                                                                    .bg(theme.text_hi),
+                                                            )
+                                                        })
+                                                        .child({
+                                                            div()
+                                                                .id(SharedString::from(format!(
+                                                                    "sb-del-{}",
+                                                                    fid
+                                                                )))
+                                                                .opacity(0.0)
+                                                                .group_hover("note-row", |s| {
+                                                                    s.opacity(1.0)
+                                                                })
+                                                                .w(px(24.0))
+                                                                .h(px(24.0))
+                                                                .rounded(sz::R_SM)
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .cursor_pointer()
+                                                                .hover(|h| {
+                                                                    h.bg(theme.bg_hover).text_color(
+                                                                        theme.text_primary,
+                                                                    )
+                                                                })
+                                                                .on_click(move |_, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    del(fid.clone(), cx);
+                                                                })
+                                                                .child(render_icon(
+                                                                    "trash-2",
+                                                                    13.0,
+                                                                    theme.text_muted,
+                                                                ))
+                                                        }),
+                                                )
+                                        }
+                                    };
+                                    // Rows must share one height; the bottom pad is
+                                    // the 2px gap the old flex column had.
+                                    div().pb(px(2.0)).child(row)
+                                })
+                                .collect::<Vec<_>>()
                         })
                         .track_scroll(scroll_handle)
                         .flex_1()
@@ -1321,5 +1380,3 @@ where
                 }),
         )
 }
-
-

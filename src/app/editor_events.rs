@@ -213,10 +213,7 @@ impl LiteMarkApp {
 
     pub(super) fn track_table_hover(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         if !self.table_chrome_interactive() {
-            if self.table_hover.is_some()
-                || self.table_drag.is_some()
-                || self.table_hot.is_some()
-            {
+            if self.table_hover.is_some() || self.table_drag.is_some() || self.table_hot.is_some() {
                 self.table_hover = None;
                 self.table_hot = None;
                 self.table_drag = None;
@@ -285,7 +282,8 @@ impl LiteMarkApp {
         // Shift+click, ends a multi-selection. A press inside the sidebar keeps
         // it: that press may be the start of dragging the whole selection, and
         // clicking a row clears it itself.
-        let in_sidebar = self.show_sidebar && event.position.x < crate::theme::sidebar_width(window.viewport_size().width);
+        let in_sidebar = self.show_sidebar
+            && event.position.x < crate::theme::sidebar_width(window.viewport_size().width);
         if !window.modifiers().shift && !in_sidebar {
             self.multi_selection = None;
             self.selected_target = None;
@@ -452,7 +450,9 @@ impl LiteMarkApp {
             }
         }
 
-        let is_table = self.active_tab().is_some_and(|tab| tab.active_formats.table);
+        let is_table = self
+            .active_tab()
+            .is_some_and(|tab| tab.active_formats.table);
         self.open_menu = None;
         self.editor_context_menu = Some(EditorContextMenu {
             position: event.position,

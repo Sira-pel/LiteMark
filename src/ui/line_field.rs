@@ -197,25 +197,46 @@ impl LineField {
         self.move_to(self.content.len(), cx);
     }
 
-    fn select_home(&mut self, _: &crate::actions::EditorSelectHome, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_home(
+        &mut self,
+        _: &crate::actions::EditorSelectHome,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_to(0, cx);
     }
 
-    fn select_end(&mut self, _: &crate::actions::EditorSelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_end(
+        &mut self,
+        _: &crate::actions::EditorSelectEnd,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.select_to(self.content.len(), cx);
     }
 
-    fn word_left(&mut self, _: &crate::actions::EditorWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn word_left(
+        &mut self,
+        _: &crate::actions::EditorWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_range.is_empty() {
             let offset = crate::model::text_ops::word_left(&self.content, self.cursor_offset());
             self.move_to(offset, cx);
         } else {
-            let offset = crate::model::text_ops::word_left(&self.content, self.selected_range.start);
+            let offset =
+                crate::model::text_ops::word_left(&self.content, self.selected_range.start);
             self.move_to(offset, cx);
         }
     }
 
-    fn word_right(&mut self, _: &crate::actions::EditorWordRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn word_right(
+        &mut self,
+        _: &crate::actions::EditorWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_range.is_empty() {
             let offset = crate::model::text_ops::word_right(&self.content, self.cursor_offset());
             self.move_to(offset, cx);

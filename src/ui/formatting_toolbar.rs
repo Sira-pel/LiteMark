@@ -1,12 +1,18 @@
-use gpui::prelude::*;
-use gpui::*;
+use super::menu::MenuItem;
+use super::primitives::{divider, icon_button, render_icon, DIVIDER_TOTAL_W};
 use crate::model::ActiveFormats;
 use crate::theme::{sz, Theme};
-use super::primitives::{divider, icon_button, render_icon, DIVIDER_TOTAL_W};
-use super::menu::MenuItem;
+use gpui::prelude::*;
+use gpui::*;
 
-pub struct FormattingToolbarProps<FFormat, FTable, FLink, FToggleFind, FToggleOverflow, FToggleHeading>
-where
+pub struct FormattingToolbarProps<
+    FFormat,
+    FTable,
+    FLink,
+    FToggleFind,
+    FToggleOverflow,
+    FToggleHeading,
+> where
     FFormat: Fn(&'static str, &mut App) + 'static + Clone,
     FTable: Fn(&mut App) + 'static + Clone,
     FLink: Fn(&mut App) + 'static + Clone,
@@ -37,7 +43,14 @@ pub fn render_formatting_toolbar<
     FToggleOverflow,
     FToggleHeading,
 >(
-    props: FormattingToolbarProps<FFormat, FTable, FLink, FToggleFind, FToggleOverflow, FToggleHeading>,
+    props: FormattingToolbarProps<
+        FFormat,
+        FTable,
+        FLink,
+        FToggleFind,
+        FToggleOverflow,
+        FToggleHeading,
+    >,
     theme: &Theme,
 ) -> impl IntoElement
 where
@@ -92,11 +105,25 @@ where
                     // 1 & 2: Undo / Redo
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-undo", "rotate-ccw", "Undo (Ctrl+Z)", false, theme, move |_, _, cx| f("undo", cx))
+                        icon_button(
+                            "tb-undo",
+                            "rotate-ccw",
+                            "Undo (Ctrl+Z)",
+                            false,
+                            theme,
+                            move |_, _, cx| f("undo", cx),
+                        )
                     })
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-redo", "rotate-cw", "Redo (Ctrl+Y)", false, theme, move |_, _, cx| f("redo", cx))
+                        icon_button(
+                            "tb-redo",
+                            "rotate-cw",
+                            "Redo (Ctrl+Y)",
+                            false,
+                            theme,
+                            move |_, _, cx| f("redo", cx),
+                        )
                     })
                     .child(divider(theme))
                     // 3: Headings dropdown (H1 / H2 / H3)
@@ -108,46 +135,116 @@ where
                     // 6, 7, 8, 9, 10: Bold, Italic, Underline (Ctrl+U), Link, Search
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-bold", "bold", "Bold (Ctrl+B)", formats.bold, theme, move |_, _, cx| f("bold", cx))
+                        icon_button(
+                            "tb-bold",
+                            "bold",
+                            "Bold (Ctrl+B)",
+                            formats.bold,
+                            theme,
+                            move |_, _, cx| f("bold", cx),
+                        )
                     })
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-italic", "italic", "Italic (Ctrl+I)", formats.italic, theme, move |_, _, cx| f("italic", cx))
+                        icon_button(
+                            "tb-italic",
+                            "italic",
+                            "Italic (Ctrl+I)",
+                            formats.italic,
+                            theme,
+                            move |_, _, cx| f("italic", cx),
+                        )
                     })
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-underline", "underline", "Underline (Ctrl+U)", formats.underline, theme, move |_, _, cx| f("underline", cx))
+                        icon_button(
+                            "tb-underline",
+                            "underline",
+                            "Underline (Ctrl+U)",
+                            formats.underline,
+                            theme,
+                            move |_, _, cx| f("underline", cx),
+                        )
                     })
                     .child({
                         let l = on_link.clone();
-                        icon_button("tb-link", "link", "Insert Link (Ctrl+K)", formats.link, theme, move |_, _, cx| l(cx))
+                        icon_button(
+                            "tb-link",
+                            "link",
+                            "Insert Link (Ctrl+K)",
+                            formats.link,
+                            theme,
+                            move |_, _, cx| l(cx),
+                        )
                     })
                     .child({
                         let s = on_find.clone();
-                        icon_button("tb-search", "search", "Find & Replace (Ctrl+F)", false, theme, move |_, _, cx| s(cx))
+                        icon_button(
+                            "tb-search",
+                            "search",
+                            "Find & Replace (Ctrl+F)",
+                            false,
+                            theme,
+                            move |_, _, cx| s(cx),
+                        )
                     })
                     .child(divider(theme))
                     // 11, 12, 13, 14: Bullet, Numbered, Checklist, Table
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-ul", "list", "Bullet List", formats.ul, theme, move |_, _, cx| f("ul", cx))
+                        icon_button(
+                            "tb-ul",
+                            "list",
+                            "Bullet List",
+                            formats.ul,
+                            theme,
+                            move |_, _, cx| f("ul", cx),
+                        )
                     })
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-ol", "list-ordered", "Numbered List", formats.ol, theme, move |_, _, cx| f("ol", cx))
+                        icon_button(
+                            "tb-ol",
+                            "list-ordered",
+                            "Numbered List",
+                            formats.ol,
+                            theme,
+                            move |_, _, cx| f("ol", cx),
+                        )
                     })
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-task", "square-check", "Checklist", formats.checklist, theme, move |_, _, cx| f("checklist", cx))
+                        icon_button(
+                            "tb-task",
+                            "square-check",
+                            "Checklist",
+                            formats.checklist,
+                            theme,
+                            move |_, _, cx| f("checklist", cx),
+                        )
                     })
                     .child({
                         let t = on_table.clone();
-                        icon_button("tb-table", "table", "Table", props.show_table_menu || formats.table, theme, move |_, _, cx| t(cx))
+                        icon_button(
+                            "tb-table",
+                            "table",
+                            "Table",
+                            props.show_table_menu || formats.table,
+                            theme,
+                            move |_, _, cx| t(cx),
+                        )
                     })
                     // 15: More (⋯)
                     .child({
                         let ov = on_overflow.clone();
-                        icon_button("tb-more", "ellipsis", "More Formatting", props.show_overflow_menu, theme, move |_, _, cx| ov(cx))
+                        icon_button(
+                            "tb-more",
+                            "ellipsis",
+                            "More Formatting",
+                            props.show_overflow_menu,
+                            theme,
+                            move |_, _, cx| ov(cx),
+                        )
                     }),
             )
             .child(
@@ -193,32 +290,81 @@ where
                     .gap(px(TOOLBAR_ICON_GAP))
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-undo", "rotate-ccw", "Undo (Ctrl+Z)", false, theme, move |_, _, cx| f("undo", cx))
+                        icon_button(
+                            "tb-undo",
+                            "rotate-ccw",
+                            "Undo (Ctrl+Z)",
+                            false,
+                            theme,
+                            move |_, _, cx| f("undo", cx),
+                        )
                     })
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-redo", "rotate-cw", "Redo (Ctrl+Y)", false, theme, move |_, _, cx| f("redo", cx))
+                        icon_button(
+                            "tb-redo",
+                            "rotate-cw",
+                            "Redo (Ctrl+Y)",
+                            false,
+                            theme,
+                            move |_, _, cx| f("redo", cx),
+                        )
                     })
                     .child(divider(theme))
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-bold", "bold", "Bold (Ctrl+B)", formats.bold, theme, move |_, _, cx| f("bold", cx))
+                        icon_button(
+                            "tb-bold",
+                            "bold",
+                            "Bold (Ctrl+B)",
+                            formats.bold,
+                            theme,
+                            move |_, _, cx| f("bold", cx),
+                        )
                     })
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-italic", "italic", "Italic (Ctrl+I)", formats.italic, theme, move |_, _, cx| f("italic", cx))
+                        icon_button(
+                            "tb-italic",
+                            "italic",
+                            "Italic (Ctrl+I)",
+                            formats.italic,
+                            theme,
+                            move |_, _, cx| f("italic", cx),
+                        )
                     })
                     .child({
                         let f = on_format.clone();
-                        icon_button("tb-underline", "underline", "Underline (Ctrl+U)", formats.underline, theme, move |_, _, cx| f("underline", cx))
+                        icon_button(
+                            "tb-underline",
+                            "underline",
+                            "Underline (Ctrl+U)",
+                            formats.underline,
+                            theme,
+                            move |_, _, cx| f("underline", cx),
+                        )
                     })
                     .child({
                         let l = on_link.clone();
-                        icon_button("tb-link", "link", "Insert Link (Ctrl+K)", formats.link, theme, move |_, _, cx| l(cx))
+                        icon_button(
+                            "tb-link",
+                            "link",
+                            "Insert Link (Ctrl+K)",
+                            formats.link,
+                            theme,
+                            move |_, _, cx| l(cx),
+                        )
                     })
                     .child({
                         let ov = on_overflow.clone();
-                        icon_button("tb-more", "ellipsis", "More Formatting", props.show_overflow_menu, theme, move |_, _, cx| ov(cx))
+                        icon_button(
+                            "tb-more",
+                            "ellipsis",
+                            "More Formatting",
+                            props.show_overflow_menu,
+                            theme,
+                            move |_, _, cx| ov(cx),
+                        )
                     }),
             )
             .child(
@@ -291,7 +437,8 @@ fn heading_button(
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| on_toggle(cx))
         .tooltip(move |_, cx| {
-            cx.new(|_| super::primitives::SimpleTooltip::new("Headings", th)).into()
+            cx.new(|_| super::primitives::SimpleTooltip::new("Headings", th))
+                .into()
         })
         .child(render_icon(icon, 16.0, color))
         .child(render_icon("chevron-down", 10.0, color))
@@ -316,7 +463,9 @@ pub fn wide_center_width() -> f32 {
     let plain_buttons = 12.0;
     let dividers = 3.0;
     let items = plain_buttons + 1.0 + dividers;
-    (plain_buttons * btn_w) + HEADING_BTN_W + (dividers * DIVIDER_TOTAL_W)
+    (plain_buttons * btn_w)
+        + HEADING_BTN_W
+        + (dividers * DIVIDER_TOTAL_W)
         + ((items - 1.0) * TOOLBAR_ICON_GAP)
 }
 
@@ -326,16 +475,16 @@ pub fn build_heading_menu_items(
     on_close: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
     HEADING_LEVELS
-    .into_iter()
-    .map(|(label, icon, shortcut, cmd)| {
-        let f = on_format.clone();
-        let c = on_close.clone();
-        MenuItem::action(label, Some(icon), Some(shortcut), move |_, cx| {
-            f(cmd, cx);
-            c(cx);
+        .into_iter()
+        .map(|(label, icon, shortcut, cmd)| {
+            let f = on_format.clone();
+            let c = on_close.clone();
+            MenuItem::action(label, Some(icon), Some(shortcut), move |_, cx| {
+                f(cmd, cx);
+                c(cx);
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 pub const TOOLBAR_PX_PAD: f32 = 8.0;
@@ -355,7 +504,8 @@ pub fn calculate_narrow_toolbar_min_width() -> f32 {
     let center_dividers_count = 1.0;
     let total_center_items = center_buttons_count + center_dividers_count;
     let gaps = (total_center_items - 1.0) * TOOLBAR_ICON_GAP;
-    let center_w = (center_buttons_count * btn_w) + (center_dividers_count * DIVIDER_TOTAL_W) + gaps;
+    let center_w =
+        (center_buttons_count * btn_w) + (center_dividers_count * DIVIDER_TOTAL_W) + gaps;
 
     // Outer container padding (left + right)
     let container_pad = TOOLBAR_PX_PAD * 2.0;
@@ -392,93 +542,153 @@ pub fn build_overflow_menu_items(
         for (label, icon, shortcut, cmd) in HEADING_LEVELS {
             let f = on_format.clone();
             let c = on_close.clone();
-            items.push(MenuItem::action(label, Some(icon), Some(shortcut), move |_, cx| {
-                f(cmd, cx);
-                c(cx);
-            }));
+            items.push(MenuItem::action(
+                label,
+                Some(icon),
+                Some(shortcut),
+                move |_, cx| {
+                    f(cmd, cx);
+                    c(cx);
+                },
+            ));
         }
         items.push(MenuItem::divider());
 
         let f4 = on_format.clone();
         let c4 = on_close.clone();
-        items.push(MenuItem::action("Bullet list", Some("list"), None, move |_, cx| {
-            f4("ul", cx);
-            c4(cx);
-        }));
+        items.push(MenuItem::action(
+            "Bullet list",
+            Some("list"),
+            None,
+            move |_, cx| {
+                f4("ul", cx);
+                c4(cx);
+            },
+        ));
         let f5 = on_format.clone();
         let c5 = on_close.clone();
-        items.push(MenuItem::action("Numbered list", Some("list-ordered"), None, move |_, cx| {
-            f5("ol", cx);
-            c5(cx);
-        }));
+        items.push(MenuItem::action(
+            "Numbered list",
+            Some("list-ordered"),
+            None,
+            move |_, cx| {
+                f5("ol", cx);
+                c5(cx);
+            },
+        ));
         let f6 = on_format.clone();
         let c6 = on_close.clone();
-        items.push(MenuItem::action("Task list", Some("square-check"), None, move |_, cx| {
-            f6("checklist", cx);
-            c6(cx);
-        }));
+        items.push(MenuItem::action(
+            "Task list",
+            Some("square-check"),
+            None,
+            move |_, cx| {
+                f6("checklist", cx);
+                c6(cx);
+            },
+        ));
         let f_find = on_toggle_find.clone();
         let c_find = on_close.clone();
-        items.push(MenuItem::action("Find & Replace", Some("search"), Some("Ctrl+F"), move |_, cx| {
-            f_find(cx);
-            c_find(cx);
-        }));
+        items.push(MenuItem::action(
+            "Find & Replace",
+            Some("search"),
+            Some("Ctrl+F"),
+            move |_, cx| {
+                f_find(cx);
+                c_find(cx);
+            },
+        ));
         items.push(MenuItem::divider());
     }
 
     // Extra features (always in overflow menu)
     let f_strike = on_format.clone();
     let c_strike = on_close.clone();
-    items.push(MenuItem::action("Strikethrough", Some("strikethrough"), Some("Ctrl+Shift+X"), move |_, cx| {
-        f_strike("strike", cx);
-        c_strike(cx);
-    }));
+    items.push(MenuItem::action(
+        "Strikethrough",
+        Some("strikethrough"),
+        Some("Ctrl+Shift+X"),
+        move |_, cx| {
+            f_strike("strike", cx);
+            c_strike(cx);
+        },
+    ));
 
     items.push(MenuItem::divider());
 
     let f_quote = on_format.clone();
     let c_quote = on_close.clone();
-    items.push(MenuItem::action("Quote Block", Some("quote"), None, move |_, cx| {
-        f_quote("quote", cx);
-        c_quote(cx);
-    }));
+    items.push(MenuItem::action(
+        "Quote Block",
+        Some("quote"),
+        None,
+        move |_, cx| {
+            f_quote("quote", cx);
+            c_quote(cx);
+        },
+    ));
 
     let f_code = on_format.clone();
     let c_code = on_close.clone();
-    items.push(MenuItem::action("Inline Code", Some("code"), Some("Ctrl+E"), move |_, cx| {
-        f_code("code", cx);
-        c_code(cx);
-    }));
+    items.push(MenuItem::action(
+        "Inline Code",
+        Some("code"),
+        Some("Ctrl+E"),
+        move |_, cx| {
+            f_code("code", cx);
+            c_code(cx);
+        },
+    ));
 
     let f_codeblock = on_format.clone();
     let c_codeblock = on_close.clone();
-    items.push(MenuItem::action("Code Block", Some("file-code"), Some("Ctrl+Shift+C"), move |_, cx| {
-        f_codeblock("codeblock", cx);
-        c_codeblock(cx);
-    }));
+    items.push(MenuItem::action(
+        "Code Block",
+        Some("file-code"),
+        Some("Ctrl+Shift+C"),
+        move |_, cx| {
+            f_codeblock("codeblock", cx);
+            c_codeblock(cx);
+        },
+    ));
 
     let f_hr = on_format.clone();
     let c_hr = on_close.clone();
-    items.push(MenuItem::action("Horizontal Divider", Some("minus"), None, move |_, cx| {
-        f_hr("hr", cx);
-        c_hr(cx);
-    }));
+    items.push(MenuItem::action(
+        "Horizontal Divider",
+        Some("minus"),
+        None,
+        move |_, cx| {
+            f_hr("hr", cx);
+            c_hr(cx);
+        },
+    ));
 
     let t1 = on_insert_table.clone();
     let c_t = on_close.clone();
-    items.push(MenuItem::action("Insert Table", Some("table"), None, move |_, cx| {
-        c_t(cx);
-        t1(cx);
-    }));
+    items.push(MenuItem::action(
+        "Insert Table",
+        Some("table"),
+        None,
+        move |_, cx| {
+            c_t(cx);
+            t1(cx);
+        },
+    ));
 
     items.push(MenuItem::divider());
 
     let f_clear = on_format.clone();
     let c_clear = on_close.clone();
-    items.push(MenuItem::action("Clear Formatting", Some("remove-formatting"), None, move |_, cx| {
-        f_clear("clear", cx);
-        c_clear(cx);
-    }));
+    items.push(MenuItem::action(
+        "Clear Formatting",
+        Some("remove-formatting"),
+        None,
+        move |_, cx| {
+            f_clear("clear", cx);
+            c_clear(cx);
+        },
+    ));
 
     items
 }
@@ -494,29 +704,20 @@ mod tests {
     #[test]
     fn test_overflow_menu_contents_at_breakpoints() {
         // In big window mode (!is_narrow): no headings, no lists, no Find (Find is already on wide toolbar)
-        let wide_items = build_overflow_menu_items(
-            false,
-            |_, _| {},
-            |_| {},
-            |_| {},
-            |_| {},
-        );
+        let wide_items = build_overflow_menu_items(false, |_, _| {}, |_| {}, |_| {}, |_| {});
         let labels_wide: Vec<&str> = wide_items.iter().map(|it| it.label).collect();
         assert!(!labels_wide.contains(&"Underline"));
         assert!(!labels_wide.contains(&"Heading 1"));
         assert!(!labels_wide.contains(&"Bullet list"));
-        assert!(!labels_wide.contains(&"Find & Replace"), "Find must not be duplicated on wide windows");
+        assert!(
+            !labels_wide.contains(&"Find & Replace"),
+            "Find must not be duplicated on wide windows"
+        );
         assert!(labels_wide.contains(&"Strikethrough"));
         assert!(labels_wide.contains(&"Insert Table"));
 
         // In super small mode (is_narrow): headings, lists, and Find are prepended
-        let narrow_items = build_overflow_menu_items(
-            true,
-            |_, _| {},
-            |_| {},
-            |_| {},
-            |_| {},
-        );
+        let narrow_items = build_overflow_menu_items(true, |_, _| {}, |_| {}, |_| {}, |_| {});
         let labels_narrow: Vec<&str> = narrow_items.iter().map(|it| it.label).collect();
         assert!(labels_narrow.contains(&"Heading 1"));
         assert!(labels_narrow.contains(&"Heading 2"));
@@ -525,7 +726,10 @@ mod tests {
         assert!(labels_narrow.contains(&"Bullet list"));
         assert!(labels_narrow.contains(&"Numbered list"));
         assert!(labels_narrow.contains(&"Task list"));
-        assert!(labels_narrow.contains(&"Find & Replace"), "Find must be in overflow menu on narrow windows");
+        assert!(
+            labels_narrow.contains(&"Find & Replace"),
+            "Find must be in overflow menu on narrow windows"
+        );
         assert!(labels_narrow.contains(&"Strikethrough"));
     }
 

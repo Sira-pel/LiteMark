@@ -1,8 +1,8 @@
-use gpui::prelude::*;
-use gpui::*;
-use crate::theme::{sz, Theme, ThemeMode};
 use super::menu::MenuItem;
 use super::primitives::render_icon;
+use crate::theme::{sz, Theme, ThemeMode};
+use gpui::prelude::*;
+use gpui::*;
 
 pub fn render_settings_button<FTogOpen>(
     is_open: bool,
@@ -25,12 +25,28 @@ where
         .h(sz::TB_TILE_H)
         .rounded(sz::R_MD)
         .cursor_pointer()
-        .bg(if is_open { theme.border_subtle } else { rgba(0x00000000) })
-        .text_color(if is_open { theme.text_strong } else { theme.text_muted })
+        .bg(if is_open {
+            theme.border_subtle
+        } else {
+            rgba(0x00000000)
+        })
+        .text_color(if is_open {
+            theme.text_strong
+        } else {
+            theme.text_muted
+        })
         .hover(|h| h.bg(theme.tile_hover).text_color(theme.text_hi))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| tog(cx))
-        .child(render_icon("settings", 16.0, if is_open { theme.text_strong } else { theme.text_muted }))
+        .child(render_icon(
+            "settings",
+            16.0,
+            if is_open {
+                theme.text_strong
+            } else {
+                theme.text_muted
+            },
+        ))
         .when(update_available, |s| {
             s.child(
                 div()
@@ -87,9 +103,24 @@ pub fn build_settings_menu_items(
 
     vec![
         MenuItem::heading("THEME"),
-        MenuItem::radio("Dark", current_theme == ThemeMode::YaruDark, None, move |_, cx| t_dark(ThemeMode::YaruDark, cx)),
-        MenuItem::radio("Light", current_theme == ThemeMode::YaruLight, None, move |_, cx| t_light(ThemeMode::YaruLight, cx)),
-        MenuItem::radio("System", current_theme == ThemeMode::System, None, move |_, cx| t_sys(ThemeMode::System, cx)),
+        MenuItem::radio(
+            "Dark",
+            current_theme == ThemeMode::YaruDark,
+            None,
+            move |_, cx| t_dark(ThemeMode::YaruDark, cx),
+        ),
+        MenuItem::radio(
+            "Light",
+            current_theme == ThemeMode::YaruLight,
+            None,
+            move |_, cx| t_light(ThemeMode::YaruLight, cx),
+        ),
+        MenuItem::radio(
+            "System",
+            current_theme == ThemeMode::System,
+            None,
+            move |_, cx| t_sys(ThemeMode::System, cx),
+        ),
         MenuItem::divider(),
         MenuItem {
             label: "Font size",
@@ -141,16 +172,30 @@ mod tests {
             |_| {},
         );
 
-        let font_item = items.iter().find(|i| i.label == "Font size").expect("Font size menu item exists");
-        assert_eq!(font_item.hint.as_ref().map(|hint| hint.as_ref()), Some("17 px"));
+        let font_item = items
+            .iter()
+            .find(|i| i.label == "Font size")
+            .expect("Font size menu item exists");
+        assert_eq!(
+            font_item.hint.as_ref().map(|hint| hint.as_ref()),
+            Some("17 px")
+        );
 
         if let MenuItemKind::Submenu(sub) = &font_item.kind {
             let labels: Vec<&str> = sub.iter().map(|s| s.label).collect();
             assert_eq!(
                 labels,
                 vec![
-                    "13 px", "14 px", "15 px", "16 px", "17 px (Default)",
-                    "18 px", "19 px", "20 px", "22 px", "24 px"
+                    "13 px",
+                    "14 px",
+                    "15 px",
+                    "16 px",
+                    "17 px (Default)",
+                    "18 px",
+                    "19 px",
+                    "20 px",
+                    "22 px",
+                    "24 px"
                 ]
             );
 
@@ -180,7 +225,10 @@ mod tests {
                 |_| {},
                 |_| {},
             );
-            let item = items.iter().find(|i| i.label == "Check automatically").expect("item exists");
+            let item = items
+                .iter()
+                .find(|i| i.label == "Check automatically")
+                .expect("item exists");
             assert!(matches!(item.kind, MenuItemKind::Check(c) if c == enabled));
         }
     }

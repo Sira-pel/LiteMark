@@ -276,7 +276,10 @@ fn closing_the_window_asks_about_a_note_changed_on_disk() {
         app.request_close_window();
         app.answer_prompt("Save", cx);
         assert!(
-            matches!(app.prompt, Some(Prompt::ExternalChange { deleted: false, .. })),
+            matches!(
+                app.prompt,
+                Some(Prompt::ExternalChange { deleted: false, .. })
+            ),
             "the changed note gets Overwrite or Reload, not the close prompt again"
         );
         assert!(!app.allow_window_close);

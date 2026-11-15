@@ -164,7 +164,10 @@ fn off_screen_table_keeps_its_height_without_shaping() {
 fn big_table(rows: usize) -> String {
     let mut table = String::from("| Name | Value | Note |\n| --- | --- | --- |\n");
     for i in 0..rows {
-        table.push_str(&format!("| row {i} | {} | some **bold** text {i} |\n", i * 7));
+        table.push_str(&format!(
+            "| row {i} | {} | some **bold** text {i} |\n",
+            i * 7
+        ));
     }
     table
 }
@@ -186,7 +189,11 @@ fn caret_in_a_large_table_shapes_only_nearby_rows() {
     let shaped = shaped_rows(&view, &cx);
     let caret_row = row_of(&view, &cx, target);
     assert!(shaped.contains(&caret_row), "the caret's row is shaped");
-    assert!(shaped.len() < rows / 10, "{} of {rows} rows shaped", shaped.len());
+    assert!(
+        shaped.len() < rows / 10,
+        "{} of {rows} rows shaped",
+        shaped.len()
+    );
 
     // Typing in the cell changes the table's key; the other rows keep
     // their cached heights and stay unshaped.
@@ -197,7 +204,11 @@ fn caret_in_a_large_table_shapes_only_nearby_rows() {
     });
     redraw(&mut cx);
     let shaped = shaped_rows(&view, &cx);
-    assert!(shaped.len() < rows / 10, "{} of {rows} rows shaped after typing", shaped.len());
+    assert!(
+        shaped.len() < rows / 10,
+        "{} of {rows} rows shaped after typing",
+        shaped.len()
+    );
     let after = geometry(&view, &cx);
     assert_eq!(after.len(), first.len());
     let chrome_rows = view.read_with(&cx, |app, _| app.editor_paint.borrow().tables[0].rows.len());
@@ -228,7 +239,11 @@ fn up_and_down_keep_the_column_across_a_short_line() {
         cx.dispatch_action(EditorDown);
         assert_eq!(caret(&view, &cx), 11, "short line clamps to its end");
         cx.dispatch_action(EditorDown);
-        assert_eq!(caret(&view, &cx), 12 + 6, "{mode:?}: column is kept going down");
+        assert_eq!(
+            caret(&view, &cx),
+            12 + 6,
+            "{mode:?}: column is kept going down"
+        );
         cx.dispatch_action(EditorUp);
         cx.dispatch_action(EditorUp);
         assert_eq!(caret(&view, &cx), 6, "{mode:?}: and going back up");
@@ -241,11 +256,19 @@ fn up_and_down_keep_the_column_across_a_short_line() {
     }
 }
 
-fn caret_row_in_view(view: &Entity<LiteMarkApp>, cx: &VisualTestContext) -> (Pixels, Pixels, Pixels) {
+fn caret_row_in_view(
+    view: &Entity<LiteMarkApp>,
+    cx: &VisualTestContext,
+) -> (Pixels, Pixels, Pixels) {
     view.read_with(cx, |app, _| {
         let cursor = app.active_tab().expect("tab").caret.cursor();
         let paint = app.editor_paint.borrow();
-        let row = paint.rows.iter().rev().find(|r| r.byte_start <= cursor).expect("row");
+        let row = paint
+            .rows
+            .iter()
+            .rev()
+            .find(|r| r.byte_start <= cursor)
+            .expect("row");
         let b = app.editor_scroll.bounds();
         (row.origin.y + row.line_height, b.bottom(), b.top())
     })
@@ -262,7 +285,10 @@ fn enter_at_the_bottom_scrolls_the_new_line_into_view() {
             cx.update(|window, _| window.refresh());
             cx.run_until_parked();
             let (row_bottom, view_bottom, _) = caret_row_in_view(&view, &cx);
-            assert!(row_bottom <= view_bottom, "{mode:?}: newline {i} fell below the editor");
+            assert!(
+                row_bottom <= view_bottom,
+                "{mode:?}: newline {i} fell below the editor"
+            );
         }
         // Moving up past the top edge follows too.
         for _ in 0..90 {
@@ -272,7 +298,10 @@ fn enter_at_the_bottom_scrolls_the_new_line_into_view() {
         }
         let (_, _, view_top) = caret_row_in_view(&view, &cx);
         let (row_bottom, view_bottom, _) = caret_row_in_view(&view, &cx);
-        assert!(row_bottom <= view_bottom && row_bottom >= view_top, "{mode:?}: up arrow lost the caret");
+        assert!(
+            row_bottom <= view_bottom && row_bottom >= view_top,
+            "{mode:?}: up arrow lost the caret"
+        );
     }
 }
 
@@ -305,7 +334,10 @@ fn touchpad_flick_keeps_scrolling_after_the_events_stop() {
         advance(&view, &mut cx, 8);
     }
     let at_release = y_of(&view, &cx);
-    assert!(at_release < -100.0, "the flick itself scrolled: {at_release}");
+    assert!(
+        at_release < -100.0,
+        "the flick itself scrolled: {at_release}"
+    );
     let mut last = at_release;
     for _ in 0..12 {
         advance(&view, &mut cx, 16);
@@ -313,7 +345,10 @@ fn touchpad_flick_keeps_scrolling_after_the_events_stop() {
         cx.run_until_parked();
         last = y_of(&view, &cx);
     }
-    assert!(last < at_release - 50.0, "coasted on: {at_release} -> {last}");
+    assert!(
+        last < at_release - 50.0,
+        "coasted on: {at_release} -> {last}"
+    );
 
     // A fresh touch stops it dead.
     cx.simulate_event(ScrollWheelEvent {
@@ -338,7 +373,10 @@ fn typing_above_tables_keeps_far_tables_unshaped() {
     let rows_before = geometry(&view, &cx).len();
     let far_table_rows = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| {
         let shaped = shaped_rows(view, cx);
-        shaped.into_iter().filter(|&row| row > rows_before / 2).count()
+        shaped
+            .into_iter()
+            .filter(|&row| row > rows_before / 2)
+            .count()
     };
     assert_eq!(far_table_rows(&view, &cx), 0, "far tables start unshaped");
 
@@ -367,7 +405,10 @@ fn layout_after_edits_matches_a_fresh_layout() {
     }
     let (view, mut cx) = harness(&content, ViewMode::Wysiwyg);
     let edits: [(usize, &str); 5] = [
-        (content.len() / 2, "inserted words that make this paragraph wrap one more row "),
+        (
+            content.len() / 2,
+            "inserted words that make this paragraph wrap one more row ",
+        ),
         (100, "\n\n# New heading\n\n"),
         (content.len() / 3, "```\n"),
         (content.len() / 3 + 30, "\n```\n"),
@@ -409,10 +450,15 @@ fn layout_after_edits_matches_a_fresh_layout() {
     let fresh = relative(geometry(&fresh_view, &fresh_cx));
     let edited = relative(edited);
     assert_eq!(edited.len(), fresh.len(), "row count");
-    let same = |a: &(usize, usize, Pixels, Pixels, Pixels), b: &(usize, usize, Pixels, Pixels, Pixels)| {
-        (a.0, a.1, a.2, a.4) == (b.0, b.1, b.2, b.4) && (f32::from(a.3) - f32::from(b.3)).abs() < 0.01
+    let same = |a: &(usize, usize, Pixels, Pixels, Pixels),
+                b: &(usize, usize, Pixels, Pixels, Pixels)| {
+        (a.0, a.1, a.2, a.4) == (b.0, b.1, b.2, b.4)
+            && (f32::from(a.3) - f32::from(b.3)).abs() < 0.01
     };
     if let Some(ix) = edited.iter().zip(&fresh).position(|(a, b)| !same(a, b)) {
-        panic!("row {ix} differs: edited {:?} fresh {:?}", edited[ix], fresh[ix]);
+        panic!(
+            "row {ix} differs: edited {:?} fresh {:?}",
+            edited[ix], fresh[ix]
+        );
     }
 }

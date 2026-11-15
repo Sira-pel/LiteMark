@@ -1,0 +1,3 @@
+# Shared by `cargo fmt`, CI and .cursor/skills/verify-litemark/scripts/fmt-gate.sh.
+max_width = 100
+newline_style = "Unix"

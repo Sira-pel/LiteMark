@@ -487,13 +487,17 @@ impl DocumentTab {
                     .collect();
 
                 if rewrite_ranges.len() == 1 && !candidate_results.is_empty() {
-                    let (rep_range, rendered_str, sel_in_rendered, p_start) = candidate_results.remove(0);
+                    let (rep_range, rendered_str, sel_in_rendered, p_start) =
+                        candidate_results.remove(0);
                     self.edit(rep_range.clone(), &rendered_str);
 
                     if let Some(cur) = orig_cursor {
                         let cursor_in_sel = cur.saturating_sub(p_start);
-                        let target_pos = rep_range.start + sel_in_rendered.start + cursor_in_sel.min(sel_in_rendered.len());
-                        self.caret.move_to(floor_boundary(&self.content, target_pos));
+                        let target_pos = rep_range.start
+                            + sel_in_rendered.start
+                            + cursor_in_sel.min(sel_in_rendered.len());
+                        self.caret
+                            .move_to(floor_boundary(&self.content, target_pos));
                     } else {
                         let new_start = rep_range.start + sel_in_rendered.start;
                         let new_end = rep_range.start + sel_in_rendered.end;
@@ -663,9 +667,7 @@ impl DocumentTab {
             {
                 if let (Some(cur), true) = (orig_cursor, every_part_has_format) {
                     let unwrapped_len = edits[0].1.len();
-                    let rel = cur
-                        .saturating_sub(parts[0].range.start)
-                        .min(unwrapped_len);
+                    let rel = cur.saturating_sub(parts[0].range.start).min(unwrapped_len);
                     self.caret.move_to(min_start + rel);
                     self.caret.reversed = false;
                     self.pending_formats = ActiveFormats::default();
@@ -921,7 +923,12 @@ impl DocumentTab {
 
 /// True when `from..to` is only whitespace and delimiter markup, so a
 /// neighboring span with matching flags can merge across that gap.
-pub(super) fn gap_is_ws_and_markers(content: &str, hidden: &[Range<usize>], from: usize, to: usize) -> bool {
+pub(super) fn gap_is_ws_and_markers(
+    content: &str,
+    hidden: &[Range<usize>],
+    from: usize,
+    to: usize,
+) -> bool {
     if to < from {
         return false;
     }
@@ -1106,7 +1113,10 @@ pub(super) fn is_indented_code(parsed: &ParsedDocument, line: &ParsedLine) -> bo
 /// The indented code block around `offset`: its consecutive code lines plus
 /// any run of blank lines between them (CommonMark example 117), or `None`
 /// when `offset` is not on an indented code line.
-pub(super) fn indented_code_block_at(parsed: &ParsedDocument, offset: usize) -> Option<&[ParsedLine]> {
+pub(super) fn indented_code_block_at(
+    parsed: &ParsedDocument,
+    offset: usize,
+) -> Option<&[ParsedLine]> {
     let at = parsed.line_at_offset(offset)?.line_index;
     let lines = &parsed.lines;
     let code = |index: usize| is_indented_code(parsed, &lines[index]);
@@ -1191,7 +1201,10 @@ pub(super) fn expand_line_group_pairs<'a>(
     }
 }
 
-pub(super) fn collect_group_pairs(parsed: &ParsedDocument, range: Range<usize>) -> Vec<&InlinePair> {
+pub(super) fn collect_group_pairs(
+    parsed: &ParsedDocument,
+    range: Range<usize>,
+) -> Vec<&InlinePair> {
     let lines = parsed.lines_near(range.clone());
     let mut group_pairs = Vec::with_capacity(lines.iter().map(|l| l.inline_pairs.len()).sum());
     let mut seen = HashSet::with_capacity(group_pairs.capacity());
@@ -1225,7 +1238,11 @@ pub(super) fn add_contained_pairs<'a>(
 
 /// `line_col` answered from the parsed line table instead of rescanning the
 /// text from the start.
-pub(super) fn parsed_line_col(content: &str, parsed: &ParsedDocument, offset: usize) -> (usize, usize) {
+pub(super) fn parsed_line_col(
+    content: &str,
+    parsed: &ParsedDocument,
+    offset: usize,
+) -> (usize, usize) {
     let offset = crate::model::text_ops::floor_char_boundary(content, offset.min(content.len()));
     let idx = parsed.lines.partition_point(|l| l.source.start <= offset);
     let Some(line) = idx.checked_sub(1).map(|i| &parsed.lines[i]) else {
@@ -1259,7 +1276,13 @@ pub(super) fn hidden_range_at(
         .cloned()
 }
 
-pub(super) fn outer_is_delimited(content: &str, start: usize, end: usize, prefix: &str, suffix: &str) -> bool {
+pub(super) fn outer_is_delimited(
+    content: &str,
+    start: usize,
+    end: usize,
+    prefix: &str,
+    suffix: &str,
+) -> bool {
     if start > content.len() || end > content.len() || start > end {
         return false;
     }
@@ -1302,7 +1325,11 @@ pub(super) fn is_single_link(text: &str) -> Option<&str> {
     Some(inner)
 }
 
-pub(super) fn unwrap_outer_link(content: &str, start: usize, end: usize) -> Option<(Range<usize>, String)> {
+pub(super) fn unwrap_outer_link(
+    content: &str,
+    start: usize,
+    end: usize,
+) -> Option<(Range<usize>, String)> {
     if start == 0 || end > content.len() || start > end {
         return None;
     }

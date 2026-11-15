@@ -18,13 +18,19 @@ fn plain_inline_shortcut_matches_pulldown() {
     for text in named {
         assert!(is_plain_inline(text), "{text:?} should take the shortcut");
         for base in [0, 7] {
-            assert_eq!(parse_inline_syntax(text, base), parse_inline_with_pulldown(text, base), "{text:?}");
+            assert_eq!(
+                parse_inline_syntax(text, base),
+                parse_inline_with_pulldown(text, base),
+                "{text:?}"
+            );
         }
         checked += 1;
     }
 
     let alphabet: Vec<char> =
-        "aZ 09.,;:-+#=()/?'\"$%^{}@é😀ßhtp:w1)\u{a0}\u{3000}\u{2003}\u{c}\u{b}".chars().collect();
+        "aZ 09.,;:-+#=()/?'\"$%^{}@é😀ßhtp:w1)\u{a0}\u{3000}\u{2003}\u{c}\u{b}"
+            .chars()
+            .collect();
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     for _ in 0..200_000 {
         seed ^= seed << 13;
@@ -34,17 +40,28 @@ fn plain_inline_shortcut_matches_pulldown() {
         let mut text = String::new();
         let mut s = seed;
         for _ in 0..len {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             text.push(alphabet[(s >> 33) as usize % alphabet.len()]);
         }
         if is_plain_inline(&text) {
-            assert_eq!(parse_inline_syntax(&text, 3), parse_inline_with_pulldown(&text, 3), "{text:?}");
+            assert_eq!(
+                parse_inline_syntax(&text, 3),
+                parse_inline_with_pulldown(&text, 3),
+                "{text:?}"
+            );
             checked += 1;
         }
     }
-    assert!(checked > 10_000, "only {checked} inputs exercised the shortcut");
+    assert!(
+        checked > 10_000,
+        "only {checked} inputs exercised the shortcut"
+    );
 
-    for text in ["1. item", " lead", "trail ", "# h", "*a*", "a_b", "x\\y", "Q&A", "<b>", "[l](u)", "- x"] {
+    for text in [
+        "1. item", " lead", "trail ", "# h", "*a*", "a_b", "x\\y", "Q&A", "<b>", "[l](u)", "- x",
+    ] {
         assert!(!is_plain_inline(text), "{text:?} must use pulldown");
     }
 }
@@ -112,12 +129,14 @@ fn test_in_list_or_quote_tracker_exhaustive() {
             tracker.is_in_list_or_quote(),
             in_list_or_quote(seq),
             "Mismatch for sequence: {:?}",
-            seq.iter().map(|l| match &l.kind {
-                LineKind::Empty => "E",
-                LineKind::ListItem { .. } => "L",
-                LineKind::Blockquote => "B",
-                _ => "O",
-            }).collect::<Vec<_>>()
+            seq.iter()
+                .map(|l| match &l.kind {
+                    LineKind::Empty => "E",
+                    LineKind::ListItem { .. } => "L",
+                    LineKind::Blockquote => "B",
+                    _ => "O",
+                })
+                .collect::<Vec<_>>()
         );
         if depth >= 8 {
             return;
@@ -196,7 +215,10 @@ fn test_spans_formatting() {
     };
     assert!(styled("bold", |s| s.bold), "Expected bold span");
     assert!(styled("italic", |s| s.italic), "Expected italic span");
-    assert!(styled("underlined", |s| s.underline), "Expected underline span");
+    assert!(
+        styled("underlined", |s| s.underline),
+        "Expected underline span"
+    );
     assert!(styled("strike", |s| s.strike), "Expected strike span");
     assert!(styled("code", |s| s.code), "Expected code span");
 }
@@ -289,14 +311,34 @@ fn test_parse_document_table() {
     let md = "| **Col 1** | Col 2 |\n| :--- | :--- |\n| Val A | ~~Val B~~ |";
     let doc = parse_document(md);
     assert_eq!(doc.lines.len(), 3);
-    assert!(matches!(doc.lines[0].kind, LineKind::TableRow { is_header: true, .. }));
+    assert!(matches!(
+        doc.lines[0].kind,
+        LineKind::TableRow {
+            is_header: true,
+            ..
+        }
+    ));
     assert!(matches!(doc.lines[1].kind, LineKind::TableDelimiter));
-    assert!(matches!(doc.lines[2].kind, LineKind::TableRow { is_header: false, .. }));
+    assert!(matches!(
+        doc.lines[2].kind,
+        LineKind::TableRow {
+            is_header: false,
+            ..
+        }
+    ));
     assert_eq!(doc.lines[0].display_text, "| **Col 1** | Col 2 |");
     // Verify Col 1 is bold (via **), but Col 2 is not forced bold
-    let bold_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| s.bold).collect();
+    let bold_segs: Vec<_> = doc.lines[0]
+        .styled_segments
+        .iter()
+        .filter(|s| s.bold)
+        .collect();
     assert!(!bold_segs.is_empty());
-    let normal_segs: Vec<_> = doc.lines[0].styled_segments.iter().filter(|s| !s.bold).collect();
+    let normal_segs: Vec<_> = doc.lines[0]
+        .styled_segments
+        .iter()
+        .filter(|s| !s.bold)
+        .collect();
     assert!(!normal_segs.is_empty());
 }
 
@@ -522,9 +564,7 @@ fn leaf_blocks_match_commonmark_examples() {
         let want = expect_dump(expected);
         match leaf_dump(md) {
             Ok(actual) if actual == want => {}
-            Ok(actual) => {
-                failures.push(format!("CASE {name}\nexpected:\n{want}actual:\n{actual}"))
-            }
+            Ok(actual) => failures.push(format!("CASE {name}\nexpected:\n{want}actual:\n{actual}")),
             Err(err) => failures.push(format!("CASE {name} {err}")),
         }
     }
@@ -3406,18 +3446,14 @@ fn wrap_snippet_contexts(inner: &str) -> Vec<(&'static str, String)> {
         ("list", format!("- {inner}")),
         ("heading", format!("# {inner}")),
         ("quote", format!("> {inner}")),
-        (
-            "table",
-            format!("| {inner} | z |\n| --- | --- |"),
-        ),
+        ("table", format!("| {inner} | z |\n| --- | --- |")),
     ]
 }
 
-fn word_style(
-    md: &str,
-    word: &str,
-) -> (bool, bool, bool, bool, bool) {
-    let start = md.find(word).unwrap_or_else(|| panic!("{word:?} not in {md:?}"));
+fn word_style(md: &str, word: &str) -> (bool, bool, bool, bool, bool) {
+    let start = md
+        .find(word)
+        .unwrap_or_else(|| panic!("{word:?} not in {md:?}"));
     let end = start + word.len();
     let doc = parse_document(md);
     let segs: Vec<_> = doc

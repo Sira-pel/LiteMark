@@ -64,22 +64,28 @@ fn a_frame_with_thousands_of_notes_stays_fast() {
         redraw(&mut cx);
     }
     let per_frame = started.elapsed() / 3;
-    assert!(per_frame.as_millis() < 500, "sidebar frame took {per_frame:?}");
+    assert!(
+        per_frame.as_millis() < 500,
+        "sidebar frame took {per_frame:?}"
+    );
 }
 
 #[std_test]
 fn keyboard_selection_finds_its_row_to_scroll_to() {
     let ws = big_workspace(3, 4);
-    let items = crate::ui::sidebar::build_sidebar_tree(
-        &ws.folders,
-        &ws.files,
-        None,
-    );
+    let items = crate::ui::sidebar::build_sidebar_tree(&ws.folders, &ws.files, None);
     let file = ws.files.last().unwrap().id.clone();
     let ix = crate::ui::sidebar::selected_row_index(&items, Some(&file), None).unwrap();
-    assert!(matches!(&items[ix], crate::ui::sidebar::SidebarTreeItem::File { file: f, .. } if f.id == file));
+    assert!(
+        matches!(&items[ix], crate::ui::sidebar::SidebarTreeItem::File { file: f, .. } if f.id == file)
+    );
     let folder = ws.folders[1].id.clone();
     let ix = crate::ui::sidebar::selected_row_index(&items, None, Some(&folder)).unwrap();
-    assert!(matches!(&items[ix], crate::ui::sidebar::SidebarTreeItem::Folder { folder: f, .. } if f.id == folder));
-    assert_eq!(crate::ui::sidebar::selected_row_index(&items, Some("gone"), None), None);
+    assert!(
+        matches!(&items[ix], crate::ui::sidebar::SidebarTreeItem::Folder { folder: f, .. } if f.id == folder)
+    );
+    assert_eq!(
+        crate::ui::sidebar::selected_row_index(&items, Some("gone"), None),
+        None
+    );
 }

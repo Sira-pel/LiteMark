@@ -1,6 +1,6 @@
+use crate::theme::{sz, Theme};
 use gpui::prelude::*;
 use gpui::*;
-use crate::theme::{sz, Theme};
 
 pub fn icon_path(name: &str) -> SharedString {
     format!("icons/{}.svg", name).into()
@@ -83,7 +83,11 @@ where
     if !tooltip.is_empty() {
         let th = *theme;
         el.tooltip(move |_, cx| {
-            cx.new(|_| SimpleTooltip { text: tooltip, theme: th }).into()
+            cx.new(|_| SimpleTooltip {
+                text: tooltip,
+                theme: th,
+            })
+            .into()
         })
     } else {
         el
@@ -106,7 +110,16 @@ pub fn divider(theme: &Theme) -> impl IntoElement {
 /// Show command shortcuts as Cmd on macOS. Navigation and deletion chords stay
 /// on Ctrl there, matching the bindings in `main.rs`.
 pub fn display_shortcut(label: &str) -> SharedString {
-    const NAV: [&str; 8] = ["Left", "Right", "Up", "Down", "Home", "End", "Backspace", "Delete"];
+    const NAV: [&str; 8] = [
+        "Left",
+        "Right",
+        "Up",
+        "Down",
+        "Home",
+        "End",
+        "Backspace",
+        "Delete",
+    ];
     if cfg!(target_os = "macos") {
         match label {
             "Ctrl + H" | "Ctrl+H" => return "Cmd + Option + F".into(),

@@ -33,7 +33,14 @@ where
         (sec("Ctrl + T"), "New Tab"),
         (sec("Ctrl + W"), "Close Active Tab"),
         (sec("Ctrl + F"), "Find in Document"),
-        (if mac { "Cmd + Alt + F".to_string() } else { "Ctrl + H".to_string() }, "Find & Replace"),
+        (
+            if mac {
+                "Cmd + Alt + F".to_string()
+            } else {
+                "Ctrl + H".to_string()
+            },
+            "Find & Replace",
+        ),
         (sec("Ctrl + Shift + M"), "Toggle WYSIWYG / Raw Mode"),
         (sec("Ctrl + Shift + L"), "Toggle Line Numbers (Raw Mode)"),
         (sec("Ctrl + + / ="), "Zoom In"),
@@ -42,22 +49,61 @@ where
         (sec("Ctrl + Z"), "Undo"),
         (sec("Ctrl + Y / Ctrl + Shift + Z"), "Redo"),
         (sec("Ctrl + A"), "Select All"),
-        (nav("Ctrl + Left / Right", "Alt + Left / Right"), "Jump Word Left / Right"),
-        (nav("Ctrl + Shift + Left / Right", "Alt + Shift + Left / Right"), "Select Word Left / Right"),
-        ("Ctrl + Shift + Up / Down".to_string(), "Select Line Up / Down"),
-        (nav("Ctrl + Home / End", "Cmd + Up / Down"), "Jump to Document Start / End"),
-        (nav("Ctrl + Backspace / Delete", "Alt + Backspace / Delete"), "Delete Word Left / Right"),
-        (nav("Ctrl + Shift + Backspace / Delete", "Cmd + Backspace / Delete"), "Delete to Line Start / End"),
+        (
+            nav("Ctrl + Left / Right", "Alt + Left / Right"),
+            "Jump Word Left / Right",
+        ),
+        (
+            nav("Ctrl + Shift + Left / Right", "Alt + Shift + Left / Right"),
+            "Select Word Left / Right",
+        ),
+        (
+            "Ctrl + Shift + Up / Down".to_string(),
+            "Select Line Up / Down",
+        ),
+        (
+            nav("Ctrl + Home / End", "Cmd + Up / Down"),
+            "Jump to Document Start / End",
+        ),
+        (
+            nav("Ctrl + Backspace / Delete", "Alt + Backspace / Delete"),
+            "Delete Word Left / Right",
+        ),
+        (
+            nav(
+                "Ctrl + Shift + Backspace / Delete",
+                "Cmd + Backspace / Delete",
+            ),
+            "Delete to Line Start / End",
+        ),
         ("Alt + Up / Down".to_string(), "Move Line Up / Down"),
-        ("Ctrl + Tab / Ctrl + Shift + Tab".to_string(), "Next / Previous Tab"),
-        ("Tab / Shift + Tab".to_string(), "Indent / Outdent List or Line"),
-        ("Shift + Enter".to_string(), "New Line Without List or Quote Continuation"),
+        (
+            "Ctrl + Tab / Ctrl + Shift + Tab".to_string(),
+            "Next / Previous Tab",
+        ),
+        (
+            "Tab / Shift + Tab".to_string(),
+            "Indent / Outdent List or Line",
+        ),
+        (
+            "Shift + Enter".to_string(),
+            "New Line Without List or Quote Continuation",
+        ),
         (sec("Ctrl + Enter"), "Add Table Row Below"),
         (sec("Ctrl + \\"), "Toggle Notes Folder Sidebar"),
-        ("Up / Down / Left / Right".to_string(), "Move Through the Sidebar (when focused)"),
-        ("Delete".to_string(), "Move Selected Note or Folder to Trash (sidebar)"),
+        (
+            "Up / Down / Left / Right".to_string(),
+            "Move Through the Sidebar (when focused)",
+        ),
+        (
+            "Delete".to_string(),
+            "Move Selected Note or Folder to Trash (sidebar)",
+        ),
         ("F1".to_string(), "Help & Shortcuts"),
-        ("Alt + F / E / V".to_string(), "Open File / Edit / View Menu"),
+        (
+            "Alt + F / E / V".to_string(),
+            "Open File / Edit / View Menu",
+        ),
         ("F10".to_string(), "Focus Menu Bar"),
         ("F11".to_string(), "Toggle Zen Mode"),
         ("Escape".to_string(), "Exit Zen Mode / Close Modals & Menus"),
@@ -71,7 +117,6 @@ where
             ("Cmd + Q".to_string(), "Quit"),
         ]);
     }
-
 
     let cls = on_close.clone();
 
@@ -424,8 +469,8 @@ where
                                         .font_weight(FontWeight::BOLD)
                                         .text_size(px(14.0))
                                         .text_color(theme.text_primary)
-                                        .child("About LiteMark")
-                                )
+                                        .child("About LiteMark"),
+                                ),
                         )
                         .child({
                             let c = cls.clone();
@@ -437,7 +482,7 @@ where
                                 .hover(|h| h.bg(theme.bg_hover))
                                 .on_click(move |_, _, cx| c(cx))
                                 .child(render_icon("x", 16.0, theme.text_muted))
-                        })
+                        }),
                 )
                 // Content
                 .child(
@@ -457,28 +502,28 @@ where
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(render_icon("folder-tree", 28.0, theme.text_hi))
+                                .child(render_icon("folder-tree", 28.0, theme.text_hi)),
                         )
                         .child(
                             div()
                                 .text_size(px(18.0))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(theme.text_strong)
-                                .child("LiteMark")
+                                .child("LiteMark"),
                         )
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.text_muted)
-                                .child(format!("Version {} (beta)", version))
+                                .child(format!("Version {} (beta)", version)),
                         )
                         .child(
                             div()
                                 .text_size(px(13.0))
                                 .text_color(theme.text_primary)
                                 .line_height(relative(1.5))
-                                .child("A native Markdown and text editor.")
-                        )
+                                .child("A native Markdown and text editor."),
+                        ),
                 )
                 // Footer
                 .child(
@@ -506,8 +551,8 @@ where
                                 .cursor_pointer()
                                 .on_click(move |_, _, cx| c(cx))
                                 .child("Close")
-                        })
-                )
+                        }),
+                ),
         )
 }
 
@@ -584,39 +629,44 @@ where
                         .bg(theme.bg_modal_header)
                         .border_t_1()
                         .border_color(theme.border_subtle)
-                        .children(choices.into_iter().enumerate().map(|(ix, (label, primary))| {
-                            let choose = on_choose.clone();
-                            let is_selected = ix == selected_ix;
-                            div()
-                                .id(SharedString::from(format!("prompt-{label}")))
-                                .px(px(14.0))
-                                .py(px(6.0))
-                                .rounded(px(6.0))
-                                .cursor_pointer()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_size(px(12.0))
-                                .bg(if primary {
-                                    theme.text_hi
-                                } else {
-                                    theme.bg_hover
-                                })
-                                .border_1()
-                                .border_color(if is_selected {
-                                    theme.text_hi
-                                } else {
-                                    rgba(0x00000000)
-                                })
-                                .text_color(if primary {
-                                    theme.on_primary
-                                } else if is_selected {
-                                    theme.text_hi
-                                } else {
-                                    theme.text_primary
-                                })
-                                .when(!is_selected, |s| s.opacity(0.75))
-                                .on_click(move |_, _, cx| choose(label, cx))
-                                .child(label)
-                        })),
+                        .children(
+                            choices
+                                .into_iter()
+                                .enumerate()
+                                .map(|(ix, (label, primary))| {
+                                    let choose = on_choose.clone();
+                                    let is_selected = ix == selected_ix;
+                                    div()
+                                        .id(SharedString::from(format!("prompt-{label}")))
+                                        .px(px(14.0))
+                                        .py(px(6.0))
+                                        .rounded(px(6.0))
+                                        .cursor_pointer()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_size(px(12.0))
+                                        .bg(if primary {
+                                            theme.text_hi
+                                        } else {
+                                            theme.bg_hover
+                                        })
+                                        .border_1()
+                                        .border_color(if is_selected {
+                                            theme.text_hi
+                                        } else {
+                                            rgba(0x00000000)
+                                        })
+                                        .text_color(if primary {
+                                            theme.on_primary
+                                        } else if is_selected {
+                                            theme.text_hi
+                                        } else {
+                                            theme.text_primary
+                                        })
+                                        .when(!is_selected, |s| s.opacity(0.75))
+                                        .on_click(move |_, _, cx| choose(label, cx))
+                                        .child(label)
+                                }),
+                        ),
                 ),
         )
 }
