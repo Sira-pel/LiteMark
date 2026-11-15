@@ -208,8 +208,7 @@ fn formatting_uses_the_selection_and_clear_keeps_markers() {
     doc.apply_format("bold");
     assert_eq!(doc.content, "abc");
 
-    let mut empty_doc =
-        DocumentTab::new("tab-1".into(), "Doc.md".into(), "".into(), None, None);
+    let mut empty_doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), "".into(), None, None);
     empty_doc.apply_format("bold");
     assert_eq!(empty_doc.content, "**bold text**");
 
@@ -266,8 +265,7 @@ fn visible_copy_drops_inline_markers() {
 
 #[test]
 fn visible_copy_rewrites_block_prefixes() {
-    let text =
-        "# Title\n> quote\n- a\n  - nested\n- [x] done\n- [ ] todo\n3. three\n\n---\nend";
+    let text = "# Title\n> quote\n- a\n  - nested\n- [x] done\n- [ ] todo\n3. three\n\n---\nend";
     assert_eq!(
         visible_copy(text, 0..text.len()),
         "Title\nquote\n• a\n  • nested\n☑ done\n☐ todo\n3. three\n\nend"
@@ -616,8 +614,7 @@ fn test_smart_newline_bullet_and_task_and_number() {
     assert_eq!(doc.cursor_offset(), 9);
 
     // 2. Numbered list continuation and exit
-    let mut doc2 =
-        DocumentTab::new("2".into(), "test.md".into(), "1. First".into(), None, None);
+    let mut doc2 = DocumentTab::new("2".into(), "test.md".into(), "1. First".into(), None, None);
     doc2.caret.move_to(8);
     doc2.smart_newline(false);
     assert_eq!(doc2.content, "1. First\n2. ");
@@ -658,8 +655,7 @@ fn test_smart_newline_bullet_and_task_and_number() {
 #[test]
 fn test_smart_backspace_boundaries() {
     // 1. Heading demotion
-    let mut doc =
-        DocumentTab::new("1".into(), "test.md".into(), "# Heading".into(), None, None);
+    let mut doc = DocumentTab::new("1".into(), "test.md".into(), "# Heading".into(), None, None);
     doc.caret.move_to(2); // right after "# "
     doc.smart_backspace();
     assert_eq!(doc.content, "Heading");
@@ -795,8 +791,7 @@ fn test_universal_reversible_inline_and_block_toggling() {
         ("quote", "> My line"),
         ("codeblock", "```\nMy line\n```"),
     ] {
-        let mut doc =
-            DocumentTab::new("b".into(), "test.md".into(), "My line".into(), None, None);
+        let mut doc = DocumentTab::new("b".into(), "test.md".into(), "My line".into(), None, None);
         doc.place(3, false);
         doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
         assert_eq!(doc.content, expected_line, "apply block {cmd} failed");
@@ -809,8 +804,7 @@ fn test_universal_reversible_inline_and_block_toggling() {
     }
 
     // 3. Switching directly from Bullet List to Numbered List to Checklist without stacking
-    let mut doc =
-        DocumentTab::new("s".into(), "test.md".into(), "Task item".into(), None, None);
+    let mut doc = DocumentTab::new("s".into(), "test.md".into(), "Task item".into(), None, None);
     doc.place(2, false);
     doc.apply_format_in_mode("ul", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "- Task item");
@@ -937,8 +931,7 @@ fn toggle_off_after_typing_keeps_the_span_and_exits_it() {
         ("strike", "~~", "~~"),
         ("code", "`", "`"),
     ] {
-        let mut doc =
-            DocumentTab::new("b".into(), "test.md".into(), "This is ".into(), None, None);
+        let mut doc = DocumentTab::new("b".into(), "test.md".into(), "This is ".into(), None, None);
         doc.place(8, false);
         doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
         type_keystrokes(&mut doc, "very");
@@ -1096,8 +1089,7 @@ fn partial_unformat_splits_the_span() {
         let wrapped = format!("{open}Hello{close}");
 
         // Start of the span: "He" becomes plain, "llo" stays formatted
-        let mut doc =
-            DocumentTab::new("p".into(), "test.md".into(), wrapped.clone(), None, None);
+        let mut doc = DocumentTab::new("p".into(), "test.md".into(), wrapped.clone(), None, None);
         doc.caret.range = open.len()..open.len() + 2;
         doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
         assert_eq!(
@@ -1107,8 +1099,7 @@ fn partial_unformat_splits_the_span() {
         );
 
         // End of the span: "llo" becomes plain, "He" stays formatted
-        let mut doc =
-            DocumentTab::new("p".into(), "test.md".into(), wrapped.clone(), None, None);
+        let mut doc = DocumentTab::new("p".into(), "test.md".into(), wrapped.clone(), None, None);
         doc.caret.range = open.len() + 2..open.len() + 5;
         doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
         assert_eq!(
@@ -1621,7 +1612,8 @@ fn select_all_inline_toggle_formats_each_block_and_toggles_back() {
         doc.apply_format_in_mode(cmd, mode);
     }
     let welcome = crate::services::fs_service::INITIAL_MARKDOWN;
-    let plain = "# Title\n\nPlain paragraph.\n\n- item one\n- [ ] task\n\n> quote\n\n```\ncode here\n```\n";
+    let plain =
+        "# Title\n\nPlain paragraph.\n\n- item one\n- [ ] task\n\n> quote\n\n```\ncode here\n```\n";
     let code_block = "```\nfn main() {\n    println!(\"Hello from LiteMark!\");\n}\n```\n";
 
     for cmd in ["bold", "italic", "underline", "strike"] {
@@ -1695,7 +1687,12 @@ fn select_all_inline_toggle_skips_what_cannot_render() {
             "<u>para</u>\n\n    code line\n",
             "para\n\n    code line\n",
         ),
-        ("~~~\ncode\n~~~\n", "strike", "~~~\ncode\n~~~\n", "~~~\ncode\n~~~\n"),
+        (
+            "~~~\ncode\n~~~\n",
+            "strike",
+            "~~~\ncode\n~~~\n",
+            "~~~\ncode\n~~~\n",
+        ),
         // `~~` wrapped in `~~` is a `~~~~~~` fence line, not strikethrough:
         // the trial parse rejects it, so only `a` is struck.
         ("a\n~~\n", "strike", "~~a~~\n~~\n", "a\n~~\n"),
@@ -1911,7 +1908,10 @@ fn delete_forward_skips_delimiters_and_drops_empty_spans() {
     doc.delete_forward_in_mode(ViewMode::Wysiwyg);
     assert_eq!(doc.content, "x**ab**", "Delete ate a visible character");
     doc.delete_forward_in_mode(ViewMode::Wysiwyg);
-    assert_eq!(doc.content, "x**b**", "Delete ate an opener character instead of skipping it");
+    assert_eq!(
+        doc.content, "x**b**",
+        "Delete ate an opener character instead of skipping it"
+    );
     doc.delete_forward_in_mode(ViewMode::Wysiwyg);
     assert_eq!(
         doc.content, "x",
@@ -2101,10 +2101,26 @@ fn toggles_split_code_span_keeping_code_innermost() {
             })
             .collect();
         let want = match format {
-            "bold" => vec![("a", false, false, false, false, true), ("b", true, false, false, false, true), ("c", false, false, false, false, true)],
-            "italic" => vec![("a", false, false, false, false, true), ("b", false, true, false, false, true), ("c", false, false, false, false, true)],
-            "underline" => vec![("a", false, false, false, false, true), ("b", false, false, true, false, true), ("c", false, false, false, false, true)],
-            _ => vec![("a", false, false, false, false, true), ("b", false, false, false, true, true), ("c", false, false, false, false, true)],
+            "bold" => vec![
+                ("a", false, false, false, false, true),
+                ("b", true, false, false, false, true),
+                ("c", false, false, false, false, true),
+            ],
+            "italic" => vec![
+                ("a", false, false, false, false, true),
+                ("b", false, true, false, false, true),
+                ("c", false, false, false, false, true),
+            ],
+            "underline" => vec![
+                ("a", false, false, false, false, true),
+                ("b", false, false, true, false, true),
+                ("c", false, false, false, false, true),
+            ],
+            _ => vec![
+                ("a", false, false, false, false, true),
+                ("b", false, false, false, true, true),
+                ("c", false, false, false, false, true),
+            ],
         };
         assert_eq!(segments, want, "{format}: wrong styles");
         assert_no_delimiter_runs(&doc);
@@ -2357,8 +2373,7 @@ fn per_line_hidden_skips_match_a_document_wide_scan() {
 
 #[test]
 fn test_wysiwyg_delimiter_skipping_navigation_and_atomic_backspace() {
-    let mut doc =
-        DocumentTab::new("n".into(), "test.md".into(), "a **b** c".into(), None, None);
+    let mut doc = DocumentTab::new("n".into(), "test.md".into(), "a **b** c".into(), None, None);
     doc.place(0, false);
 
     // Visible text is "a b c"
@@ -2698,12 +2713,10 @@ fn test_enter_on_indented_bullet_tab() {
 fn edit_probe(source: &str) -> (usize, usize, String, String, String, usize, String) {
     let prefix_len = block_prefix_len(source);
     let marker_len = crate::model::text_ops::list_marker_len(source);
-    let mut newline_doc =
-        DocumentTab::new("n".into(), "t.md".into(), source.into(), None, None);
+    let mut newline_doc = DocumentTab::new("n".into(), "t.md".into(), source.into(), None, None);
     newline_doc.place(source.len(), false);
     newline_doc.smart_newline(false);
-    let mut backspace_doc =
-        DocumentTab::new("b".into(), "t.md".into(), source.into(), None, None);
+    let mut backspace_doc = DocumentTab::new("b".into(), "t.md".into(), source.into(), None, None);
     backspace_doc.place(source.len(), false);
     backspace_doc.smart_backspace();
     let mut toggle_doc = DocumentTab::new("o".into(), "t.md".into(), source.into(), None, None);
@@ -3030,8 +3043,7 @@ fn checklist_toggle_keeps_ordered_marker() {
         ("1) [x] a", "1) a", "- [ ] a"),
         ("12. [X] a", "12. a", "- [ ] a"),
     ] {
-        let mut doc =
-            DocumentTab::new("c".into(), "t.md".into(), source.to_string(), None, None);
+        let mut doc = DocumentTab::new("c".into(), "t.md".into(), source.to_string(), None, None);
         assert!(doc.active_formats.checklist, "{source} checklist");
         assert!(!doc.active_formats.ol, "{source} ol");
         doc.apply_format_in_mode("checklist", ViewMode::Wysiwyg);
@@ -3063,8 +3075,7 @@ fn edit_probes_for_interrupted_and_indented_markers() {
     let mut deleted = DocumentTab::new("d".into(), "t.md".into(), "foo\n*".into(), None, None);
     deleted.edit(4..5, "");
     assert_eq!(deleted.content, "foo\n");
-    let mut backspaced =
-        DocumentTab::new("b".into(), "t.md".into(), "foo\n*".into(), None, None);
+    let mut backspaced = DocumentTab::new("b".into(), "t.md".into(), "foo\n*".into(), None, None);
     backspaced.place(5, false);
     backspaced.smart_backspace_in_mode(ViewMode::Wysiwyg);
     assert_eq!(backspaced.content, "foo\n");
@@ -3080,15 +3091,13 @@ fn edit_probes_for_interrupted_and_indented_markers() {
     paren_enter.smart_newline(false);
     assert_eq!(paren_enter.content, format!("{paren}\n"));
     let marker_at = paren.find("14)").unwrap();
-    let mut paren_type =
-        DocumentTab::new("t".into(), "t.md".into(), paren.to_string(), None, None);
+    let mut paren_type = DocumentTab::new("t".into(), "t.md".into(), paren.to_string(), None, None);
     paren_type.edit(marker_at..marker_at, "Z");
     assert_eq!(
         paren_type.content,
         "The number of windows in my house is\nZ14)  The number of doors is 6."
     );
-    let mut paren_bs =
-        DocumentTab::new("b".into(), "t.md".into(), paren.to_string(), None, None);
+    let mut paren_bs = DocumentTab::new("b".into(), "t.md".into(), paren.to_string(), None, None);
     paren_bs.place(marker_at + "14)  ".len(), false);
     paren_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
     assert_eq!(
@@ -3132,8 +3141,7 @@ fn edit_probes_for_interrupted_and_indented_markers() {
 
 #[test]
 fn enter_keeps_cr_on_ordered_task_and_paren_marker() {
-    let mut task =
-        DocumentTab::new("t".into(), "t.md".into(), "1. [ ] \r\n".into(), None, None);
+    let mut task = DocumentTab::new("t".into(), "t.md".into(), "1. [ ] \r\n".into(), None, None);
     task.place(crate::model::text_ops::line_end(&task.content, 0), false);
     task.smart_newline(false);
     assert_eq!(task.content, "1. [ ] \r\n2. [ ] \r\n");
@@ -3146,8 +3154,7 @@ fn enter_keeps_cr_on_ordered_task_and_paren_marker() {
     dot.place(crate::model::text_ops::line_end(&dot.content, 0), false);
     dot.smart_newline(false);
     assert_eq!(dot.content, "\n");
-    let mut bullet =
-        DocumentTab::new("b".into(), "t.md".into(), "- [ ] \r\n".into(), None, None);
+    let mut bullet = DocumentTab::new("b".into(), "t.md".into(), "- [ ] \r\n".into(), None, None);
     bullet.place(crate::model::text_ops::line_end(&bullet.content, 0), false);
     bullet.smart_newline(false);
     assert_eq!(bullet.content, "\n");
@@ -3158,8 +3165,7 @@ fn enter_keeps_cr_on_ordered_task_and_paren_marker() {
 #[test]
 fn ordered_button_off_does_not_strip_task() {
     for source in ["1. [x] a", "1) [x] a", "12. [X] a"] {
-        let mut doc =
-            DocumentTab::new("o".into(), "t.md".into(), source.to_string(), None, None);
+        let mut doc = DocumentTab::new("o".into(), "t.md".into(), source.to_string(), None, None);
         assert_eq!(
             format!(
                 "ol={} checklist={} content={:?}",
@@ -3202,31 +3208,27 @@ fn edit_probes_for_nested_lazy_and_crlf_markers() {
         DocumentTab::new("d".into(), "t.md".into(), nested.to_string(), None, None);
     nested_del.edit(8..9, "");
     assert_eq!(nested_del.content, "- foo\n  ");
-    let mut nested_bs =
-        DocumentTab::new("b".into(), "t.md".into(), nested.to_string(), None, None);
+    let mut nested_bs = DocumentTab::new("b".into(), "t.md".into(), nested.to_string(), None, None);
     nested_bs.place(nested.len(), false);
     nested_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
     assert_eq!(nested_bs.content, "- foo\n  ");
 
     let lazy = "- foo\nbar\n2. baz";
-    let mut lazy_end =
-        DocumentTab::new("e".into(), "t.md".into(), lazy.to_string(), None, None);
+    let mut lazy_end = DocumentTab::new("e".into(), "t.md".into(), lazy.to_string(), None, None);
     lazy_end.place(lazy.rfind('\n').unwrap() + 1, false);
     lazy_end.move_end(false);
     assert_eq!(lazy_end.cursor_offset(), lazy.len());
     lazy_end.smart_newline(false);
     assert_eq!(lazy_end.content, "- foo\nbar\n2. baz\n3. ");
     let marker = lazy.rfind("2. ").unwrap();
-    let mut lazy_del =
-        DocumentTab::new("d".into(), "t.md".into(), lazy.to_string(), None, None);
+    let mut lazy_del = DocumentTab::new("d".into(), "t.md".into(), lazy.to_string(), None, None);
     lazy_del.edit(marker..marker + 3, "");
     assert_eq!(lazy_del.content, "- foo\nbar\nbaz");
     let mut lazy_bs = DocumentTab::new("b".into(), "t.md".into(), lazy.to_string(), None, None);
     lazy_bs.place(lazy.len(), false);
     lazy_bs.smart_backspace_in_mode(ViewMode::Wysiwyg);
     assert_eq!(lazy_bs.content, "- foo\nbar\n2. ba");
-    let mut lazy_type =
-        DocumentTab::new("t".into(), "t.md".into(), lazy.to_string(), None, None);
+    let mut lazy_type = DocumentTab::new("t".into(), "t.md".into(), lazy.to_string(), None, None);
     lazy_type.place(marker, false);
     lazy_type.move_home_in_mode(false, ViewMode::Wysiwyg);
     lazy_type.edit(lazy_type.cursor_offset()..lazy_type.cursor_offset(), "Z");
@@ -3234,19 +3236,16 @@ fn edit_probes_for_nested_lazy_and_crlf_markers() {
 
     let crlf = "1. foo\r\n2.\r\n3. bar";
     let third = crlf.rfind('\n').unwrap() + 1;
-    let mut crlf_end =
-        DocumentTab::new("e".into(), "t.md".into(), crlf.to_string(), None, None);
+    let mut crlf_end = DocumentTab::new("e".into(), "t.md".into(), crlf.to_string(), None, None);
     crlf_end.place(third, false);
     crlf_end.move_end(false);
     assert_eq!(crlf_end.cursor_offset(), crlf.len());
     crlf_end.smart_newline(false);
     assert_eq!(crlf_end.content, "1. foo\r\n2.\r\n3. bar\r\n4. ");
-    let mut crlf_del =
-        DocumentTab::new("d".into(), "t.md".into(), crlf.to_string(), None, None);
+    let mut crlf_del = DocumentTab::new("d".into(), "t.md".into(), crlf.to_string(), None, None);
     crlf_del.edit(third..third + 3, "");
     assert_eq!(crlf_del.content, "1. foo\r\n2.\r\nbar");
-    let mut crlf_type =
-        DocumentTab::new("t".into(), "t.md".into(), crlf.to_string(), None, None);
+    let mut crlf_type = DocumentTab::new("t".into(), "t.md".into(), crlf.to_string(), None, None);
     crlf_type.place(third, false);
     crlf_type.move_home_in_mode(false, ViewMode::Wysiwyg);
     let home = crlf_type.cursor_offset();
@@ -4630,7 +4629,8 @@ fn test_format_commands_mixed_plain_lines_and_table() {
     let mut doc = DocumentTab::new("tab".into(), "test.md".into(), mixed.into(), None, None);
     doc.select_all();
     doc.apply_format("h1");
-    let expected_h1 = "# Before table\n\n| Col 1 | Col 2 |\n| :--- | :--- |\n| Val 1 | Val 2 |\n\n# After table";
+    let expected_h1 =
+        "# Before table\n\n| Col 1 | Col 2 |\n| :--- | :--- |\n| Val 1 | Val 2 |\n\n# After table";
     assert_eq!(doc.content, expected_h1);
 
     // Toggle off restores
@@ -4638,8 +4638,7 @@ fn test_format_commands_mixed_plain_lines_and_table() {
     assert_eq!(doc.content, mixed);
 
     // Applying bold formats plain lines and table cells individually
-    let mut doc_bold =
-        DocumentTab::new("tab".into(), "test.md".into(), mixed.into(), None, None);
+    let mut doc_bold = DocumentTab::new("tab".into(), "test.md".into(), mixed.into(), None, None);
     doc_bold.select_all();
     doc_bold.apply_format("bold");
     let expected_bold = "**Before table**\n\n| **Col 1** | **Col 2** |\n| :--- | :--- |\n| **Val 1** | **Val 2** |\n\n**After table**";
@@ -4767,7 +4766,11 @@ fn enter_on_empty_middle_row_moves_to_same_column_next_row() {
 
 #[test]
 fn shift_enter_leaves_the_table_without_changing_it() {
-    for pos in [0usize, TBL.find("a1").unwrap() + 1, TBL.find("b2").unwrap() + 2] {
+    for pos in [
+        0usize,
+        TBL.find("a1").unwrap() + 1,
+        TBL.find("b2").unwrap() + 2,
+    ] {
         let mut doc = table_doc(TBL);
         doc.place(pos, false);
         doc.smart_newline(true);
@@ -4800,8 +4803,13 @@ fn ctrl_enter_adds_a_row_below_in_the_same_column() {
     let mut doc = table_doc(TBL);
     doc.place(2, false);
     assert!(doc.table_insert_row_below());
-    assert!(doc.content.starts_with("| A | B |\n| --- | --- |\n|  |  |\n| a1"));
-    assert_eq!(doc.cursor_offset(), doc.content.find("|  |  |").unwrap() + 1 + 2 - 1);
+    assert!(doc
+        .content
+        .starts_with("| A | B |\n| --- | --- |\n|  |  |\n| a1"));
+    assert_eq!(
+        doc.cursor_offset(),
+        doc.content.find("|  |  |").unwrap() + 1 + 2 - 1
+    );
     // outside a table nothing happens
     let mut doc = table_doc("plain");
     assert!(!doc.table_insert_row_below());
@@ -4860,8 +4868,16 @@ fn left_and_right_jump_between_cells_not_pipes() {
     for _ in 0..4 {
         doc.move_right_in_mode(false, ViewMode::Wysiwyg);
         let c = doc.cursor_offset();
-        assert_ne!(doc.content.as_bytes()[c], b'|', "caret before a pipe at {c}");
-        assert_ne!(doc.content.as_bytes()[c - 1], b'|', "caret after a pipe at {c}");
+        assert_ne!(
+            doc.content.as_bytes()[c],
+            b'|',
+            "caret before a pipe at {c}"
+        );
+        assert_ne!(
+            doc.content.as_bytes()[c - 1],
+            b'|',
+            "caret after a pipe at {c}"
+        );
     }
 }
 
@@ -4946,22 +4962,34 @@ fn test_inline_format_stacked_combos_table_driven() {
                 assert!(
                     !doc.content.contains("****"),
                     "Content contains **** for combo {:?}, format {}, pos {}: {}",
-                    combo_formats, cmd, pos, doc.content
+                    combo_formats,
+                    cmd,
+                    pos,
+                    doc.content
                 );
                 assert!(
                     !doc.content.contains("<u><u>"),
                     "Content contains <u><u> for combo {:?}, format {}, pos {}: {}",
-                    combo_formats, cmd, pos, doc.content
+                    combo_formats,
+                    cmd,
+                    pos,
+                    doc.content
                 );
                 assert!(
                     !doc.content.contains("</u></u>"),
                     "Content contains </u></u> for combo {:?}, format {}, pos {}: {}",
-                    combo_formats, cmd, pos, doc.content
+                    combo_formats,
+                    cmd,
+                    pos,
+                    doc.content
                 );
                 assert!(
                     !doc.content.contains("~~~~"),
                     "Content contains ~~~~ for combo {:?}, format {}, pos {}: {}",
-                    combo_formats, cmd, pos, doc.content
+                    combo_formats,
+                    cmd,
+                    pos,
+                    doc.content
                 );
 
                 // 3. Verify format state of each letter in "Hello"
@@ -5143,15 +5171,30 @@ fn test_wysiwyg_repro1_stacked_format_typing_continuation() {
     );
     let parsed = crate::markdown::parse_document(&doc.content);
     let line = parsed.lines.first().unwrap();
-    assert_eq!(line.display_text, "This is a test for combination i want jlkj ");
+    assert_eq!(
+        line.display_text,
+        "This is a test for combination i want jlkj "
+    );
 
-    let s_lead = line.styled_segments.iter().find(|s| s.source == (0..19)).unwrap();
+    let s_lead = line
+        .styled_segments
+        .iter()
+        .find(|s| s.source == (0..19))
+        .unwrap();
     assert!(!s_lead.bold && !s_lead.italic && !s_lead.underline && !s_lead.strike);
 
-    let s_combo = line.styled_segments.iter().find(|s| &doc.content[s.source.clone()] == "combination i want").unwrap();
+    let s_combo = line
+        .styled_segments
+        .iter()
+        .find(|s| &doc.content[s.source.clone()] == "combination i want")
+        .unwrap();
     assert!(s_combo.bold && s_combo.italic && s_combo.underline);
 
-    let s_jlkj = line.styled_segments.iter().find(|s| &doc.content[s.source.clone()] == " jlkj").unwrap();
+    let s_jlkj = line
+        .styled_segments
+        .iter()
+        .find(|s| &doc.content[s.source.clone()] == " jlkj")
+        .unwrap();
     assert!(!s_jlkj.bold && s_jlkj.italic && s_jlkj.underline);
 }
 
@@ -5172,10 +5215,18 @@ fn test_wysiwyg_repro2_stacked_format_typing_disarm_plain() {
     let line = parsed.lines.first().unwrap();
     assert_eq!(line.display_text, "combination i wantfasjj");
 
-    let s_formatted = line.styled_segments.iter().find(|s| &doc.content[s.source.clone()] == "combination i want").unwrap();
+    let s_formatted = line
+        .styled_segments
+        .iter()
+        .find(|s| &doc.content[s.source.clone()] == "combination i want")
+        .unwrap();
     assert!(s_formatted.bold && s_formatted.italic && s_formatted.underline && !s_formatted.strike);
 
-    let s_plain = line.styled_segments.iter().find(|s| &doc.content[s.source.clone()] == "fasjj").unwrap();
+    let s_plain = line
+        .styled_segments
+        .iter()
+        .find(|s| &doc.content[s.source.clone()] == "fasjj")
+        .unwrap();
     assert!(!s_plain.bold && !s_plain.italic && !s_plain.underline && !s_plain.strike);
 }
 
@@ -5192,7 +5243,13 @@ fn test_all_stacked_combos_followed_by_unspaced_text() {
         // Triples
         (vec!["bold", "italic", "underline"], true, true, true, false),
         (vec!["bold", "strike", "underline"], true, false, true, true),
-        (vec!["italic", "strike", "underline"], false, true, true, true),
+        (
+            vec!["italic", "strike", "underline"],
+            false,
+            true,
+            true,
+            true,
+        ),
         (vec!["bold", "italic", "strike"], true, true, false, true),
     ];
 
@@ -5241,7 +5298,12 @@ fn test_all_stacked_combos_followed_by_unspaced_text() {
                 .styled_segments
                 .iter()
                 .find(|seg| &doc.content[seg.source.clone()] == "word")
-                .unwrap_or_else(|| panic!("Segment 'word' not found for {:?}, content: {:?}", fmts, doc.content));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Segment 'word' not found for {:?}, content: {:?}",
+                        fmts, doc.content
+                    )
+                });
             assert_eq!(seg_word.bold, b, "{:?}: bold mismatch", fmts);
             assert_eq!(seg_word.italic, i, "{:?}: italic mismatch", fmts);
             assert_eq!(seg_word.underline, u, "{:?}: underline mismatch", fmts);
@@ -5251,7 +5313,12 @@ fn test_all_stacked_combos_followed_by_unspaced_text() {
                 .styled_segments
                 .iter()
                 .find(|seg| &doc.content[seg.source.clone()] == "after")
-                .unwrap_or_else(|| panic!("Segment 'after' not found for {:?}, content: {:?}", fmts, doc.content));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Segment 'after' not found for {:?}, content: {:?}",
+                        fmts, doc.content
+                    )
+                });
             assert!(
                 !seg_after.bold && !seg_after.italic && !seg_after.underline && !seg_after.strike,
                 "{:?}: after was styled",
@@ -5318,7 +5385,8 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
     for (combo, exp_b, exp_i, exp_s, exp_c) in combos {
         // 1. Toggled on immediately after a letter: type "a", arm combo, type "hi"
         {
-            let mut doc = DocumentTab::new("on".into(), "test.md".into(), String::new(), None, None);
+            let mut doc =
+                DocumentTab::new("on".into(), "test.md".into(), String::new(), None, None);
             type_keystrokes(&mut doc, "a");
             for &cmd in combo {
                 doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
@@ -5340,9 +5408,15 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
                 .iter()
                 .find(|s| s.source.start <= a_src && a_src < s.source.end)
                 .unwrap_or_else(|| panic!("No styled segment covering 'a' for combo {:?}", combo));
-            assert!(!a_seg.bold && !a_seg.italic && !a_seg.strike && !a_seg.code,
+            assert!(
+                !a_seg.bold && !a_seg.italic && !a_seg.strike && !a_seg.code,
                 "Expected 'a' unstyled for combo {:?}, got B={} I={} S={} C={}",
-                combo, a_seg.bold, a_seg.italic, a_seg.strike, a_seg.code);
+                combo,
+                a_seg.bold,
+                a_seg.italic,
+                a_seg.strike,
+                a_seg.code
+            );
 
             // 'h' and 'i' must have the combo formats
             for ch_idx in 1..3 {
@@ -5351,17 +5425,39 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
                     .styled_segments
                     .iter()
                     .find(|s| s.source.start <= src && src < s.source.end)
-                    .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
-                assert_eq!(seg.bold, exp_b, "Bold mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
-                assert_eq!(seg.italic, exp_i, "Italic mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
-                assert_eq!(seg.strike, exp_s, "Strike mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
-                assert_eq!(seg.code, exp_c, "Code mismatch on char {} for combo ON {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "No styled segment covering char {} for combo {:?}",
+                            ch_idx, combo
+                        )
+                    });
+                assert_eq!(
+                    seg.bold, exp_b,
+                    "Bold mismatch on char {} for combo ON {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
+                assert_eq!(
+                    seg.italic, exp_i,
+                    "Italic mismatch on char {} for combo ON {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
+                assert_eq!(
+                    seg.strike, exp_s,
+                    "Strike mismatch on char {} for combo ON {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
+                assert_eq!(
+                    seg.code, exp_c,
+                    "Code mismatch on char {} for combo ON {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
             }
         }
 
         // 2. Toggled off with a letter typed immediately after: arm combo, type "hi", toggle off, type "y"
         {
-            let mut doc = DocumentTab::new("off".into(), "test.md".into(), String::new(), None, None);
+            let mut doc =
+                DocumentTab::new("off".into(), "test.md".into(), String::new(), None, None);
             for &cmd in combo {
                 doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
             }
@@ -5386,11 +5482,32 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
                     .styled_segments
                     .iter()
                     .find(|s| s.source.start <= src && src < s.source.end)
-                    .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
-                assert_eq!(seg.bold, exp_b, "Bold mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
-                assert_eq!(seg.italic, exp_i, "Italic mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
-                assert_eq!(seg.strike, exp_s, "Strike mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
-                assert_eq!(seg.code, exp_c, "Code mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "No styled segment covering char {} for combo {:?}",
+                            ch_idx, combo
+                        )
+                    });
+                assert_eq!(
+                    seg.bold, exp_b,
+                    "Bold mismatch on char {} for combo OFF {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
+                assert_eq!(
+                    seg.italic, exp_i,
+                    "Italic mismatch on char {} for combo OFF {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
+                assert_eq!(
+                    seg.strike, exp_s,
+                    "Strike mismatch on char {} for combo OFF {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
+                assert_eq!(
+                    seg.code, exp_c,
+                    "Code mismatch on char {} for combo OFF {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
             }
 
             // 'y' must be unstyled
@@ -5400,14 +5517,26 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
                 .iter()
                 .find(|s| s.source.start <= y_src && y_src < s.source.end)
                 .unwrap_or_else(|| panic!("No styled segment covering 'y' for combo {:?}", combo));
-            assert!(!y_seg.bold && !y_seg.italic && !y_seg.strike && !y_seg.code,
+            assert!(
+                !y_seg.bold && !y_seg.italic && !y_seg.strike && !y_seg.code,
                 "Expected 'y' unstyled for combo {:?}, got B={} I={} S={} C={}",
-                combo, y_seg.bold, y_seg.italic, y_seg.strike, y_seg.code);
+                combo,
+                y_seg.bold,
+                y_seg.italic,
+                y_seg.strike,
+                y_seg.code
+            );
         }
 
         // 3. With prefix "x ": "x ", arm combo, type "hi", toggle off, type "y"
         {
-            let mut doc = DocumentTab::new("prefix_off".into(), "test.md".into(), String::new(), None, None);
+            let mut doc = DocumentTab::new(
+                "prefix_off".into(),
+                "test.md".into(),
+                String::new(),
+                None,
+                None,
+            );
             type_keystrokes(&mut doc, "x ");
             for &cmd in combo {
                 doc.apply_format_in_mode(cmd, ViewMode::Wysiwyg);
@@ -5433,7 +5562,12 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
                     .styled_segments
                     .iter()
                     .find(|s| s.source.start <= src && src < s.source.end)
-                    .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "No styled segment covering char {} for combo {:?}",
+                            ch_idx, combo
+                        )
+                    });
                 assert!(!seg.bold && !seg.italic && !seg.strike && !seg.code);
             }
 
@@ -5444,11 +5578,32 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
                     .styled_segments
                     .iter()
                     .find(|s| s.source.start <= src && src < s.source.end)
-                    .unwrap_or_else(|| panic!("No styled segment covering char {} for combo {:?}", ch_idx, combo));
-                assert_eq!(seg.bold, exp_b, "Bold mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
-                assert_eq!(seg.italic, exp_i, "Italic mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
-                assert_eq!(seg.strike, exp_s, "Strike mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
-                assert_eq!(seg.code, exp_c, "Code mismatch on char {} for combo OFF {:?}. Content: {:?}", ch_idx, combo, doc.content);
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "No styled segment covering char {} for combo {:?}",
+                            ch_idx, combo
+                        )
+                    });
+                assert_eq!(
+                    seg.bold, exp_b,
+                    "Bold mismatch on char {} for combo OFF {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
+                assert_eq!(
+                    seg.italic, exp_i,
+                    "Italic mismatch on char {} for combo OFF {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
+                assert_eq!(
+                    seg.strike, exp_s,
+                    "Strike mismatch on char {} for combo OFF {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
+                assert_eq!(
+                    seg.code, exp_c,
+                    "Code mismatch on char {} for combo OFF {:?}. Content: {:?}",
+                    ch_idx, combo, doc.content
+                );
             }
 
             // 'y' must be unstyled
@@ -5458,9 +5613,15 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
                 .iter()
                 .find(|s| s.source.start <= y_src && y_src < s.source.end)
                 .unwrap_or_else(|| panic!("No styled segment covering 'y' for combo {:?}", combo));
-            assert!(!y_seg.bold && !y_seg.italic && !y_seg.strike && !y_seg.code,
+            assert!(
+                !y_seg.bold && !y_seg.italic && !y_seg.strike && !y_seg.code,
                 "Expected 'y' unstyled for combo {:?}, got B={} I={} S={} C={}",
-                combo, y_seg.bold, y_seg.italic, y_seg.strike, y_seg.code);
+                combo,
+                y_seg.bold,
+                y_seg.italic,
+                y_seg.strike,
+                y_seg.code
+            );
         }
     }
 }
@@ -5622,7 +5783,13 @@ fn test_no_empty_format_spans_after_toggling() {
     // Toggle on and immediately toggle off for each format
     let formats = ["bold", "italic", "underline", "strike", "code"];
     for fmt in formats {
-        let mut doc = DocumentTab::new("empty_toggle".into(), "test.md".into(), String::new(), None, None);
+        let mut doc = DocumentTab::new(
+            "empty_toggle".into(),
+            "test.md".into(),
+            String::new(),
+            None,
+            None,
+        );
         doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
         doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
         assert_eq!(doc.content, "");
@@ -5634,15 +5801,36 @@ fn test_no_empty_format_spans_after_toggling() {
 
     // Type word, toggle off, type word for each format
     for fmt in formats {
-        let mut doc = DocumentTab::new("toggle_seq".into(), "test.md".into(), String::new(), None, None);
+        let mut doc = DocumentTab::new(
+            "toggle_seq".into(),
+            "test.md".into(),
+            String::new(),
+            None,
+            None,
+        );
         doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
         type_keystrokes(&mut doc, "abc");
         doc.apply_format_in_mode(fmt, ViewMode::Wysiwyg);
         type_keystrokes(&mut doc, "def");
 
-        assert!(!doc.content.contains("<u></u>"), "Format {} left <u></u>: {:?}", fmt, doc.content);
-        assert!(!doc.content.contains("****"), "Format {} left ****: {:?}", fmt, doc.content);
-        assert!(!doc.content.contains("~~~~"), "Format {} left ~~~~: {:?}", fmt, doc.content);
+        assert!(
+            !doc.content.contains("<u></u>"),
+            "Format {} left <u></u>: {:?}",
+            fmt,
+            doc.content
+        );
+        assert!(
+            !doc.content.contains("****"),
+            "Format {} left ****: {:?}",
+            fmt,
+            doc.content
+        );
+        assert!(
+            !doc.content.contains("~~~~"),
+            "Format {} left ~~~~: {:?}",
+            fmt,
+            doc.content
+        );
     }
 }
 
@@ -5667,10 +5855,7 @@ fn naive_span_open_start(parsed: &ParsedDocument, pair: &InlinePair) -> usize {
         .unwrap_or(pair.open_delim.start)
 }
 
-fn naive_collect_group_pairs(
-    parsed: &ParsedDocument,
-    range: Range<usize>,
-) -> Vec<&InlinePair> {
+fn naive_collect_group_pairs(parsed: &ParsedDocument, range: Range<usize>) -> Vec<&InlinePair> {
     let mut group_pairs: Vec<&InlinePair> = parsed
         .all_inline_pairs()
         .filter(|p| {
@@ -5683,9 +5868,7 @@ fn naive_collect_group_pairs(
     while expanded {
         expanded = false;
         for p in parsed.all_inline_pairs() {
-            if p.kind == InlineTagKind::Link
-                || group_pairs.iter().any(|g| std::ptr::eq(*g, p))
-            {
+            if p.kind == InlineTagKind::Link || group_pairs.iter().any(|g| std::ptr::eq(*g, p)) {
                 continue;
             }
             let touches = group_pairs.iter().any(|g| {
@@ -5701,17 +5884,7 @@ fn naive_collect_group_pairs(
     group_pairs
 }
 
-fn pair_key(
-    p: &InlinePair,
-) -> (
-    InlineTagKind,
-    usize,
-    usize,
-    usize,
-    usize,
-    usize,
-    usize,
-) {
+fn pair_key(p: &InlinePair) -> (InlineTagKind, usize, usize, usize, usize, usize, usize) {
     (
         p.kind,
         p.open_delim.start,
@@ -5793,7 +5966,9 @@ fn snapshot(doc: &DocumentTab) -> (String, Range<usize>, ActiveFormats, ActiveFo
     )
 }
 
-fn run_scripted_format_sequence(n: usize) -> Vec<(String, Range<usize>, ActiveFormats, ActiveFormats)> {
+fn run_scripted_format_sequence(
+    n: usize,
+) -> Vec<(String, Range<usize>, ActiveFormats, ActiveFormats)> {
     let mut doc = DocumentTab::new(
         "perf".into(),
         "perf.md".into(),
@@ -5988,15 +6163,13 @@ fn format_toggle_perf_bench() {
 
 #[test]
 fn compute_stats_is_lazy_until_ensure_stats() {
-    let mut doc = DocumentTab::new(
-        "s".into(),
-        "s.md".into(),
-        "one two".into(),
-        None,
-        None,
-    );
+    let mut doc = DocumentTab::new("s".into(), "s.md".into(), "one two".into(), None, None);
     assert_eq!(doc.word_count, 2);
-    doc.insert_text_in_mode(doc.content.len()..doc.content.len(), " three four", ViewMode::Raw);
+    doc.insert_text_in_mode(
+        doc.content.len()..doc.content.len(),
+        " three four",
+        ViewMode::Raw,
+    );
     let before = compute_stats(&doc.content);
     assert_eq!(
         doc.word_count, 2,
@@ -6016,11 +6189,22 @@ fn parse_stays_equal_to_a_full_parse_through_edits_undo_and_redo() {
     // F15: parsed() updates the cached parse in place after each edit.
     let mut seed = 0x0dd5_eed5u64;
     let mut next = |n: usize| {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((seed >> 33) as usize) % n.max(1)
     };
-    let pieces = ["# Title\n", "- item\n", "1. one\n", "> quote\n", "```\ncode\n```\n",
-        "| a | b |\n| --- | --- |\n| 1 | 2 |\n", "text **bold**\n", "\n", "    indented\n"];
+    let pieces = [
+        "# Title\n",
+        "- item\n",
+        "1. one\n",
+        "> quote\n",
+        "```\ncode\n```\n",
+        "| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+        "text **bold**\n",
+        "\n",
+        "    indented\n",
+    ];
     let mut source = String::new();
     for _ in 0..300 {
         source.push_str(pieces[next(pieces.len())]);
@@ -6042,12 +6226,19 @@ fn parse_stays_equal_to_a_full_parse_through_edits_undo_and_redo() {
                 while !doc.content.is_char_boundary(end) {
                     end -= 1;
                 }
-                let text = if next(3) == 0 { "" } else { snippets[next(snippets.len())] };
+                let text = if next(3) == 0 {
+                    ""
+                } else {
+                    snippets[next(snippets.len())]
+                };
                 doc.edit(start..end.max(start), text);
             }
         }
         let fresh = parse_document(&doc.content);
-        assert!(*doc.parsed() == fresh, "step {step}: cached parse differs from a full parse");
+        assert!(
+            *doc.parsed() == fresh,
+            "step {step}: cached parse differs from a full parse"
+        );
     }
 }
 

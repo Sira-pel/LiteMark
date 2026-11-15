@@ -38,7 +38,11 @@ impl DocumentTab {
     /// it and keeps the formats armed so the next letter reopens them on the
     /// new line. `line_ins` is the line-prefix text the caller would insert
     /// at the caret (for example `"\n> "` inside a blockquote).
-    pub(super) fn split_inline_span_newline(&mut self, range: &Range<usize>, line_ins: &str) -> bool {
+    pub(super) fn split_inline_span_newline(
+        &mut self,
+        range: &Range<usize>,
+        line_ins: &str,
+    ) -> bool {
         if !range.is_empty() {
             return false;
         }
@@ -223,16 +227,20 @@ impl DocumentTab {
 
                 if is_empty_row {
                     let table = self.table_at(cursor);
-                    let row_pos = table
-                        .as_ref()
-                        .and_then(|t| t.rows.iter().position(|r| r.source.start == pline.source.start));
+                    let row_pos = table.as_ref().and_then(|t| {
+                        t.rows
+                            .iter()
+                            .position(|r| r.source.start == pline.source.start)
+                    });
                     if let (Some(table), Some(row_pos)) = (table, row_pos) {
                         if row_pos + 1 < table.rows.len() {
                             // Not the last row: move to the same column in the next row
                             let col = table.rows[row_pos]
                                 .cells
                                 .iter()
-                                .position(|c| cursor >= c.start.saturating_sub(1) && cursor <= c.end + 1)
+                                .position(|c| {
+                                    cursor >= c.start.saturating_sub(1) && cursor <= c.end + 1
+                                })
                                 .unwrap_or(0);
                             let next = &table.rows[row_pos + 1];
                             let target = next
@@ -310,8 +318,7 @@ impl DocumentTab {
                             }
                         }
                         let new_row = format!("{nl}|{}|", new_cells.join("|"));
-                        let combined =
-                            format!("{}{}{}{}", span_close, tail, rest_of_line, new_row);
+                        let combined = format!("{}{}{}{}", span_close, tail, rest_of_line, new_row);
                         let new_row_start = edit_start
                             + span_close.len()
                             + tail.len()
@@ -447,7 +454,10 @@ impl DocumentTab {
                 .any(|p| trimmed_start.starts_with(p));
         if is_heading {
             let text_start = line_start + block_prefix_in(&self.content, line_start);
-            if range.is_empty() && cursor <= text_start && !line[text_start - line_start..].trim().is_empty() {
+            if range.is_empty()
+                && cursor <= text_start
+                && !line[text_start - line_start..].trim().is_empty()
+            {
                 // Before the heading text: push the heading down, keep it a heading.
                 self.edit(line_start..line_start, nl);
                 self.caret.move_to(cursor + nl.len());

@@ -4,7 +4,12 @@ use super::*;
 
 impl LiteMarkApp {
     /// Feeds touchpad movement to the momentum tracker; wheel notches reset it.
-    pub(super) fn note_scroll(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn note_scroll(
+        &mut self,
+        ev: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // macOS already sends its own inertial events after the lift, and
         // Windows only reports line steps, so this is for Linux touchpads.
         match ev.delta {
@@ -50,11 +55,7 @@ impl LiteMarkApp {
     /// that paint has not happened yet and another frame should be asked for.
     pub(super) fn follow_caret(&mut self) -> Option<bool> {
         let tab = self.active_tab()?;
-        let key = (
-            tab.id.clone(),
-            tab.selection_range(),
-            tab.content.len(),
-        );
+        let key = (tab.id.clone(), tab.selection_range(), tab.content.len());
         if self.caret_followed.as_ref() == Some(&key) {
             return None;
         }

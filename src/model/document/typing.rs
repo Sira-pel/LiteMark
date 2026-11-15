@@ -57,7 +57,8 @@ impl DocumentTab {
                     let at = span_close_end(&parsed, &pair);
                     self.edit(at..at, text);
                     self.pending_formats = pending;
-                    self.caret.move_to(floor_boundary(&self.content, at + text.len()));
+                    self.caret
+                        .move_to(floor_boundary(&self.content, at + text.len()));
                     self.refresh_cursor();
                     return;
                 }
@@ -67,11 +68,7 @@ impl DocumentTab {
             self.pending_formats = pf;
             return;
         }
-        if mode == ViewMode::Wysiwyg
-            && range.is_empty()
-            && !text.is_empty()
-            && text != "\n"
-        {
+        if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() && text != "\n" {
             let pf = self.pending_formats;
             if self.has_pending_inline_formats() {
                 let parsed = self.parsed();
@@ -139,9 +136,11 @@ impl DocumentTab {
         let mut escaped: Option<String> = None;
         if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() {
             let parsed = self.parsed();
-            if let Some(pair) = line_pair_refs(&parsed, range.start).iter().rev().find(|p| {
-                range.start >= p.inner.start && range.start <= p.inner.end
-            }) {
+            if let Some(pair) = line_pair_refs(&parsed, range.start)
+                .iter()
+                .rev()
+                .find(|p| range.start >= p.inner.start && range.start <= p.inner.end)
+            {
                 match pair.kind {
                     InlineTagKind::Bold | InlineTagKind::Italic => {
                         if text.contains('*') {
@@ -177,8 +176,7 @@ impl DocumentTab {
             });
             if !in_code {
                 let next_char = self.content[range.start..].chars().next();
-                let starts_tag =
-                    next_char.is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+                let starts_tag = next_char.is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
                 let prev_is_lt = range.start > 0
                     && self.content[..range.start].ends_with('<')
                     && !self.content[..range.start].ends_with("\\<");
@@ -260,13 +258,12 @@ impl DocumentTab {
             None,
         );
         let selected: Vec<&StyledSlice> = slices.iter().filter(|s| s.is_selected).collect();
-        let typed_flags = if !selected.is_empty()
-            && selected.iter().all(|s| s.flags == selected[0].flags)
-        {
-            selected[0].flags
-        } else {
-            FormatFlags::default()
-        };
+        let typed_flags =
+            if !selected.is_empty() && selected.iter().all(|s| s.flags == selected[0].flags) {
+                selected[0].flags
+            } else {
+                FormatFlags::default()
+            };
         let mut out = Vec::new();
         let mut replaced = false;
         for s in slices {
@@ -447,10 +444,8 @@ impl DocumentTab {
                                     | LineKind::ListItem { .. }
                             )
                         };
-                        let next_is_block = parsed
-                            .lines
-                            .get(pline.line_index + 1)
-                            .is_some_and(|n| {
+                        let next_is_block =
+                            parsed.lines.get(pline.line_index + 1).is_some_and(|n| {
                                 matches!(
                                     n.kind,
                                     LineKind::Heading { .. }
@@ -458,8 +453,8 @@ impl DocumentTab {
                                         | LineKind::ListItem { .. }
                                 )
                             });
-                        let own_text = pline.source.start
-                            + block_prefix_in(&self.content, pline.source.start);
+                        let own_text =
+                            pline.source.start + block_prefix_in(&self.content, pline.source.start);
                         let strip = if text_line(&pline.kind) && next_is_block && own_text < cursor
                         {
                             block_prefix_in(&self.content, after + break_len)
@@ -482,8 +477,7 @@ impl DocumentTab {
                     if next_vis < pair.inner.start || next_vis >= pair.inner.end {
                         continue;
                     }
-                    let only =
-                        previous_grapheme(&self.content, pair.inner.end) <= pair.inner.start;
+                    let only = previous_grapheme(&self.content, pair.inner.end) <= pair.inner.start;
                     if only {
                         let start = span_open_start(&parsed, pair);
                         let end = span_close_end(&parsed, pair);
@@ -501,7 +495,8 @@ impl DocumentTab {
                 }
                 let g_end = next_grapheme(&self.content, next_vis);
                 self.edit(next_vis..g_end, "");
-                self.caret.move_to(floor_boundary(&self.content, cursor.min(next_vis)));
+                self.caret
+                    .move_to(floor_boundary(&self.content, cursor.min(next_vis)));
                 self.refresh_cursor();
                 return;
             }

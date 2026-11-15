@@ -183,14 +183,28 @@ mod tests {
     fn link_uses_the_real_tag_when_it_is_a_plain_version() {
         let info = parse_release(r#"{"tag_name":"v2.1"}"#).expect("release");
         assert_eq!(info.version, "2.1.0");
-        assert_eq!(info.url, "https://github.com/Sira-pel/LiteMark/releases/tag/v2.1");
+        assert_eq!(
+            info.url,
+            "https://github.com/Sira-pel/LiteMark/releases/tag/v2.1"
+        );
         let info = parse_release(r#"{"tag_name":"2.1.0"}"#).expect("release");
-        assert_eq!(info.url, "https://github.com/Sira-pel/LiteMark/releases/tag/2.1.0");
+        assert_eq!(
+            info.url,
+            "https://github.com/Sira-pel/LiteMark/releases/tag/2.1.0"
+        );
         // Anything else in the tag: the link is rebuilt from the numbers.
-        for tag in ["v2.1.0-x/../../evil", "v2.1.0-%2e%2e", "v2.1.0-now go", "v2.1.0-x?y=1"] {
+        for tag in [
+            "v2.1.0-x/../../evil",
+            "v2.1.0-%2e%2e",
+            "v2.1.0-now go",
+            "v2.1.0-x?y=1",
+        ] {
             let body = serde_json::json!({ "tag_name": tag }).to_string();
             let info = parse_release(&body).expect("release");
-            assert_eq!(info.url, "https://github.com/Sira-pel/LiteMark/releases/tag/v2.1.0", "{tag}");
+            assert_eq!(
+                info.url, "https://github.com/Sira-pel/LiteMark/releases/tag/v2.1.0",
+                "{tag}"
+            );
         }
     }
 

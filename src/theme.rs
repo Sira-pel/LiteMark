@@ -22,10 +22,12 @@ impl ThemeMode {
         match self {
             ThemeMode::YaruDark => true,
             ThemeMode::YaruLight => false,
-            ThemeMode::System => matches!(appearance, WindowAppearance::Dark | WindowAppearance::VibrantDark),
+            ThemeMode::System => matches!(
+                appearance,
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            ),
         }
     }
-
 }
 
 pub mod sz {

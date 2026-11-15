@@ -90,14 +90,16 @@ pub fn record_table_row(
         let columns = cells
             .iter()
             .enumerate()
-            .map(|(index, &(anchor, box_bounds))| super::text_editor::TableColGeom {
-                header_bounds: box_bounds,
-                align: alignments
-                    .get(index)
-                    .copied()
-                    .unwrap_or(TableColumnAlign::None),
-                anchor,
-            })
+            .map(
+                |(index, &(anchor, box_bounds))| super::text_editor::TableColGeom {
+                    header_bounds: box_bounds,
+                    align: alignments
+                        .get(index)
+                        .copied()
+                        .unwrap_or(TableColumnAlign::None),
+                    anchor,
+                },
+            )
             .collect();
         tables.push(TableGeom {
             source,
@@ -201,7 +203,10 @@ pub fn row_pill_bounds(row: Bounds<Pixels>) -> Bounds<Pixels> {
 pub fn corner_grip_bounds(table: Bounds<Pixels>) -> Bounds<Pixels> {
     let side = sz::TABLE_PILL;
     Bounds::new(
-        point(table.right() + sz::TABLE_GAP, table.top() - side - sz::TABLE_GAP),
+        point(
+            table.right() + sz::TABLE_GAP,
+            table.top() - side - sz::TABLE_GAP,
+        ),
         size(side, side),
     )
 }

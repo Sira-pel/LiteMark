@@ -50,9 +50,7 @@ impl LiteMarkApp {
             .filter_map(&path_of)
             .collect();
         let rows = without_partial_folders(&rows, &visible);
-        let dest_is_target = |t: &SidebarTarget| {
-            matches!((t, &folder_id), (SidebarTarget::Folder(id), Some(dest)) if id == dest)
-        };
+        let dest_is_target = |t: &SidebarTarget| matches!((t, &folder_id), (SidebarTarget::Folder(id), Some(dest)) if id == dest);
         let moving: Vec<SidebarTarget> = top_level_targets(&rows)
             .into_iter()
             .filter(|t| !dest_is_target(t))

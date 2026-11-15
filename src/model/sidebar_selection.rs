@@ -31,7 +31,11 @@ pub fn toggle_row<T: Clone + PartialEq>(
         }
         None => items.push(target.clone()),
     }
-    let cursor = if items.contains(&target) { target } else { items.last()?.clone() };
+    let cursor = if items.contains(&target) {
+        target
+    } else {
+        items.last()?.clone()
+    };
     let anchor = anchor
         .filter(|a| items.contains(a))
         .unwrap_or_else(|| cursor.clone());
@@ -131,7 +135,9 @@ pub fn without_partial_folders<T: Clone>(
                 return true;
             }
             let inside = |row: &&PathBuf| *row != folder && row.starts_with(folder);
-            let any_selected = items.iter().any(|(_, p, _)| p != folder && p.starts_with(folder));
+            let any_selected = items
+                .iter()
+                .any(|(_, p, _)| p != folder && p.starts_with(folder));
             let any_skipped = visible.iter().filter(inside).any(|row| !selected(row));
             !(any_selected && any_skipped)
         })
@@ -225,10 +231,7 @@ mod tests {
     #[test]
     fn partial_folder_is_dropped_but_its_selected_rows_stay() {
         let p = |s: &str| PathBuf::from(s);
-        let items = vec![
-            (1, p("/w/dir"), true),
-            (2, p("/w/dir/a.md"), false),
-        ];
+        let items = vec![(1, p("/w/dir"), true), (2, p("/w/dir/a.md"), false)];
         let visible = vec![p("/w/dir"), p("/w/dir/a.md"), p("/w/dir/b.md")];
         let got = without_partial_folders(&items, &visible);
         assert_eq!(got, vec![(2, p("/w/dir/a.md"), false)]);
@@ -242,9 +245,15 @@ mod tests {
         assert_eq!(without_partial_folders(&items, &all), items);
         let collapsed = vec![p("/w/dir")];
         let only_folder = vec![(1, p("/w/dir"), true)];
-        assert_eq!(without_partial_folders(&only_folder, &collapsed), only_folder);
+        assert_eq!(
+            without_partial_folders(&only_folder, &collapsed),
+            only_folder
+        );
         let expanded = vec![p("/w/dir"), p("/w/dir/a.md")];
-        assert_eq!(without_partial_folders(&only_folder, &expanded), only_folder);
+        assert_eq!(
+            without_partial_folders(&only_folder, &expanded),
+            only_folder
+        );
     }
 
     #[test]

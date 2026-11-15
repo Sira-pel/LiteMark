@@ -112,7 +112,11 @@ fn main() {
                 KeyBinding::new("secondary-shift-s", SaveFileAs, None),
                 // Cmd+H hides the app on macOS.
                 KeyBinding::new(
-                    if cfg!(target_os = "macos") { "cmd-alt-f" } else { "ctrl-h" },
+                    if cfg!(target_os = "macos") {
+                        "cmd-alt-f"
+                    } else {
+                        "ctrl-h"
+                    },
                     OpenReplace,
                     None,
                 ),
@@ -169,7 +173,11 @@ fn main() {
                 KeyBinding::new("ctrl-shift-end", EditorSelectDocEnd, Some("Editor")),
                 KeyBinding::new("ctrl-backspace", EditorDeleteWordLeft, Some("Editor")),
                 KeyBinding::new("ctrl-delete", EditorDeleteWordRight, Some("Editor")),
-                KeyBinding::new("ctrl-shift-backspace", EditorDeleteLineStart, Some("Editor")),
+                KeyBinding::new(
+                    "ctrl-shift-backspace",
+                    EditorDeleteLineStart,
+                    Some("Editor"),
+                ),
                 KeyBinding::new("ctrl-shift-delete", EditorDeleteLineEnd, Some("Editor")),
                 KeyBinding::new("backspace", EditorBackspace, Some("Editor")),
                 KeyBinding::new("delete", EditorDelete, Some("Editor")),
@@ -216,7 +224,11 @@ fn main() {
                 KeyBinding::new("ctrl-shift-right", EditorSelectWordRight, Some("LineField")),
                 KeyBinding::new("ctrl-backspace", EditorDeleteWordLeft, Some("LineField")),
                 KeyBinding::new("ctrl-delete", EditorDeleteWordRight, Some("LineField")),
-                KeyBinding::new("ctrl-shift-backspace", EditorDeleteLineStart, Some("LineField")),
+                KeyBinding::new(
+                    "ctrl-shift-backspace",
+                    EditorDeleteLineStart,
+                    Some("LineField"),
+                ),
                 KeyBinding::new("ctrl-shift-delete", EditorDeleteLineEnd, Some("LineField")),
                 KeyBinding::new("backspace", EditorBackspace, Some("LineField")),
                 KeyBinding::new("delete", EditorDelete, Some("LineField")),
@@ -307,7 +319,6 @@ fn main() {
             }
         });
 }
-
 
 /// macOS only builds a resizable/zoomable window when a titlebar is given;
 /// with `None` the style mask lacks the resizable and miniaturizable flags, so

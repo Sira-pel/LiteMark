@@ -1,3 +1,5 @@
+> Note: the fmt runs below were recorded before the tree was formatted (audit finding F19). The baseline is now empty and the absorb, collide, shift and stale proofs are gone.
+
 # Evidence
 
 SHA: `f4a7e9b84e4bdbedf1adc15a027993ae2630fc2f`

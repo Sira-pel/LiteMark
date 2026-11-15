@@ -12,7 +12,12 @@ impl LiteMarkApp {
     }
 
     pub fn toggle_folder(&mut self, folder_id: &str) {
-        if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.id == folder_id) {
+        if let Some(folder) = self
+            .workspace
+            .folders
+            .iter_mut()
+            .find(|f| f.id == folder_id)
+        {
             folder.is_open = !folder.is_open;
         }
         // Clicking a folder selects it (Delete-key target) and keeps
@@ -104,7 +109,11 @@ impl LiteMarkApp {
         let toggled = toggle_row(items, multi.map(|m| m.anchor), target);
         self.selected_target = toggled.as_ref().map(|(_, cursor, _)| cursor.clone());
         self.multi_selection = toggled.and_then(|(anchor, cursor, items)| {
-            (items.len() > 1).then_some(MultiSelection { anchor, cursor, items })
+            (items.len() > 1).then_some(MultiSelection {
+                anchor,
+                cursor,
+                items,
+            })
         });
         self.sidebar_keyboard = true;
     }
@@ -135,12 +144,18 @@ impl LiteMarkApp {
 
     pub(super) fn target_path(&self, target: &SidebarTarget) -> Option<PathBuf> {
         match target {
-            SidebarTarget::Folder(id) => {
-                self.workspace.folders.iter().find(|f| &f.id == id).map(|f| f.path.clone())
-            }
-            SidebarTarget::File(id) => {
-                self.workspace.files.iter().find(|f| &f.id == id).map(|f| f.path.clone())
-            }
+            SidebarTarget::Folder(id) => self
+                .workspace
+                .folders
+                .iter()
+                .find(|f| &f.id == id)
+                .map(|f| f.path.clone()),
+            SidebarTarget::File(id) => self
+                .workspace
+                .files
+                .iter()
+                .find(|f| &f.id == id)
+                .map(|f| f.path.clone()),
         }
     }
 
@@ -151,12 +166,24 @@ impl LiteMarkApp {
             .into_iter()
             .filter_map(|t| {
                 let (path, is_folder) = match &t {
-                    SidebarTarget::Folder(id) => {
-                        (self.workspace.folders.iter().find(|f| &f.id == id)?.path.clone(), true)
-                    }
-                    SidebarTarget::File(id) => {
-                        (self.workspace.files.iter().find(|f| &f.id == id)?.path.clone(), false)
-                    }
+                    SidebarTarget::Folder(id) => (
+                        self.workspace
+                            .folders
+                            .iter()
+                            .find(|f| &f.id == id)?
+                            .path
+                            .clone(),
+                        true,
+                    ),
+                    SidebarTarget::File(id) => (
+                        self.workspace
+                            .files
+                            .iter()
+                            .find(|f| &f.id == id)?
+                            .path
+                            .clone(),
+                        false,
+                    ),
                 };
                 Some((t, path, is_folder))
             })
@@ -232,13 +259,7 @@ impl LiteMarkApp {
                 cx.notify();
             }
             SidebarTarget::File(id) => {
-                let Some(file) = self
-                    .workspace
-                    .files
-                    .iter()
-                    .find(|f| f.id == id)
-                    .cloned()
-                else {
+                let Some(file) = self.workspace.files.iter().find(|f| f.id == id).cloned() else {
                     return;
                 };
                 match read_note(&file.path) {
@@ -265,12 +286,7 @@ impl LiteMarkApp {
         };
         match target {
             SidebarTarget::Folder(id) => {
-                if let Some(folder) = self
-                    .workspace
-                    .folders
-                    .iter_mut()
-                    .find(|f| f.id == id)
-                {
+                if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.id == id) {
                     folder.is_open = false;
                 }
                 self.sidebar_keyboard = true;
@@ -326,7 +342,11 @@ impl LiteMarkApp {
         self.refresh_workspace_ids();
     }
 
-    pub(super) fn create_note(&mut self, folder_id: Option<String>, desired: String) -> Result<(), String> {
+    pub(super) fn create_note(
+        &mut self,
+        folder_id: Option<String>,
+        desired: String,
+    ) -> Result<(), String> {
         let folders = self.folder_pairs();
         let dir = child_directory(&self.workspace.folder_path, &folders, folder_id.as_deref());
         let name = next_available_filename(&dir, &desired);
@@ -356,7 +376,11 @@ impl LiteMarkApp {
         }
     }
 
-    pub(super) fn create_folder(&mut self, parent_id: Option<String>, desired: String) -> Result<(), String> {
+    pub(super) fn create_folder(
+        &mut self,
+        parent_id: Option<String>,
+        desired: String,
+    ) -> Result<(), String> {
         let folders = self.folder_pairs();
         let dir = child_directory(&self.workspace.folder_path, &folders, parent_id.as_deref());
         let name = unique_name(&sanitize_name(&desired), &|candidate| {
@@ -371,12 +395,7 @@ impl LiteMarkApp {
                 }
                 self.rescan_workspace();
                 // Keep the fresh folder visible in the tree.
-                if let Some(folder) = self
-                    .workspace
-                    .folders
-                    .iter_mut()
-                    .find(|f| f.path == path)
-                {
+                if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.path == path) {
                     folder.is_open = true;
                 }
                 Ok(())

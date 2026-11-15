@@ -81,7 +81,12 @@ impl DocumentTab {
         else {
             // On the delimiter row: add the first body row
             let at = table.delimiter_end.unwrap_or(table.source.end);
-            let cols = table.rows.first().map(|r| r.cells.len()).unwrap_or(2).max(2);
+            let cols = table
+                .rows
+                .first()
+                .map(|r| r.cells.len())
+                .unwrap_or(2)
+                .max(2);
             let nl = self.line_break(at);
             let row = format!("{nl}|{}", "  |".repeat(cols));
             self.edit(at..at, &row);
@@ -95,7 +100,12 @@ impl DocumentTab {
             .cells
             .iter()
             .position(|c| cursor >= c.start.saturating_sub(1) && cursor <= c.end + 1)
-            .unwrap_or_else(|| row.cells.iter().rposition(|c| c.start <= cursor).unwrap_or(0));
+            .unwrap_or_else(|| {
+                row.cells
+                    .iter()
+                    .rposition(|c| c.start <= cursor)
+                    .unwrap_or(0)
+            });
         let cols = row.cells.len().max(2);
         let at = if row.is_header {
             table.delimiter_end.unwrap_or(row.source.end)

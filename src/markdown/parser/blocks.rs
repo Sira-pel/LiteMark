@@ -247,7 +247,10 @@ pub(super) fn atx_heading(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
 }
 
 /// `max_indent` is a column, with tabs advancing to the next multiple of 4.
-pub(super) fn atx_heading_within(line: &str, max_indent: usize) -> Option<(u8, std::ops::Range<usize>)> {
+pub(super) fn atx_heading_within(
+    line: &str,
+    max_indent: usize,
+) -> Option<(u8, std::ops::Range<usize>)> {
     let bytes = line.as_bytes();
     let (mut index, column) = split_indent(line);
     if column > max_indent || index >= bytes.len() {

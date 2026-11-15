@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-mod tables;
 mod blocks;
 mod lists;
+mod tables;
 
-pub use tables::*;
 pub(crate) use blocks::*;
 pub use lists::*;
+pub use tables::*;
 
 struct SourceLine<'a> {
     start: usize,
@@ -281,7 +281,9 @@ fn is_footnote_definition(line: &str) -> bool {
 pub enum LineKind {
     Empty,
     Paragraph,
-    Heading { level: u8 }, // 1..=6
+    Heading {
+        level: u8,
+    }, // 1..=6
     Blockquote,
     ListItem {
         ordered: bool,
@@ -571,7 +573,9 @@ impl RowOffsetMap {
             }
             let overlap_start = d.start.max(disp_range.start);
             let overlap_end = d.end.min(disp_range.end);
-            if overlap_end > overlap_start || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end) {
+            if overlap_end > overlap_start
+                || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end)
+            {
                 let src_start = s.start + (overlap_start - d.start);
                 let src_end = s.start + (overlap_end - d.start);
                 let new_d_start = overlap_start - disp_range.start;
@@ -914,7 +918,17 @@ fn is_plain_inline(input: &str) -> bool {
             b.is_ascii_control()
                 || matches!(
                     b,
-                    b'*' | b'_' | b'~' | b'`' | b'[' | b']' | b'<' | b'>' | b'\\' | b'&' | b'!' | b'|'
+                    b'*' | b'_'
+                        | b'~'
+                        | b'`'
+                        | b'['
+                        | b']'
+                        | b'<'
+                        | b'>'
+                        | b'\\'
+                        | b'&'
+                        | b'!'
+                        | b'|'
                 )
         })
 }
@@ -1018,12 +1032,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
                     let inner = open_d.end..close_d.start;
                     raw_hidden.push(open_d.clone());
                     raw_hidden.push(close_d.clone());
-                    inline_pairs.push(InlinePair::new(
-                        InlineTagKind::Link,
-                        open_d,
-                        inner,
-                        close_d,
-                    ));
+                    inline_pairs.push(InlinePair::new(InlineTagKind::Link, open_d, inner, close_d));
                 }
             }
             pulldown_cmark::Event::InlineHtml(h) | pulldown_cmark::Event::Html(h) => {
@@ -1724,31 +1733,39 @@ impl ParsedDocument {
         let mut new_checkpoints = Vec::new();
         let mut resync = None;
         let mut state = restart_state;
-        parse_lines(&raw, restart, &mut state, &mut new_lines, |i, start, now| {
-            if start >= new_edit_end && i > restart {
-                let old_start = (start as isize - delta) as usize;
-                let k = old_lines.partition_point(|l| l.source.start < old_start);
-                let at_line_start = old_lines.get(k).is_some_and(|l| l.source.start == old_start);
-                if at_line_start {
-                    if let Ok(ix) = checkpoints.binary_search_by_key(&k, |(l, _)| *l) {
-                        let shift = Shift {
-                            old_end: old.end,
-                            delta,
-                            old_line: k,
-                            line_delta: i as isize - k as isize,
-                        };
-                        if shift.state(&checkpoints[ix].1) == *now {
-                            resync = Some((i, k, ix, shift));
-                            return Step::Stop;
+        parse_lines(
+            &raw,
+            restart,
+            &mut state,
+            &mut new_lines,
+            |i, start, now| {
+                if start >= new_edit_end && i > restart {
+                    let old_start = (start as isize - delta) as usize;
+                    let k = old_lines.partition_point(|l| l.source.start < old_start);
+                    let at_line_start = old_lines
+                        .get(k)
+                        .is_some_and(|l| l.source.start == old_start);
+                    if at_line_start {
+                        if let Ok(ix) = checkpoints.binary_search_by_key(&k, |(l, _)| *l) {
+                            let shift = Shift {
+                                old_end: old.end,
+                                delta,
+                                old_line: k,
+                                line_delta: i as isize - k as isize,
+                            };
+                            if shift.state(&checkpoints[ix].1) == *now {
+                                resync = Some((i, k, ix, shift));
+                                return Step::Stop;
+                            }
                         }
                     }
                 }
-            }
-            if (i - restart) % CHECKPOINT_EVERY == 0 {
-                new_checkpoints.push((i, now.clone()));
-            }
-            Step::Parse
-        });
+                if (i - restart) % CHECKPOINT_EVERY == 0 {
+                    new_checkpoints.push((i, now.clone()));
+                }
+                Step::Parse
+            },
+        );
 
         let inserted = new_lines.len();
         let old_generation = self.meta.generation;
@@ -2046,7 +2063,8 @@ fn parse_lines(
             continue;
         }
 
-        let skip_rejected = !list_quote_tracker.is_in_list_or_quote() && backtick_info_rejects_fence(line);
+        let skip_rejected =
+            !list_quote_tracker.is_in_list_or_quote() && backtick_info_rejects_fence(line);
         if trimmed.starts_with("```") && !skip_rejected {
             list_walk.note_block(line);
             let lang = trimmed

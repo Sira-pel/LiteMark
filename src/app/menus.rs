@@ -11,10 +11,7 @@ impl LiteMarkApp {
             .enumerate()
             .filter(|(_, item)| {
                 !item.disabled
-                    && !matches!(
-                        item.kind,
-                        MenuItemKind::Divider | MenuItemKind::Heading
-                    )
+                    && !matches!(item.kind, MenuItemKind::Divider | MenuItemKind::Heading)
             })
             .map(|(ix, _)| ix)
             .collect()
@@ -91,7 +88,10 @@ impl LiteMarkApp {
     /// if any. The caller must run the action *outside* the view update —
     /// item actions themselves update this view, so calling them from
     /// inside a `view.update` would re-entrantly borrow it and panic.
-    pub(super) fn menu_take_confirm_action(&mut self, cx: &mut Context<Self>) -> Option<MenuAction> {
+    pub(super) fn menu_take_confirm_action(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<MenuAction> {
         if self.open_menu.is_none() || self.open_menu == Some(MenuId::Table) {
             return None;
         }
@@ -149,10 +149,7 @@ impl LiteMarkApp {
             cx.notify();
             return None;
         }
-        if matches!(
-            item.kind,
-            MenuItemKind::Divider | MenuItemKind::Heading
-        ) {
+        if matches!(item.kind, MenuItemKind::Divider | MenuItemKind::Heading) {
             return None;
         }
         let action = item.action.clone();
@@ -312,7 +309,11 @@ impl LiteMarkApp {
             Prompt::CloseTab { id } => match choice {
                 "Save" => {
                     // Untitled quick notes get a name before the close continues.
-                    if self.tabs.iter().any(|t| t.id == id && t.file_path.is_none()) {
+                    if self
+                        .tabs
+                        .iter()
+                        .any(|t| t.id == id && t.file_path.is_none())
+                    {
                         self.begin_save_naming(&id, cx);
                         self.pending_after_save = Some(PendingAfterSave::CloseTab(id));
                     } else {
@@ -470,12 +471,14 @@ impl LiteMarkApp {
             self.begin_save_naming(&id, cx);
             return;
         }
-        let changed = self.tabs.iter().filter(|tab| tab.is_modified).find_map(|tab| {
-            match self.disk_change_for(&tab.id) {
+        let changed = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.is_modified)
+            .find_map(|tab| match self.disk_change_for(&tab.id) {
                 DiskChange::Unchanged => None,
                 change => Some((tab.id.clone(), change == DiskChange::Deleted)),
-            }
-        });
+            });
         if let Some((id, deleted)) = changed {
             self.active_tab_id = id.clone();
             self.pending_after_save = Some(PendingAfterSave::CloseWindow);

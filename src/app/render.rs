@@ -687,7 +687,10 @@ impl Render for LiteMarkApp {
 
         let on_drop_item = {
             let view = view.clone();
-            move |targets: Vec<SidebarTarget>, folder_id: Option<String>, copy: bool, cx: &mut App| {
+            move |targets: Vec<SidebarTarget>,
+                  folder_id: Option<String>,
+                  copy: bool,
+                  cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.handle_drop_items(targets, folder_id, copy, cx);
                     cx.notify();
@@ -1000,187 +1003,187 @@ impl Render for LiteMarkApp {
                 )
             } else {
                 let (point, anchor, width, items) = match open_id {
-                MenuId::File => (
-                    Point::new(px(8.0), px(76.0)),
-                    Corner::TopLeft,
-                    px(220.0),
-                    build_file_menu_items(
-                        active_tab_has_pdf,
-                        // "New note" starts the inline sidebar editor so the
-                        // user names the file, not an auto "Untitled-N" tab.
-                        {
-                            let bc = on_begin_create.clone();
-                            move |cx: &mut App| bc(None, false, cx)
-                        },
-                        on_new_folder.clone(),
-                        on_open.clone(),
-                        on_choose_dir.clone(),
-                        on_save.clone(),
-                        on_save_as.clone(),
-                        on_export_html.clone(),
-                        on_export_md.clone(),
-                        on_export_txt.clone(),
-                        on_view_pdf.clone(),
-                        on_close_active_tab.clone(),
-                    ),
-                ),
-                MenuId::Edit => (
-                    Point::new(px(48.0), px(76.0)),
-                    Corner::TopLeft,
-                    px(200.0),
-                    build_edit_menu_items(
-                        on_undo.clone(),
-                        on_redo.clone(),
-                        on_cut.clone(),
-                        on_copy.clone(),
-                        on_paste.clone(),
-                        on_select_all.clone(),
-                        on_toggle_find.clone(),
-                        on_open_replace.clone(),
-                    ),
-                ),
-                MenuId::View => (
-                    Point::new(px(92.0), px(76.0)),
-                    Corner::TopLeft,
-                    px(220.0),
-                    build_view_menu_items(
-                        self.settings.view_mode,
-                        self.view_locked_raw(),
-                        self.settings.show_line_numbers,
-                        self.settings.word_wrap,
-                        self.show_sidebar,
-                        self.settings.show_code_files,
-                        self.settings.content_alignment,
-                        on_set_view_mode.clone(),
-                        on_toggle_line_numbers.clone(),
-                        on_toggle_word_wrap.clone(),
-                        on_set_content_alignment.clone(),
-                        on_zoom_in.clone(),
-                        on_zoom_out.clone(),
-                        on_reset_zoom.clone(),
-                        on_toggle_sidebar.clone(),
-                        on_toggle_show_code_files.clone(),
-                        on_toggle_zen.clone(),
-                    ),
-                ),
-                MenuId::Settings => (
-                    Point::new(window.viewport_size().width - px(8.0), px(76.0)),
-                    Corner::TopRight,
-                    px(220.0),
-                    build_settings_menu_items(
-                        self.settings.theme,
-                        self.settings.base_font_size,
-                        on_set_theme.clone(),
-                        on_set_font_size.clone(),
-                        on_open_shortcuts.clone(),
-                        on_open_about.clone(),
-                        self.settings.check_for_updates,
-                        on_toggle_update_checks.clone(),
-                        on_check_updates_now.clone(),
-                    ),
-                ),
-                MenuId::Hamburger => {
-                    let file_items = build_file_menu_items(
-                        active_tab_has_pdf,
-                        // "New note" starts the inline sidebar editor, same as
-                        // the File menu.
-                        {
-                            let bc = on_begin_create.clone();
-                            move |cx: &mut App| bc(None, false, cx)
-                        },
-                        on_new_folder.clone(),
-                        on_open.clone(),
-                        on_choose_dir.clone(),
-                        on_save.clone(),
-                        on_save_as.clone(),
-                        on_export_html.clone(),
-                        on_export_md.clone(),
-                        on_export_txt.clone(),
-                        on_view_pdf.clone(),
-                        on_close_active_tab.clone(),
-                    );
-                    let edit_items = build_edit_menu_items(
-                        on_undo.clone(),
-                        on_redo.clone(),
-                        on_cut.clone(),
-                        on_copy.clone(),
-                        on_paste.clone(),
-                        on_select_all.clone(),
-                        on_toggle_find.clone(),
-                        on_open_replace.clone(),
-                    );
-                    let view_items = build_view_menu_items(
-                        self.settings.view_mode,
-                        self.view_locked_raw(),
-                        self.settings.show_line_numbers,
-                        self.settings.word_wrap,
-                        self.show_sidebar,
-                        self.settings.show_code_files,
-                        self.settings.content_alignment,
-                        on_set_view_mode.clone(),
-                        on_toggle_line_numbers.clone(),
-                        on_toggle_word_wrap.clone(),
-                        on_set_content_alignment.clone(),
-                        on_zoom_in.clone(),
-                        on_zoom_out.clone(),
-                        on_reset_zoom.clone(),
-                        on_toggle_sidebar.clone(),
-                        on_toggle_show_code_files.clone(),
-                        on_toggle_zen.clone(),
-                    );
-                    let items = vec![
-                        MenuItem::submenu("File", None, file_items),
-                        MenuItem::submenu("Edit", None, edit_items),
-                        MenuItem::submenu("View", None, view_items),
-                    ];
-                    (
+                    MenuId::File => (
                         Point::new(px(8.0), px(76.0)),
                         Corner::TopLeft,
-                        px(180.0),
-                        items,
-                    )
-                }
-                MenuId::Heading => (
-                    Point::new(
-                        px(heading_button_left(f32::from(window.viewport_size().width))),
-                        px(76.0),
+                        px(220.0),
+                        build_file_menu_items(
+                            active_tab_has_pdf,
+                            // "New note" starts the inline sidebar editor so the
+                            // user names the file, not an auto "Untitled-N" tab.
+                            {
+                                let bc = on_begin_create.clone();
+                                move |cx: &mut App| bc(None, false, cx)
+                            },
+                            on_new_folder.clone(),
+                            on_open.clone(),
+                            on_choose_dir.clone(),
+                            on_save.clone(),
+                            on_save_as.clone(),
+                            on_export_html.clone(),
+                            on_export_md.clone(),
+                            on_export_txt.clone(),
+                            on_view_pdf.clone(),
+                            on_close_active_tab.clone(),
+                        ),
                     ),
-                    Corner::TopLeft,
-                    px(190.0),
-                    build_heading_menu_items(on_format.clone(), on_close_menu.clone()),
-                ),
-                MenuId::Overflow => {
-                    let overflow_x = if is_narrow {
-                        (window.viewport_size().width / 2.0 + px(128.0))
-                            .min(window.viewport_size().width - px(8.0))
-                    } else {
-                        (window.viewport_size().width / 2.0 + px(wide_center_width() / 2.0))
-                            .min(window.viewport_size().width - px(8.0))
-                    };
-                    (
+                    MenuId::Edit => (
+                        Point::new(px(48.0), px(76.0)),
+                        Corner::TopLeft,
+                        px(200.0),
+                        build_edit_menu_items(
+                            on_undo.clone(),
+                            on_redo.clone(),
+                            on_cut.clone(),
+                            on_copy.clone(),
+                            on_paste.clone(),
+                            on_select_all.clone(),
+                            on_toggle_find.clone(),
+                            on_open_replace.clone(),
+                        ),
+                    ),
+                    MenuId::View => (
+                        Point::new(px(92.0), px(76.0)),
+                        Corner::TopLeft,
+                        px(220.0),
+                        build_view_menu_items(
+                            self.settings.view_mode,
+                            self.view_locked_raw(),
+                            self.settings.show_line_numbers,
+                            self.settings.word_wrap,
+                            self.show_sidebar,
+                            self.settings.show_code_files,
+                            self.settings.content_alignment,
+                            on_set_view_mode.clone(),
+                            on_toggle_line_numbers.clone(),
+                            on_toggle_word_wrap.clone(),
+                            on_set_content_alignment.clone(),
+                            on_zoom_in.clone(),
+                            on_zoom_out.clone(),
+                            on_reset_zoom.clone(),
+                            on_toggle_sidebar.clone(),
+                            on_toggle_show_code_files.clone(),
+                            on_toggle_zen.clone(),
+                        ),
+                    ),
+                    MenuId::Settings => (
+                        Point::new(window.viewport_size().width - px(8.0), px(76.0)),
+                        Corner::TopRight,
+                        px(220.0),
+                        build_settings_menu_items(
+                            self.settings.theme,
+                            self.settings.base_font_size,
+                            on_set_theme.clone(),
+                            on_set_font_size.clone(),
+                            on_open_shortcuts.clone(),
+                            on_open_about.clone(),
+                            self.settings.check_for_updates,
+                            on_toggle_update_checks.clone(),
+                            on_check_updates_now.clone(),
+                        ),
+                    ),
+                    MenuId::Hamburger => {
+                        let file_items = build_file_menu_items(
+                            active_tab_has_pdf,
+                            // "New note" starts the inline sidebar editor, same as
+                            // the File menu.
+                            {
+                                let bc = on_begin_create.clone();
+                                move |cx: &mut App| bc(None, false, cx)
+                            },
+                            on_new_folder.clone(),
+                            on_open.clone(),
+                            on_choose_dir.clone(),
+                            on_save.clone(),
+                            on_save_as.clone(),
+                            on_export_html.clone(),
+                            on_export_md.clone(),
+                            on_export_txt.clone(),
+                            on_view_pdf.clone(),
+                            on_close_active_tab.clone(),
+                        );
+                        let edit_items = build_edit_menu_items(
+                            on_undo.clone(),
+                            on_redo.clone(),
+                            on_cut.clone(),
+                            on_copy.clone(),
+                            on_paste.clone(),
+                            on_select_all.clone(),
+                            on_toggle_find.clone(),
+                            on_open_replace.clone(),
+                        );
+                        let view_items = build_view_menu_items(
+                            self.settings.view_mode,
+                            self.view_locked_raw(),
+                            self.settings.show_line_numbers,
+                            self.settings.word_wrap,
+                            self.show_sidebar,
+                            self.settings.show_code_files,
+                            self.settings.content_alignment,
+                            on_set_view_mode.clone(),
+                            on_toggle_line_numbers.clone(),
+                            on_toggle_word_wrap.clone(),
+                            on_set_content_alignment.clone(),
+                            on_zoom_in.clone(),
+                            on_zoom_out.clone(),
+                            on_reset_zoom.clone(),
+                            on_toggle_sidebar.clone(),
+                            on_toggle_show_code_files.clone(),
+                            on_toggle_zen.clone(),
+                        );
+                        let items = vec![
+                            MenuItem::submenu("File", None, file_items),
+                            MenuItem::submenu("Edit", None, edit_items),
+                            MenuItem::submenu("View", None, view_items),
+                        ];
+                        (
+                            Point::new(px(8.0), px(76.0)),
+                            Corner::TopLeft,
+                            px(180.0),
+                            items,
+                        )
+                    }
+                    MenuId::Heading => (
                         Point::new(
-                            overflow_x.min(window.viewport_size().width - px(8.0)),
+                            px(heading_button_left(f32::from(window.viewport_size().width))),
                             px(76.0),
                         ),
-                        Corner::TopRight,
-                        px(210.0),
-                        build_overflow_menu_items(
-                            is_narrow,
-                            on_format.clone(),
-                            on_insert_table.clone(),
-                            on_toggle_find.clone(),
-                            on_close_menu.clone(),
-                        ),
-                    )
-                }
-                MenuId::Table => unreachable!(),
-            };
+                        Corner::TopLeft,
+                        px(190.0),
+                        build_heading_menu_items(on_format.clone(), on_close_menu.clone()),
+                    ),
+                    MenuId::Overflow => {
+                        let overflow_x = if is_narrow {
+                            (window.viewport_size().width / 2.0 + px(128.0))
+                                .min(window.viewport_size().width - px(8.0))
+                        } else {
+                            (window.viewport_size().width / 2.0 + px(wide_center_width() / 2.0))
+                                .min(window.viewport_size().width - px(8.0))
+                        };
+                        (
+                            Point::new(
+                                overflow_x.min(window.viewport_size().width - px(8.0)),
+                                px(76.0),
+                            ),
+                            Corner::TopRight,
+                            px(210.0),
+                            build_overflow_menu_items(
+                                is_narrow,
+                                on_format.clone(),
+                                on_insert_table.clone(),
+                                on_toggle_find.clone(),
+                                on_close_menu.clone(),
+                            ),
+                        )
+                    }
+                    MenuId::Table => unreachable!(),
+                };
 
-            // Cache the built items so keyboard navigation (SelectNext /
-            // Confirm) can act on them between renders.
-            self.menu_items_cache = items.clone();
+                // Cache the built items so keyboard navigation (SelectNext /
+                // Confirm) can act on them between renders.
+                self.menu_items_cache = items.clone();
 
-            Some(
+                Some(
                     render_dropdown_menu(
                         MenuProps {
                             id: ("menu-dropdown", open_id as usize).into(),
@@ -1198,8 +1201,8 @@ impl Render for LiteMarkApp {
                         },
                         &theme,
                     )
-                .into_any_element(),
-            )
+                    .into_any_element(),
+                )
             }
         } else {
             None
@@ -1280,14 +1283,16 @@ impl Render for LiteMarkApp {
                     cx.notify();
                 }
             }))
-            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _window, cx| {
-                if this.table_drag.is_none() || !event.modifiers.modified() {
-                    return;
-                }
-                this.table_drag = clear_drag_for_modifier(this.table_drag.take());
-                cx.stop_propagation();
-                cx.notify();
-            }))
+            .on_modifiers_changed(cx.listener(
+                |this, event: &ModifiersChangedEvent, _window, cx| {
+                    if this.table_drag.is_none() || !event.modifiers.modified() {
+                        return;
+                    }
+                    this.table_drag = clear_drag_for_modifier(this.table_drag.take());
+                    cx.stop_propagation();
+                    cx.notify();
+                },
+            ))
             .on_action(cx.listener(|this, _: &CloseModal, window, cx| {
                 this.handle_close_modal(window, cx);
             }))
@@ -1364,9 +1369,7 @@ impl Render for LiteMarkApp {
                                             .active_tab()
                                             .and_then(|tab| tab.workspace_file_id.clone()),
                                         selected_folder_id: match &self.selected_target {
-                                            Some(SidebarTarget::Folder(id)) => {
-                                                Some(id.clone())
-                                            }
+                                            Some(SidebarTarget::Folder(id)) => Some(id.clone()),
                                             _ => None,
                                         },
                                         focus_handle: self.sidebar_focus_handle.clone(),
@@ -1476,56 +1479,56 @@ impl Render for LiteMarkApp {
                                 ))
                             })
                             .when(self.workspace_menu_open && self.show_sidebar, |parent| {
-                let recents: Vec<(String, PathBuf)> = self
-                    .workspace_menu_recents
-                    .iter()
-                    .filter(|p| **p != self.workspace.folder_path)
-                    .map(|p| {
-                        let name = p
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("Folder")
-                            .to_string();
-                        (name, p.clone())
-                    })
-                    .collect();
-                let view = view.clone();
-                parent.child(render_workspace_menu(
-                    self.workspace.folder_path.display().to_string(),
-                    recents,
-                    {
-                        let view = view.clone();
-                        move |dir: PathBuf, cx: &mut App| {
-                            let _ = view.update(cx, |this, cx| {
-                                this.workspace_menu_open = false;
-                                this.prepare_workspace_switch(dir);
-                                cx.notify();
-                            });
-                        }
-                    },
-                    {
-                        let view = view.clone();
-                        let choose = on_choose_dir.clone();
-                        move |cx: &mut App| {
-                            let _ = view.update(cx, |this, cx| {
-                                this.workspace_menu_open = false;
-                                cx.notify();
-                            });
-                            choose(cx);
-                        }
-                    },
-                    {
-                        let view = view.clone();
-                        move |cx: &mut App| {
-                            let _ = view.update(cx, |this, cx| {
-                                this.workspace_menu_open = false;
-                                cx.notify();
-                            });
-                        }
-                    },
-                    &theme,
-                ))
-            })
+                                let recents: Vec<(String, PathBuf)> = self
+                                    .workspace_menu_recents
+                                    .iter()
+                                    .filter(|p| **p != self.workspace.folder_path)
+                                    .map(|p| {
+                                        let name = p
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("Folder")
+                                            .to_string();
+                                        (name, p.clone())
+                                    })
+                                    .collect();
+                                let view = view.clone();
+                                parent.child(render_workspace_menu(
+                                    self.workspace.folder_path.display().to_string(),
+                                    recents,
+                                    {
+                                        let view = view.clone();
+                                        move |dir: PathBuf, cx: &mut App| {
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.workspace_menu_open = false;
+                                                this.prepare_workspace_switch(dir);
+                                                cx.notify();
+                                            });
+                                        }
+                                    },
+                                    {
+                                        let view = view.clone();
+                                        let choose = on_choose_dir.clone();
+                                        move |cx: &mut App| {
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.workspace_menu_open = false;
+                                                cx.notify();
+                                            });
+                                            choose(cx);
+                                        }
+                                    },
+                                    {
+                                        let view = view.clone();
+                                        move |cx: &mut App| {
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.workspace_menu_open = false;
+                                                cx.notify();
+                                            });
+                                        }
+                                    },
+                                    &theme,
+                                ))
+                            }),
                     )
                     // 5. StatusBar
                     .child(render_status_bar(
@@ -1555,7 +1558,9 @@ impl Render for LiteMarkApp {
                             show_zoom_hud: self.show_zoom_hud,
                             scroll: self.editor_scroll.clone(),
                             on_scroll: Some(Box::new(cx.listener(
-                                |this, ev: &ScrollWheelEvent, window, cx| this.note_scroll(ev, window, cx),
+                                |this, ev: &ScrollWheelEvent, window, cx| {
+                                    this.note_scroll(ev, window, cx)
+                                },
                             ))),
                             editor_element: self.editor_surface(cx, &theme, false),
                         },
@@ -1823,8 +1828,7 @@ impl Render for LiteMarkApp {
                     let commit = on_rename_commit.clone();
                     let backdrop_cancel = cancel.clone();
                     let is_save = self.save_as_tab.is_some();
-                    let is_folder =
-                        matches!(self.rename_target, Some(SidebarTarget::Folder(_)));
+                    let is_folder = matches!(self.rename_target, Some(SidebarTarget::Folder(_)));
                     let title = if is_save {
                         "Save note"
                     } else if is_folder {
@@ -1833,65 +1837,67 @@ impl Render for LiteMarkApp {
                         "Rename Note"
                     };
                     parent.child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .top_0()
-                        .left_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(hsla(0.0, 0.0, 0.0, 0.35))
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| backdrop_cancel(cx))
-                        .child(
-                            div()
-                                .w(px(360.0))
-                                .p(px(16.0))
-                                .flex()
-                                .flex_col()
-                                .gap(px(10.0))
-                                .rounded(px(8.0))
-                                .bg(theme.menu_bg)
-                                .border_1()
-                                .border_color(theme.border_surface)
-                                .shadow_lg()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .child(
-                                    div()
-                                        .text_size(px(14.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(title),
-                                )
-                                .child(self.rename_field.clone())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .justify_end()
-                                        .gap(px(8.0))
-                                        .child(
-                                            div()
-                                                .id("rename-cancel")
-                                                .px(px(10.0))
-                                                .py(px(4.0))
-                                                .rounded(px(6.0))
-                                                .cursor_pointer()
-                                                .child("Cancel")
-                                                .on_click(move |_, _, cx| cancel(cx)),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("rename-commit")
-                                                .px(px(10.0))
-                                                .py(px(4.0))
-                                                .rounded(px(6.0))
-                                                .cursor_pointer()
-                                                .bg(theme.bg_hover)
-                                                .child(if is_save { "Save" } else { "Rename" })
-                                                .on_click(move |_, _, cx| commit(cx)),
-                                        ),
-                                ),
-                        ),
-                )
+                        div()
+                            .absolute()
+                            .size_full()
+                            .top_0()
+                            .left_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(hsla(0.0, 0.0, 0.0, 0.35))
+                            .on_mouse_down(MouseButton::Left, move |_, _, cx| backdrop_cancel(cx))
+                            .child(
+                                div()
+                                    .w(px(360.0))
+                                    .p(px(16.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(10.0))
+                                    .rounded(px(8.0))
+                                    .bg(theme.menu_bg)
+                                    .border_1()
+                                    .border_color(theme.border_surface)
+                                    .shadow_lg()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .child(
+                                        div()
+                                            .text_size(px(14.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(title),
+                                    )
+                                    .child(self.rename_field.clone())
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .justify_end()
+                                            .gap(px(8.0))
+                                            .child(
+                                                div()
+                                                    .id("rename-cancel")
+                                                    .px(px(10.0))
+                                                    .py(px(4.0))
+                                                    .rounded(px(6.0))
+                                                    .cursor_pointer()
+                                                    .child("Cancel")
+                                                    .on_click(move |_, _, cx| cancel(cx)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("rename-commit")
+                                                    .px(px(10.0))
+                                                    .py(px(4.0))
+                                                    .rounded(px(6.0))
+                                                    .cursor_pointer()
+                                                    .bg(theme.bg_hover)
+                                                    .child(if is_save { "Save" } else { "Rename" })
+                                                    .on_click(move |_, _, cx| commit(cx)),
+                                            ),
+                                    ),
+                            ),
+                    )
                 },
             )
     }
@@ -1909,7 +1915,10 @@ impl LiteMarkApp {
         if self.allow_window_close {
             window.remove_window();
         }
-        if self.show_find_replace && !self.show_replace_row && self.field_focus == TextInput::Replace {
+        if self.show_find_replace
+            && !self.show_replace_row
+            && self.field_focus == TextInput::Replace
+        {
             self.field_focus = TextInput::Find;
         }
         if !self.show_find_replace
@@ -1992,13 +2001,28 @@ impl LiteMarkApp {
         // The find panel draws its own input boxes, so the find and replace
         // fields stay transparent.
         self.find_field.update(cx, |field, _cx| {
-            field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
+            field.set_colors(
+                text_color,
+                placeholder_color,
+                rgba(0x00000000),
+                rgba(0x00000000),
+            );
         });
         self.replace_field.update(cx, |field, _cx| {
-            field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
+            field.set_colors(
+                text_color,
+                placeholder_color,
+                rgba(0x00000000),
+                rgba(0x00000000),
+            );
         });
         self.search_field.update(cx, |field, _cx| {
-            field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
+            field.set_colors(
+                text_color,
+                placeholder_color,
+                rgba(0x00000000),
+                rgba(0x00000000),
+            );
         });
         self.create_field.update(cx, |field, _cx| {
             field.set_colors(text_color, placeholder_color, field_bg, field_border);

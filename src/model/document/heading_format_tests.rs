@@ -27,12 +27,21 @@ fn inline_formats_work_on_headings_in_both_modes() {
 #[test]
 fn heading_format_toggles_off_and_can_be_unformatted_in_parts() {
     for mode in [ViewMode::Raw, ViewMode::Wysiwyg] {
-        assert_eq!(run("# Hello world here", 2..18, &["bold", "bold"], mode), "# Hello world here");
+        assert_eq!(
+            run("# Hello world here", 2..18, &["bold", "bold"], mode),
+            "# Hello world here"
+        );
         let b = "# **Hello world here**";
-        assert_eq!(run(b, 10..15, &["bold"], mode), "# **Hello** world **here**");
+        assert_eq!(
+            run(b, 10..15, &["bold"], mode),
+            "# **Hello** world **here**"
+        );
         assert_eq!(run(b, 4..9, &["bold"], mode), "# Hello **world here**");
         assert_eq!(run(b, 16..20, &["bold"], mode), "# **Hello world** here");
-        assert_eq!(run(b, 10..15, &["italic"], mode), "# **Hello *world* here**");
+        assert_eq!(
+            run(b, 10..15, &["italic"], mode),
+            "# **Hello *world* here**"
+        );
         assert_eq!(
             run("# ***Hello world here***", 11..16, &["italic"], mode),
             "# ***Hello* world *here***"
@@ -46,7 +55,10 @@ fn heading_marker_survives_formatting_a_selection_that_includes_it() {
         run("# Hello world here", 0..18, &["bold"], ViewMode::Wysiwyg),
         "# **Hello world here**"
     );
-    assert_eq!(run("## Title", 3..8, &["bold"], ViewMode::Wysiwyg), "## **Title**");
+    assert_eq!(
+        run("## Title", 3..8, &["bold"], ViewMode::Wysiwyg),
+        "## **Title**"
+    );
 }
 
 #[test]

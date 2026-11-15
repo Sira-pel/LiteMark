@@ -18,19 +18,19 @@ use super::text_ops::{
     HistoryRestore, SelectionSnap, UndoHistory, TAB_DISPLAY_COLUMNS,
 };
 
-mod newline;
 mod blocks;
 mod inline_format;
 mod inline_rewrite;
-mod typing;
 mod navigation;
+mod newline;
 mod table;
+mod typing;
 
 pub(crate) use blocks::*;
 use inline_format::*;
 pub(crate) use inline_rewrite::*;
-use typing::*;
 pub(crate) use navigation::*;
+use typing::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FileType {
@@ -755,7 +755,11 @@ impl DocumentTab {
         let Some(restore) = self.history.undo(&mut self.content) else {
             return false;
         };
-        self.last_edit = Some((self.revision, restore.replaced.0.clone(), restore.replaced.1));
+        self.last_edit = Some((
+            self.revision,
+            restore.replaced.0.clone(),
+            restore.replaced.1,
+        ));
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);
@@ -768,7 +772,11 @@ impl DocumentTab {
         let Some(restore) = self.history.redo(&mut self.content) else {
             return false;
         };
-        self.last_edit = Some((self.revision, restore.replaced.0.clone(), restore.replaced.1));
+        self.last_edit = Some((
+            self.revision,
+            restore.replaced.0.clone(),
+            restore.replaced.1,
+        ));
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);

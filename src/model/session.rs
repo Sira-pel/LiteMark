@@ -131,7 +131,10 @@ pub fn step_prompt_selection(current: usize, count: usize, step_back: bool) -> u
 
 /// Index of the default choice for a prompt modal, or 0 if none is marked default.
 pub fn default_prompt_choice_index(choices: &[(&'static str, bool)]) -> usize {
-    choices.iter().position(|(_, default)| *default).unwrap_or(0)
+    choices
+        .iter()
+        .position(|(_, default)| *default)
+        .unwrap_or(0)
 }
 
 /// Clicking a tab id activates that tab, including a newly created untitled tab.
@@ -438,16 +441,8 @@ mod tests {
         assert!(!document_accepts_keystrokes(TextInput::Rename));
         assert!(command_edits_document("undo", TextInput::Replace, true));
         assert!(command_edits_document("redo", TextInput::Find, true));
-        assert!(!command_edits_document(
-            "bold",
-            TextInput::Replace,
-            true
-        ));
-        assert!(command_edits_document(
-            "bold",
-            TextInput::Editor,
-            false
-        ));
+        assert!(!command_edits_document("bold", TextInput::Replace, true));
+        assert!(command_edits_document("bold", TextInput::Editor, false));
     }
 
     #[test]

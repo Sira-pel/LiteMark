@@ -16,19 +16,75 @@ impl Lcg {
 }
 
 const LINES: &[&str] = &[
-    "", "", "", "Plain paragraph text", "more *italic* and **bold** words",
-    "a [link](https://x.y) and `code`", "# Heading", "## Sub *heading* ##",
-    "- bullet", "- [ ] task", "- [x] done", "  - nested item", "    - deeper",
-    "1. one", "2) two", "10. ten", "> quote", "> > nested quote",
-    "```", "```rust", "~~~", "~~~~", "    indented code", "\tTab code",
-    "---", "***", "___", "| a | b |", "| --- | :-: |", "|---|---|", "| 1 | 2 |",
-    "| x | **y** |", "a | b", "- | c |", "text with | pipe", "~~strike~~ <u>u</u>",
-    "   ```", " - spaced bullet", "+ plus", "* star item", "line\\",
+    "",
+    "",
+    "",
+    "Plain paragraph text",
+    "more *italic* and **bold** words",
+    "a [link](https://x.y) and `code`",
+    "# Heading",
+    "## Sub *heading* ##",
+    "- bullet",
+    "- [ ] task",
+    "- [x] done",
+    "  - nested item",
+    "    - deeper",
+    "1. one",
+    "2) two",
+    "10. ten",
+    "> quote",
+    "> > nested quote",
+    "```",
+    "```rust",
+    "~~~",
+    "~~~~",
+    "    indented code",
+    "\tTab code",
+    "---",
+    "***",
+    "___",
+    "| a | b |",
+    "| --- | :-: |",
+    "|---|---|",
+    "| 1 | 2 |",
+    "| x | **y** |",
+    "a | b",
+    "- | c |",
+    "text with | pipe",
+    "~~strike~~ <u>u</u>",
+    "   ```",
+    " - spaced bullet",
+    "+ plus",
+    "* star item",
+    "line\\",
 ];
 
 const SNIPPETS: &[&str] = &[
-    "a", " ", "\n", "\n\n", "|", "| x |", "```", "~~~", "#", "# ", "- ", "1. ", "> ",
-    "    ", "\t", "*", "**", "`", "[", "](u)", "---", "\r\n", "\r", "| --- |", "x\n| --- | --- |\n",
+    "a",
+    " ",
+    "\n",
+    "\n\n",
+    "|",
+    "| x |",
+    "```",
+    "~~~",
+    "#",
+    "# ",
+    "- ",
+    "1. ",
+    "> ",
+    "    ",
+    "\t",
+    "*",
+    "**",
+    "`",
+    "[",
+    "](u)",
+    "---",
+    "\r\n",
+    "\r",
+    "| --- |",
+    "x\n| --- | --- |\n",
 ];
 
 fn random_doc(rng: &mut Lcg) -> String {
@@ -39,7 +95,11 @@ fn random_doc(rng: &mut Lcg) -> String {
     let mut s = String::new();
     for _ in 0..n {
         s.push_str(LINES[rng.next(LINES.len())]);
-        s.push_str(if mixed { endings[rng.next(endings.len())] } else { ending });
+        s.push_str(if mixed {
+            endings[rng.next(endings.len())]
+        } else {
+            ending
+        });
     }
     if rng.next(3) == 0 {
         s.push_str(LINES[rng.next(LINES.len())]);
@@ -88,7 +148,10 @@ fn all_states(text: &str) -> Vec<ParseState> {
 fn incremental_parse_matches_a_full_parse() {
     let mut rng = Lcg(0x5eed_1234_abcd_0001);
     let mut resumed_mid_document = 0;
-    let cases: usize = std::env::var("INCR_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(250);
+    let cases: usize = std::env::var("INCR_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(250);
     for case in 0..cases {
         let mut text = random_doc(&mut rng);
         let mut doc = parse_document(&text);
@@ -99,11 +162,7 @@ fn incremental_parse_matches_a_full_parse() {
             doc.apply_edit(&next, range.clone(), insert.len());
             let full = parse_document(&next);
             if doc != full {
-                let ix = doc
-                    .lines
-                    .iter()
-                    .zip(&full.lines)
-                    .position(|(a, b)| a != b);
+                let ix = doc.lines.iter().zip(&full.lines).position(|(a, b)| a != b);
                 let detail = match ix {
                     Some(ix) => format!(
                         "first different line {ix} (of {} vs {})\nincremental: {:?}\nfull:        {:?}\nsplice: {:?}",
@@ -138,14 +197,19 @@ fn incremental_parse_matches_a_full_parse() {
         }
     }
     // Most edits should touch a small part of the document.
-    assert!(resumed_mid_document > 1000, "only {resumed_mid_document} local updates");
+    assert!(
+        resumed_mid_document > 1000,
+        "only {resumed_mid_document} local updates"
+    );
 }
 
 #[test]
 fn typing_into_a_large_document_reparses_a_few_lines() {
     let mut text = String::new();
     for i in 0..5000 {
-        text.push_str(&format!("Paragraph {i} with **bold** text.\n\n- item {i}\n\n"));
+        text.push_str(&format!(
+            "Paragraph {i} with **bold** text.\n\n- item {i}\n\n"
+        ));
     }
     let mut doc = parse_document(&text);
     let at = text.len() / 2;

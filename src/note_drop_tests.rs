@@ -27,7 +27,10 @@ fn opening_a_copied_note_shows_its_content() {
         assert!(matches!(outcome, DropOutcome::Done(_)));
 
         let tab = app.active_tab().expect("copy opened in a tab");
-        assert_eq!(tab.file_path.as_deref(), Some(root.join("dest").join("note.md").as_path()));
+        assert_eq!(
+            tab.file_path.as_deref(),
+            Some(root.join("dest").join("note.md").as_path())
+        );
         assert_eq!(tab.content, text);
     });
 
@@ -51,7 +54,12 @@ fn resaving_a_listed_note_does_not_rescan_the_workspace() {
         app.workspace = scan_workspace_dir(&root, true);
         app.refresh_workspace_ids();
         let file_id = app.workspace.files[0].id.clone();
-        app.open_loaded_tab("note.md".into(), "old".into(), Some(note.clone()), Some(file_id.clone()));
+        app.open_loaded_tab(
+            "note.md".into(),
+            "old".into(),
+            Some(note.clone()),
+            Some(file_id.clone()),
+        );
         std::fs::write(root.join("outside.md"), "added elsewhere").unwrap();
 
         let id = app.active_tab_id.clone();
@@ -59,7 +67,10 @@ fn resaving_a_listed_note_does_not_rescan_the_workspace() {
         app.save_tab(&id).expect("save");
         assert_eq!(std::fs::read_to_string(&note).unwrap(), "new");
         assert_eq!(app.workspace.files.len(), 1, "re-save must not rescan");
-        assert_eq!(app.active_tab().unwrap().workspace_file_id.as_deref(), Some(file_id.as_str()));
+        assert_eq!(
+            app.active_tab().unwrap().workspace_file_id.as_deref(),
+            Some(file_id.as_str())
+        );
 
         // A save that creates a file still rescans, so the new note is listed.
         app.open_loaded_tab("fresh.md".into(), "fresh".into(), None, None);

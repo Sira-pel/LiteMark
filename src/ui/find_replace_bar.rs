@@ -4,8 +4,15 @@ use crate::theme::{sz, Theme};
 use gpui::prelude::*;
 use gpui::*;
 
-pub struct FindReplaceBarProps<FFindNext, FFindPrev, FReplace, FReplaceAll, FClose, FCase, FToggleReplace>
-where
+pub struct FindReplaceBarProps<
+    FFindNext,
+    FFindPrev,
+    FReplace,
+    FReplaceAll,
+    FClose,
+    FCase,
+    FToggleReplace,
+> where
     FFindNext: Fn(&mut App) + 'static + Clone,
     FFindPrev: Fn(&mut App) + 'static + Clone,
     FReplace: Fn(&mut App) + 'static + Clone,
@@ -129,8 +136,16 @@ where
                     let toggle = on_toggle_replace.clone();
                     icon_button(
                         "fr-toggle-replace",
-                        if show_replace { "chevron-down" } else { "chevron-right" },
-                        if show_replace { "Hide Replace" } else { "Show Replace (Ctrl+H)" },
+                        if show_replace {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        if show_replace {
+                            "Hide Replace"
+                        } else {
+                            "Show Replace (Ctrl+H)"
+                        },
                         show_replace,
                         theme,
                         move |_, _, cx| toggle(cx),

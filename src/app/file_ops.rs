@@ -36,7 +36,11 @@ impl LiteMarkApp {
     /// Switch the workspace to `new_dir`, optionally copying the current
     /// note (including unsaved edits) into it before the switch. The
     /// original file on disk is never removed.
-    pub(super) fn apply_workspace_switch(&mut self, new_dir: PathBuf, migrate_from: Option<PathBuf>) {
+    pub(super) fn apply_workspace_switch(
+        &mut self,
+        new_dir: PathBuf,
+        migrate_from: Option<PathBuf>,
+    ) {
         let mut migrated = None;
         let mut copy_error = None;
         if let Some(old_path) = migrate_from {
@@ -383,9 +387,7 @@ impl LiteMarkApp {
                 // renamed item stays highlighted.
                 let (kind, old_id) = match &target {
                     SidebarTarget::File(_) => ("file", format!("file-{}", old.display())),
-                    SidebarTarget::Folder(_) => {
-                        ("folder", format!("folder-{}", old.display()))
-                    }
+                    SidebarTarget::Folder(_) => ("folder", format!("folder-{}", old.display())),
                 };
                 let new_id = format!("{kind}-{}", new_path.display());
                 match &self.selected_target {
@@ -408,15 +410,15 @@ impl LiteMarkApp {
     /// Optimistically close the tabs whose file path matches `pred` and fix
     /// up the active-tab selection. Returns enough state to restore them if
     /// the operation that motivated the close fails.
-    pub(super) fn optimistic_close_tabs(&mut self, pred: impl Fn(&Path) -> bool) -> OptimisticClose {
+    pub(super) fn optimistic_close_tabs(
+        &mut self,
+        pred: impl Fn(&Path) -> bool,
+    ) -> OptimisticClose {
         let prev_active = self.active_tab_id.clone();
         let mut removed: Vec<(usize, DocumentTab)> = Vec::new();
         let mut original_ix = 0usize;
         self.tabs.retain(|tab| {
-            let keep = !tab
-                .file_path
-                .as_ref()
-                .is_some_and(|path| pred(path));
+            let keep = !tab.file_path.as_ref().is_some_and(|path| pred(path));
             if !keep {
                 removed.push((original_ix, tab.clone()));
             }
@@ -476,8 +478,9 @@ impl LiteMarkApp {
         if let Some(placeholder_id) = placeholder_id {
             // Only drop the placeholder while the user hasn't typed into it
             // in the meantime; a used placeholder is real work, keep it open.
-            self.tabs
-                .retain(|tab| !(tab.id == placeholder_id && tab.content.is_empty() && !tab.is_modified));
+            self.tabs.retain(|tab| {
+                !(tab.id == placeholder_id && tab.content.is_empty() && !tab.is_modified)
+            });
         }
         for (ix, tab) in tabs {
             let at = ix.min(self.tabs.len());
@@ -495,7 +498,12 @@ impl LiteMarkApp {
         self.trash_file_in(id, cx, None);
     }
 
-    pub(super) fn trash_file_in(&mut self, id: &str, cx: &mut Context<Self>, bulk: Option<BulkReport>) {
+    pub(super) fn trash_file_in(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+        bulk: Option<BulkReport>,
+    ) {
         let Some(file) = self
             .workspace
             .files
@@ -564,7 +572,12 @@ impl LiteMarkApp {
     /// Count one row of a bulk trash. After the last row, show one message
     /// and, if anything failed, restore the pre-trash selection (when that
     /// row is still in the tree).
-    pub(super) fn record_bulk(&mut self, bulk: &BulkTrash, result: Result<(), String>, cx: &mut Context<Self>) {
+    pub(super) fn record_bulk(
+        &mut self,
+        bulk: &BulkTrash,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
         let message = bulk.report.borrow_mut().record(result);
         let (finished, failed) = {
             let report = bulk.report.borrow();
@@ -602,7 +615,12 @@ impl LiteMarkApp {
         }
     }
 
-    pub(super) fn trash_folder_in(&mut self, id: &str, cx: &mut Context<Self>, bulk: Option<BulkReport>) {
+    pub(super) fn trash_folder_in(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+        bulk: Option<BulkReport>,
+    ) {
         let Some(folder) = self
             .workspace
             .folders

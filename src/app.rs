@@ -3,11 +3,11 @@ use crate::editor_input::{
     dispatch_editor_input, swallow_table_drag_input, DispatchOutcome, EditorInput,
 };
 use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
+use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::table_ops::TableOp;
 use crate::model::text_ops::{
     home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16, TAB_DISPLAY_COLUMNS,
 };
-use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
@@ -28,18 +28,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod commands;
-mod find;
-mod scroll;
-mod tabs;
-mod sidebar;
 mod drag_drop;
-mod file_ops;
-mod menus;
 mod editor_events;
+mod file_ops;
+mod find;
 mod input_handler;
 mod key_bindings;
+mod menus;
 mod render;
-
+mod scroll;
+mod sidebar;
+mod tabs;
 
 /// An item action stored in a menu: run with the window and app.
 pub(crate) type MenuAction = Arc<dyn Fn(&mut Window, &mut App) + 'static>;
@@ -80,17 +79,31 @@ pub struct MultiSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Prompt {
-    CloseTab { id: String },
+    CloseTab {
+        id: String,
+    },
     CloseWindow,
-    DeleteFile { id: String },
-    DeleteFolder { id: String },
-    TrashDirtyFile { id: String },
-    TrashDirtyFolder { id: String },
+    DeleteFile {
+        id: String,
+    },
+    DeleteFolder {
+        id: String,
+    },
+    TrashDirtyFile {
+        id: String,
+    },
+    TrashDirtyFolder {
+        id: String,
+    },
     /// Several sidebar rows selected with Shift, trashed together.
-    DeleteMany { targets: Vec<SidebarTarget> },
+    DeleteMany {
+        targets: Vec<SidebarTarget>,
+    },
     /// A new workspace folder was picked; ask whether to copy the current
     /// note into it before switching.
-    SwitchWorkspace { new_dir: PathBuf },
+    SwitchWorkspace {
+        new_dir: PathBuf,
+    },
     /// Ctrl+S on a tab whose file another program changed (or deleted)
     /// since the tab read it.
     ExternalChange {
@@ -792,7 +805,6 @@ impl LiteMarkApp {
         })
         .detach();
     }
-
 }
 
 fn planned_title_fallback() -> String {

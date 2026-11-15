@@ -226,7 +226,10 @@ mod tests {
 
     #[test]
     fn visible_row_does_not_scroll() {
-        assert_eq!(scroll_delta_for_row(px(100.0), px(20.0), px(0.0), px(600.0)), None);
+        assert_eq!(
+            scroll_delta_for_row(px(100.0), px(20.0), px(0.0), px(600.0)),
+            None
+        );
     }
 
     #[test]

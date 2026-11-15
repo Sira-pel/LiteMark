@@ -287,7 +287,8 @@ impl EntityInputHandler for LiteMarkApp {
                     .lines
                     .iter()
                     .find(|l| {
-                        range.start >= l.offset_map.line_start && range.start <= l.offset_map.line_end
+                        range.start >= l.offset_map.line_start
+                            && range.start <= l.offset_map.line_end
                     })
                     .or_else(|| cell.lines.first())
                 {
@@ -297,7 +298,10 @@ impl EntityInputHandler for LiteMarkApp {
                     let x1 = line.shaped.x_for_index(local_end);
                     return Some(Bounds::from_corners(
                         point(line.text_origin.x + x0, line.text_origin.y),
-                        point(line.text_origin.x + x1.max(x0), line.text_origin.y + line.line_height),
+                        point(
+                            line.text_origin.x + x1.max(x0),
+                            line.text_origin.y + line.line_height,
+                        ),
                     ));
                 }
                 let local_start = cell.offset_map.source_to_display(range.start);
@@ -306,7 +310,10 @@ impl EntityInputHandler for LiteMarkApp {
                 let x1 = cell.shaped.x_for_index(local_end);
                 return Some(Bounds::from_corners(
                     point(cell.text_origin.x + x0, cell.text_origin.y),
-                    point(cell.text_origin.x + x1.max(x0), cell.text_origin.y + row.line_height),
+                    point(
+                        cell.text_origin.x + x1.max(x0),
+                        cell.text_origin.y + row.line_height,
+                    ),
                 ));
             }
         }

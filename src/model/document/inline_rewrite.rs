@@ -209,7 +209,11 @@ pub(super) fn merge_work_slices(slices: &[WorkSlice]) -> Vec<WorkSlice> {
     merged
 }
 
-pub(super) fn sel_overlap(sel: &Option<Range<usize>>, start: usize, end: usize) -> Option<Range<usize>> {
+pub(super) fn sel_overlap(
+    sel: &Option<Range<usize>>,
+    start: usize,
+    end: usize,
+) -> Option<Range<usize>> {
     let sel = sel.as_ref()?;
     let a = sel.start.max(start).min(end);
     let b = sel.end.max(start).min(end);
@@ -431,7 +435,8 @@ pub(super) fn render_work_slices(
             f.underline = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 3, false, include_wraps_in_sel);
+        let inner_str =
+            render_work_slices(&inner, sel_range, offset + 3, false, include_wraps_in_sel);
         return format!("<u>{}</u>", inner_str);
     }
 
@@ -440,7 +445,8 @@ pub(super) fn render_work_slices(
             f.strike = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 2, false, include_wraps_in_sel);
+        let inner_str =
+            render_work_slices(&inner, sel_range, offset + 2, false, include_wraps_in_sel);
         return format!("~~{}~~", inner_str);
     }
 
@@ -450,7 +456,8 @@ pub(super) fn render_work_slices(
             f.italic = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 3, false, include_wraps_in_sel);
+        let inner_str =
+            render_work_slices(&inner, sel_range, offset + 3, false, include_wraps_in_sel);
         return format!("***{}***", inner_str);
     }
 
@@ -495,7 +502,8 @@ pub(super) fn render_work_slices(
             f.italic = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 1, false, include_wraps_in_sel);
+        let inner_str =
+            render_work_slices(&inner, sel_range, offset + 1, false, include_wraps_in_sel);
         return format!("*{}*", inner_str);
     }
 
@@ -527,7 +535,8 @@ pub(super) fn render_work_slices(
             f.bold = false;
             f
         });
-        let inner_str = render_work_slices(&inner, sel_range, offset + 2, false, include_wraps_in_sel);
+        let inner_str =
+            render_work_slices(&inner, sel_range, offset + 2, false, include_wraps_in_sel);
         return format!("**{}**", inner_str);
     }
 
@@ -548,7 +557,8 @@ pub(super) fn render_work_slices(
                 f.code = false;
                 f
             });
-            let inner_str = render_work_slices(&inner, sel_range, offset + 1, false, include_wraps_in_sel);
+            let inner_str =
+                render_work_slices(&inner, sel_range, offset + 1, false, include_wraps_in_sel);
             return format!("`{}`", inner_str);
         }
     }
@@ -775,7 +785,10 @@ pub(super) fn segment_raw_range(content: &str, source: &Range<usize>) -> Range<u
     let mut start = source.start;
     if start > 0
         && content.as_bytes().get(start - 1) == Some(&b'\\')
-        && content[start..].chars().next().is_some_and(|c| c.is_ascii_punctuation())
+        && content[start..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_punctuation())
         && start
             .checked_sub(2)
             .and_then(|at| content.as_bytes().get(at))
@@ -826,9 +839,10 @@ pub(super) fn verify_inline_rewrites(
             let Some((old_start, sel)) = place else {
                 return false;
             };
-            let (Some(old_line), Some(new_line)) =
-                (parsed.line_at_offset(old_start), reparsed.line_at_offset(sel.start))
-            else {
+            let (Some(old_line), Some(new_line)) = (
+                parsed.line_at_offset(old_start),
+                reparsed.line_at_offset(sel.start),
+            ) else {
                 return false;
             };
             if std::mem::discriminant(&old_line.kind) != std::mem::discriminant(&new_line.kind) {
@@ -1032,7 +1046,10 @@ pub(super) fn skip_end_at(skips: &[Range<usize>], pos: usize) -> Option<usize> {
     }
 }
 
-pub(super) fn selected_link_markup_ranges(pairs: &[&InlinePair], p_range: Range<usize>) -> Vec<Range<usize>> {
+pub(super) fn selected_link_markup_ranges(
+    pairs: &[&InlinePair],
+    p_range: Range<usize>,
+) -> Vec<Range<usize>> {
     let mut rs = Vec::new();
     for p in pairs {
         if p.kind != InlineTagKind::Link
@@ -1240,7 +1257,15 @@ pub(super) fn extend_or_splice_span(
             p.kind != InlineTagKind::Link && p.inner.end == caret && p.inner.end > p.inner.start
         })
         .cloned()?;
-    splice_for_anchor(content, parsed, pending, caret, text, &inside_candidate, true)
+    splice_for_anchor(
+        content,
+        parsed,
+        pending,
+        caret,
+        text,
+        &inside_candidate,
+        true,
+    )
 }
 
 /// True when the maximal delimiter run that contains `pair`'s closer extends
@@ -1251,7 +1276,9 @@ pub(super) fn close_run_reaches(content: &str, pair: &InlinePair, caret: usize) 
         return false;
     };
     pair.close_delim.end < caret
-        && bytes[pair.close_delim.end..caret].iter().all(|&b| b == delim)
+        && bytes[pair.close_delim.end..caret]
+            .iter()
+            .all(|&b| b == delim)
 }
 
 pub(super) fn splice_for_anchor(

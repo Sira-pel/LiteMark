@@ -73,9 +73,13 @@ pub fn default_notes_dir(base: &Path) -> PathBuf {
 
 impl Default for WorkspaceDirectory {
     fn default() -> Self {
-        let home = dirs::document_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
+        let home = dirs::document_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Documents"));
         let notes = default_notes_dir(&home);
-        let name = notes.file_name().and_then(|n| n.to_str()).unwrap_or("LiteMark");
+        let name = notes
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("LiteMark");
         Self {
             folder_name: format!("~/Documents/{name}"),
             folder_path: notes,
@@ -92,7 +96,12 @@ mod tests {
     use super::*;
     use crate::ui::sidebar::{build_sidebar_tree, SidebarCreate, SidebarTreeItem};
 
-    fn make_folder(id: &str, name: &str, parent_id: Option<&str>, is_open: bool) -> WorkspaceFolder {
+    fn make_folder(
+        id: &str,
+        name: &str,
+        parent_id: Option<&str>,
+        is_open: bool,
+    ) -> WorkspaceFolder {
         WorkspaceFolder {
             id: id.to_string(),
             name: name.to_string(),
@@ -145,7 +154,9 @@ mod tests {
                         f.parent_id.as_deref() == Some(pid)
                     } else {
                         f.parent_id.is_none()
-                            || f.parent_id.as_deref().is_some_and(|p| !folder_ids.contains(p))
+                            || f.parent_id
+                                .as_deref()
+                                .is_some_and(|p| !folder_ids.contains(p))
                     }
                 })
                 .collect();
@@ -159,7 +170,15 @@ mod tests {
                     depth,
                 });
                 if is_open {
-                    collect_level(Some(&fid), depth + 1, folders, files, folder_ids, creating, out);
+                    collect_level(
+                        Some(&fid),
+                        depth + 1,
+                        folders,
+                        files,
+                        folder_ids,
+                        creating,
+                        out,
+                    );
                 }
             }
 
@@ -170,7 +189,9 @@ mod tests {
                         f.folder_id.as_deref() == Some(pid)
                     } else {
                         f.folder_id.is_none()
-                            || f.folder_id.as_deref().is_some_and(|p| !folder_ids.contains(p))
+                            || f.folder_id
+                                .as_deref()
+                                .is_some_and(|p| !folder_ids.contains(p))
                     }
                 })
                 .collect();
@@ -201,7 +222,9 @@ mod tests {
         // Small LCG so the cases are the same on every run.
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         let mut next = |n: usize| {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 33) as usize) % n
         };
         let names = ["b", "A", "a", "c", "B", "Notes", "notes", "z"];
@@ -230,11 +253,18 @@ mod tests {
                     1 => Some("missing".to_string()),
                     _ => None,
                 };
-                files.push(make_file(&format!("f{i}"), names[next(names.len())], folder.as_deref()));
+                files.push(make_file(
+                    &format!("f{i}"),
+                    names[next(names.len())],
+                    folder.as_deref(),
+                ));
             }
             let creating = match next(3) {
                 0 => None,
-                1 => Some(SidebarCreate { parent: None, is_folder: next(2) == 0 }),
+                1 => Some(SidebarCreate {
+                    parent: None,
+                    is_folder: next(2) == 0,
+                }),
                 _ => Some(SidebarCreate {
                     parent: Some(format!("d{}", next(folder_count.max(1)))),
                     is_folder: next(2) == 0,
