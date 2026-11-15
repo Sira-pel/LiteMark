@@ -30,6 +30,9 @@ pub struct WorkspaceDirectory {
     pub is_linked_to_local_disk: bool,
     pub folders: Vec<WorkspaceFolder>,
     pub files: Vec<WorkspaceFile>,
+    /// The scan stopped at its depth or item limit, so some of the folder
+    /// isn't listed.
+    pub scan_truncated: bool,
 }
 
 /// Default notes folder under `base`: an existing `Notes` folder keeps being
@@ -54,6 +57,7 @@ impl Default for WorkspaceDirectory {
             is_linked_to_local_disk: true,
             folders: Vec::new(),
             files: Vec::new(),
+            scan_truncated: false,
         }
     }
 }

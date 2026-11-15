@@ -235,6 +235,9 @@ impl LiteMarkApp {
         } else {
             Self::welcome_tab(&workspace, first_id.clone())
         };
+        if workspace.scan_truncated && error_message.is_none() {
+            error_message = Some(scan_truncated_message());
+        }
 
         let app_handle = cx.weak_entity();
         let find_field = cx.new({
@@ -565,6 +568,7 @@ impl LiteMarkApp {
                 is_linked_to_local_disk: false,
                 folders: Vec::new(),
                 files: Vec::new(),
+                scan_truncated: false,
             },
             settings: EditorSettings {
                 check_for_updates: false,
