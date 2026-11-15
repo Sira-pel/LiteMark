@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::markdown::{
     accepted_list_marker, accepted_list_marker_in, parse_document, unescaped_pipe_offsets,
     InlinePair, InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment,
-    TableColumnAlign, TableRowBody,
+    TableColumnAlign, TableRowBody, MAX_LIST_NUMBER,
 };
 
 use super::table_ops::{self, TableOp};
@@ -287,6 +287,10 @@ pub struct DocumentTab {
     /// The file as last read or written; `None` for a tab not backed by a
     /// file, or when the file couldn't be inspected.
     pub disk_version: Option<super::workspace::DiskVersion>,
+    /// The file started with a UTF-8 byte order mark. It is kept out of
+    /// `content`, so the first line's Markdown is recognized, and written
+    /// back by [`DocumentTab::file_text`].
+    pub has_bom: bool,
     pub word_count: usize,
     pub char_count: usize,
     pub line_count: usize,
@@ -332,6 +336,10 @@ impl DocumentTab {
         file_path: Option<PathBuf>,
         workspace_file_id: Option<String>,
     ) -> Self {
+        let (content, has_bom) = match content.strip_prefix('\u{feff}') {
+            Some(rest) => (rest.to_string(), true),
+            None => (content, false),
+        };
         let file_type = FileType::from_filename(&title);
         let stats = compute_stats(&content);
         let default_style = indent_style(&title, file_type);
@@ -350,6 +358,7 @@ impl DocumentTab {
             file_path,
             workspace_file_id,
             disk_version: None,
+            has_bom,
             word_count: stats.words,
             char_count: stats.chars,
             line_count: stats.lines,
@@ -402,6 +411,16 @@ impl DocumentTab {
         fresh.caret.move_to(cursor);
         *self = fresh;
         self.refresh_cursor();
+    }
+
+    /// The text to write to the file: `content`, with the byte order mark
+    /// put back if the file had one.
+    pub fn file_text(&self) -> String {
+        if self.has_bom {
+            format!("\u{feff}{}", self.content)
+        } else {
+            self.content.clone()
+        }
     }
 
     pub fn parsed(&mut self) -> Arc<ParsedDocument> {
@@ -473,11 +492,36 @@ impl DocumentTab {
         self.history.stored_bytes()
     }
 
+    /// Replace the whole text as one undo step. Only the part between the
+    /// common start and end is recorded, so a Replace All that changes a few
+    /// words stores those words, not two copies of the document.
     pub fn set_content(&mut self, new_content: String) {
-        if self.content != new_content {
-            let end = self.content.len();
-            self.edit(0..end, &new_content);
+        if self.content == new_content {
+            return;
         }
+        let (old, new) = (self.content.as_bytes(), new_content.as_bytes());
+        let mut prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+        while !self.content.is_char_boundary(prefix) || !new_content.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+        let max_suffix = (old.len() - prefix).min(new.len() - prefix);
+        let mut suffix = old
+            .iter()
+            .rev()
+            .zip(new.iter().rev())
+            .take(max_suffix)
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !self.content.is_char_boundary(old.len() - suffix)
+            || !new_content.is_char_boundary(new.len() - suffix)
+        {
+            suffix -= 1;
+        }
+        let old_end = old.len() - suffix;
+        let new_end = new.len() - suffix;
+        self.history.seal();
+        self.edit(prefix..old_end, &new_content[prefix..new_end]);
+        self.history.seal();
     }
 
     /// Replace `range` and record a diff. Read-only documents ignore the edit.

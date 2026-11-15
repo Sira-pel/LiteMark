@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Largest ordered-list number: CommonMark allows at most nine digits.
+pub const MAX_LIST_NUMBER: usize = 999_999_999;
+
 /// One list marker, shared by the parser and the editing helpers.
 ///
 /// Ordered markers are 1–9 digits and then `.` or `)`. Padding after `.`, `)`,
@@ -359,10 +362,11 @@ pub fn accepted_list_marker_in(
     markdown: &str,
     line_start: usize,
 ) -> Option<ListMarker> {
-    let line = doc
-        .lines
-        .iter()
-        .find(|line| line.source.start == line_start)?;
+    // `lines` is in source order, so binary search instead of a linear
+    // `find`: callers run this once per selected line, and a scan from the
+    // top made Select All + list/quote/heading toggles O(n²).
+    let ix = doc.lines.partition_point(|line| line.source.start < line_start);
+    let line = doc.lines.get(ix).filter(|line| line.source.start == line_start)?;
     if !matches!(line.kind, LineKind::ListItem { .. }) {
         return None;
     }

@@ -324,3 +324,24 @@ fn naming_an_untitled_note_on_close_still_asks_about_changed_files() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[std_test]
+fn a_bom_note_is_neither_reloaded_nor_reported_changed() {
+    let root = fresh_root("bom");
+    let path = root.join("bom.md");
+    std::fs::write(&path, "\u{feff}# Title\n").unwrap();
+
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, _cx| {
+        app.workspace = scan_workspace_dir(&root, true);
+        click_open(app, &path);
+        let revision = app.active_tab().unwrap().revision;
+        click_open(app, &path);
+        assert_eq!(app.active_tab().unwrap().revision, revision, "not reloaded");
+        let id = app.active_tab_id.clone();
+        assert_eq!(app.disk_change_for(&id), DiskChange::Unchanged);
+    });
+
+    let _ = std::fs::remove_dir_all(&root);
+}

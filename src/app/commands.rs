@@ -149,7 +149,7 @@ impl LiteMarkApp {
                         this.available_update = Some(release);
                     }
                 }
-                this.settings.save();
+                this.save_settings();
                 cx.notify();
             })
             .ok();
@@ -162,7 +162,7 @@ impl LiteMarkApp {
         if !self.settings.check_for_updates {
             self.available_update = None;
         }
-        self.settings.save();
+        self.save_settings();
     }
 
     /// Enter in the search box: select the first match and move keyboard
@@ -197,10 +197,27 @@ impl LiteMarkApp {
         cx.notify();
     }
 
+    /// Ctrl+F and the toolbar's search button: show or hide the find panel.
+    /// It opens with the find row only; Ctrl+H is the way to the replace row.
+    pub(crate) fn toggle_find_panel(&mut self) {
+        self.show_find_replace = !self.show_find_replace;
+        self.refresh_find();
+        if self.show_find_replace {
+            self.show_replace_row = false;
+            self.pending_find_focus = true;
+        } else {
+            self.pending_find_focus = false;
+            self.applied_focus = None;
+            self.field_owns_keys = false;
+        }
+    }
+
     pub(super) fn line_field_for_focus(&self) -> Option<Entity<LineField>> {
         match self.field_focus {
             TextInput::Find if self.show_find_replace => Some(self.find_field.clone()),
-            TextInput::Replace if self.show_find_replace => Some(self.replace_field.clone()),
+            TextInput::Replace if self.show_find_replace && self.show_replace_row => {
+                Some(self.replace_field.clone())
+            }
             TextInput::Rename
                 if self.rename_target.is_some() || self.save_as_tab.is_some() =>
             {
@@ -345,7 +362,7 @@ impl LiteMarkApp {
         }
     }
 
-    pub fn handle_open_file(&mut self) {
+    pub fn handle_open_file(&mut self, cx: &mut Context<Self>) {
         if let Some(message) = file_dialog_error() {
             self.show_error(message);
             return;
@@ -370,25 +387,89 @@ impl LiteMarkApp {
                 self.prompt_selected_ix = 0;
                 return;
             }
-            match extract_text_from_pdf(&path) {
-                Ok((extracted_md, pages)) => {
-                    let new_id = self.tab_ids.alloc();
-                    let mut tab =
-                        DocumentTab::new(new_id.clone(), name, extracted_md, Some(path), None);
-                    tab.file_type = FileType::Pdf;
-                    tab.pdf_page_count = Some(pages);
-                    self.tabs.push(tab);
-                    self.active_tab_id = new_id;
-                    self.show_pdf_modal = true;
-                    self.prompt_selected_ix = 0;
-                }
-                Err(err) => self.show_error(format!("Couldn't open PDF: {err}")),
-            }
+            self.open_pdf_in_background(name, path, cx);
         } else {
             match read_note(&path) {
                 Ok(content) => self.open_loaded_tab(name, content, Some(path), None),
                 Err(err) => self.show_error(err),
             }
+        }
+    }
+
+    /// Extract a PDF's text off the UI thread, then open it as a read-only
+    /// tab. One PDF is extracted at a time.
+    fn open_pdf_in_background(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
+        if self.pdf_opening.is_some() {
+            self.show_toast("Still opening a PDF…", cx);
+            return;
+        }
+        self.pdf_opening = Some(path.clone());
+        self.show_toast(format!("Opening {name}…"), cx);
+        let started = PdfOpenStart {
+            tab_id: self.active_tab_id.clone(),
+            toast_epoch: self.toast_epoch,
+        };
+        let task = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { extract_text_from_pdf(&path) }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.finish_pdf_open(name, path, result, &started, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show a PDF whose text extraction just finished. The progress toast
+    /// goes only if no other toast replaced it, and the PDF takes over the
+    /// window only if the user is still on the tab they opened it from.
+    pub(super) fn finish_pdf_open(
+        &mut self,
+        name: String,
+        path: PathBuf,
+        result: Result<(String, usize), String>,
+        started: &PdfOpenStart,
+        cx: &mut Context<Self>,
+    ) {
+        self.pdf_opening = None;
+        if self.toast_epoch == started.toast_epoch {
+            self.saved_toast = None;
+        }
+        let (extracted_md, pages) = match result {
+            Ok(extracted) => extracted,
+            Err(err) => {
+                self.show_error(format!("Couldn't open PDF: {err}"));
+                return;
+            }
+        };
+        let still_there = self.active_tab_id == started.tab_id;
+        let paths: Vec<Option<&Path>> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.file_path.as_deref())
+            .collect();
+        let existing = tab_index_for_path(&paths, &path);
+        let opened_new = existing.is_none();
+        let id = if let Some(index) = existing {
+            self.tabs[index].id.clone()
+        } else {
+            let new_id = self.tab_ids.alloc();
+            let mut tab = DocumentTab::new(new_id.clone(), name.clone(), extracted_md, Some(path), None);
+            tab.file_type = FileType::Pdf;
+            tab.pdf_page_count = Some(pages);
+            self.tabs.push(tab);
+            new_id
+        };
+        if still_there {
+            self.active_tab_id = id;
+            self.show_pdf_modal = true;
+            self.prompt_selected_ix = 0;
+        } else if opened_new {
+            self.show_toast(format!("Opened {name} in a new tab"), cx);
         }
     }
 
@@ -565,7 +646,7 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_show_code_files(&mut self) {
         self.settings.show_code_files = !self.settings.show_code_files;
-        self.settings.save();
+        self.save_settings();
         self.rescan_workspace();
     }
 
@@ -585,7 +666,7 @@ impl LiteMarkApp {
     #[allow(dead_code)]
     pub fn handle_toggle_theme(&mut self) {
         self.settings.theme = self.settings.theme.toggle();
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_toggle_zen(&mut self) {
@@ -602,19 +683,19 @@ impl LiteMarkApp {
 
     pub fn handle_zoom_in(&mut self, cx: &mut Context<Self>) {
         self.settings.zoom_level = (self.settings.zoom_level + 10).min(200);
-        self.settings.save();
+        self.save_settings();
         self.flash_zoom(cx);
     }
 
     pub fn handle_zoom_out(&mut self, cx: &mut Context<Self>) {
         self.settings.zoom_level = self.settings.zoom_level.saturating_sub(10).max(50);
-        self.settings.save();
+        self.save_settings();
         self.flash_zoom(cx);
     }
 
     pub fn handle_reset_zoom(&mut self, cx: &mut Context<Self>) {
         self.settings.zoom_level = 100;
-        self.settings.save();
+        self.save_settings();
         self.flash_zoom(cx);
     }
 
@@ -633,7 +714,7 @@ impl LiteMarkApp {
                 tab.snap_wysiwyg_table_delimiter();
             }
         }
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_save_as(&mut self, cx: &mut Context<Self>) {
@@ -669,7 +750,7 @@ impl LiteMarkApp {
         }
         let content = self
             .active_tab()
-            .map(|tab| tab.content.clone())
+            .map(|tab| tab.file_text())
             .unwrap_or_default();
         match atomic_save(&path, &content) {
             Ok(()) => {
@@ -681,7 +762,7 @@ impl LiteMarkApp {
                     }
                     type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
                     tab.is_modified = false;
-                    tab.disk_version = disk_version(&path, &tab.content);
+                    tab.disk_version = disk_version(&path, &tab.file_text());
                     let title = tab.title.clone();
                     self.show_toast(format!("Saved {title}"), cx);
                 }
@@ -771,7 +852,7 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_word_wrap(&mut self) {
         self.settings.word_wrap = !self.settings.word_wrap;
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_set_content_alignment(&mut self, alignment: ContentAlignment) {
@@ -779,7 +860,7 @@ impl LiteMarkApp {
             return;
         }
         self.settings.content_alignment = alignment;
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_toggle_line_numbers(&mut self) {
@@ -787,7 +868,7 @@ impl LiteMarkApp {
             return;
         }
         self.settings.show_line_numbers = !self.settings.show_line_numbers;
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_set_view_mode(&mut self, mode: ViewMode) {
@@ -801,17 +882,17 @@ impl LiteMarkApp {
                 tab.snap_wysiwyg_table_delimiter();
             }
         }
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_set_theme(&mut self, theme: ThemeMode) {
         self.settings.theme = theme;
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_set_font_size(&mut self, size: f32) {
         self.settings.base_font_size = size;
-        self.settings.save();
+        self.save_settings();
     }
 
     /// Clipboard item for the active selection. Other apps get the text as
@@ -883,4 +964,10 @@ impl LiteMarkApp {
             tab.select_all();
         }
     }
+}
+
+/// What was on screen when a PDF started opening.
+pub(super) struct PdfOpenStart {
+    pub(super) tab_id: String,
+    pub(super) toast_epoch: u64,
 }

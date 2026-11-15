@@ -51,8 +51,9 @@ impl DocumentTab {
     /// otherwise empty at the table end) and put the caret on a paragraph line
     /// below the table, with exactly one blank line between them. One undo step.
     pub(super) fn apply_table_exit(&mut self, remove_start: usize, remove_end: usize) {
+        let nl = self.line_break(remove_start);
         let rest = &self.content[remove_end..];
-        let (insert_at, insert_text, caret_rel) = blank_gap_after_table(rest);
+        let (insert_at, insert_text, caret_rel) = blank_gap_after_table(rest, nl);
         let end = remove_end + insert_at;
         let replacement = format!("{}{}", &self.content[remove_end..end], insert_text);
         if remove_start != end || !replacement.is_empty() {
@@ -81,9 +82,11 @@ impl DocumentTab {
             // On the delimiter row: add the first body row
             let at = table.delimiter_end.unwrap_or(table.source.end);
             let cols = table.rows.first().map(|r| r.cells.len()).unwrap_or(2).max(2);
-            let row = format!("\n|{}", "  |".repeat(cols));
+            let nl = self.line_break(at);
+            let row = format!("{nl}|{}", "  |".repeat(cols));
             self.edit(at..at, &row);
-            self.caret.move_to(floor_boundary(&self.content, at + 3));
+            self.caret
+                .move_to(floor_boundary(&self.content, at + nl.len() + 2));
             self.refresh_cursor();
             return true;
         };
@@ -99,9 +102,10 @@ impl DocumentTab {
         } else {
             row.source.end
         };
-        let new_row = format!("\n|{}", "  |".repeat(cols));
+        let nl = self.line_break(at);
+        let new_row = format!("{nl}|{}", "  |".repeat(cols));
         self.edit(at..at, &new_row);
-        let target = at + 3 + 3 * col.min(cols - 1);
+        let target = at + nl.len() + 2 + 3 * col.min(cols - 1);
         self.caret.move_to(floor_boundary(&self.content, target));
         self.refresh_cursor();
         true
@@ -256,26 +260,25 @@ impl DocumentTab {
             range = table_end..table_end;
         }
 
+        // Blank lines around the table use the line ending already there.
+        let nl = self.line_break(range.start);
+        let blank = format!("{nl}{nl}");
         let mut prefix = String::new();
         if range.start > 0 {
-            let prev_char = self.content[..range.start].chars().next_back();
-            if let Some(c) = prev_char {
-                if c != '\n' {
-                    prefix.push_str("\n\n");
-                } else if !self.content[..range.start].ends_with("\n\n") {
-                    prefix.push('\n');
-                }
+            let before = &self.content[..range.start];
+            if !before.ends_with(['\n', '\r']) {
+                prefix.push_str(&blank);
+            } else if !before.ends_with(blank.as_str()) {
+                prefix.push_str(nl);
             }
         }
         let mut suffix = String::new();
         if range.end < self.content.len() {
-            let next_char = self.content[range.end..].chars().next();
-            if let Some(c) = next_char {
-                if c != '\n' {
-                    suffix.push_str("\n\n");
-                } else if !self.content[range.end..].starts_with("\n\n") {
-                    suffix.push('\n');
-                }
+            let after = &self.content[range.end..];
+            if !after.starts_with(['\n', '\r']) {
+                suffix.push_str(&blank);
+            } else if !after.starts_with(blank.as_str()) {
+                suffix.push_str(nl);
             }
         }
 
@@ -284,7 +287,14 @@ impl DocumentTab {
             table_rows.push(vec![String::new(); cols]);
         }
         let alignments = vec![TableColumnAlign::Left; cols];
+        // The first cell sits on the first line, before any break, so its
+        // range is the same after the breaks are converted.
         let (table_str, first_cell_rel) = format_markdown_table(&table_rows, &alignments, 0, 0);
+        let table_str = if nl == "\n" {
+            table_str
+        } else {
+            table_str.replace('\n', nl)
+        };
         let full_insert = format!("{}{}{}", prefix, table_str, suffix);
         let base = range.start + prefix.len();
         self.edit(range, &full_insert);
@@ -340,11 +350,14 @@ impl DocumentTab {
         let Some(source) = table_ops::parsed_table_source_in(&self.parsed(), pos) else {
             return;
         };
+        // Remove one whole line ending with the table (CR included), the one
+        // after it if there is one, else the one before.
         let mut del_range = source;
-        if del_range.end < self.content.len() && self.content.as_bytes()[del_range.end] == b'\n' {
-            del_range.end += 1;
-        } else if del_range.start > 0 && self.content.as_bytes()[del_range.start - 1] == b'\n' {
-            del_range.start -= 1;
+        let after = line_ending_len(&self.content, del_range.end);
+        if after > 0 {
+            del_range.end += after;
+        } else {
+            del_range.start -= line_ending_len_before(&self.content, del_range.start);
         }
         let target = del_range.start;
         self.edit(del_range, "");
@@ -401,9 +414,10 @@ impl DocumentTab {
             cur_idx - 1
         } else {
             if cur_idx + 1 == all_cells.len() {
-                let new_row = format!("\n|{}", "  |".repeat(num_cols));
+                let nl = self.line_break(table_end);
+                let new_row = format!("{nl}|{}", "  |".repeat(num_cols));
                 self.edit(table_end..table_end, &new_row);
-                let first_cell_start = (table_end + 3).min(self.content.len());
+                let first_cell_start = (table_end + nl.len() + 2).min(self.content.len());
                 let target = floor_boundary(&self.content, first_cell_start);
                 self.caret.range = target..target;
                 self.caret.reversed = false;
@@ -534,24 +548,24 @@ pub(super) struct TableInfo {
 /// Given the text after a table's end, return where to insert what so a blank
 /// line separates the table from the caret line, and where the caret goes
 /// (all offsets relative to the start of `rest`, caret in the edited text).
-/// An existing blank line is reused.
-pub(super) fn blank_gap_after_table(rest: &str) -> (usize, &'static str, usize) {
+/// An existing blank line is reused. New breaks are `nl`.
+pub(super) fn blank_gap_after_table(rest: &str, nl: &str) -> (usize, String, usize) {
     if rest.is_empty() {
-        return (0, "\n\n", 2);
+        return (0, format!("{nl}{nl}"), 2 * nl.len());
     }
     let ne = line_ending_len(rest, 0);
     if ne == 0 {
-        return (0, "\n\n", 2);
+        return (0, format!("{nl}{nl}"), 2 * nl.len());
     }
     let after = &rest[ne..];
     if after.is_empty() {
-        return (ne, "\n", ne + 1);
+        return (ne, nl.to_string(), ne + nl.len());
     }
     let l2_end = line_end(after, 0);
     if after[..l2_end].trim().is_empty() {
         let end_len = line_ending_len(after, l2_end);
-        (0, "", ne + l2_end + end_len)
+        (0, String::new(), ne + l2_end + end_len)
     } else {
-        (ne, "\n", ne + 1)
+        (ne, nl.to_string(), ne + nl.len())
     }
 }
