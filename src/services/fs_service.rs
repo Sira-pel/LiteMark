@@ -717,6 +717,12 @@ const SKIPPED_ENTRIES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store", "node_mod
 
 /// List the notes folder. Dotfiles are listed; only `SKIPPED_ENTRIES` are left out.
 /// Code files are listed only when `show_code_files` is set.
+/// Modification time of `path` in Unix seconds, as the sidebar stores it.
+pub fn modified_secs(path: &Path) -> Option<u64> {
+    let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
+    modified.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
 pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirectory {
     let folder_name = if let Some(name) = dir.file_name().and_then(|f| f.to_str()) {
         format!("📁 {}", name)
