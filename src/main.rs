@@ -333,10 +333,14 @@ fn main() {
                         .timer(std::time::Duration::from_millis(250))
                         .await;
                     while let Ok(path) = incoming.try_recv() {
-                        let _ = window.update(cx, |app, window, cx| {
+                        let updated = window.update(cx, |app, window, cx| {
                             app.open_path(path, cx);
                             window.activate_window();
                         });
+                        // The window is gone: stop polling.
+                        if updated.is_err() {
+                            return;
+                        }
                     }
                 })
                 .detach();

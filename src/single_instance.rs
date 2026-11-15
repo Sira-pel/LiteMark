@@ -19,7 +19,18 @@ pub fn claim(file: Option<&std::path::Path>) -> Claim {
     let Some(dir) = dirs::runtime_dir().or_else(dirs::cache_dir) else {
         return Claim::Primary(None);
     };
-    claim_at(&dir.join("litemark.sock"), file)
+    // The socket lives in a directory only this user can enter, so it is never
+    // reachable by others, even in the moment between `bind` and `chmod`.
+    let private = dir.join("litemark");
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let made = std::fs::DirBuilder::new().mode(0o700).create(&private);
+        if made.is_err() && !private.is_dir() {
+            return Claim::Primary(None);
+        }
+        let _ = std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700));
+    }
+    claim_at(&private.join("litemark.sock"), file)
 }
 
 #[cfg(not(unix))]
@@ -33,15 +44,19 @@ fn claim_at(sock: &std::path::Path, file: Option<&std::path::Path>) -> Claim {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
 
-    if let Some(file) = file {
-        if let Ok(mut stream) = UnixStream::connect(sock) {
-            let path = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-            if stream.write_all(path.as_os_str().as_encoded_bytes()).is_ok()
-                && stream.write_all(b"\n").is_ok()
-            {
-                return Claim::HandedOff;
-            }
+    if let Ok(mut stream) = UnixStream::connect(sock) {
+        let Some(file) = file else {
+            // Another LiteMark is already running: open a plain window and
+            // leave its socket alone so it stays reachable.
+            return Claim::Primary(None);
+        };
+        let path = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        let sent = stream.write_all(path.as_os_str().as_encoded_bytes());
+        if sent.is_ok() && stream.write_all(b"\n").is_ok() {
+            return Claim::HandedOff;
         }
+        // It answered but took nothing: don't tear its socket down.
+        return Claim::Primary(None);
     }
     // Nobody is listening (or the socket is left over from a crash).
     let _ = std::fs::remove_file(sock);
@@ -54,7 +69,10 @@ fn claim_at(sock: &std::path::Path, file: Option<&std::path::Path>) -> Claim {
         for stream in listener.incoming().flatten() {
             let mut line = Vec::new();
             // A path is short; cap the read so a stray client can't grow it.
-            if BufReader::new(stream.take(8192)).read_until(b'\n', &mut line).is_err() {
+            if BufReader::new(stream.take(8192))
+                .read_until(b'\n', &mut line)
+                .is_err()
+            {
                 continue;
             }
             while line.last() == Some(&b'\n') {
