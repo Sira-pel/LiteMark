@@ -658,9 +658,125 @@ pub fn safe_delete(path: &Path, is_dir: bool) -> io::Result<()> {
 /// Folders the scan never descends into: VCS metadata and build output.
 const SKIPPED_ENTRIES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store", "node_modules", "target"];
 
+/// Folders nested deeper than this below the notes folder are not listed.
+pub const MAX_SCAN_DEPTH: usize = 64;
+/// The scan stops after listing this many folders and notes.
+pub const MAX_SCAN_ITEMS: usize = 50_000;
+
+/// Shown when [`WorkspaceDirectory::scan_truncated`] is set. The numbers
+/// match [`MAX_SCAN_ITEMS`] and [`MAX_SCAN_DEPTH`] (checked by a test).
+pub fn scan_truncated_message() -> String {
+    "This folder is too large to list completely. The sidebar shows up to 50,000 items \
+     and folders up to 64 levels deep."
+        .to_string()
+}
+
+/// One listed child of a folder, read and released before the scan goes
+/// deeper, so no directory handle stays open across levels.
+struct ScanEntry {
+    name: String,
+    path: PathBuf,
+    kind: ScanKind,
+}
+
+enum ScanKind {
+    Folder,
+    File {
+        file_type: FileType,
+        updated_at: u64,
+    },
+}
+
+/// The listed children of `dir`, sorted by name. Unreadable folders are
+/// empty. Symlinks are never listed: a link back to a parent would loop,
+/// and a link to /etc would let rename and trash act outside the notes
+/// folder.
+fn read_scan_entries(dir: &Path, show_code_files: bool) -> Vec<ScanEntry> {
+    let mut entries: Vec<ScanEntry> = listed_entries(dir, show_code_files).collect();
+    // Each DirEntry keeps its directory open on Unix; all of them are
+    // dropped here, before any child folder is read.
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
+/// The children of `dir` the sidebar lists, unsorted, read lazily.
+fn listed_entries(dir: &Path, show_code_files: bool) -> impl Iterator<Item = ScanEntry> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(move |entry| listed_entry(entry, show_code_files))
+}
+
+/// `entry` as the sidebar lists it, or `None` if it is left out.
+fn listed_entry(entry: fs::DirEntry, show_code_files: bool) -> Option<ScanEntry> {
+    let name = entry.file_name().to_string_lossy().to_string();
+    // Temp files of an interrupted save are not notes.
+    if SKIPPED_ENTRIES.contains(&name.as_str()) || name.ends_with(TEMP_SUFFIX) {
+        return None;
+    }
+    // DirEntry::file_type does not follow symlinks.
+    let Ok(entry_type) = entry.file_type() else {
+        return None;
+    };
+    let kind = if entry_type.is_dir() {
+        ScanKind::Folder
+    } else if entry_type.is_file() {
+        let file_type = FileType::from_filename(&name);
+        let listed = match file_type {
+            FileType::Markdown | FileType::PlainText => true,
+            FileType::Code => show_code_files,
+            FileType::Pdf => false,
+        };
+        if !listed {
+            return None;
+        }
+        let updated_at = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        ScanKind::File {
+            file_type,
+            updated_at,
+        }
+    } else {
+        return None;
+    };
+    Some(ScanEntry {
+        name,
+        path: entry.path(),
+        kind,
+    })
+}
+
+/// Whether `dir` holds anything the sidebar would list. A folder holding
+/// only `.DS_Store`, a PDF or a symlink has nothing to show, so leaving it
+/// unread past the depth limit hides nothing.
+fn has_entries(dir: &Path, show_code_files: bool) -> bool {
+    listed_entries(dir, show_code_files).next().is_some()
+}
+
 /// List the notes folder. Dotfiles are listed; only `SKIPPED_ENTRIES` are left out.
 /// Code files are listed only when `show_code_files` is set.
+///
+/// The walk uses its own stack instead of recursion, so a deeply nested
+/// folder can't overflow the thread's stack, and holds no directory handle
+/// open while it goes deeper. It stops at [`MAX_SCAN_DEPTH`] levels and
+/// [`MAX_SCAN_ITEMS`] items and then sets `scan_truncated`. Items come out in
+/// the same order as a depth-first walk: each folder, then its contents.
 pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirectory {
+    scan_workspace_dir_limited(dir, show_code_files, MAX_SCAN_DEPTH, MAX_SCAN_ITEMS)
+}
+
+fn scan_workspace_dir_limited(
+    dir: &Path,
+    show_code_files: bool,
+    max_depth: usize,
+    max_items: usize,
+) -> WorkspaceDirectory {
     let folder_name = if let Some(name) = dir.file_name().and_then(|f| f.to_str()) {
         format!("📁 {}", name)
     } else {
@@ -669,76 +785,53 @@ pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirecto
 
     let mut folders = Vec::new();
     let mut files = Vec::new();
+    let mut truncated = false;
 
-    fn walk(
-        current: &Path,
-        parent_id: Option<String>,
-        show_code_files: bool,
-        folders: &mut Vec<WorkspaceFolder>,
-        files: &mut Vec<WorkspaceFile>,
-    ) {
-        if let Ok(entries) = fs::read_dir(current) {
-            let mut entries: Vec<_> = entries.flatten().collect();
-            entries.sort_by_key(|e| e.file_name());
-
-            for entry in entries {
-                let path = entry.path();
-                let file_name = entry.file_name().to_string_lossy().to_string();
-
-                if SKIPPED_ENTRIES.contains(&file_name.as_str()) || file_name.ends_with(TEMP_SUFFIX)
-                {
-                    continue;
+    // Per open folder: its remaining children, its id, and how deep they sit
+    // (children of the notes folder are at depth 1).
+    let mut stack: Vec<(std::vec::IntoIter<ScanEntry>, Option<String>, usize)> =
+        vec![(read_scan_entries(dir, show_code_files).into_iter(), None, 1)];
+    'walk: while let Some((children, parent_id, depth)) = stack.last_mut() {
+        let Some(entry) = children.next() else {
+            stack.pop();
+            continue;
+        };
+        if folders.len() + files.len() >= max_items {
+            truncated = true;
+            break 'walk;
+        }
+        let parent_id = parent_id.clone();
+        let depth = *depth;
+        match entry.kind {
+            ScanKind::Folder => {
+                let folder_id = format!("folder-{}", entry.path.display());
+                if depth < max_depth {
+                    let children = read_scan_entries(&entry.path, show_code_files);
+                    stack.push((children.into_iter(), Some(folder_id.clone()), depth + 1));
+                } else if has_entries(&entry.path, show_code_files) {
+                    truncated = true;
                 }
-
-                // DirEntry::file_type does not follow symlinks: symlinked
-                // folders must not be expanded (a link back to a parent would
-                // recurse forever, and a link to /etc would let rename/trash
-                // act on real files outside the notes folder).
-                let Ok(entry_type) = entry.file_type() else {
-                    continue;
-                };
-
-                if entry_type.is_dir() {
-                    let folder_id = format!("folder-{}", path.display());
-                    folders.push(WorkspaceFolder {
-                        id: folder_id.clone(),
-                        name: file_name,
-                        parent_id: parent_id.clone(),
-                        path: path.clone(),
-                        is_open: true,
-                    });
-                    walk(&path, Some(folder_id), show_code_files, folders, files);
-                } else if entry_type.is_file() {
-                    let file_type = FileType::from_filename(&file_name);
-                    let listed = match file_type {
-                        FileType::Markdown | FileType::PlainText => true,
-                        FileType::Code => show_code_files,
-                        FileType::Pdf => false,
-                    };
-                    if listed {
-                        let updated_at = entry
-                            .metadata()
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-
-                        files.push(WorkspaceFile {
-                            id: format!("file-{}", path.display()),
-                            name: file_name,
-                            folder_id: parent_id.clone(),
-                            path,
-                            file_type,
-                            updated_at,
-                        });
-                    }
-                }
+                folders.push(WorkspaceFolder {
+                    id: folder_id,
+                    name: entry.name,
+                    parent_id,
+                    path: entry.path,
+                    is_open: true,
+                });
             }
+            ScanKind::File {
+                file_type,
+                updated_at,
+            } => files.push(WorkspaceFile {
+                id: format!("file-{}", entry.path.display()),
+                name: entry.name,
+                folder_id: parent_id,
+                path: entry.path,
+                file_type,
+                updated_at,
+            }),
         }
     }
-
-    walk(dir, None, show_code_files, &mut folders, &mut files);
 
     WorkspaceDirectory {
         folder_name,
@@ -746,6 +839,7 @@ pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirecto
         is_linked_to_local_disk: true,
         folders,
         files,
+        scan_truncated: truncated,
     }
 }
 
@@ -898,6 +992,134 @@ mod tests {
         assert!(renamed_folder.is_dir());
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    fn nested_tree(root: &Path, levels: usize) -> PathBuf {
+        let mut path = root.to_path_buf();
+        for _ in 0..levels {
+            path.push("d");
+        }
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("deepest.md"), "bottom").unwrap();
+        path
+    }
+
+    /// The old recursive walk overflowed small stacks (1 MiB on the Windows
+    /// main thread) on deep trees. The loop needs the same stack at any depth.
+    #[test]
+    fn deep_folder_tree_scans_on_a_small_stack() {
+        let root = std::env::temp_dir().join(format!("litemark-deepscan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        nested_tree(&root, 300);
+
+        let scan_root = root.clone();
+        let (full, capped) = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                (
+                    scan_workspace_dir_limited(&scan_root, true, 1_000, MAX_SCAN_ITEMS),
+                    scan_workspace_dir(&scan_root, true),
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(full.folders.len(), 300);
+        assert_eq!(full.files.len(), 1);
+        assert!(!full.scan_truncated);
+
+        assert_eq!(capped.folders.len(), MAX_SCAN_DEPTH);
+        assert!(capped.files.is_empty());
+        assert!(capped.scan_truncated);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_stops_at_the_item_limit() {
+        let root = std::env::temp_dir().join(format!("litemark-scanitems-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for i in 0..10 {
+            fs::write(root.join(format!("note-{i}.md")), "x").unwrap();
+        }
+        let scan = scan_workspace_dir_limited(&root, true, MAX_SCAN_DEPTH, 4);
+        assert_eq!(scan.files.len(), 4);
+        assert!(scan.scan_truncated);
+        let names: Vec<_> = scan.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["note-0.md", "note-1.md", "note-2.md", "note-3.md"]);
+
+        let exact = scan_workspace_dir_limited(&root, true, MAX_SCAN_DEPTH, 10);
+        assert_eq!(exact.files.len(), 10);
+        assert!(!exact.scan_truncated);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_folder_at_the_depth_limit_is_not_a_truncation() {
+        let root = std::env::temp_dir().join(format!("litemark-scanedge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a").join("b")).unwrap();
+        let scan = scan_workspace_dir_limited(&root, true, 2, MAX_SCAN_ITEMS);
+        assert_eq!(scan.folders.len(), 2);
+        assert!(!scan.scan_truncated);
+
+        // Files the sidebar never lists don't count as hidden items.
+        let deep = root.join("a").join("b");
+        fs::write(deep.join(".DS_Store"), "x").unwrap();
+        fs::write(deep.join("paper.pdf"), "x").unwrap();
+        fs::write(deep.join("main.rs"), "x").unwrap();
+        let scan = scan_workspace_dir_limited(&root, false, 2, MAX_SCAN_ITEMS);
+        assert!(!scan.scan_truncated, "nothing listable below the limit");
+        let scan = scan_workspace_dir_limited(&root, true, 2, MAX_SCAN_ITEMS);
+        assert!(scan.scan_truncated, "code files are listed when shown");
+        fs::remove_file(deep.join("main.rs")).unwrap();
+
+        fs::write(root.join("a").join("b").join("hidden.md"), "x").unwrap();
+        let scan = scan_workspace_dir_limited(&root, true, 2, MAX_SCAN_ITEMS);
+        assert!(scan.files.is_empty());
+        assert!(scan.scan_truncated);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Folders come out before their contents, in name order, as the old
+    /// recursive walk produced them.
+    #[test]
+    fn scan_keeps_depth_first_name_order() {
+        let root = std::env::temp_dir().join(format!("litemark-scanorder-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("b").join("inner")).unwrap();
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::write(root.join("b").join("inner").join("deep.md"), "x").unwrap();
+        fs::write(root.join("b").join("note.md"), "x").unwrap();
+        fs::write(root.join("a").join("first.md"), "x").unwrap();
+        fs::write(root.join("top.md"), "x").unwrap();
+
+        let scan = scan_workspace_dir(&root, true);
+        let folders: Vec<_> = scan.folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(folders, ["a", "b", "inner"]);
+        let files: Vec<_> = scan.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(files, ["first.md", "deep.md", "note.md", "top.md"]);
+        let inner = scan.folders.iter().find(|f| f.name == "inner").unwrap();
+        assert_eq!(
+            inner.parent_id.as_deref(),
+            Some(scan.folders[1].id.as_str())
+        );
+        let deep = scan.files.iter().find(|f| f.name == "deep.md").unwrap();
+        assert_eq!(deep.folder_id.as_deref(), Some(inner.id.as_str()));
+        assert!(!scan.scan_truncated);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn truncation_message_names_the_limits() {
+        let message = scan_truncated_message();
+        assert_eq!(MAX_SCAN_ITEMS, 50_000);
+        assert_eq!(MAX_SCAN_DEPTH, 64);
+        assert!(message.contains("50,000 items"), "{message}");
+        assert!(message.contains("64 levels"), "{message}");
     }
 
     #[cfg(unix)]
