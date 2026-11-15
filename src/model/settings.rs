@@ -100,6 +100,9 @@ impl Default for EditorSettings {
     }
 }
 
+/// Backups of a damaged settings file kept side by side before giving up.
+const MAX_SETTINGS_BACKUPS: usize = 100;
+
 /// Most recent workspace folders kept in the switcher.
 pub const MAX_RECENT_FOLDERS: usize = 5;
 
@@ -127,21 +130,35 @@ impl EditorSettings {
     }
 
     /// Read settings from `path`. A missing file gives the defaults. A file
-    /// that can't be fully parsed keeps every field that still parses, and
-    /// is copied aside first so the next save can't destroy the original.
+    /// that can't be fully read or parsed keeps every field that still
+    /// parses, and is copied aside first so the next save can't destroy the
+    /// original.
     fn load_from(path: &Path) -> Self {
-        let content = match fs::read_to_string(path) {
-            Ok(content) => content,
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Self::default(),
             Err(err) => {
                 eprintln!("litemark: couldn't read {}: {err}", path.display());
+                Self::back_up_unreadable(path);
                 return Self::default();
+            }
+        };
+        let mut backed_up = false;
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(err) => {
+                // Damaged bytes inside one value shouldn't cost the others.
+                Self::back_up_unreadable(path);
+                backed_up = true;
+                String::from_utf8_lossy(err.as_bytes()).into_owned()
             }
         };
         let settings = match serde_json::from_str::<Self>(&content) {
             Ok(settings) => settings,
             Err(_) => {
-                Self::back_up_unreadable(path);
+                if !backed_up {
+                    Self::back_up_unreadable(path);
+                }
                 Self::salvage(&content)
             }
         };
@@ -181,15 +198,42 @@ impl EditorSettings {
         settings
     }
 
-    fn back_up_unreadable(path: &Path) {
-        let backup = path.with_extension("json.bak");
-        match fs::copy(path, &backup) {
-            Ok(_) => eprintln!(
-                "litemark: {} couldn't be fully read; a copy was kept at {}",
-                path.display(),
-                backup.display()
-            ),
-            Err(err) => eprintln!("litemark: couldn't back up {}: {err}", path.display()),
+    /// Copy `path` to the first free `settings.json.bak`, `.bak.1`, `.bak.2`
+    /// and so on, so an earlier backup is never replaced. Returns the copy.
+    fn back_up_unreadable(path: &Path) -> Option<PathBuf> {
+        let result = (|| {
+            let mut source = fs::File::open(path)?;
+            for n in 0..MAX_SETTINGS_BACKUPS {
+                let mut name = path.as_os_str().to_os_string();
+                name.push(if n == 0 { ".bak".to_string() } else { format!(".bak.{n}") });
+                let backup = PathBuf::from(name);
+                let mut dest = match fs::OpenOptions::new().write(true).create_new(true).open(&backup) {
+                    Ok(dest) => dest,
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(err) => return Err(err),
+                };
+                if let Err(err) = io::copy(&mut source, &mut dest) {
+                    drop(dest);
+                    let _ = fs::remove_file(&backup);
+                    return Err(err);
+                }
+                return Ok(backup);
+            }
+            Err(io::Error::other("too many settings backups"))
+        })();
+        match result {
+            Ok(backup) => {
+                eprintln!(
+                    "litemark: {} couldn't be fully read; a copy was kept at {}",
+                    path.display(),
+                    backup.display()
+                );
+                Some(backup)
+            }
+            Err(err) => {
+                eprintln!("litemark: couldn't back up {}: {err}", path.display());
+                None
+            }
         }
     }
 
@@ -318,6 +362,40 @@ mod tests {
         let loaded = EditorSettings::load_from(&path);
         assert_eq!(loaded.zoom_level, EditorSettings::default().zoom_level);
         assert!(path.with_extension("json.bak").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bad_utf8_keeps_the_valid_fields_and_backs_up_the_file() {
+        let dir = temp_settings_dir("badutf8");
+        let path = dir.join("settings.json");
+        let mut content = br#"{"zoom_level": 150, "word_wrap": false, "theme": ""#.to_vec();
+        content.extend_from_slice(&[0xff, 0xfe]);
+        content.extend_from_slice(br#""}"#);
+        fs::write(&path, &content).unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, 150);
+        assert!(!loaded.word_wrap);
+        assert_eq!(fs::read(path.with_extension("json.bak")).unwrap(), content);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_damaged_file_does_not_replace_the_first_backup() {
+        let dir = temp_settings_dir("twobackups");
+        let path = dir.join("settings.json");
+        fs::write(&path, "first damage {").unwrap();
+        EditorSettings::load_from(&path);
+        fs::write(&path, "second damage {").unwrap();
+        EditorSettings::load_from(&path);
+        assert_eq!(
+            fs::read_to_string(dir.join("settings.json.bak")).unwrap(),
+            "first damage {"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("settings.json.bak.1")).unwrap(),
+            "second damage {"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
