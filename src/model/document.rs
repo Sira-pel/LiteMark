@@ -284,6 +284,9 @@ pub struct DocumentTab {
     pub is_modified: bool,
     pub file_path: Option<PathBuf>,
     pub workspace_file_id: Option<String>,
+    /// The file as last read or written; `None` for a tab not backed by a
+    /// file, or when the file couldn't be inspected.
+    pub disk_version: Option<super::workspace::DiskVersion>,
     /// The file started with a UTF-8 byte order mark. It is kept out of
     /// `content`, so the first line's Markdown is recognized, and written
     /// back by [`DocumentTab::file_text`].
@@ -354,6 +357,7 @@ impl DocumentTab {
             is_modified: false,
             file_path,
             workspace_file_id,
+            disk_version: None,
             has_bom,
             word_count: stats.words,
             char_count: stats.chars,
@@ -381,6 +385,32 @@ impl DocumentTab {
         };
         tab.refresh_cursor();
         tab
+    }
+
+    /// Replace the text with a newer version read from disk. Undo history is
+    /// dropped (it describes the old text); the view mode and, where it
+    /// still fits, the caret are kept. The revision keeps counting up so
+    /// caches keyed on it never mistake the new text for the old.
+    pub fn reload(&mut self, content: String) {
+        let mut fresh = DocumentTab::new(
+            self.id.clone(),
+            self.title.clone(),
+            content,
+            self.file_path.clone(),
+            self.workspace_file_id.clone(),
+        );
+        fresh.view_mode = self.view_mode;
+        fresh.pdf_page_count = self.pdf_page_count;
+        fresh.disk_version = self.disk_version.clone();
+        fresh.revision = self.revision + 1;
+        fresh.stats_revision = Some(fresh.revision);
+        let cursor = floor_boundary(
+            &fresh.content,
+            self.cursor_offset().min(fresh.content.len()),
+        );
+        fresh.caret.move_to(cursor);
+        *self = fresh;
+        self.refresh_cursor();
     }
 
     /// The text to write to the file: `content`, with the byte order mark

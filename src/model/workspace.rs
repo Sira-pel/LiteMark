@@ -1,5 +1,33 @@
-use std::path::{Path, PathBuf};
 use super::document::FileType;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+
+/// What a tab's file looked like on disk the last time LiteMark read or
+/// wrote it. A save compares it with the file now on disk to notice that
+/// another program (a sync client, `git pull`, a second editor) changed or
+/// deleted the file in between.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskVersion {
+    /// Hash of the bytes. A save reads the file and compares, so a `touch`
+    /// or a copy that kept the text doesn't count as a change, and a
+    /// same-size edit that kept the timestamp still does.
+    pub content_hash: u64,
+}
+
+/// How the file behind a tab compares with what the tab last saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskChange {
+    Unchanged,
+    Changed,
+    Deleted,
+}
+
+/// Stable within one run of the app, which is all a tab needs.
+pub fn content_hash(bytes: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]

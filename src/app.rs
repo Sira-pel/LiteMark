@@ -91,6 +91,12 @@ pub(crate) enum Prompt {
     /// A new workspace folder was picked; ask whether to copy the current
     /// note into it before switching.
     SwitchWorkspace { new_dir: PathBuf },
+    /// Ctrl+S on a tab whose file another program changed (or deleted)
+    /// since the tab read it.
+    ExternalChange {
+        id: String,
+        deleted: bool,
+    },
 }
 
 /// What to resume after an untitled tab is saved with a chosen name.
@@ -170,6 +176,9 @@ pub struct LiteMarkApp {
     caret_followed: Option<(String, Range<usize>, usize)>,
     caret_follow_waits: u8,
     scroll_momentum: crate::ui::editor::ScrollMomentum,
+    /// Clock for touchpad momentum. `None` is the real clock; tests set and
+    /// advance it so the coast doesn't depend on how fast the machine runs.
+    pub(crate) scroll_clock: Option<std::time::Instant>,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
     pub find_hits: Vec<Range<usize>>,
@@ -241,7 +250,12 @@ impl LiteMarkApp {
                 .unwrap_or("Untitled.md")
                 .to_string();
             match read_note(&path) {
-                Ok(content) => DocumentTab::new(first_id.clone(), name, content, Some(path), None),
+                Ok(content) => {
+                    let mut tab = DocumentTab::new(first_id.clone(), name, content, None, None);
+                    tab.disk_version = disk_version(&path, &tab.file_text());
+                    tab.file_path = Some(path);
+                    tab
+                }
                 Err(err) => {
                     error_message = Some(err);
                     Self::welcome_tab(&workspace, first_id.clone())
@@ -508,6 +522,7 @@ impl LiteMarkApp {
             caret_followed: None,
             caret_follow_waits: 0,
             scroll_momentum: Default::default(),
+            scroll_clock: None,
             find_field,
             replace_field,
             find_hits: Vec::new(),
@@ -635,6 +650,7 @@ impl LiteMarkApp {
             caret_followed: None,
             caret_follow_waits: 0,
             scroll_momentum: Default::default(),
+            scroll_clock: None,
             find_field: Self::dummy_line_field(cx, "find-field"),
             replace_field: Self::dummy_line_field(cx, "replace-field"),
             find_hits: Vec::new(),
@@ -683,13 +699,15 @@ impl LiteMarkApp {
             .find(|file| file.name == "Welcome.md")
         {
             if let Ok(content) = read_note(&file.path) {
-                return DocumentTab::new(
+                let mut tab = DocumentTab::new(
                     id,
                     file.name.clone(),
                     content,
                     Some(file.path.clone()),
                     Some(file.id.clone()),
                 );
+                tab.disk_version = disk_version(&file.path, &tab.file_text());
+                return tab;
             }
         }
         DocumentTab::new(
@@ -796,6 +814,10 @@ mod viewport_culling_tests;
 #[cfg(test)]
 #[path = "note_drop_tests.rs"]
 mod note_drop_tests;
+
+#[cfg(test)]
+#[path = "disk_change_tests.rs"]
+mod disk_change_tests;
 
 #[cfg(test)]
 #[path = "typing_tests.rs"]

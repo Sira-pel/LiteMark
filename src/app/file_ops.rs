@@ -66,6 +66,7 @@ impl LiteMarkApp {
                 if let Some(name) = new_path.file_name().and_then(|n| n.to_str()) {
                     tab.title = name.to_string();
                 }
+                tab.disk_version = disk_version(&new_path, &tab.file_text());
                 tab.file_path = Some(new_path);
                 tab.is_modified = false;
             }
@@ -299,10 +300,9 @@ impl LiteMarkApp {
         let Some(tab_id) = self.save_as_tab.clone() else {
             return;
         };
-        let raw = name_override
-            .unwrap_or_else(|| self.rename_value.clone())
-            .trim()
-            .to_string();
+        // The same cleanup as New Note and Rename: no folders, `..` or
+        // absolute paths, and no names Windows can't hold.
+        let raw = sanitize_name(&name_override.unwrap_or_else(|| self.rename_value.clone()));
         if raw.is_empty() {
             self.show_error("Enter a name.");
             return;
@@ -337,19 +337,10 @@ impl LiteMarkApp {
 
     /// Continue the close-window flow after a tab was saved with a name:
     /// name the next untitled dirty tab, or finish the save-all.
+    /// Same as Save on the close-window prompt, so a note changed on disk
+    /// gets the "Changed on disk" prompt here too.
     pub(super) fn resume_close_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.first_unnamed_dirty_tab() {
-            self.pending_after_save = Some(PendingAfterSave::CloseWindow);
-            self.begin_save_naming(&id, cx);
-            return;
-        }
-        match self.save_all_dirty() {
-            Ok(()) => self.allow_window_close = true,
-            Err(err) => {
-                self.show_file_error(err);
-                self.show_prompt(Prompt::CloseWindow);
-            }
-        }
+        self.save_all_then_close(cx);
     }
 
     pub(super) fn commit_rename(&mut self, name_override: Option<String>, _cx: &mut Context<Self>) {

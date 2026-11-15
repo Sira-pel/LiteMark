@@ -47,6 +47,11 @@ jobs:
       - name: Test
         run: cargo test
 
+      # Wall-clock tests, ignored in the run above: shown here, never blocking.
+      - name: Timing tests
+        continue-on-error: true
+        run: cargo test -- --ignored --exact markdown::parser::tests::test_20000_row_table_parse_fast model::text_ops::tests::tabbed_rows_stay_within_budget_on_large_files
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 

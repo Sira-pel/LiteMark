@@ -1615,6 +1615,8 @@ mod tests {
     }
 
     #[test]
+    // Wall-clock limit: flaky on slow CI runners. CI runs it on its own (allowed to fail).
+    #[ignore = "timing"]
     fn tabbed_rows_stay_within_budget_on_large_files() {
         use std::time::Instant;
         // 5 MB of short, tab-indented lines and a 1 MB single line.
