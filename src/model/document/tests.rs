@@ -369,6 +369,42 @@ fn doc_start_and_end_navigation() {
     assert_eq!(doc.selection_range(), 7..16);
 }
 
+/// Audit F04: `indent` counts Unicode whitespace in bytes, and the heading
+/// toggle cut it at byte 3, which can land inside a multi-byte character.
+#[test]
+fn heading_toggle_with_multibyte_indent_does_not_panic() {
+    for indent in [
+        "\u{a0}\u{a0}",
+        "  \u{a0}",
+        " \u{a0}\u{a0}",
+        "\u{3000}\u{3000}",
+        "\u{2009}",
+        "\u{a0}",
+    ] {
+        for level in ["h1", "h3", "h6"] {
+            let text = format!("{indent}Title\nParagraph");
+            let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), text, None, None);
+            doc.caret.move_to(indent.len() + 2);
+            doc.apply_format(level);
+            let first = doc.content.lines().next().unwrap().to_string();
+            let hashes = "#".repeat(level[1..].parse().unwrap());
+            assert!(
+                first.ends_with(&format!("{hashes} Title")),
+                "{indent:?} {level}: {first:?}"
+            );
+            assert!(doc.content.ends_with("\nParagraph"), "{:?}", doc.content);
+            assert!(doc.content.is_char_boundary(doc.caret.range.start));
+            // Toggling the same level again removes it without panicking.
+            doc.apply_format(level);
+            assert!(
+                !doc.content.lines().next().unwrap().contains('#'),
+                "{:?}",
+                doc.content
+            );
+        }
+    }
+}
+
 #[test]
 fn heading_toggle_and_level_switching() {
     let mut doc = DocumentTab::new(
@@ -3100,11 +3136,11 @@ fn enter_keeps_cr_on_ordered_task_and_paren_marker() {
         DocumentTab::new("t".into(), "t.md".into(), "1. [ ] \r\n".into(), None, None);
     task.place(crate::model::text_ops::line_end(&task.content, 0), false);
     task.smart_newline(false);
-    assert_eq!(task.content, "1. [ ] \n2. [ ] \r\n");
+    assert_eq!(task.content, "1. [ ] \r\n2. [ ] \r\n");
     let mut paren = DocumentTab::new("p".into(), "t.md".into(), "1) \r\n".into(), None, None);
     paren.place(crate::model::text_ops::line_end(&paren.content, 0), false);
     paren.smart_newline(false);
-    assert_eq!(paren.content, "1) \n2) \r\n");
+    assert_eq!(paren.content, "1) \r\n2) \r\n");
     // Plain dot and bullet markers still exit, the same as the kit.
     let mut dot = DocumentTab::new("d".into(), "t.md".into(), "1. \r\n".into(), None, None);
     dot.place(crate::model::text_ops::line_end(&dot.content, 0), false);
@@ -3204,7 +3240,7 @@ fn edit_probes_for_nested_lazy_and_crlf_markers() {
     crlf_end.move_end(false);
     assert_eq!(crlf_end.cursor_offset(), crlf.len());
     crlf_end.smart_newline(false);
-    assert_eq!(crlf_end.content, "1. foo\r\n2.\r\n3. bar\n4. ");
+    assert_eq!(crlf_end.content, "1. foo\r\n2.\r\n3. bar\r\n4. ");
     let mut crlf_del =
         DocumentTab::new("d".into(), "t.md".into(), crlf.to_string(), None, None);
     crlf_del.edit(third..third + 3, "");
@@ -6013,4 +6049,311 @@ fn parse_stays_equal_to_a_full_parse_through_edits_undo_and_redo() {
         let fresh = parse_document(&doc.content);
         assert!(*doc.parsed() == fresh, "step {step}: cached parse differs from a full parse");
     }
+}
+
+#[test]
+fn block_toggle_over_a_large_selection_is_not_quadratic() {
+    // F14: each selected line used to scan every parsed line from the top.
+    let lines = 20_000;
+    let source = "1. item\n".repeat(lines);
+    let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), source, None, None);
+    doc.select_all();
+    let started = std::time::Instant::now();
+    doc.apply_format("ol");
+    let elapsed = started.elapsed();
+    assert_eq!(doc.content, "item\n".repeat(lines));
+    doc.select_all();
+    doc.apply_format("ol");
+    assert!(doc.content.starts_with("1. item\n"));
+    assert_eq!(doc.content.matches(". item").count(), lines);
+    // Quadratic took tens of seconds here in a debug build; linear is well under one.
+    assert!(elapsed.as_secs() < 5, "toggle took {elapsed:?}");
+}
+
+/// Every LF without a CR before it and every CR without an LF after it.
+fn stray_line_endings(s: &str) -> Vec<usize> {
+    let b = s.as_bytes();
+    (0..b.len())
+        .filter(|&i| {
+            (b[i] == b'\n' && (i == 0 || b[i - 1] != b'\r'))
+                || (b[i] == b'\r' && b.get(i + 1) != Some(&b'\n'))
+        })
+        .collect()
+}
+
+/// Audit F08: edits in a CRLF Markdown file insert CRLF, and deleting a
+/// table leaves no stray CR.
+#[test]
+fn crlf_markdown_edits_keep_crlf() {
+    let table = "para\r\n\r\n| a | b |\r\n|---|---|\r\n| c | d |\r\n\r\nend\r\n";
+    let cell_d = table.find("d |").unwrap();
+    type Op = Box<dyn Fn(&mut DocumentTab)>;
+    let cases: Vec<(&str, &str, usize, Op)> = vec![
+        (
+            "Tab in last table cell",
+            table,
+            cell_d,
+            Box::new(|t| {
+                t.tab_table_cell(false);
+            }),
+        ),
+        (
+            "Ctrl+Enter row below",
+            table,
+            cell_d,
+            Box::new(|t| {
+                t.table_insert_row_below();
+            }),
+        ),
+        (
+            "Enter in a table row",
+            table,
+            cell_d + 1,
+            Box::new(|t| t.smart_newline(false)),
+        ),
+        (
+            "Delete table",
+            table,
+            cell_d,
+            Box::new(|t| t.table_delete_table()),
+        ),
+        (
+            "Insert table 2x2",
+            "para\r\n\r\nend\r\n",
+            4,
+            Box::new(|t| t.insert_table_with_size(2, 2)),
+        ),
+        (
+            "Code block on a line",
+            "para\r\n\r\nend\r\n",
+            2,
+            Box::new(|t| t.apply_format_in_mode("codeblock", ViewMode::Wysiwyg)),
+        ),
+        (
+            "Code block on an empty line",
+            "para\r\n\r\nend\r\n",
+            6,
+            Box::new(|t| t.apply_format_in_mode("codeblock", ViewMode::Wysiwyg)),
+        ),
+        (
+            "Enter in paragraph",
+            "one two\r\nend\r\n",
+            3,
+            Box::new(|t| t.smart_newline(false)),
+        ),
+        (
+            "Shift+Enter in paragraph",
+            "one two\r\nend\r\n",
+            3,
+            Box::new(|t| t.smart_newline(true)),
+        ),
+        (
+            "Enter inside bold",
+            "a **bold text** x\r\nend\r\n",
+            8,
+            Box::new(|t| t.smart_newline(false)),
+        ),
+        (
+            "Enter in list item",
+            "- one two\r\n- x\r\n",
+            5,
+            Box::new(|t| t.smart_newline(false)),
+        ),
+        (
+            "Enter in fenced code",
+            "```\r\ncode\r\n```\r\n",
+            7,
+            Box::new(|t| t.smart_newline(false)),
+        ),
+        (
+            "Enter in quote",
+            "> one two\r\n",
+            5,
+            Box::new(|t| t.smart_newline(false)),
+        ),
+        (
+            "Enter in heading",
+            "# one two\r\nx\r\n",
+            5,
+            Box::new(|t| t.smart_newline(false)),
+        ),
+        (
+            "Enter before heading text",
+            "# one\r\nx\r\n",
+            0,
+            Box::new(|t| t.smart_newline(false)),
+        ),
+        (
+            "Enter in indented text",
+            "  one two\r\n",
+            5,
+            Box::new(|t| t.smart_newline(false)),
+        ),
+    ];
+    for (name, src, caret, op) in &cases {
+        let mut t = DocumentTab::new("t".into(), "t.md".into(), src.to_string(), None, None);
+        t.caret.move_to(*caret);
+        t.refresh_cursor();
+        let before = t.content.clone();
+        op(&mut t);
+        assert_ne!(t.content, before, "{name}: nothing changed");
+        assert!(
+            stray_line_endings(&t.content).is_empty(),
+            "{name}: mixed endings in {:?}",
+            t.content
+        );
+    }
+
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), table.to_string(), None, None);
+    t.caret.move_to(cell_d);
+    t.refresh_cursor();
+    t.table_delete_table();
+    assert_eq!(t.content, "para\r\n\r\n\r\nend\r\n");
+
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), "one\r\n".into(), None, None);
+    t.caret.move_to(1);
+    t.refresh_cursor();
+    t.apply_format_in_mode("codeblock", ViewMode::Wysiwyg);
+    assert_eq!(t.content, "```\r\none\r\n```\r\n");
+    // Toggling it off again restores the line.
+    t.apply_format_in_mode("codeblock", ViewMode::Wysiwyg);
+    assert_eq!(t.content, "one\r\n");
+}
+
+/// LF files are unchanged by the CRLF handling.
+#[test]
+fn lf_markdown_edits_stay_lf() {
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), "- one two\n".into(), None, None);
+    t.caret.move_to(5);
+    t.refresh_cursor();
+    t.smart_newline(false);
+    assert_eq!(t.content.matches('\n').count(), 2);
+    assert!(!t.content.contains('\r'));
+    let mut t = DocumentTab::new(
+        "t".into(),
+        "t.md".into(),
+        "para\n\nend\n".into(),
+        None,
+        None,
+    );
+    t.caret.move_to(4);
+    t.refresh_cursor();
+    t.insert_table_with_size(2, 1);
+    assert!(!t.content.contains('\r'));
+}
+
+/// Audit F18: on a 300 KB note, Replace All then one keystroke used to evict
+/// the Replace All step, so undo could not get back to the original.
+#[test]
+fn replace_all_survives_the_next_keystroke_on_a_large_note() {
+    let paragraph = "A paragraph of ordinary text that fills the note.\n\n";
+    let original = paragraph.repeat(300 * 1024 / paragraph.len());
+    assert!(original.len() > 290 * 1024);
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), original.clone(), None, None);
+    assert!(t.replace_every_match("paragraph", "PARAGRAPH", true));
+    assert!(t.content.contains("A PARAGRAPH of"));
+    t.caret.move_to(0);
+    t.refresh_cursor();
+    t.insert_text_in_mode(0..0, "x", ViewMode::Wysiwyg);
+    assert!(t.undo());
+    assert!(t.undo());
+    assert_eq!(t.content, original);
+
+    // Changing one word records that word, not the document twice.
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), original.clone(), None, None);
+    let mut edited = original.clone();
+    edited.replace_range(1000..1009, "PARAGRAPH");
+    t.set_content(edited.clone());
+    assert_eq!(t.content, edited);
+    assert!(
+        t.undo_stored_bytes() < 64,
+        "{} bytes",
+        t.undo_stored_bytes()
+    );
+    assert!(t.undo());
+    assert_eq!(t.content, original);
+}
+
+/// The trimmed diff never cuts a multi-byte character.
+#[test]
+fn set_content_trims_on_character_boundaries() {
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), "aé😀b".into(), None, None);
+    t.set_content("aè😁b".into());
+    assert_eq!(t.content, "aè😁b");
+    assert!(t.undo());
+    assert_eq!(t.content, "aé😀b");
+    t.set_content("aé😀b😀".into());
+    assert_eq!(t.content, "aé😀b😀");
+    assert!(t.undo());
+    assert_eq!(t.content, "aé😀b");
+}
+
+/// Audit F23 (B5, B7, B8): small edit-result bugs.
+#[test]
+fn edge_case_edits_from_the_audit() {
+    // B5: a document starting with a backslash escape no longer underflows
+    // (debug builds panicked here).
+    let mut t = DocumentTab::new(
+        "t".into(),
+        "t.md".into(),
+        "\\<Hello **bold** and\n".into(),
+        None,
+        None,
+    );
+    t.caret.move_to(2);
+    t.insert_text_in_mode(8..10, "    ", ViewMode::Wysiwyg);
+    assert!(t.content.starts_with("\\<"));
+
+    // B7: a byte order mark doesn't hide the first heading, and it is
+    // written back.
+    let mut t = DocumentTab::new(
+        "t".into(),
+        "t.md".into(),
+        "\u{feff}# Title\nbody\n".into(),
+        None,
+        None,
+    );
+    assert!(t.has_bom);
+    assert_eq!(t.content, "# Title\nbody\n");
+    assert!(matches!(
+        t.parsed().lines[0].kind,
+        LineKind::Heading { level: 1, .. }
+    ));
+    assert_eq!(t.file_text(), "\u{feff}# Title\nbody\n");
+    let plain = DocumentTab::new("p".into(), "t.md".into(), "# Title\n".into(), None, None);
+    assert!(!plain.has_bom);
+    assert_eq!(plain.file_text(), "# Title\n");
+
+    // B8a: Select All + Tab doesn't indent the empty line after the final
+    // newline.
+    let mut t = DocumentTab::new(
+        "t".into(),
+        "t.md".into(),
+        "- one\n- two\n".into(),
+        None,
+        None,
+    );
+    t.caret.range = 0..t.content.len();
+    t.indent();
+    assert_eq!(t.content, "  - one\n  - two\n");
+
+    // B8b: Enter after `999999999.` ends the list instead of writing a
+    // ten-digit marker that isn't one.
+    let src = "999999999. x\n";
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+    t.caret.move_to(src.len() - 1);
+    t.refresh_cursor();
+    t.smart_newline(false);
+    assert_eq!(t.content, "999999999. x\n\n");
+    let mut t = DocumentTab::new(
+        "t".into(),
+        "t.md".into(),
+        "999999998. x\n".into(),
+        None,
+        None,
+    );
+    t.caret.move_to(12);
+    t.refresh_cursor();
+    t.smart_newline(false);
+    assert_eq!(t.content, "999999998. x\n999999999. \n");
 }

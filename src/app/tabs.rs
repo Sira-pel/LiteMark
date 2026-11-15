@@ -3,7 +3,79 @@
 use super::*;
 
 impl LiteMarkApp {
+    /// Save a tab. Refuses, with an error, when another program changed or
+    /// deleted the file since the tab last read or wrote it; `handle_save`
+    /// checks first and asks instead.
     pub(super) fn save_tab(&mut self, id: &str) -> Result<String, String> {
+        self.save_tab_with(id, false)
+    }
+
+    /// Save a tab even if the file changed on disk (the user chose to keep
+    /// their version).
+    pub(super) fn overwrite_tab(&mut self, id: &str) -> Result<String, String> {
+        self.save_tab_with(id, true)
+    }
+
+    /// How the file behind tab `id` compares with what the tab last saw.
+    pub(super) fn disk_change_for(&self, id: &str) -> DiskChange {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return DiskChange::Unchanged;
+        };
+        match (&tab.file_path, &tab.disk_version) {
+            (Some(path), Some(seen)) => disk_change(path, seen),
+            _ => DiskChange::Unchanged,
+        }
+    }
+
+    /// Remember the file as it is now, holding the tab's current text.
+    pub(super) fn record_disk_version(&mut self, id: &str) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            tab.disk_version = tab
+                .file_path
+                .as_deref()
+                .and_then(|path| disk_version(path, &tab.file_text()));
+        }
+    }
+
+    /// Replace the tab's text with the file on disk (the user chose to drop
+    /// their version).
+    pub(super) fn reload_tab(&mut self, id: &str) -> Result<(), String> {
+        let path = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .and_then(|tab| tab.file_path.clone())
+            .ok_or_else(|| "This note has no file to reload.".to_string())?;
+        let content = read_note(&path)?;
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            tab.reload(content);
+        }
+        self.record_disk_version(id);
+        self.refresh_find();
+        Ok(())
+    }
+
+    fn save_tab_with(&mut self, id: &str, overwrite: bool) -> Result<String, String> {
+        if !overwrite {
+            let change = self.disk_change_for(id);
+            if change != DiskChange::Unchanged {
+                let name = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == id)
+                    .map(|tab| tab.title.clone())
+                    .unwrap_or_default();
+                let what = if change == DiskChange::Deleted {
+                    "deleted"
+                } else {
+                    "changed"
+                };
+                return Err(format!(
+                    "Didn't save {name}: another program {what} it on disk. \
+                     Open the note and save it to choose which version to keep."
+                ));
+            }
+        }
         let tab = self
             .tabs
             .iter()
@@ -21,7 +93,8 @@ impl LiteMarkApp {
             &folder,
             |name| folder.join(name).exists(),
         )?;
-        let content = tab.content.clone();
+        let content = tab.file_text();
+        let previous_path = tab.file_path.clone();
         let saved_path = if planned.path.exists() {
             atomic_save(&planned.path, &content)
                 .map_err(|err| format!("Couldn't save {}: {err}", planned.path.display()))?;
@@ -45,7 +118,7 @@ impl LiteMarkApp {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or(planned.title);
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
-            tab.file_path = Some(saved_path);
+            tab.file_path = Some(saved_path.clone());
             tab.title = saved_title;
             let type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
             tab.is_modified = false;
@@ -53,7 +126,18 @@ impl LiteMarkApp {
                 self.refresh_find();
             }
         }
-        self.rescan_workspace();
+        self.record_disk_version(id);
+        // Re-saving a file the sidebar already lists changes nothing in the
+        // tree, so update its timestamp instead of rescanning the whole
+        // workspace on the UI thread on every Ctrl+S.
+        let listed = (previous_path.as_ref() == Some(&saved_path))
+            .then(|| self.workspace.files.iter_mut().find(|file| file.path == saved_path))
+            .flatten();
+        if let Some(file) = listed {
+            file.updated_at = modified_secs(&saved_path).unwrap_or(file.updated_at);
+        } else {
+            self.rescan_workspace();
+        }
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
             let path = tab.file_path.clone();
             tab.workspace_file_id = path.and_then(|path| {
@@ -87,7 +171,19 @@ impl LiteMarkApp {
                 .map(|tab| tab.file_path.as_deref())
                 .collect();
             if let Some(index) = tab_index_for_path(&paths, path) {
-                self.active_tab_id = self.tabs[index].id.clone();
+                let id = self.tabs[index].id.clone();
+                self.active_tab_id = id.clone();
+                // `content` was just read from disk. A tab without edits
+                // shows it if it is newer; a tab with edits keeps them, and
+                // its next save asks because the file changed.
+                let tab = &mut self.tabs[index];
+                if !tab.is_modified {
+                    // `content` is the raw file, BOM included.
+                    if tab.file_text() != content {
+                        tab.reload(content);
+                    }
+                    self.record_disk_version(&id);
+                }
                 self.refresh_find();
                 return;
             }
@@ -100,6 +196,7 @@ impl LiteMarkApp {
             path,
             workspace_file_id,
         ));
+        self.record_disk_version(&id);
         self.active_tab_id = id;
         self.refresh_find();
     }

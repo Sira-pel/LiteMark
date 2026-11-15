@@ -14,7 +14,7 @@ use crate::model::table_ops::parsed_table_source_in;
 use crate::model::DocumentTab;
 use crate::theme::sz;
 
-use super::text_editor::{PaintCell, PaintRow, TableGeom};
+use super::text_editor::{PaintRow, TableGeom};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TableDragKind {
@@ -79,9 +79,10 @@ pub fn record_table_row(
     is_header: bool,
     alignments: &[TableColumnAlign],
     row_bounds: Bounds<Pixels>,
-    cells: &[PaintCell],
+    // (anchor, box) per cell: the cell's first raw byte and its bounds.
+    cells: &[(usize, Bounds<Pixels>)],
 ) {
-    let anchors: Vec<usize> = cells.iter().map(|cell| cell.raw_range.start).collect();
+    let anchors: Vec<usize> = cells.iter().map(|&(anchor, _)| anchor).collect();
     let same = tables
         .last()
         .is_some_and(|table| table.source == source && !is_header);
@@ -89,13 +90,13 @@ pub fn record_table_row(
         let columns = cells
             .iter()
             .enumerate()
-            .map(|(index, cell)| super::text_editor::TableColGeom {
-                header_bounds: cell.box_bounds,
+            .map(|(index, &(anchor, box_bounds))| super::text_editor::TableColGeom {
+                header_bounds: box_bounds,
                 align: alignments
                     .get(index)
                     .copied()
                     .unwrap_or(TableColumnAlign::None),
-                anchor: cell.raw_range.start,
+                anchor,
             })
             .collect();
         tables.push(TableGeom {
