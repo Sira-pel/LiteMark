@@ -5974,3 +5974,23 @@ fn compute_stats_is_lazy_until_ensure_stats() {
     doc.ensure_stats();
     assert_eq!(doc.word_count, before.words);
 }
+
+#[test]
+fn block_toggle_over_a_large_selection_is_not_quadratic() {
+    // F14: each selected line used to scan every parsed line from the top.
+    let lines = 20_000;
+    let source = "1. item\n".repeat(lines);
+    let mut doc = DocumentTab::new("tab-1".into(), "Doc.md".into(), source, None, None);
+    doc.select_all();
+    let started = std::time::Instant::now();
+    doc.apply_format("ol");
+    let elapsed = started.elapsed();
+    assert_eq!(doc.content, "item\n".repeat(lines));
+    doc.select_all();
+    doc.apply_format("ol");
+    assert!(doc.content.starts_with("1. item\n"));
+    assert_eq!(doc.content.matches(". item").count(), lines);
+    // Quadratic took tens of seconds here in a debug build; linear is well under one.
+    assert!(elapsed.as_secs() < 5, "toggle took {elapsed:?}");
+}
+
