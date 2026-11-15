@@ -51,9 +51,14 @@ impl DocumentTab {
         let lines_str = self.content[start_line..end_line].to_string();
         let mut modified = Vec::new();
         let mut first_added = 0;
+        let last = lines_str.split('\n').count() - 1;
         for (i, line) in lines_str.split('\n').enumerate() {
             let blank = line.trim().is_empty();
-            if !markdown && blank {
+            // An empty last line of a multi-line selection (the "line" after
+            // the final newline when everything is selected) stays empty, so
+            // the file doesn't gain trailing spaces.
+            let empty_tail = i > 0 && i == last && line.is_empty();
+            if (!markdown && blank) || empty_tail {
                 modified.push(line.to_string());
                 continue;
             }
@@ -279,19 +284,21 @@ impl DocumentTab {
             let inner_start = open_fence.end.min(close_fence.start);
             let inner_end = close_fence.start;
             let mut inner = self.content[inner_start..inner_end].to_string();
-            // Drop the newline that separated the body from the closer. An
-            // unclosed fence has an empty close range, and the document's own
-            // trailing newline is added back below, so the same pop applies.
-            if inner.ends_with('\n') {
-                inner.pop();
-            }
+            // Drop the line ending that separated the body from the closer
+            // (CR included). An unclosed fence has an empty close range, and
+            // the document's own trailing ending is added back below, so the
+            // same cut applies.
+            let body_ending = line_ending_len_before(&inner, inner.len());
+            inner.truncate(inner.len() - body_ending);
             let full_end = close_fence.end;
-            let trailing_nl =
-                if full_end <= self.content.len() && self.content[..full_end].ends_with('\n') {
-                    "\n"
-                } else {
-                    ""
-                };
+            let before_end = &self.content[..full_end.min(self.content.len())];
+            let trailing_nl = if before_end.ends_with("\r\n") {
+                "\r\n"
+            } else if before_end.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
             let replacement = format!("{}{}", inner, trailing_nl);
             let unwrapped_len = inner.len();
             self.edit(open_fence.start..full_end, &replacement);
@@ -335,8 +342,14 @@ impl DocumentTab {
 
         // Also check if `selected` itself starts and ends with ```
         let selected = self.content[range.clone()].to_string();
-        if selected.starts_with("```\n") && selected.ends_with("\n```") && selected.len() >= 8 {
-            let unwrapped = selected[4..selected.len() - 4].to_string();
+        let wrapped_inner = ["\r\n", "\n"].iter().find_map(|nl| {
+            selected
+                .strip_prefix("```")?
+                .strip_prefix(nl)?
+                .strip_suffix("```")?
+                .strip_suffix(nl)
+        });
+        if let Some(unwrapped) = wrapped_inner.map(str::to_string) {
             let start = range.start;
             let end = start + unwrapped.len();
             self.edit(range, &unwrapped);
@@ -352,6 +365,9 @@ impl DocumentTab {
             })
         };
 
+        // New fences use the line ending already there.
+        let nl = self.line_break(range.start);
+        let fence_open = 3 + nl.len();
         if selected.is_empty() {
             if is_table_line(range.start) {
                 // Inside a table: skip so table never breaks!
@@ -361,13 +377,13 @@ impl DocumentTab {
             let line_e = line_end(&self.content, range.start);
             let line_text = self.content[line_s..line_e].to_string();
             if line_text.is_empty() {
-                self.edit(range.clone(), "```\ncode\n```");
-                self.caret.range = (range.start + 4)..(range.start + 8);
+                self.edit(range.clone(), &format!("```{nl}code{nl}```"));
+                self.caret.range = (range.start + fence_open)..(range.start + fence_open + 4);
                 self.caret.reversed = false;
             } else {
-                let wrapped = format!("```\n{}\n```", line_text);
+                let wrapped = format!("```{nl}{line_text}{nl}```");
                 self.edit(line_s..line_e, &wrapped);
-                self.caret.range = (line_s + 4)..(line_s + 4 + line_text.len());
+                self.caret.range = (line_s + fence_open)..(line_s + fence_open + line_text.len());
                 self.caret.reversed = false;
             }
             self.refresh_cursor();
@@ -398,21 +414,24 @@ impl DocumentTab {
             let has_table_lines = non_table_count < split_lines.len();
             if !has_table_lines {
                 // Pure non-table selection: wrap the selection directly
-                let wrapped = format!("```\n{}\n```", selected);
-                let inner_start = range.start + 4;
+                let wrapped = format!("```{nl}{selected}{nl}```");
+                let inner_start = range.start + fence_open;
                 let inner_end = inner_start + selected.len();
                 self.edit(range, &wrapped);
                 self.caret.range = inner_start..inner_end;
                 self.caret.reversed = false;
                 self.refresh_cursor();
             } else {
-                // Mixed selection: wrap non-table chunks, keep table lines intact
+                // Mixed selection: wrap non-table chunks, keep table lines
+                // intact. Lines are split on LF, so a CRLF line keeps its CR;
+                // it is dropped here and every break is written as `nl`.
                 let mut transformed = Vec::new();
                 let mut chunk: Vec<&str> = Vec::new();
                 for (i, line) in split_lines.iter().enumerate() {
+                    let line = line.strip_suffix('\r').unwrap_or(line);
                     if is_table_line(line_at[i]) {
                         if !chunk.is_empty() {
-                            transformed.push(format!("```\n{}\n```", chunk.join("\n")));
+                            transformed.push(format!("```{nl}{}{nl}```", chunk.join(nl)));
                             chunk.clear();
                         }
                         transformed.push(line.to_string());
@@ -421,9 +440,9 @@ impl DocumentTab {
                     }
                 }
                 if !chunk.is_empty() {
-                    transformed.push(format!("```\n{}\n```", chunk.join("\n")));
+                    transformed.push(format!("```{nl}{}{nl}```", chunk.join(nl)));
                 }
-                let replacement = transformed.join("\n");
+                let replacement = transformed.join(nl);
                 let new_len = replacement.len();
                 self.edit(start_line..end_line, &replacement);
                 self.caret.range = start_line..(start_line + new_len);
