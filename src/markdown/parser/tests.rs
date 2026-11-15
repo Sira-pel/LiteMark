@@ -1055,7 +1055,7 @@ fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
         (
             "tab-list-not-code",
             "\t- foo",
-            vec![leaf("ul:1", "foo", "\t- foo")],
+            vec![leaf("ul:4", "foo", "\t- foo")],
         ),
         (
             "double-tilde-not-fence",
@@ -1279,11 +1279,11 @@ fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
             ],
         ),
         (
-            "tab-fence-stays-red",
+            "tab-fence-is-indented-code",
             "\t```\ncode",
             vec![
-                leaf("fence-open", "", "\t```"),
-                leaf_marks("code", "code", "code", "C:code"),
+                leaf_marks("code", "```", "\t```", "C:```"),
+                leaf("p", "code", "code"),
             ],
         ),
     ]
@@ -2710,7 +2710,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] Paragraph display=">bar" code=[]"#,
+            r#"line[3] Blockquote display="bar" code=[]"#,
         ],
         false,
     );
@@ -3269,7 +3269,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] Blockquote display="bar" code=[]"#,
+            r#"line[3] Paragraph display="    > bar" code=[]"#,
         ],
         false,
     );
@@ -3280,7 +3280,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] Blockquote display="bar" code=[]"#,
+            r#"line[3] Paragraph display="\t> bar" code=[]"#,
         ],
         false,
     );
@@ -3334,7 +3334,7 @@ fn table_membership_kinds_and_cells() {
         ],
         false,
     );
-    // Main opens its trimmed backtick fence after the table.
+    // Top-level 4-space backtick line after a table stays paragraph text like `~~~`.
     check(
         "tail-fence-indent4",
         "| a | b |\n| --- | --- |\n| c | d |\n    ```\ncode",
@@ -3342,8 +3342,8 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] CodeFence display="" code=[]"#,
-            r#"line[4] CodeLine display="code" code=["code"]"#,
+            r#"line[3] Paragraph display="    ```" code=[]"#,
+            r#"line[4] Paragraph display="code" code=[]"#,
         ],
         false,
     );
@@ -3622,4 +3622,53 @@ fn expanded_tabs_keep_multibyte_text_aligned() {
     assert_eq!(map.source_to_display(2), 2);
     assert_eq!(map.source_to_display(3), 5);
     assert_eq!(map.display_to_source(5), 3);
+}
+
+#[test]
+fn tab_indented_list_items_count_tab_stop_columns() {
+    let doc = parse_document("- parent\n\t- child\n\t\t- grandchild\n\u{00a0}- nbsp");
+    assert!(matches!(
+        doc.lines[0].kind,
+        LineKind::ListItem { indent_cols: 0, .. }
+    ));
+    assert!(matches!(
+        doc.lines[1].kind,
+        LineKind::ListItem { indent_cols: 4, .. }
+    ));
+    assert!(matches!(
+        doc.lines[2].kind,
+        LineKind::ListItem { indent_cols: 8, .. }
+    ));
+    assert_eq!(doc.lines[3].kind, LineKind::Paragraph);
+    assert!(scan_list_marker("\u{00a0}- nbsp").is_none());
+}
+
+#[test]
+fn blockquotes_accept_optional_space_tab_eol_and_max_three_cols() {
+    let doc = parse_document(">foo\n>\tbar\n>\n   > baz\n\n    > code\npara\n\t> text");
+    assert_eq!(doc.lines[0].kind, LineKind::Blockquote);
+    assert_eq!(doc.lines[0].display_text, "foo");
+    assert_eq!(doc.lines[1].kind, LineKind::Blockquote);
+    assert_eq!(doc.lines[1].display_text, "bar");
+    assert_eq!(doc.lines[2].kind, LineKind::Blockquote);
+    assert_eq!(doc.lines[2].display_text, "");
+    assert_eq!(doc.lines[3].kind, LineKind::Blockquote);
+    assert_eq!(doc.lines[3].display_text, "baz");
+    assert_eq!(doc.lines[5].kind, LineKind::CodeLine);
+    assert_eq!(doc.lines[7].kind, LineKind::Paragraph);
+}
+
+#[test]
+fn top_level_four_space_backticks_do_not_swallow_document() {
+    let after_heading = parse_document("# Title\n    ```\nrest of note");
+    assert_eq!(after_heading.lines[1].kind, LineKind::CodeLine);
+    assert_eq!(after_heading.lines[2].kind, LineKind::Paragraph);
+
+    let after_blank = parse_document("intro\n\n    ```\nrest of note");
+    assert_eq!(after_blank.lines[2].kind, LineKind::CodeLine);
+    assert_eq!(after_blank.lines[3].kind, LineKind::Paragraph);
+
+    let after_para = parse_document("intro\n    ```\nrest of note");
+    assert_eq!(after_para.lines[1].kind, LineKind::Paragraph);
+    assert_eq!(after_para.lines[2].kind, LineKind::Paragraph);
 }

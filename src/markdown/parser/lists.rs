@@ -57,7 +57,7 @@ impl ListMarker {
 
 pub fn scan_list_marker(line: &str) -> Option<ListMarker> {
     let bytes = line.as_bytes();
-    let indent_bytes = line.len() - line.trim_start().len();
+    let (indent_bytes, _) = split_indent(line);
     let mut col = ColScan::new(bytes);
     col.skip_indent(indent_bytes);
     if col.ix >= bytes.len() {
@@ -236,8 +236,8 @@ pub(super) fn is_structural_line(line: &str, parent_col: usize) -> bool {
     if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
         return true;
     }
-    let trimmed_start = line.trim_start();
-    if trimmed_start.starts_with("> ") || trimmed_start == ">" {
+    let (indent_bytes, indent_cols) = split_indent(line);
+    if indent_cols <= 3 && line[indent_bytes..].starts_with('>') {
         return true;
     }
     trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2

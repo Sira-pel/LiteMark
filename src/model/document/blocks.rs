@@ -545,11 +545,15 @@ pub(super) fn parse_line_block_prefix(
         };
         return (item.indent_bytes, Some(target), item.prefix_end());
     }
-    if trimmed.starts_with("> ") {
-        return (indent, Some(BlockFormatTarget::Blockquote), indent + 2);
-    }
-    if trimmed == ">" {
-        return (indent, Some(BlockFormatTarget::Blockquote), indent + 1);
+    let (q_indent_bytes, q_indent_cols) = crate::markdown::parser::split_indent(line);
+    let q_after = &line[q_indent_bytes..];
+    if q_indent_cols <= 3 && q_after.starts_with('>') {
+        let space_or_tab = usize::from(matches!(q_after.as_bytes().get(1), Some(b' ' | b'\t')));
+        return (
+            q_indent_bytes,
+            Some(BlockFormatTarget::Blockquote),
+            q_indent_bytes + 1 + space_or_tab,
+        );
     }
     (indent, None, indent)
 }
@@ -577,8 +581,11 @@ pub fn block_prefix_in(content: &str, line_start: usize) -> usize {
         return item.prefix_end();
     }
 
-    if trimmed_start.starts_with("> ") {
-        return indent_len + 2;
+    let (q_indent_bytes, q_indent_cols) = crate::markdown::parser::split_indent(line);
+    let q_after = &line[q_indent_bytes..];
+    if q_indent_cols <= 3 && q_after.starts_with('>') {
+        let space_or_tab = usize::from(matches!(q_after.as_bytes().get(1), Some(b' ' | b'\t')));
+        return q_indent_bytes + 1 + space_or_tab;
     }
 
     0

@@ -1971,8 +1971,8 @@ fn parse_lines(
         let line_end = line_start + line.len();
         let line_source = line_start..line_end;
         let trimmed = line.trim();
-        let trimmed_start = line.trim_start();
-        let indent_len = line.len() - trimmed_start.len();
+        let (indent_bytes, indent_cols) = split_indent(line);
+        let after_indent = &line[indent_bytes..];
 
         // Fences. Top-level backtick and tilde fences follow CommonMark. A
         // fence in a list item or quote, and a tab-indented backtick fence,
@@ -2063,9 +2063,7 @@ fn parse_lines(
             continue;
         }
 
-        let skip_rejected =
-            !list_quote_tracker.is_in_list_or_quote() && backtick_info_rejects_fence(line);
-        if trimmed.starts_with("```") && !skip_rejected {
+        if list_quote_tracker.is_in_list_or_quote() && trimmed.starts_with("```") {
             list_walk.note_block(line);
             let lang = trimmed
                 .strip_prefix("```")
@@ -2285,14 +2283,16 @@ fn parse_lines(
                 ordered: item.ordered,
                 number: item.number,
                 task: item.task.as_ref().map(|task| task.checked),
-                indent_cols: indent_len,
+                indent_cols,
                 checkbox_source,
             };
             prefix_len = item.prefix_end();
-        } else if trimmed_start.starts_with("> ") {
+        } else if indent_cols <= 3 && after_indent.starts_with('>') {
             list_walk.note_block(line);
             kind = LineKind::Blockquote;
-            prefix_len = indent_len + 2;
+            let space_or_tab =
+                usize::from(matches!(after_indent.as_bytes().get(1), Some(b' ' | b'\t')));
+            prefix_len = indent_bytes + 1 + space_or_tab;
         } else {
             list_walk.note_paragraph();
         }

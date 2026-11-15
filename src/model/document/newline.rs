@@ -422,23 +422,27 @@ impl DocumentTab {
             return;
         }
 
-        // Blockquotes: "> "
-        if trimmed_start.starts_with("> ") || trimmed_start == ">" {
-            let is_empty_quote = trimmed_start == ">"
-                || trimmed_start == "> "
-                || trimmed_start[1..].trim().is_empty();
+        // Blockquotes: ">", "> ", ">\t", or ">text" (up to 3 columns of indent)
+        if let Some(parsed_line) = parsed
+            .line_at_offset(line_start)
+            .filter(|l| l.kind == LineKind::Blockquote)
+        {
+            let prefix_len = parsed_line.prefix_range.end - parsed_line.source.start;
+            let body = &line[prefix_len..];
+            let is_empty_quote = body.trim().is_empty();
             if is_empty_quote {
                 if !range.is_empty() {
                     self.edit(range, nl);
                 } else {
                     self.edit(line_start..line_end_pos, "");
                 }
-            } else if range.is_empty() && cursor < line_start + indent.len() + 2 {
+            } else if range.is_empty() && cursor < line_start + prefix_len {
                 self.edit(line_start..line_start, nl);
                 self.caret.move_to(cursor + nl.len());
                 self.refresh_cursor();
             } else {
-                let ins = format!("{nl}{indent}> ");
+                let q_indent = &line[..crate::markdown::parser::split_indent(line).0];
+                let ins = format!("{nl}{q_indent}> ");
                 if self.split_inline_span_newline(&range, &ins) {
                     return;
                 }
