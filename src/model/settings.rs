@@ -77,6 +77,11 @@ pub struct EditorSettings {
     /// Release version whose notice the user closed.
     #[serde(default)]
     pub dismissed_update: Option<String>,
+    /// Set when settings.json couldn't be read and couldn't be backed up
+    /// either. Saving is refused for the session so the original file is
+    /// never overwritten; the text says why.
+    #[serde(skip)]
+    pub save_blocked: Option<String>,
 }
 
 impl Default for EditorSettings {
@@ -96,6 +101,7 @@ impl Default for EditorSettings {
             check_for_updates: true,
             last_update_check: None,
             dismissed_update: None,
+            save_blocked: None,
         }
     }
 }
@@ -139,30 +145,43 @@ impl EditorSettings {
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Self::default(),
             Err(err) => {
                 eprintln!("litemark: couldn't read {}: {err}", path.display());
-                Self::back_up_unreadable(path);
-                return Self::default();
+                let backed_up = Self::back_up_unreadable(path).is_some();
+                return Self::default().blocked_unless(backed_up, path);
             }
         };
-        let mut backed_up = false;
+        let mut backed_up = None;
         let content = match String::from_utf8(bytes) {
             Ok(content) => content,
             Err(err) => {
                 // Damaged bytes inside one value shouldn't cost the others.
-                Self::back_up_unreadable(path);
-                backed_up = true;
+                backed_up = Some(Self::back_up_unreadable(path).is_some());
                 String::from_utf8_lossy(err.as_bytes()).into_owned()
             }
         };
         let settings = match serde_json::from_str::<Self>(&content) {
             Ok(settings) => settings,
             Err(_) => {
-                if !backed_up {
-                    Self::back_up_unreadable(path);
+                if backed_up.is_none() {
+                    backed_up = Some(Self::back_up_unreadable(path).is_some());
                 }
                 Self::salvage(&content)
             }
         };
-        settings.clamped()
+        settings
+            .clamped()
+            .blocked_unless(backed_up.unwrap_or(true), path)
+    }
+
+    /// Without a backup, block saving for this session: a save would replace
+    /// the only copy of the file that couldn't be read.
+    fn blocked_unless(mut self, backed_up: bool, path: &Path) -> Self {
+        if !backed_up {
+            self.save_blocked = Some(format!(
+                "Couldn't read or back up {}, so settings won't be saved this session.",
+                path.display()
+            ));
+        }
+        self
     }
 
     /// Pull out-of-range numbers back to what the UI can produce, so a
@@ -239,6 +258,9 @@ impl EditorSettings {
 
     /// Save to the config file. The error names the file, for showing to the user.
     pub fn save(&self) -> Result<(), String> {
+        if let Some(reason) = &self.save_blocked {
+            return Err(reason.clone());
+        }
         let Some(path) = Self::config_path() else {
             return Err("Couldn't save settings: no config folder on this system".into());
         };
@@ -396,6 +418,26 @@ mod tests {
             fs::read_to_string(dir.join("settings.json.bak.1")).unwrap(),
             "second damage {"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn damaged_file_that_cant_be_backed_up_blocks_saving() {
+        let dir = temp_settings_dir("nobackup");
+        let path = dir.join("settings.json");
+        let damaged = b"{\"zoom_level\": 150, \"theme\": \"\xff\"}";
+        fs::write(&path, damaged).unwrap();
+        // Every backup name is taken, so the copy can't be made.
+        fs::write(dir.join("settings.json.bak"), "old").unwrap();
+        for n in 1..MAX_SETTINGS_BACKUPS {
+            fs::write(dir.join(format!("settings.json.bak.{n}")), "old").unwrap();
+        }
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, 150, "valid fields still load");
+        assert!(loaded.save_blocked.is_some());
+        let err = loaded.save().unwrap_err();
+        assert!(err.contains("won't be saved this session"), "{err}");
+        assert_eq!(fs::read(&path).unwrap(), damaged, "original untouched");
         let _ = fs::remove_dir_all(&dir);
     }
 

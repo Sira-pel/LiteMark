@@ -214,13 +214,16 @@ pub struct LiteMarkApp {
 impl LiteMarkApp {
     pub fn new(initial_file: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let settings = EditorSettings::load();
+        // Told once here; save_settings stays quiet about it afterwards.
+        let settings_save_failed = settings.save_blocked.is_some();
+        let settings_warning = settings.save_blocked.clone();
         let notes_dir = get_or_create_notes_dir();
         seed_welcome_note(&notes_dir);
         let workspace = scan_workspace_dir(&notes_dir, settings.show_code_files);
 
         let mut tab_ids = TabIds::new();
         let first_id = tab_ids.alloc();
-        let mut error_message = None;
+        let mut error_message = settings_warning;
         let initial_tab = if let Some(path) = initial_file {
             let name = path
                 .file_name()
@@ -479,7 +482,7 @@ impl LiteMarkApp {
             appearance_subscription: None,
             tab_ids,
             error_message,
-            settings_save_failed: false,
+            settings_save_failed,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
