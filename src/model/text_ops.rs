@@ -1153,7 +1153,7 @@ mod tests {
 
     #[test]
     fn line_span_at_matches_the_full_scan_on_every_offset() {
-        let alphabet = [b'a', b'\n', b'\r'];
+        let alphabet = *b"a\n\r";
         // Every string up to 7 bytes over {a, LF, CR}, every offset.
         for len in 0..=7u32 {
             for code in 0..3usize.pow(len) {
