@@ -492,7 +492,7 @@ impl LiteMarkApp {
             multi_selection: None,
             workspace,
             settings,
-            show_sidebar: true,
+            show_sidebar: false,
             show_find_replace: false,
             show_replace_row: false,
             show_shortcuts_modal: false,
