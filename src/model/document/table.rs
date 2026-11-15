@@ -158,18 +158,6 @@ impl DocumentTab {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn is_in_table(&mut self) -> bool {
-        let cursor = self.cursor_offset();
-        let parsed = self.parsed();
-        parsed.lines.iter().any(|l| match l.kind {
-            LineKind::TableRow { ref body, .. } => {
-                cursor >= body.table_source.start && cursor <= body.table_source.end
-            }
-            _ => false,
-        })
-    }
-
     pub fn apply_table_op(&mut self, op: TableOp) -> bool {
         let pos = self.cursor_offset();
         self.apply_table_op_at(pos, op)

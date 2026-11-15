@@ -341,7 +341,7 @@ pub fn build_heading_menu_items(
 pub const TOOLBAR_PX_PAD: f32 = 8.0;
 pub const TOOLBAR_ICON_GAP: f32 = 2.0;
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn calculate_narrow_toolbar_min_width() -> f32 {
     let btn_w = f32::from(sz::BTN);
     // Left zone: hamburger menu button
@@ -363,7 +363,7 @@ pub fn calculate_narrow_toolbar_min_width() -> f32 {
     left_w + center_w + right_w + container_pad
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn calculate_wide_toolbar_min_width() -> f32 {
     let btn_w = f32::from(sz::BTN);
     // Menu bar element (File, Edit, View text buttons ~ 140px minimum)

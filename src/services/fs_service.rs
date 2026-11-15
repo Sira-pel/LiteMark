@@ -625,15 +625,6 @@ pub fn file_dialog_error() -> Option<String> {
     file_dialog_block_reason(probe_file_dialog()).map(str::to_string)
 }
 
-#[allow(dead_code)]
-pub fn safe_delete(path: &Path, is_dir: bool) -> io::Result<()> {
-    if is_dir {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
-}
-
 /// Folders the scan never descends into: VCS metadata and build output.
 const SKIPPED_ENTRIES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store", "node_modules", "target"];
 

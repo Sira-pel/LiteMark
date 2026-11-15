@@ -170,41 +170,33 @@ fn test_20000_row_table_parse_fast() {
 #[test]
 fn test_headings_and_hr() {
     let md = "# Title\n## Subtitle\n### Section\n---";
-    let blocks = parse_markdown(md);
-    assert_eq!(blocks.len(), 4);
-    match &blocks[0] {
-        Block::Heading { level, .. } => assert_eq!(*level, 1),
-        _ => panic!("Expected H1"),
-    }
-    match &blocks[1] {
-        Block::Heading { level, .. } => assert_eq!(*level, 2),
-        _ => panic!("Expected H2"),
-    }
-    match &blocks[2] {
-        Block::Heading { level, .. } => assert_eq!(*level, 3),
-        _ => panic!("Expected H3"),
-    }
-    assert!(matches!(blocks[3], Block::HorizontalRule { .. }));
+    let doc = parse_document(md);
+    let kinds: Vec<_> = doc.lines.iter().map(|l| l.kind.clone()).collect();
+    assert_eq!(
+        kinds,
+        [
+            LineKind::Heading { level: 1 },
+            LineKind::Heading { level: 2 },
+            LineKind::Heading { level: 3 },
+            LineKind::HorizontalRule,
+        ]
+    );
 }
 
 #[test]
 fn test_spans_formatting() {
     let input = "Normal **bold** *italic* <u>underlined</u> ~~strike~~ `code`";
-    let spans = parse_spans(input);
-    assert!(!spans.is_empty());
-    let has_bold = spans.iter().any(|s| s.bold && s.text.contains("bold"));
-    let has_italic = spans.iter().any(|s| s.italic && s.text.contains("italic"));
-    let has_underline = spans
-        .iter()
-        .any(|s| s.underline && s.text.contains("underlined"));
-    let has_strike = spans.iter().any(|s| s.strike && s.text.contains("strike"));
-    let has_code = spans.iter().any(|s| s.code && s.text.contains("code"));
-
-    assert!(has_bold, "Expected bold span");
-    assert!(has_italic, "Expected italic span");
-    assert!(has_underline, "Expected underline span");
-    assert!(has_strike, "Expected strike span");
-    assert!(has_code, "Expected code span");
+    let doc = parse_document(input);
+    let segs = &doc.lines[0].styled_segments;
+    let styled = |word: &str, pick: fn(&StyledSegment) -> bool| {
+        segs.iter()
+            .any(|s| pick(s) && input[s.source.clone()].contains(word))
+    };
+    assert!(styled("bold", |s| s.bold), "Expected bold span");
+    assert!(styled("italic", |s| s.italic), "Expected italic span");
+    assert!(styled("underlined", |s| s.underline), "Expected underline span");
+    assert!(styled("strike", |s| s.strike), "Expected strike span");
+    assert!(styled("code", |s| s.code), "Expected code span");
 }
 
 #[test]
@@ -230,26 +222,16 @@ fn test_styled_segments_bold() {
 #[test]
 fn test_task_list() {
     let md = "- [ ] Task to do\n- [x] Completed task";
-    let blocks = parse_markdown(md);
-    assert_eq!(blocks.len(), 2);
-    match &blocks[0] {
-        Block::ListItem {
-            is_task, checked, ..
-        } => {
-            assert!(is_task);
-            assert!(!checked);
-        }
-        _ => panic!("Expected task item"),
-    }
-    match &blocks[1] {
-        Block::ListItem {
-            is_task, checked, ..
-        } => {
-            assert!(is_task);
-            assert!(checked);
-        }
-        _ => panic!("Expected completed task item"),
-    }
+    let doc = parse_document(md);
+    let tasks: Vec<_> = doc
+        .lines
+        .iter()
+        .map(|l| match l.kind {
+            LineKind::ListItem { task, .. } => task,
+            ref other => panic!("Expected task item, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(tasks, [Some(false), Some(true)]);
 }
 
 #[test]
@@ -285,19 +267,19 @@ fn escaped_pipe_is_not_a_column_break() {
 #[test]
 fn test_table_parsing() {
     let md = "| Col 1 | Col 2 |\n| :--- | :--- |\n| Val A | Val B |";
-    let blocks = parse_markdown(md);
-    assert_eq!(blocks.len(), 1);
-    match &blocks[0] {
-        Block::Table { headers, rows, .. } => {
-            assert_eq!(headers.len(), 2);
-            assert_eq!(headers[0], "Col 1");
-            assert_eq!(headers[1], "Col 2");
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0][0], "Val A");
-            assert_eq!(rows[0][1], "Val B");
-        }
-        _ => panic!("Expected table block"),
-    }
+    let doc = parse_document(md);
+    let cell_texts = |line: &ParsedLine| match &line.kind {
+        LineKind::TableRow { body, .. } => body
+            .cells
+            .iter()
+            .map(|c| md[c.clone()].to_string())
+            .collect::<Vec<_>>(),
+        other => panic!("Expected table row, got {other:?}"),
+    };
+    assert_eq!(doc.lines.len(), 3);
+    assert_eq!(cell_texts(&doc.lines[0]), ["Col 1", "Col 2"]);
+    assert!(matches!(doc.lines[1].kind, LineKind::TableDelimiter));
+    assert_eq!(cell_texts(&doc.lines[2]), ["Val A", "Val B"]);
 }
 
 #[test]
@@ -319,17 +301,18 @@ fn test_parse_document_table() {
 #[test]
 fn rendered_click_maps_to_source_and_strike_is_marked() {
     let md = "# Hi\n\n~~gone~~";
-    let blocks = parse_markdown(md);
-    let offset = source_offset_for_click(md, 0, 1).unwrap();
-    assert!(md.is_char_boundary(offset));
+    let doc = parse_document(md);
+    // Display column 1 of the heading ("Hi" without "# ") is the "i".
+    let offset = doc.lines[0].offset_map.display_to_source(1);
     assert_eq!(&md[offset..offset + 1], "i");
-    let strike = blocks.iter().find_map(|block| match block {
-        Block::Paragraph { spans, .. } => spans.iter().find(|span| span.text.contains("gone")),
-        _ => None,
-    });
+    let strike = doc.lines[2]
+        .styled_segments
+        .iter()
+        .find(|s| md[s.source.clone()].contains("gone"));
     assert!(strike.unwrap().strike);
 
-    let bullet = source_offset_for_click("- alpha", 0, 0).unwrap();
+    let bullet_doc = parse_document("- alpha");
+    let bullet = bullet_doc.lines[0].offset_map.display_to_source(0);
     assert_eq!(&"- alpha"[bullet..bullet + 1], "a");
 }
 
@@ -3412,36 +3395,6 @@ fn table_membership_kinds_and_cells() {
     );
     drop(check);
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
-    let table_rows = |markdown: &str| {
-        parse_markdown(markdown)
-            .into_iter()
-            .filter_map(|block| match block {
-                Block::Table { rows, .. } => Some(rows.len() + 1),
-                Block::Heading { .. }
-                | Block::Paragraph { .. }
-                | Block::Blockquote { .. }
-                | Block::CodeBlock { .. }
-                | Block::ListItem { .. }
-                | Block::HorizontalRule { .. }
-                | Block::EmptyLine { .. } => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        table_rows("| a | b |\n| --- | --- |\n| c | d |\n    ```\ncode"),
-        vec![2],
-        "tail-fence-indent4"
-    );
-    assert_eq!(
-        table_rows("~~~\n| a | b |\n| --- | --- |\n| c | d |\n~~~"),
-        vec![2],
-        "inside-tilde"
-    );
-    assert_eq!(
-        table_rows("| a | b |\n| --- | --- |\n| c | d |\n\u{000b}"),
-        vec![2],
-        "tail-vtab"
-    );
 }
 
 fn wrap_snippet_contexts(inner: &str) -> Vec<(&'static str, String)> {

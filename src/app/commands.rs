@@ -572,12 +572,6 @@ impl LiteMarkApp {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn handle_toggle_theme(&mut self) {
-        self.settings.theme = self.settings.theme.toggle();
-        self.settings.save();
-    }
-
     pub fn handle_toggle_zen(&mut self) {
         self.zen_mode = !self.zen_mode;
         if self.zen_mode {

@@ -329,16 +329,6 @@ impl DocumentTab {
         self.refresh_cursor();
     }
 
-    #[allow(dead_code)]
-    pub fn insert_snippet(&mut self, snippet: &str) {
-        let cursor = self.cursor_offset();
-        self.edit(
-            self.selection_range().start..self.selection_range().end,
-            snippet,
-        );
-        let _ = cursor;
-    }
-
     pub fn smart_backspace_in_mode(&mut self, mode: ViewMode) -> bool {
         self.pending_formats = ActiveFormats::default();
         if mode == ViewMode::Raw {

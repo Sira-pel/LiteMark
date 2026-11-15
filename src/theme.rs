@@ -26,14 +26,6 @@ impl ThemeMode {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn toggle(&self) -> Self {
-        match self {
-            ThemeMode::YaruDark => ThemeMode::YaruLight,
-            ThemeMode::YaruLight => ThemeMode::YaruDark,
-            ThemeMode::System => ThemeMode::YaruDark,
-        }
-    }
 }
 
 pub mod sz {
@@ -78,12 +70,9 @@ pub mod sz {
     pub const TABLE_EDGE: Pixels = px(4.);
     /// Gap between a table control's highlight and the pill edge.
     pub const TABLE_BTN_INSET: Pixels = px(3.);
-    #[allow(dead_code)]
-    pub const BODY: f32 = 17.;
     pub const MEASURE_FALLBACK: Pixels = px(672.);
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub mode: ThemeMode,
@@ -121,8 +110,6 @@ pub struct Theme {
     pub h1: Rgba,
     pub h2: Rgba,
     pub code_text: Rgba,
-    pub pill_border: Rgba,
-    pub pill_text: Rgba,
     pub placeholder: Rgba,
     pub menu_text: Rgba,
     pub menu_shortcut: Rgba,
@@ -146,11 +133,6 @@ pub struct Theme {
 }
 
 impl Theme {
-    #[allow(dead_code)]
-    pub fn new(mode: ThemeMode) -> Self {
-        Self::resolve(mode, WindowAppearance::Dark)
-    }
-
     pub fn resolve(mode: ThemeMode, appearance: WindowAppearance) -> Self {
         if mode.resolved_is_dark(appearance) {
             Self {
@@ -187,8 +169,6 @@ impl Theme {
                 h1: rgb(0xe8e8e8),
                 h2: rgb(0xe2e2e2),
                 code_text: rgb(0xdcdcdc),
-                pill_border: rgb(0x3a3a3a),
-                pill_text: rgb(0xb4b4b4),
                 placeholder: rgb(0x8a8a8a),
                 menu_text: rgb(0xc8c8c8),
                 menu_shortcut: rgb(0x8e8e8e),
@@ -237,8 +217,6 @@ impl Theme {
                 h1: rgb(0x1f1f1f),
                 h2: rgb(0x262626),
                 code_text: rgb(0x2e2e2e),
-                pill_border: rgb(0xcccccc),
-                pill_text: rgb(0x555555),
                 placeholder: rgb(0x666666),
                 menu_text: rgb(0x383838),
                 menu_shortcut: rgb(0x6e6e6e),

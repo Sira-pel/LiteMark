@@ -128,7 +128,7 @@ fn absorb_into_span_group(previous: &mut DiffEdit, edit: &DiffEdit) -> bool {
 }
 
 impl UndoHistory {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn stored_bytes(&self) -> usize {
         self.undo_bytes + self.redo_bytes
     }
@@ -1105,14 +1105,14 @@ fn push_wrapped(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn hud_should_hide(elapsed_ms: u64) -> bool {
     elapsed_ms >= TRANSIENT_TTL_MS
 }
 
 /// Minimum block height for a WYSIWYG list row, in CSS pixels.
 /// The extra gap keeps the next bullet from painting over this one.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn wysiwyg_list_row_height(font_px: f32) -> f32 {
     font_px * 1.65 + 8.0
 }

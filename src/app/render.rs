@@ -1408,7 +1408,6 @@ impl Render for LiteMarkApp {
                                         on_toggle_folder: on_toggle_folder.clone(),
                                         on_workspace_menu: on_toggle_workspace_menu.clone(),
                                         workspace_menu_open: self.workspace_menu_open,
-                                        on_close: on_toggle_sidebar.clone(),
                                         on_context_menu: on_sidebar_context.clone(),
                                         on_drop_item: on_drop_item.clone(),
                                         on_range_select: on_range_select.clone(),

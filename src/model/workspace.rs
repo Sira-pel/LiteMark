@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use super::document::FileType;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceFile {
     pub id: String,
@@ -12,7 +11,6 @@ pub struct WorkspaceFile {
     pub updated_at: u64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceFolder {
     pub id: String,
@@ -22,7 +20,6 @@ pub struct WorkspaceFolder {
     pub is_open: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceDirectory {
     pub folder_name: String,

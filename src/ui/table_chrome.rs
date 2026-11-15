@@ -330,7 +330,7 @@ pub fn action_anchor(tables: &[TableGeom], hit: &TableHit, hover: Option<&TableH
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn hit_test(tables: &[TableGeom], point: Point<Pixels>) -> Option<TableHit> {
     hit_test_occupied(tables, point, &[])
 }
@@ -592,7 +592,7 @@ pub struct TableHover {
     pub row: Option<usize>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn hover_at(
     tables: &[TableGeom],
     at: Point<Pixels>,
@@ -601,6 +601,7 @@ pub fn hover_at(
     hover_at_occupied(tables, at, previous, &[])
 }
 
+#[cfg(test)]
 pub fn hover_at_occupied(
     tables: &[TableGeom],
     at: Point<Pixels>,

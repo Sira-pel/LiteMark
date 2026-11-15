@@ -196,7 +196,7 @@ impl InListOrQuoteTracker {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn in_list_or_quote(lines: &[ParsedLine]) -> bool {
     let mut saw_blank = false;
     for line in lines.iter().rev() {

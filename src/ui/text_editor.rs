@@ -32,11 +32,8 @@ pub struct PaintCell {
     pub raw_range: Range<usize>,
     pub inner_range: Range<usize>,
     pub box_bounds: Bounds<Pixels>,
-    #[allow(dead_code)]
     pub text_origin: Point<Pixels>,
-    #[allow(dead_code)]
     pub shaped: ShapedLine,
-    #[allow(dead_code)]
     pub offset_map: RowOffsetMap,
     pub lines: Vec<CellLine>,
 }
@@ -165,7 +162,7 @@ fn table_width_key(table_text: &str, font: &str, mono_font: &str, font_size: Pix
     hasher.finish()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn str_display_width(s: &str) -> usize {
     s.chars()
         .map(|c| {
@@ -866,8 +863,6 @@ pub struct EditorElement<V: 'static> {
     pub text_color: Hsla,
     pub strong_color: Hsla,
     pub muted_color: Hsla,
-    #[allow(dead_code)]
-    pub faint_color: Hsla,
     pub h1_color: Hsla,
     pub h2_color: Hsla,
     pub code_color: Hsla,

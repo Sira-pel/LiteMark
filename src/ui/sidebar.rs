@@ -222,7 +222,6 @@ pub fn build_sidebar_tree(
     items
 }
 
-#[allow(dead_code)]
 pub struct SidebarProps<
     'a,
     FSelect,
@@ -231,7 +230,6 @@ pub struct SidebarProps<
     FDeleteFolder,
     FToggleFolder,
     FWorkspaceMenu,
-    FClose,
     FContext,
     FDropItem,
     FRange,
@@ -244,7 +242,6 @@ pub struct SidebarProps<
     FDeleteFolder: Fn(String, &mut App) + 'static + Clone,
     FToggleFolder: Fn(String, &mut App) + 'static + Clone,
     FWorkspaceMenu: Fn(&mut App) + 'static + Clone,
-    FClose: Fn(&mut App) + 'static + Clone,
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(Vec<SidebarTarget>, Option<String>, bool, &mut App) + 'static + Clone,
     FRange: Fn(SidebarTarget, &mut App) + 'static + Clone,
@@ -273,7 +270,6 @@ pub struct SidebarProps<
     pub on_workspace_menu: FWorkspaceMenu,
     /// Drives the pressed look and chevron direction of the title button.
     pub workspace_menu_open: bool,
-    pub on_close: FClose,
     pub on_context_menu: FContext,
     pub on_drop_item: FDropItem,
     /// Shift+click: extend the selection from the anchor to this row.
@@ -294,7 +290,6 @@ pub fn render_sidebar<
     FDeleteFolder,
     FToggleFolder,
     FWorkspaceMenu,
-    FClose,
     FContext,
     FDropItem,
     FRange,
@@ -309,7 +304,6 @@ pub fn render_sidebar<
         FDeleteFolder,
         FToggleFolder,
         FWorkspaceMenu,
-        FClose,
         FContext,
         FDropItem,
         FRange,
@@ -325,7 +319,6 @@ where
     FDeleteFolder: Fn(String, &mut App) + 'static + Clone,
     FToggleFolder: Fn(String, &mut App) + 'static + Clone,
     FWorkspaceMenu: Fn(&mut App) + 'static + Clone,
-    FClose: Fn(&mut App) + 'static + Clone,
     FContext: Fn(SidebarTarget, Point<Pixels>, &mut App) + 'static + Clone,
     FDropItem: Fn(Vec<SidebarTarget>, Option<String>, bool, &mut App) + 'static + Clone,
     FRange: Fn(SidebarTarget, &mut App) + 'static + Clone,
