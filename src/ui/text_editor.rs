@@ -831,7 +831,12 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
     }
     let local_x = position.x - row.origin.x;
     if local_x <= px(0.0) {
-        return row.offset_map.display_to_source(0);
+        // Off-screen rows share an empty map that maps to byte 0, so clamp
+        // to the row like the branch below does.
+        return row
+            .offset_map
+            .display_to_source(0)
+            .clamp(row.byte_start, row.byte_end);
     }
     let display_idx = row.shaped.closest_index_for_x(local_x);
     row.offset_map
@@ -3692,6 +3697,29 @@ mod tests {
         let _ = editor_home_visual(&paint, &mut caret, false);
         let _ = editor_end_visual(&paint, &mut caret, false);
         let _ = move_vertical_visual(&paint, "0123456789", &mut caret, 1, false, ViewMode::Wysiwyg);
+    }
+
+    #[test]
+    fn drag_left_of_an_off_screen_row_stays_in_that_row() {
+        // An off-screen row: shared empty map and line, real byte range.
+        let row = PaintRow {
+            line_index: 40,
+            byte_start: 500,
+            byte_end: 520,
+            origin: point(px(100.0), px(1000.0)),
+            line_height: px(28.0),
+            shaped: std::rc::Rc::new(ShapedLine::default()),
+            offset_map: Arc::new(RowOffsetMap::default()),
+            checkbox_hit: None,
+            link_hits: Arc::default(),
+            cells: Vec::new(),
+        };
+        let paint = EditorPaint {
+            rows: vec![row],
+            ..EditorPaint::default()
+        };
+        assert_eq!(index_in_rows(&paint, point(px(-400.0), px(1010.0))), 500);
+        assert_eq!(index_in_rows(&paint, point(px(100.0), px(1010.0))), 500);
     }
 
     #[test]
