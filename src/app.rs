@@ -189,6 +189,9 @@ pub struct LiteMarkApp {
     pub pending_rename_focus: bool,
     pub sidebar_menu: Option<SidebarMenu>,
     pub workspace_menu_open: bool,
+    /// Recent folders that still exist, checked when the workspace menu
+    /// opens rather than on every frame it is open.
+    workspace_menu_recents: Vec<PathBuf>,
     pub rename_target: Option<SidebarTarget>,
     pub rename_value: String,
     pub rename_field: Entity<LineField>,
@@ -522,6 +525,7 @@ impl LiteMarkApp {
             pending_rename_focus: false,
             sidebar_menu: None,
             workspace_menu_open: false,
+            workspace_menu_recents: Vec::new(),
             rename_target: None,
             rename_value: String::new(),
             rename_field,
@@ -648,6 +652,7 @@ impl LiteMarkApp {
             pending_rename_focus: false,
             sidebar_menu: None,
             workspace_menu_open: false,
+            workspace_menu_recents: Vec::new(),
             rename_target: None,
             rename_value: String::new(),
             rename_field: Self::dummy_line_field(cx, "rename-field"),

@@ -22,6 +22,7 @@ impl LiteMarkApp {
             |name| folder.join(name).exists(),
         )?;
         let content = tab.file_text();
+        let previous_path = tab.file_path.clone();
         let saved_path = if planned.path.exists() {
             atomic_save(&planned.path, &content)
                 .map_err(|err| format!("Couldn't save {}: {err}", planned.path.display()))?;
@@ -45,7 +46,7 @@ impl LiteMarkApp {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or(planned.title);
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
-            tab.file_path = Some(saved_path);
+            tab.file_path = Some(saved_path.clone());
             tab.title = saved_title;
             let type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
             tab.is_modified = false;
@@ -53,7 +54,17 @@ impl LiteMarkApp {
                 self.refresh_find();
             }
         }
-        self.rescan_workspace();
+        // Re-saving a file the sidebar already lists changes nothing in the
+        // tree, so update its timestamp instead of rescanning the whole
+        // workspace on the UI thread on every Ctrl+S.
+        let listed = (previous_path.as_ref() == Some(&saved_path))
+            .then(|| self.workspace.files.iter_mut().find(|file| file.path == saved_path))
+            .flatten();
+        if let Some(file) = listed {
+            file.updated_at = modified_secs(&saved_path).unwrap_or(file.updated_at);
+        } else {
+            self.rescan_workspace();
+        }
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
             let path = tab.file_path.clone();
             tab.workspace_file_id = path.and_then(|path| {

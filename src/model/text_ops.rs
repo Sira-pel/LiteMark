@@ -417,31 +417,33 @@ struct TextLine {
 /// The line that contains `offset`. A caret between CR and LF belongs to the
 /// line that owns that CRLF, and its content end is the CR, not the LF.
 fn line_span_at(content: &str, offset: usize) -> TextLine {
+    // Look only around `offset`: callers run this once per line of a
+    // selection, and scanning from the top made those commands O(n²).
     let bytes = content.as_bytes();
     let offset = offset.min(bytes.len());
-    let mut start = 0usize;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let ending = line_ending_len(content, index);
-        if ending > 0 {
-            let next = index + ending;
-            if offset < next {
-                return TextLine {
-                    start,
-                    content_end: index,
-                    next,
-                };
+    let is_eol = |b: &u8| *b == b'\n' || *b == b'\r';
+    // A caret between CR and LF: that CR ends this line, not the previous one.
+    let between_crlf =
+        offset > 0 && bytes.get(offset) == Some(&b'\n') && bytes[offset - 1] == b'\r';
+    let look_back = if between_crlf { offset - 1 } else { offset };
+    let start = bytes[..look_back]
+        .iter()
+        .rposition(is_eol)
+        .map_or(0, |eol| eol + 1);
+    match bytes[start..].iter().position(is_eol) {
+        Some(rel) => {
+            let content_end = start + rel;
+            TextLine {
+                start,
+                content_end,
+                next: content_end + line_ending_len(content, content_end),
             }
-            index = next;
-            start = next;
-        } else {
-            index += 1;
         }
-    }
-    TextLine {
-        start,
-        content_end: bytes.len(),
-        next: bytes.len(),
+        None => TextLine {
+            start,
+            content_end: bytes.len(),
+            next: bytes.len(),
+        },
     }
 }
 
@@ -1122,6 +1124,63 @@ pub fn wysiwyg_list_row_height(font_px: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// The original whole-document scan, kept to check the local version.
+    fn line_span_at_reference(content: &str, offset: usize) -> TextLine {
+        let bytes = content.as_bytes();
+        let offset = offset.min(bytes.len());
+        let mut start = 0usize;
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let ending = line_ending_len(content, index);
+            if ending > 0 {
+                let next = index + ending;
+                if offset < next {
+                    return TextLine {
+                        start,
+                        content_end: index,
+                        next,
+                    };
+                }
+                index = next;
+                start = next;
+            } else {
+                index += 1;
+            }
+        }
+        TextLine {
+            start,
+            content_end: bytes.len(),
+            next: bytes.len(),
+        }
+    }
+
+    #[test]
+    fn line_span_at_matches_the_full_scan_on_every_offset() {
+        let alphabet = *b"a\n\r";
+        // Every string up to 7 bytes over {a, LF, CR}, every offset.
+        for len in 0..=7u32 {
+            for code in 0..3usize.pow(len) {
+                let mut c = code;
+                let text: String = (0..len)
+                    .map(|_| {
+                        let ch = alphabet[c % 3] as char;
+                        c /= 3;
+                        ch
+                    })
+                    .collect();
+                for offset in 0..=text.len() + 1 {
+                    let got = line_span_at(&text, offset);
+                    let want = line_span_at_reference(&text, offset);
+                    assert_eq!(
+                        (got.start, got.content_end, got.next),
+                        (want.start, want.content_end, want.next),
+                        "{text:?} at {offset}"
+                    );
+                }
+            }
+        }
+    }
+
     fn visual_row_count(content: &str, wrap_cols: usize) -> usize {
         visual_row_count_tabbed(content, wrap_cols, 0)
     }

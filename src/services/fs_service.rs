@@ -347,12 +347,73 @@ pub fn atomic_save_new(dir: &Path, desired_name: &str, content: &str) -> io::Res
     ))
 }
 
+/// Largest note we load. Bigger files take seconds to read and lay out on
+/// the UI thread, which freezes the window.
+pub const MAX_NOTE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// How much of a file `looks_binary` inspects.
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x0004;
+
+/// Why `meta` can't be opened as a note, if it can't.
+fn note_open_block(meta: &fs::Metadata) -> Option<String> {
+    if meta.is_dir() {
+        return Some("it's a folder".into());
+    }
+    if !meta.is_file() {
+        // FIFOs, sockets and devices: reading them can block forever.
+        return Some("not a regular file".into());
+    }
+    if meta.len() > MAX_NOTE_BYTES {
+        return Some(format!(
+            "file is too large ({} MB, limit {} MB)",
+            meta.len() / (1024 * 1024),
+            MAX_NOTE_BYTES / (1024 * 1024)
+        ));
+    }
+    None
+}
+
 /// Read a note. Failure is an error — callers must not substitute an empty document.
+/// Never blocks on a FIFO or device, and refuses files over `MAX_NOTE_BYTES`.
 pub fn read_note(path: &Path) -> Result<String, String> {
+    use std::io::Read;
     let fail = |err: &dyn std::fmt::Display| format!("Couldn't open {}: {err}", path.display());
-    let bytes = fs::read(path).map_err(|err| fail(&err))?;
+    let meta = fs::metadata(path).map_err(|err| fail(&err))?;
+    if let Some(reason) = note_open_block(&meta) {
+        return Err(fail(&reason));
+    }
+    // The path may be swapped for a FIFO after the check above, so open
+    // without blocking and check the handle we actually got.
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    options.custom_flags(O_NONBLOCK);
+    let file = options.open(path).map_err(|err| fail(&err))?;
+    let meta = file.metadata().map_err(|err| fail(&err))?;
+    if let Some(reason) = note_open_block(&meta) {
+        return Err(fail(&reason));
+    }
+    // Check the head for binary content before reading the rest, so a large
+    // binary file costs 8 KiB, not its whole size.
+    let mut reader = file.take(MAX_NOTE_BYTES + 1);
+    let mut bytes = Vec::with_capacity(BINARY_SNIFF_BYTES);
+    (&mut reader)
+        .take(BINARY_SNIFF_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|err| fail(&err))?;
     if looks_binary(&bytes) {
         return Err(fail(&"binary file, can't open"));
+    }
+    bytes.reserve((meta.len() as usize).saturating_sub(bytes.len()));
+    // The outer take is +1 so a file that grew past the limit is caught.
+    reader.read_to_end(&mut bytes).map_err(|err| fail(&err))?;
+    if bytes.len() as u64 > MAX_NOTE_BYTES {
+        return Err(fail(&"file is too large"));
     }
     String::from_utf8(bytes).map_err(|err| fail(&err))
 }
@@ -655,8 +716,34 @@ pub fn safe_delete(path: &Path, is_dir: bool) -> io::Result<()> {
     }
 }
 
+/// Extensions of common binary formats. Without this every unknown file
+/// counts as plain text, so images, video and disk images show up as notes.
+/// Short or generic extensions (`a`, `o`, `bin`, `dat`, `db`) are left out:
+/// plain-text files use them too, and hiding a note is worse than listing a
+/// binary file, which `read_note` refuses to open anyway.
+const BINARY_EXTENSIONS: &[&str] = &[
+    "7z", "aac", "apk", "app", "avi", "avif", "bmp", "bz2", "class", "deb", "dll", "dmg", "doc",
+    "docx", "dylib", "epub", "exe", "flac", "gif", "gz", "heic", "ico", "img", "iso", "jar", "jpeg",
+    "jpg", "m4a", "m4v", "mkv", "mov", "mp3", "mp4", "mpg", "msi", "odt", "ogg", "opus", "otf",
+    "pkg", "png", "ppt", "pptx", "psd", "pyc", "rar", "rpm", "so", "sqlite", "tar", "tgz", "tif",
+    "tiff", "ttf", "vmdk", "wav", "webm", "webp", "woff", "woff2", "xls", "xlsx", "xz", "zip",
+    "zst",
+];
+
+fn has_binary_extension(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && BINARY_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+    })
+}
+
 /// Folders the scan never descends into: VCS metadata and build output.
 const SKIPPED_ENTRIES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store", "node_modules", "target"];
+
+/// Modification time of `path` in Unix seconds, as the sidebar stores it.
+pub fn modified_secs(path: &Path) -> Option<u64> {
+    let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
+    modified.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
 
 /// Folders nested deeper than this below the notes folder are not listed.
 pub const MAX_SCAN_DEPTH: usize = 64;
@@ -724,7 +811,8 @@ fn listed_entry(entry: fs::DirEntry, show_code_files: bool) -> Option<ScanEntry>
     } else if entry_type.is_file() {
         let file_type = FileType::from_filename(&name);
         let listed = match file_type {
-            FileType::Markdown | FileType::PlainText => true,
+            FileType::Markdown => true,
+            FileType::PlainText => !has_binary_extension(&name),
             FileType::Code => show_code_files,
             FileType::Pdf => false,
         };
@@ -875,6 +963,17 @@ pub fn pick_directory() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_extensions_hide_media_but_not_generic_names() {
+        for name in ["photo.png", "Clip.MP4", "disk.iso", "notes.sqlite"] {
+            assert!(has_binary_extension(name), "{name}");
+        }
+        // Text files use these too; they stay listed.
+        for name in ["data.dat", "lib.a", "main.o", "notes.db", "config.bin", ".png", "README"] {
+            assert!(!has_binary_extension(name), "{name}");
+        }
+    }
 
     #[test]
     fn test_sanitize_name() {
@@ -1566,6 +1665,75 @@ mod tests {
         let good = dir.join("main.rs");
         fs::write(&good, "fn main() {}").unwrap();
         assert_eq!(read_note(&good).unwrap(), "fn main() {}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_note_does_not_hang_on_a_fifo() {
+        let dir = std::env::temp_dir().join(format!("litemark-fifo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("pipe.md");
+        let status = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(status.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_note(&path));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("read_note blocked on a FIFO");
+        assert!(result.unwrap_err().contains("not a regular file"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_note_rejects_binary_from_the_head_without_reading_it_all() {
+        let dir = std::env::temp_dir().join(format!("litemark-binhead-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let text = dir.join("long.txt");
+        let content = "line of text\n".repeat(2000);
+        fs::write(&text, &content).unwrap();
+        assert_eq!(read_note(&text).unwrap(), content);
+        let bin = dir.join("disk.txt");
+        let file = fs::File::create(&bin).unwrap();
+        file.set_len(MAX_NOTE_BYTES - 1).unwrap();
+        drop(file);
+        assert!(read_note(&bin).unwrap_err().contains("binary"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidebar_skips_binary_files_but_keeps_text() {
+        let dir = std::env::temp_dir().join(format!("litemark-binlist-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["backup.iso", "photo.JPG", "notes.txt", "data.csv", "README", ".jpg"] {
+            fs::write(dir.join(name), "x").unwrap();
+        }
+        let mut names: Vec<_> = scan_workspace_dir(&dir, false)
+            .files
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, [".jpg", "README", "data.csv", "notes.txt"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_note_refuses_oversized_files() {
+        let dir = std::env::temp_dir().join(format!("litemark-big-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.md");
+        let file = fs::File::create(&big).unwrap();
+        file.set_len(MAX_NOTE_BYTES + 1).unwrap();
+        drop(file);
+        assert!(read_note(&big).unwrap_err().contains("too large"));
         let _ = fs::remove_dir_all(&dir);
     }
 

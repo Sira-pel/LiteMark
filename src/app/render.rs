@@ -805,6 +805,15 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.workspace_menu_open = !this.workspace_menu_open;
+                    if this.workspace_menu_open {
+                        this.workspace_menu_recents = this
+                            .settings
+                            .recent_folders
+                            .iter()
+                            .filter(|p| p.is_dir())
+                            .cloned()
+                            .collect();
+                    }
                     this.sidebar_menu = None;
                     cx.notify();
                 });
@@ -1469,10 +1478,9 @@ impl Render for LiteMarkApp {
                             })
                             .when(self.workspace_menu_open && self.show_sidebar, |parent| {
                 let recents: Vec<(String, PathBuf)> = self
-                    .settings
-                    .recent_folders
+                    .workspace_menu_recents
                     .iter()
-                    .filter(|p| p.is_dir() && **p != self.workspace.folder_path)
+                    .filter(|p| **p != self.workspace.folder_path)
                     .map(|p| {
                         let name = p
                             .file_name()
