@@ -378,6 +378,10 @@ impl LiteMarkApp {
         }
         self.pdf_opening = Some(path.clone());
         self.show_toast(format!("Opening {name}…"), cx);
+        let started = PdfOpenStart {
+            tab_id: self.active_tab_id.clone(),
+            toast_epoch: self.toast_epoch,
+        };
         let task = cx.background_executor().spawn({
             let path = path.clone();
             async move { extract_text_from_pdf(&path) }
@@ -385,41 +389,59 @@ impl LiteMarkApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
-                this.pdf_opening = None;
-                this.saved_toast = None;
-                match result {
-                    Ok((extracted_md, pages)) => {
-                        let paths: Vec<Option<&Path>> = this
-                            .tabs
-                            .iter()
-                            .map(|tab| tab.file_path.as_deref())
-                            .collect();
-                        if let Some(index) = tab_index_for_path(&paths, &path) {
-                            this.active_tab_id = this.tabs[index].id.clone();
-                        } else {
-                            let new_id = this.tab_ids.alloc();
-                            let mut tab = DocumentTab::new(
-                                new_id.clone(),
-                                name,
-                                extracted_md,
-                                Some(path),
-                                None,
-                            );
-                            tab.file_type = FileType::Pdf;
-                            tab.pdf_page_count = Some(pages);
-                            this.tabs.push(tab);
-                            this.active_tab_id = new_id;
-                        }
-                        this.show_pdf_modal = true;
-                        this.prompt_selected_ix = 0;
-                    }
-                    Err(err) => this.show_error(format!("Couldn't open PDF: {err}")),
-                }
+                this.finish_pdf_open(name, path, result, &started, cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Show a PDF whose text extraction just finished. The progress toast
+    /// goes only if no other toast replaced it, and the PDF takes over the
+    /// window only if the user is still on the tab they opened it from.
+    pub(super) fn finish_pdf_open(
+        &mut self,
+        name: String,
+        path: PathBuf,
+        result: Result<(String, usize), String>,
+        started: &PdfOpenStart,
+        cx: &mut Context<Self>,
+    ) {
+        self.pdf_opening = None;
+        if self.toast_epoch == started.toast_epoch {
+            self.saved_toast = None;
+        }
+        let (extracted_md, pages) = match result {
+            Ok(extracted) => extracted,
+            Err(err) => {
+                self.show_error(format!("Couldn't open PDF: {err}"));
+                return;
+            }
+        };
+        let still_there = self.active_tab_id == started.tab_id;
+        let paths: Vec<Option<&Path>> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.file_path.as_deref())
+            .collect();
+        let id = if let Some(index) = tab_index_for_path(&paths, &path) {
+            self.tabs[index].id.clone()
+        } else {
+            let new_id = self.tab_ids.alloc();
+            let mut tab = DocumentTab::new(new_id.clone(), name.clone(), extracted_md, Some(path), None);
+            tab.file_type = FileType::Pdf;
+            tab.pdf_page_count = Some(pages);
+            self.tabs.push(tab);
+            new_id
+        };
+        if still_there {
+            self.active_tab_id = id;
+            self.show_pdf_modal = true;
+            self.prompt_selected_ix = 0;
+        } else {
+            self.show_toast(format!("Opened {name} in a new tab"), cx);
+        }
     }
 
     pub fn handle_export(&mut self, format: &'static str, cx: &mut Context<Self>) {
@@ -912,4 +934,10 @@ impl LiteMarkApp {
             tab.select_all();
         }
     }
+}
+
+/// What was on screen when a PDF started opening.
+pub(super) struct PdfOpenStart {
+    pub(super) tab_id: String,
+    pub(super) toast_epoch: u64,
 }

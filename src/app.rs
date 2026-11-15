@@ -761,3 +761,7 @@ mod note_drop_tests;
 #[cfg(test)]
 #[path = "typing_tests.rs"]
 mod typing_tests;
+
+#[cfg(test)]
+#[path = "pdf_open_tests.rs"]
+mod pdf_open_tests;
