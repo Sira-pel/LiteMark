@@ -105,7 +105,7 @@ where
     div()
         .id("find-replace-panel")
         .absolute()
-        .top(sz::TITLE_BAR + sz::TOOLBAR + px(8.0))
+        .top(px(8.0))
         .right(px(FIND_PANEL_RIGHT))
         .w(find_panel_width(props.window_width))
         .flex()

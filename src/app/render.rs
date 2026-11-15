@@ -1333,30 +1333,6 @@ impl Render for LiteMarkApp {
                         },
                         &theme,
                     ))
-                    // 3. Find & Replace Bar (Overlay if enabled)
-                    // Deferred so it paints above the editor and gets its
-                    // clicks, like the narrow sidebar drawer.
-                    .when(self.show_find_replace, |s| {
-                        s.child(deferred(render_find_replace_bar(
-                            FindReplaceBarProps {
-                                find_field: self.find_field.clone(),
-                                replace_field: self.replace_field.clone(),
-                                match_label: self.match_label(),
-                                match_case: self.match_case,
-                                not_found: self.not_found,
-                                on_find_next: on_find_next.clone(),
-                                on_find_prev: on_find_prev.clone(),
-                                on_replace: on_replace.clone(),
-                                on_replace_all: on_replace_all.clone(),
-                                on_close: on_find_close.clone(),
-                                on_toggle_case: on_toggle_case.clone(),
-                                show_replace: self.show_replace_row,
-                                on_toggle_replace: on_toggle_replace.clone(),
-                                window_width,
-                            },
-                            &theme,
-                        )))
-                    })
                     // 4. Middle Area: Sidebar + Editor
                     .child(
                         div()
@@ -1463,6 +1439,31 @@ impl Render for LiteMarkApp {
                                 },
                                 &theme,
                             ))
+                            // Find panel: after the editor so it draws above it and
+                            // gets its clicks, before the workspace menu so that menu
+                            // still covers it. Menus, the narrow sidebar drawer and
+                            // prompts draw later (or deferred), so they cover it too.
+                            .when(self.show_find_replace, |s| {
+                                s.child(render_find_replace_bar(
+                                    FindReplaceBarProps {
+                                        find_field: self.find_field.clone(),
+                                        replace_field: self.replace_field.clone(),
+                                        match_label: self.match_label(),
+                                        match_case: self.match_case,
+                                        not_found: self.not_found,
+                                        on_find_next: on_find_next.clone(),
+                                        on_find_prev: on_find_prev.clone(),
+                                        on_replace: on_replace.clone(),
+                                        on_replace_all: on_replace_all.clone(),
+                                        on_close: on_find_close.clone(),
+                                        on_toggle_case: on_toggle_case.clone(),
+                                        show_replace: self.show_replace_row,
+                                        on_toggle_replace: on_toggle_replace.clone(),
+                                        window_width,
+                                    },
+                                    &theme,
+                                ))
+                            })
                             .when(self.workspace_menu_open && self.show_sidebar, |parent| {
                 let recents: Vec<(String, PathBuf)> = self
                     .settings

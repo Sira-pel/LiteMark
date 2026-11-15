@@ -24,3 +24,21 @@ fn ctrl_f_opens_find_without_the_replace_row() {
         assert!(app.pending_find_focus);
     });
 }
+
+#[std_test]
+fn replace_does_nothing_while_a_prompt_is_open() {
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("a a a", cx));
+    view.update(cx, |app, _cx| {
+        app.find_term = "a".into();
+        app.replace_term = "b".into();
+        app.prompt = Some(Prompt::CloseWindow);
+        app.replace_all_matches();
+        app.replace_current();
+        assert_eq!(app.active_tab().unwrap().content, "a a a");
+
+        app.prompt = None;
+        app.replace_all_matches();
+        assert_eq!(app.active_tab().unwrap().content, "b b b");
+    });
+}
