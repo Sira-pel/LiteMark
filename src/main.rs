@@ -284,7 +284,7 @@ fn main() {
                 .detach();
             }
 
-            cx.open_window(
+            let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                         None,
@@ -298,8 +298,13 @@ fn main() {
                     ..Default::default()
                 },
                 move |_, cx| cx.new(|cx| LiteMarkApp::new(initial_file.clone(), cx)),
-            )
-            .unwrap();
+            );
+            // No display server, or the window system refused the window:
+            // say so instead of panicking with a raw unwrap message.
+            if let Err(err) = opened {
+                eprintln!("LiteMark couldn't open its window: {err:#}");
+                std::process::exit(1);
+            }
         });
 }
 
