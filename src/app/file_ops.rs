@@ -329,19 +329,10 @@ impl LiteMarkApp {
 
     /// Continue the close-window flow after a tab was saved with a name:
     /// name the next untitled dirty tab, or finish the save-all.
+    /// Same as Save on the close-window prompt, so a note changed on disk
+    /// gets the "Changed on disk" prompt here too.
     pub(super) fn resume_close_window(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.first_unnamed_dirty_tab() {
-            self.pending_after_save = Some(PendingAfterSave::CloseWindow);
-            self.begin_save_naming(&id, cx);
-            return;
-        }
-        match self.save_all_dirty() {
-            Ok(()) => self.allow_window_close = true,
-            Err(err) => {
-                self.show_file_error(err);
-                self.show_prompt(Prompt::CloseWindow);
-            }
-        }
+        self.save_all_then_close(cx);
     }
 
     pub(super) fn commit_rename(&mut self, name_override: Option<String>, _cx: &mut Context<Self>) {

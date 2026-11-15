@@ -297,3 +297,30 @@ fn closing_the_window_asks_about_a_note_changed_on_disk() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[std_test]
+fn naming_an_untitled_note_on_close_still_asks_about_changed_files() {
+    let root = fresh_root("closenamed");
+    let path = root.join("journal.md");
+    std::fs::write(&path, "mine\n").unwrap();
+
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("untitled", cx));
+    view.update(cx, |app, cx| {
+        app.workspace = scan_workspace_dir(&root, true);
+        app.active_tab_mut().unwrap().is_modified = true;
+        click_open(app, &path);
+        let tab = app.active_tab_mut().unwrap();
+        tab.edit(0..0, "edited ");
+        tab.is_modified = true;
+        std::fs::write(&path, "theirs\n").unwrap();
+
+        app.request_close_window();
+        app.answer_prompt("Save", cx);
+        app.commit_save_naming(Some("named".to_string()), cx);
+        assert!(matches!(app.prompt, Some(Prompt::ExternalChange { .. })));
+        assert!(!app.allow_window_close);
+    });
+
+    let _ = std::fs::remove_dir_all(&root);
+}

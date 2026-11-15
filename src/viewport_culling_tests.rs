@@ -238,6 +238,15 @@ fn touchpad_flick_keeps_scrolling_after_the_events_stop() {
         view.read_with(cx, |app, _| f32::from(app.editor_scroll.offset().y))
     };
     let pos = view.read_with(&cx, |app, _| app.editor_scroll.bounds().center());
+    // A fake clock moved by fixed steps, so a slow runner can't stretch the
+    // gaps between events into a "fingers rested" pause.
+    let advance = |view: &Entity<LiteMarkApp>, cx: &mut VisualTestContext, ms: u64| {
+        view.update(cx, |app, _| {
+            let now = app.scroll_clock.unwrap_or_else(std::time::Instant::now);
+            app.scroll_clock = Some(now + std::time::Duration::from_millis(ms));
+        });
+    };
+    advance(&view, &mut cx, 0);
     for _ in 0..12 {
         cx.simulate_event(ScrollWheelEvent {
             position: pos,
@@ -245,13 +254,13 @@ fn touchpad_flick_keeps_scrolling_after_the_events_stop() {
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
         });
-        std::thread::sleep(std::time::Duration::from_millis(8));
+        advance(&view, &mut cx, 8);
     }
     let at_release = y_of(&view, &cx);
     assert!(at_release < -100.0, "the flick itself scrolled: {at_release}");
     let mut last = at_release;
     for _ in 0..12 {
-        std::thread::sleep(std::time::Duration::from_millis(16));
+        advance(&view, &mut cx, 16);
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
         last = y_of(&view, &cx);
@@ -266,7 +275,7 @@ fn touchpad_flick_keeps_scrolling_after_the_events_stop() {
         touch_phase: TouchPhase::Moved,
     });
     let stopped = y_of(&view, &cx);
-    std::thread::sleep(std::time::Duration::from_millis(60));
+    advance(&view, &mut cx, 60);
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert_eq!(y_of(&view, &cx), stopped);

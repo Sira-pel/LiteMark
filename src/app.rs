@@ -169,6 +169,9 @@ pub struct LiteMarkApp {
     caret_followed: Option<(String, Range<usize>, usize)>,
     caret_follow_waits: u8,
     scroll_momentum: crate::ui::editor::ScrollMomentum,
+    /// Clock for touchpad momentum. `None` is the real clock; tests set and
+    /// advance it so the coast doesn't depend on how fast the machine runs.
+    pub(crate) scroll_clock: Option<std::time::Instant>,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
     pub find_hits: Vec<Range<usize>>,
@@ -498,6 +501,7 @@ impl LiteMarkApp {
             caret_followed: None,
             caret_follow_waits: 0,
             scroll_momentum: Default::default(),
+            scroll_clock: None,
             find_field,
             replace_field,
             find_hits: Vec::new(),
@@ -619,6 +623,7 @@ impl LiteMarkApp {
             caret_followed: None,
             caret_follow_waits: 0,
             scroll_momentum: Default::default(),
+            scroll_clock: None,
             find_field: Self::dummy_line_field(cx, "find-field"),
             replace_field: Self::dummy_line_field(cx, "replace-field"),
             find_hits: Vec::new(),
