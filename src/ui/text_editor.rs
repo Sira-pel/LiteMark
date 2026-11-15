@@ -3325,9 +3325,6 @@ fn paint_ranges_mapped(
     }
     let clamped_start = range.start.clamp(row_start, row_end);
     let clamped_end = range.end.clamp(row_start, row_end);
-    if clamped_end <= clamped_start && range.start < row_end {
-        return;
-    }
     let local_start = offset_map.source_to_display(clamped_start);
     let local_end = offset_map.source_to_display(clamped_end);
     let x0 = shaped.x_for_index(local_start);
