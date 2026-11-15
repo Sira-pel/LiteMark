@@ -355,3 +355,64 @@ fn typing_above_tables_keeps_far_tables_unshaped() {
     );
 }
 
+#[std_test]
+fn layout_after_edits_matches_a_fresh_layout() {
+    // F15: the layout cache follows the parse's incremental updates instead
+    // of starting over; the rows must be the same as laying out from scratch.
+    let mut content = String::new();
+    for i in 0..400 {
+        content.push_str(&format!(
+            "## Part {i}\n\nA long paragraph {i} that keeps going so that it wraps over several rows in the editor window, with **bold** and `code` in it.\n\n- item {i}\n\n"
+        ));
+    }
+    let (view, mut cx) = harness(&content, ViewMode::Wysiwyg);
+    let edits: [(usize, &str); 5] = [
+        (content.len() / 2, "inserted words that make this paragraph wrap one more row "),
+        (100, "\n\n# New heading\n\n"),
+        (content.len() / 3, "```\n"),
+        (content.len() / 3 + 30, "\n```\n"),
+        (content.len() - 10, "x"),
+    ];
+    for (at, text) in edits {
+        view.update(&mut cx, |app, _cx| {
+            let tab = app.active_tab_mut().expect("tab");
+            let mut at = at.min(tab.content.len());
+            while !tab.content.is_char_boundary(at) {
+                at -= 1;
+            }
+            tab.place(at, false);
+            tab.insert_text_in_mode(at..at, text, ViewMode::Wysiwyg);
+        });
+        redraw(&mut cx);
+    }
+    let final_content = view.read_with(&cx, |app, _| app.active_tab().unwrap().content.clone());
+    let caret = view.read_with(&cx, |app, _| app.active_tab().unwrap().caret.cursor());
+    let edited = geometry(&view, &cx);
+
+    let (fresh_view, mut fresh_cx) = harness(&final_content, ViewMode::Wysiwyg);
+    fresh_view.update(&mut fresh_cx, |app, _cx| {
+        app.active_tab_mut().unwrap().place(caret, false);
+    });
+    redraw(&mut fresh_cx);
+    // Scroll position may differ, and y is a running float sum: compare each
+    // row's step from the row above instead of its absolute position.
+    let relative = |rows: Geometry| -> Vec<(usize, usize, Pixels, Pixels, Pixels)> {
+        let mut prev = rows.first().map_or(px(0.0), |r| r.2.y);
+        rows.into_iter()
+            .map(|(start, end, origin, h)| {
+                let step = origin.y - prev;
+                prev = origin.y;
+                (start, end, origin.x, step, h)
+            })
+            .collect()
+    };
+    let fresh = relative(geometry(&fresh_view, &fresh_cx));
+    let edited = relative(edited);
+    assert_eq!(edited.len(), fresh.len(), "row count");
+    let same = |a: &(usize, usize, Pixels, Pixels, Pixels), b: &(usize, usize, Pixels, Pixels, Pixels)| {
+        (a.0, a.1, a.2, a.4) == (b.0, b.1, b.2, b.4) && (f32::from(a.3) - f32::from(b.3)).abs() < 0.01
+    };
+    if let Some(ix) = edited.iter().zip(&fresh).position(|(a, b)| !same(a, b)) {
+        panic!("row {ix} differs: edited {:?} fresh {:?}", edited[ix], fresh[ix]);
+    }
+}

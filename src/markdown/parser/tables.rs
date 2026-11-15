@@ -227,6 +227,7 @@ pub(super) struct TableBlock {
     pub(super) alignments: Vec<TableColumnAlign>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct DetectedTable {
     pub(super) first: usize,
     pub(super) last: usize,

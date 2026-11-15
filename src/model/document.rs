@@ -309,6 +309,10 @@ pub struct DocumentTab {
     pub marked_range: Option<Range<usize>>,
     pub revision: u64,
     cached_parse: Option<(u64, Arc<ParsedDocument>)>,
+    /// The edit that made `revision` from the one before it: the revision
+    /// it applied to, the bytes it replaced, and the length written. Lets
+    /// `parsed()` update the cached parse instead of parsing everything.
+    last_edit: Option<(u64, Range<usize>, usize)>,
     stats_revision: Option<u64>,
     history: UndoHistory,
     /// Set right before the edit that wraps freshly typed text into a new
@@ -375,6 +379,7 @@ impl DocumentTab {
             marked_range: None,
             revision: 1,
             cached_parse: None,
+            last_edit: None,
             stats_revision: Some(1),
             history: UndoHistory::default(),
             next_edit_opens_span_group: false,
@@ -427,6 +432,19 @@ impl DocumentTab {
         if let Some((rev, ref doc)) = self.cached_parse {
             if rev == self.revision {
                 return doc.clone();
+            }
+        }
+        // One known edit since the cached parse: update it. In place when
+        // nothing else holds it; otherwise on a copy.
+        if let (Some((rev, _)), Some((edit_rev, range, new_len))) =
+            (&self.cached_parse, &self.last_edit)
+        {
+            if rev == edit_rev && rev.wrapping_add(1) == self.revision {
+                let (range, new_len) = (range.clone(), *new_len);
+                let (_, mut doc) = self.cached_parse.take().expect("cached parse");
+                Arc::make_mut(&mut doc).apply_edit(&self.content, range, new_len);
+                self.cached_parse = Some((self.revision, doc.clone()));
+                return doc;
             }
         }
         let doc = Arc::new(parse_document(&self.content));
@@ -560,6 +578,7 @@ impl DocumentTab {
             self.history.push(edit);
         }
         let cursor_at = range.start + new_text.len();
+        self.last_edit = Some((self.revision, range.clone(), new_text.len()));
         self.content.replace_range(range, new_text);
         let cursor = snap_off_ending_interior(&self.content, cursor_at);
         self.revision = self.revision.wrapping_add(1);
@@ -746,6 +765,7 @@ impl DocumentTab {
         let Some(restore) = self.history.undo(&mut self.content) else {
             return false;
         };
+        self.last_edit = Some((self.revision, restore.replaced.0.clone(), restore.replaced.1));
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);
@@ -758,6 +778,7 @@ impl DocumentTab {
         let Some(restore) = self.history.redo(&mut self.content) else {
             return false;
         };
+        self.last_edit = Some((self.revision, restore.replaced.0.clone(), restore.replaced.1));
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);

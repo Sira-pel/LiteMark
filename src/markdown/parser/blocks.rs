@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct OpenFence {
     /// Column-0..3 fence. A shorter run does not close it.
     pub(super) strict: bool,

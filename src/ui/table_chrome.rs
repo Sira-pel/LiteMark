@@ -129,7 +129,8 @@ fn bounds_overlap(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
 /// Glyph boxes of non-table rows. Chrome must not cover or steal these.
 pub fn occupied_content(rows: &[PaintRow]) -> Vec<Bounds<Pixels>> {
     rows.iter()
-        .filter(|row| row.cells.is_empty())
+        // Unshaped rows (outside the shaping band) have nothing on screen.
+        .filter(|row| row.cells.is_empty() && !row.shaped.text.is_empty())
         .map(|row| {
             Bounds::new(
                 row.origin,
