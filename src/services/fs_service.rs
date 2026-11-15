@@ -330,6 +330,9 @@ pub fn atomic_save_new(dir: &Path, desired_name: &str, content: &str) -> io::Res
 /// the UI thread, which freezes the window.
 pub const MAX_NOTE_BYTES: u64 = 32 * 1024 * 1024;
 
+/// How much of a file `looks_binary` inspects.
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
 #[cfg(target_os = "linux")]
 const O_NONBLOCK: i32 = 0o4000;
 #[cfg(target_os = "macos")]
@@ -374,16 +377,22 @@ pub fn read_note(path: &Path) -> Result<String, String> {
     if let Some(reason) = note_open_block(&meta) {
         return Err(fail(&reason));
     }
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
-    // +1 so a file that grew past the limit since the check is caught.
-    file.take(MAX_NOTE_BYTES + 1)
+    // Check the head for binary content before reading the rest, so a large
+    // binary file costs 8 KiB, not its whole size.
+    let mut reader = file.take(MAX_NOTE_BYTES + 1);
+    let mut bytes = Vec::with_capacity(BINARY_SNIFF_BYTES);
+    (&mut reader)
+        .take(BINARY_SNIFF_BYTES as u64)
         .read_to_end(&mut bytes)
         .map_err(|err| fail(&err))?;
-    if bytes.len() as u64 > MAX_NOTE_BYTES {
-        return Err(fail(&"file is too large"));
-    }
     if looks_binary(&bytes) {
         return Err(fail(&"binary file, can't open"));
+    }
+    bytes.reserve((meta.len() as usize).saturating_sub(bytes.len()));
+    // The outer take is +1 so a file that grew past the limit is caught.
+    reader.read_to_end(&mut bytes).map_err(|err| fail(&err))?;
+    if bytes.len() as u64 > MAX_NOTE_BYTES {
+        return Err(fail(&"file is too large"));
     }
     String::from_utf8(bytes).map_err(|err| fail(&err))
 }
@@ -687,6 +696,23 @@ pub fn safe_delete(path: &Path, is_dir: bool) -> io::Result<()> {
 }
 
 /// Folders the scan never descends into: VCS metadata and build output.
+/// Extensions of common binary formats. Without this every unknown file
+/// counts as plain text, so images, video and disk images show up as notes.
+const BINARY_EXTENSIONS: &[&str] = &[
+    "7z", "a", "aac", "apk", "app", "avi", "avif", "bin", "bmp", "bz2", "class", "dat", "db", "deb",
+    "dll", "dmg", "doc", "docx", "dylib", "epub", "exe", "flac", "gif", "gz", "heic", "ico", "img",
+    "iso", "jar", "jpeg", "jpg", "m4a", "m4v", "mkv", "mov", "mp3", "mp4", "mpg", "msi", "o", "odt",
+    "ogg", "opus", "otf", "pkg", "png", "ppt", "pptx", "psd", "pyc", "rar", "rpm", "so", "sqlite",
+    "tar", "tgz", "tif", "tiff", "ttf", "vmdk", "wav", "webm", "webp", "woff", "woff2", "xls",
+    "xlsx", "xz", "zip", "zst",
+];
+
+fn has_binary_extension(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && BINARY_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+    })
+}
+
 const SKIPPED_ENTRIES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store", "node_modules", "target"];
 
 /// List the notes folder. Dotfiles are listed; only `SKIPPED_ENTRIES` are left out.
@@ -741,7 +767,8 @@ pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirecto
                 } else if entry_type.is_file() {
                     let file_type = FileType::from_filename(&file_name);
                     let listed = match file_type {
-                        FileType::Markdown | FileType::PlainText => true,
+                        FileType::PlainText => !has_binary_extension(&file_name),
+                        FileType::Markdown => true,
                         FileType::Code => show_code_files,
                         FileType::Pdf => false,
                     };
@@ -1251,6 +1278,41 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("read_note blocked on a FIFO");
         assert!(result.unwrap_err().contains("not a regular file"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_note_rejects_binary_from_the_head_without_reading_it_all() {
+        let dir = std::env::temp_dir().join(format!("litemark-binhead-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let text = dir.join("long.txt");
+        let content = "line of text\n".repeat(2000);
+        fs::write(&text, &content).unwrap();
+        assert_eq!(read_note(&text).unwrap(), content);
+        let bin = dir.join("disk.txt");
+        let file = fs::File::create(&bin).unwrap();
+        file.set_len(MAX_NOTE_BYTES - 1).unwrap();
+        drop(file);
+        assert!(read_note(&bin).unwrap_err().contains("binary"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidebar_skips_binary_files_but_keeps_text() {
+        let dir = std::env::temp_dir().join(format!("litemark-binlist-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["backup.iso", "photo.JPG", "notes.txt", "data.csv", "README", ".jpg"] {
+            fs::write(dir.join(name), "x").unwrap();
+        }
+        let mut names: Vec<_> = scan_workspace_dir(&dir, false)
+            .files
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, [".jpg", "README", "data.csv", "notes.txt"]);
         let _ = fs::remove_dir_all(&dir);
     }
 
