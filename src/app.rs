@@ -177,6 +177,8 @@ pub struct LiteMarkApp {
     pub toast_epoch: u64,
     /// An update check is running; further checks are ignored until it ends.
     update_check_running: bool,
+    /// The PDF whose text is being extracted in the background, if any.
+    pdf_opening: Option<PathBuf>,
     pub available_update: Option<ReleaseInfo>,
     pub pending_find_focus: bool,
     pub pending_rename_focus: bool,
@@ -504,6 +506,7 @@ impl LiteMarkApp {
             zoom_epoch: 0,
             toast_epoch: 0,
             update_check_running: false,
+            pdf_opening: None,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
@@ -626,6 +629,7 @@ impl LiteMarkApp {
             zoom_epoch: 0,
             toast_epoch: 0,
             update_check_running: false,
+            pdf_opening: None,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
@@ -782,3 +786,7 @@ mod typing_tests;
 #[cfg(test)]
 #[path = "find_panel_tests.rs"]
 mod find_panel_tests;
+
+#[cfg(test)]
+#[path = "pdf_open_tests.rs"]
+mod pdf_open_tests;

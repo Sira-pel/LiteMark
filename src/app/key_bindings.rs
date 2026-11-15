@@ -115,7 +115,7 @@ impl LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenFile, _window, cx| {
-                this.handle_open_file();
+                this.handle_open_file(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &NewTab, _window, cx| {

@@ -115,7 +115,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_open_file();
+                    this.handle_open_file(cx);
                     cx.notify();
                 });
             }
