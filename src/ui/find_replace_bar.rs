@@ -28,6 +28,22 @@ where
     pub on_close: FClose,
     pub on_toggle_case: FCase,
     pub on_toggle_replace: FToggleReplace,
+    /// Window width; the panel narrows to fit small windows.
+    pub window_width: Pixels,
+}
+
+/// Widest the find panel gets.
+const FIND_PANEL_MAX_W: f32 = 440.0;
+/// Gap from the panel's right edge to the window's.
+const FIND_PANEL_RIGHT: f32 = 24.0;
+/// Gap kept free on the panel's left side, so it never touches the window edge.
+const FIND_PANEL_LEFT_GAP: f32 = 8.0;
+
+/// The panel's width in a window `window_width` wide: 440px, or less so it
+/// keeps clear of both window edges.
+pub fn find_panel_width(window_width: Pixels) -> Pixels {
+    let room = window_width - px(FIND_PANEL_RIGHT + FIND_PANEL_LEFT_GAP);
+    room.min(px(FIND_PANEL_MAX_W)).max(px(0.0))
 }
 
 /// Compact find panel that floats at the top right of the editor. One search
@@ -90,8 +106,8 @@ where
         .id("find-replace-panel")
         .absolute()
         .top(sz::TITLE_BAR + sz::TOOLBAR + px(8.0))
-        .right(px(24.0))
-        .w(px(440.0))
+        .right(px(FIND_PANEL_RIGHT))
+        .w(find_panel_width(props.window_width))
         .flex()
         .flex_col()
         .gap(px(6.0))
@@ -249,4 +265,21 @@ where
                     }),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `use gpui::*` brings in a `test` attribute that is not Rust's `#[test]`.
+    use ::core::prelude::v1::test as std_test;
+
+    #[std_test]
+    fn find_panel_fits_narrow_windows() {
+        assert_eq!(find_panel_width(px(1200.0)), px(440.0));
+        // The 360px minimum window: the panel stays inside both edges.
+        let narrow = find_panel_width(px(360.0));
+        assert!(narrow + px(FIND_PANEL_RIGHT) < px(360.0), "{narrow:?}");
+        assert_eq!(narrow, px(328.0));
+        assert_eq!(find_panel_width(px(10.0)), px(0.0));
+    }
 }

@@ -197,6 +197,21 @@ impl LiteMarkApp {
         cx.notify();
     }
 
+    /// Ctrl+F and the toolbar's search button: show or hide the find panel.
+    /// It opens with the find row only; Ctrl+H is the way to the replace row.
+    pub(crate) fn toggle_find_panel(&mut self) {
+        self.show_find_replace = !self.show_find_replace;
+        self.refresh_find();
+        if self.show_find_replace {
+            self.show_replace_row = false;
+            self.pending_find_focus = true;
+        } else {
+            self.pending_find_focus = false;
+            self.applied_focus = None;
+            self.field_owns_keys = false;
+        }
+    }
+
     pub(super) fn line_field_for_focus(&self) -> Option<Entity<LineField>> {
         match self.field_focus {
             TextInput::Find if self.show_find_replace => Some(self.find_field.clone()),
