@@ -84,10 +84,11 @@ pub fn sanitize_name(name: &str) -> String {
             c => c,
         })
         .collect();
-    // Trim whitespace first so a leading dot after spaces is still stripped:
-    // " .hidden" must become "hidden", not ".hidden" (which would create a
-    // note that never shows up in the sidebar).
-    let trimmed = replaced.trim().trim_matches('.').trim().to_string();
+    // Leading dots stay (`.gitignore`, `.env`): dotfiles are listed in the
+    // sidebar. Trailing dots and spaces go, since Windows drops them and
+    // "notes." would silently become "notes". That also turns "." and ".."
+    // into "", which callers reject as an empty name.
+    let trimmed = replaced.trim().trim_end_matches(['.', ' ']).to_string();
     avoid_reserved_device_name(trimmed)
 }
 
@@ -407,35 +408,22 @@ pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
 /// Record what `path` looks like now, holding `content` (the text just read
 /// from it or written to it). `None` when the file can't be inspected.
 pub fn disk_version(path: &Path, content: &str) -> Option<DiskVersion> {
-    let meta = fs::metadata(path).ok()?;
-    Some(version_from(&meta, content_hash(content.as_bytes())))
+    fs::metadata(path).ok()?;
+    Some(DiskVersion {
+        content_hash: content_hash(content.as_bytes()),
+    })
 }
 
-fn version_from(meta: &fs::Metadata, content_hash: u64) -> DiskVersion {
-    #[cfg(unix)]
-    let file_id = Some((meta.dev(), meta.ino()));
-    #[cfg(not(unix))]
-    let file_id = None;
-    DiskVersion {
-        len: meta.len(),
-        modified: meta.modified().ok(),
-        file_id,
-        content_hash,
-    }
-}
-
-/// Has `path` changed since `seen` was recorded? Only when size, time or
-/// file id differ is the file read, and then the bytes decide, so a
-/// `touch` or a copy that kept the text doesn't count as a change.
+/// Has `path` changed since `seen` was recorded? The bytes decide, so a
+/// `touch` or a copy that kept the text doesn't count as a change. They are
+/// read even when size, time and file id all match: a same-size write within
+/// the filesystem's timestamp granularity leaves all three unchanged.
 pub fn disk_change(path: &Path, seen: &DiskVersion) -> DiskChange {
-    let meta = match fs::metadata(path) {
-        Ok(meta) => meta,
+    match fs::metadata(path) {
+        Ok(_) => {}
         Err(err) if err.kind() == io::ErrorKind::NotFound => return DiskChange::Deleted,
         // Can't tell; let the save itself report the problem.
         Err(_) => return DiskChange::Unchanged,
-    };
-    if version_from(&meta, seen.content_hash).same_metadata(seen) {
-        return DiskChange::Unchanged;
     }
     match fs::read(path) {
         Ok(bytes) if content_hash(&bytes) == seen.content_hash => DiskChange::Unchanged,
@@ -931,13 +919,21 @@ mod tests {
 
     #[test]
     fn test_sanitize_name() {
-        assert_eq!(sanitize_name("../../etc/passwd"), "_.._etc_passwd");
+        // Separators are replaced, so the result is always one path component.
+        assert_eq!(sanitize_name("../../etc/passwd"), ".._.._etc_passwd");
         assert_eq!(sanitize_name("My Notes/File.md"), "My Notes_File.md");
-        assert_eq!(sanitize_name("..hidden.."), "hidden");
-        // Leading whitespace must not hide a dot from the trim, or the
-        // created note would be invisible in the sidebar.
-        assert_eq!(sanitize_name(" .hidden"), "hidden");
+        assert_eq!(sanitize_name("a\\b\0c"), "a_b_c");
+        // Leading dots are kept (as in #60); trailing dots and spaces are not.
+        assert_eq!(sanitize_name(".gitignore"), ".gitignore");
+        assert_eq!(sanitize_name(" .hidden"), ".hidden");
+        assert_eq!(sanitize_name("..hidden.."), "..hidden");
+        assert_eq!(sanitize_name("notes. . "), "notes");
+        assert_eq!(sanitize_name("."), "");
+        assert_eq!(sanitize_name(".."), "");
+        assert_eq!(sanitize_name(" ... "), "");
         assert_eq!(sanitize_name("  "), "");
+        // Device names are still caught once trailing dots go.
+        assert_eq!(sanitize_name("CON."), "CON_");
     }
 
     #[test]

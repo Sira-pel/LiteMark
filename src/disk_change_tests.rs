@@ -219,7 +219,9 @@ fn save_name_box_keeps_the_note_inside_the_workspace() {
     std::fs::create_dir_all(&ws).unwrap();
 
     let cases = [
-        ("../escaped", "_escaped.md"),
+        // Leading dots stay (dotfiles), but the separator is gone.
+        ("../escaped", ".._escaped"),
+        (".env", ".env"),
         ("sub/dir/note", "sub_dir_note.md"),
         ("CON", "CON_.md"),
         ("a:b?", "a_b_.md"),
@@ -250,6 +252,47 @@ fn save_name_box_keeps_the_note_inside_the_workspace() {
         app.commit_save_naming(Some("..".to_string()), cx);
         assert!(app.error_message.is_some());
         assert!(app.active_tab().unwrap().file_path.is_none());
+    });
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
+fn closing_the_window_asks_about_a_note_changed_on_disk() {
+    let root = fresh_root("closewindow");
+    let path = root.join("journal.md");
+    std::fs::write(&path, "mine\n").unwrap();
+
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, cx| {
+        app.workspace = scan_workspace_dir(&root, true);
+        click_open(app, &path);
+        let tab = app.active_tab_mut().unwrap();
+        tab.edit(0..0, "edited ");
+        tab.is_modified = true;
+        std::fs::write(&path, "theirs\n").unwrap();
+
+        app.request_close_window();
+        app.answer_prompt("Save", cx);
+        assert!(
+            matches!(app.prompt, Some(Prompt::ExternalChange { deleted: false, .. })),
+            "the changed note gets Overwrite or Reload, not the close prompt again"
+        );
+        assert!(!app.allow_window_close);
+
+        // Cancel there stops the close and keeps both versions.
+        app.answer_prompt("Cancel", cx);
+        assert!(app.prompt.is_none());
+        assert!(!app.allow_window_close);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n");
+
+        // Overwrite settles it and the window closes.
+        app.request_close_window();
+        app.answer_prompt("Save", cx);
+        app.answer_prompt("Overwrite", cx);
+        assert!(app.allow_window_close);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited mine\n");
     });
 
     let _ = std::fs::remove_dir_all(&root);
