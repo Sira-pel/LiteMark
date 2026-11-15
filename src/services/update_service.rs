@@ -28,29 +28,98 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-pub fn is_newer(current: &str, latest: &str) -> bool {
-    match (parse_version(current), parse_version(latest)) {
-        (Some(current), Some(latest)) => latest > current,
-        _ => false,
+/// The pre-release part of a version (`rc.1` in `1.2.3-rc.1+build`), if any.
+fn pre_release(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let without_build = text.split('+').next().unwrap_or(text);
+    without_build.split_once('-').map(|(_, pre)| pre)
+}
+
+/// Semver precedence of two pre-release parts: identifiers are compared one
+/// by one, numbers numerically and below words, and a longer list wins a tie.
+fn compare_pre_release(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut a_ids = a.split('.');
+    let mut b_ids = b.split('.');
+    loop {
+        match (a_ids.next(), b_ids.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let order = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+        }
     }
 }
 
+/// Is `latest` newer than `current`? A pre-release comes before its release:
+/// `1.2.3-rc1` < `1.2.3`.
+pub fn is_newer(current: &str, latest: &str) -> bool {
+    use std::cmp::Ordering;
+    let (Some(current_core), Some(latest_core)) = (parse_version(current), parse_version(latest))
+    else {
+        return false;
+    };
+    match latest_core.cmp(&current_core) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => match (pre_release(current), pre_release(latest)) {
+            (Some(_), None) => true,
+            (Some(current_pre), Some(latest_pre)) => {
+                compare_pre_release(latest_pre, current_pre) == Ordering::Greater
+            }
+            (None, _) => false,
+        },
+    }
+}
+
+/// Longest `tag_name` accepted. Real tags look like `v1.2.3`.
+const MAX_TAG_LEN: usize = 64;
+
+/// A tag that is safe to put in the release link as one path segment: a
+/// version (`v1.2`, `v1.2.3-rc.1`) made only of letters, digits, `.` and `-`.
+fn link_safe_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && parse_version(tag).is_some()
+}
+
 /// Read the fields we need from a GitHub "latest release" response.
+///
+/// The version shown in the banner is rebuilt from the numbers, so a
+/// tampered response can't put its own text there. The Download link uses
+/// the release's real `tag_name` when it is a plain version (so `v1.2` links
+/// to `tag/v1.2`, not a `tag/v1.2.0` that doesn't exist), and is rebuilt from
+/// the numbers otherwise. `html_url` is never used, so the link can't point
+/// elsewhere on github.com (for example with `releases/../../other/repo`).
 fn parse_release(body: &str) -> Option<ReleaseInfo> {
     let json: serde_json::Value = serde_json::from_str(body).ok()?;
     if json["draft"].as_bool().unwrap_or(false) || json["prerelease"].as_bool().unwrap_or(false) {
         return None;
     }
     let tag = json["tag_name"].as_str()?;
-    parse_version(tag)?;
-    let url = json["html_url"].as_str()?;
-    if !url.starts_with(RELEASE_PAGE_PREFIX) {
+    if tag.len() > MAX_TAG_LEN {
         return None;
     }
-    Some(ReleaseInfo {
-        version: tag.trim_start_matches('v').to_string(),
-        url: url.to_string(),
-    })
+    let (major, minor, patch) = parse_version(tag)?;
+    let version = format!("{major}.{minor}.{patch}");
+    let url = if link_safe_tag(tag) {
+        format!("{RELEASE_PAGE_PREFIX}tag/{tag}")
+    } else {
+        format!("{RELEASE_PAGE_PREFIX}tag/v{version}")
+    };
+    Some(ReleaseInfo { url, version })
 }
 
 /// Ask GitHub for the latest release. Any failure (offline, rate limited,
@@ -97,6 +166,35 @@ mod tests {
     }
 
     #[test]
+    fn pre_releases_come_before_their_release() {
+        assert!(is_newer("1.2.3-rc1", "1.2.3"));
+        assert!(is_newer("1.2.3-rc.1", "v1.2.3"));
+        assert!(!is_newer("1.2.3", "1.2.3-rc1"));
+        assert!(is_newer("1.2.3-rc.1", "1.2.3-rc.2"));
+        assert!(is_newer("1.2.3-rc.2", "1.2.3-rc.10"));
+        assert!(is_newer("1.2.3-alpha", "1.2.3-beta"));
+        assert!(is_newer("1.2.3-rc", "1.2.3-rc.1"));
+        assert!(!is_newer("1.2.3-rc.1", "1.2.3-rc.1"));
+        assert!(!is_newer("1.2.4-rc1", "1.2.3"));
+        assert!(!is_newer("1.2.3+build5", "1.2.3"));
+    }
+
+    #[test]
+    fn link_uses_the_real_tag_when_it_is_a_plain_version() {
+        let info = parse_release(r#"{"tag_name":"v2.1"}"#).expect("release");
+        assert_eq!(info.version, "2.1.0");
+        assert_eq!(info.url, "https://github.com/Sira-pel/LiteMark/releases/tag/v2.1");
+        let info = parse_release(r#"{"tag_name":"2.1.0"}"#).expect("release");
+        assert_eq!(info.url, "https://github.com/Sira-pel/LiteMark/releases/tag/2.1.0");
+        // Anything else in the tag: the link is rebuilt from the numbers.
+        for tag in ["v2.1.0-x/../../evil", "v2.1.0-%2e%2e", "v2.1.0-now go", "v2.1.0-x?y=1"] {
+            let body = serde_json::json!({ "tag_name": tag }).to_string();
+            let info = parse_release(&body).expect("release");
+            assert_eq!(info.url, "https://github.com/Sira-pel/LiteMark/releases/tag/v2.1.0", "{tag}");
+        }
+    }
+
+    #[test]
     fn unparseable_versions_are_never_newer() {
         assert!(!is_newer("1.0.0", "latest"));
         assert!(!is_newer("1.0.0", "1.0.0.1"));
@@ -112,16 +210,62 @@ mod tests {
     }
 
     #[test]
-    fn ignores_drafts_prereleases_and_foreign_links() {
+    fn ignores_drafts_prereleases_and_bad_tags() {
         let draft = r#"{"tag_name":"v2.0.0","html_url":"https://github.com/Sira-pel/LiteMark/releases/tag/v2.0.0","draft":true}"#;
         let pre = r#"{"tag_name":"v2.0.0","html_url":"https://github.com/Sira-pel/LiteMark/releases/tag/v2.0.0","prerelease":true}"#;
-        let foreign = r#"{"tag_name":"v2.0.0","html_url":"https://evil.example/download"}"#;
         assert_eq!(parse_release(draft), None);
         assert_eq!(parse_release(pre), None);
-        assert_eq!(parse_release(foreign), None);
-        let other_repo = r#"{"tag_name":"v2.0.0","html_url":"https://github.com/someone/else/releases/tag/v2.0.0"}"#;
-        assert_eq!(parse_release(other_repo), None);
+        assert_eq!(parse_release(r#"{"tag_name":"latest"}"#), None);
+        assert_eq!(
+            parse_release(
+                r#"{"html_url":"https://github.com/Sira-pel/LiteMark/releases/tag/v2.0.0"}"#
+            ),
+            None
+        );
         assert_eq!(parse_release("not json"), None);
+    }
+
+    /// The link is built from the version, so whatever `html_url` says
+    /// (another site, another repo, `..` or `%2e%2e` segments) is ignored.
+    #[test]
+    fn download_link_comes_from_the_version_not_html_url() {
+        let expected = "https://github.com/Sira-pel/LiteMark/releases/tag/v2.0.0";
+        for html_url in [
+            "https://evil.example/download",
+            "https://github.com/someone/else/releases/tag/v2.0.0",
+            "https://github.com/Sira-pel/LiteMark/releases/../../../evil-org/evil-repo/releases/tag/v2.0.0",
+            "https://github.com/Sira-pel/LiteMark/releases/%2e%2e/%2e%2e/%2e%2e/evil-org",
+        ] {
+            let body = serde_json::json!({ "tag_name": "v2.0.0", "html_url": html_url }).to_string();
+            let info = parse_release(&body).expect("release");
+            assert_eq!(info.url, expected, "html_url {html_url}");
+        }
+        // A missing html_url is fine too.
+        let info = parse_release(r#"{"tag_name":"v2.0.0"}"#).expect("release");
+        assert_eq!(info.url, expected);
+    }
+
+    /// Only the numbers reach the banner: no words or newlines after them,
+    /// and no huge tags.
+    #[test]
+    fn banner_version_is_only_the_numbers() {
+        let body = serde_json::json!({
+            "tag_name": "v9.9.9-URGENT: your copy is infected.\nGo to evil.example now",
+        })
+        .to_string();
+        let info = parse_release(&body).expect("release");
+        assert_eq!(info.version, "9.9.9");
+        assert_eq!(
+            info.url,
+            "https://github.com/Sira-pel/LiteMark/releases/tag/v9.9.9"
+        );
+
+        let info = parse_release(r#"{"tag_name":"v2"}"#).expect("release");
+        assert_eq!(info.version, "2.0.0");
+
+        let huge = format!("v1.0.0-{}", "x".repeat(5_000_000));
+        let body = serde_json::json!({ "tag_name": huge }).to_string();
+        assert_eq!(parse_release(&body), None);
     }
 
     #[test]
