@@ -30,6 +30,9 @@ winresource = "0.1"
 gpui = { version = "=0.2.2", features = ["test-support"] }
 
 [patch.crates-io]
+# xattr 0.2.3 (pulled in by gpui's tar support) uses libc::ENOATTR, which libc
+# doesn't define on Linux. The patch uses ENODATA there and keeps ENOATTR on
+# macOS and the BSDs (patches/xattr/src/sys/mod.rs).
 xattr = { path = "patches/xattr" }
 
 [profile.release]
