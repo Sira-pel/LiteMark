@@ -41,7 +41,7 @@ impl LiteMarkApp {
         if let Some(old_path) = migrate_from {
             let content = self
                 .active_tab()
-                .map(|tab| tab.content.clone())
+                .map(|tab| tab.file_text())
                 .unwrap_or_default();
             match copy_note_into_workspace(&old_path, &new_dir, &content) {
                 Ok(new_path) => migrated = Some(new_path),
@@ -51,7 +51,7 @@ impl LiteMarkApp {
         let left = self.workspace.folder_path.clone();
         self.workspace = scan_workspace_dir(&new_dir, self.settings.show_code_files);
         self.settings.remember_folders(&left, &new_dir);
-        self.settings.save();
+        self.save_settings();
         self.workspace_menu_open = false;
         if let Some(new_path) = migrated {
             if let Some(tab) = self.active_tab_mut() {

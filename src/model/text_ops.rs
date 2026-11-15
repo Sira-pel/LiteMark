@@ -10,7 +10,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::markdown::scan_list_marker;
 
 /// Maximum total bytes of deleted + inserted text kept on the undo and redo stacks.
-pub const UNDO_BYTE_BUDGET: usize = 256 * 1024;
+/// Large enough that one whole-document step (Select All + type on a
+/// multi-megabyte note) survives the next keystroke; small next to the
+/// parse cache of the same note.
+pub const UNDO_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 
 /// Typing that continues the same word inside this window is one undo step.
 pub const TYPING_BURST_MS: u64 = 1_000;
@@ -820,15 +823,14 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
     }
 
     let needle = term.to_lowercase();
-    let needle_chars = needle.chars().count();
-    if needle_chars == 0 {
+    if needle.is_empty() {
         return Vec::new();
     }
     let mut hits = Vec::new();
     let mut start = 0usize;
     while start < content.len() {
         let rest = &content[start..];
-        if let Some(len) = caseless_match_len(rest, &needle, needle_chars) {
+        if let Some(len) = caseless_match_len(rest, &needle) {
             hits.push(start..start + len);
             start += len;
         } else {
@@ -838,35 +840,36 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
     hits
 }
 
-/// Byte length of the first `count` chars of `text` when they lowercase to
-/// `needle`, without allocating. Matches `text[..len].to_lowercase() == needle`.
-fn caseless_match_len(text: &str, needle: &str, count: usize) -> Option<usize> {
-    let mut want = needle.chars();
-    let mut taken = 0usize;
-    let mut end = 0usize;
+/// Byte length of the shortest start of `text` whose lowercase is `needle`,
+/// without allocating. The match ends when the needle is used up at a
+/// character boundary, so a character that lowercases to two (`İ` → `i̇`)
+/// can match, and a needle never matches half of one.
+fn caseless_match_len(text: &str, needle: &str) -> Option<usize> {
+    let mut want = needle.chars().peekable();
     for (index, ch) in text.char_indices() {
-        if taken == count {
-            break;
+        if want.peek().is_none() {
+            return Some(index);
         }
         if ch == '\u{03A3}' {
             // Capital sigma lowercases by context (final sigma), which only
-            // str::to_lowercase knows; compare the whole window that way.
-            let len = text
-                .char_indices()
-                .nth(count)
-                .map_or(text.len(), |(at, _)| at);
-            let enough = text[..len].chars().count() == count;
-            return (enough && text[..len].to_lowercase() == needle).then_some(len);
+            // str::to_lowercase knows. Compare the shortest window from the
+            // match start that lowercases to at least the needle's length.
+            let mut end = index;
+            for (at, c) in text[index..].char_indices() {
+                end = index + at + c.len_utf8();
+                if text[..end].to_lowercase().len() >= needle.len() {
+                    break;
+                }
+            }
+            return (text[..end].to_lowercase() == needle).then_some(end);
         }
         for lower in ch.to_lowercase() {
             if want.next() != Some(lower) {
                 return None;
             }
         }
-        taken += 1;
-        end = index + ch.len_utf8();
     }
-    (taken == count && want.next().is_none()).then_some(end)
+    want.peek().is_none().then_some(text.len())
 }
 
 /// Index of the next hit at or after `cursor`. Wraps to the first hit.
@@ -1269,22 +1272,28 @@ mod tests {
     }
 
     /// The allocation-per-position search `find_matches` replaced.
+    /// Reference: at each position, the shortest window whose lowercase is
+    /// at least as long as the needle's; a hit when it equals the needle.
     fn find_matches_by_lowercasing(content: &str, term: &str) -> Vec<Range<usize>> {
         let needle = term.to_lowercase();
-        let needle_chars = needle.chars().count();
-        let chars: Vec<(usize, char)> = content.char_indices().collect();
         let mut hits = Vec::new();
-        let mut index = 0usize;
-        while needle_chars > 0 && index + needle_chars <= chars.len() {
-            let start = chars[index].0;
-            let end = chars
-                .get(index + needle_chars)
-                .map_or(content.len(), |c| c.0);
+        if needle.is_empty() {
+            return hits;
+        }
+        let mut start = 0usize;
+        while start < content.len() {
+            let mut end = start;
+            for (at, c) in content[start..].char_indices() {
+                end = start + at + c.len_utf8();
+                if content[start..end].to_lowercase().len() >= needle.len() {
+                    break;
+                }
+            }
             if content[start..end].to_lowercase() == needle {
                 hits.push(start..end);
-                index += needle_chars;
+                start = end;
             } else {
-                index += 1;
+                start += content[start..].chars().next().map_or(1, char::len_utf8);
             }
         }
         hits
@@ -1315,6 +1324,14 @@ mod tests {
                 );
             }
         }
+        // Audit B6: `İ` lowercases to two characters and still matches.
+        assert_eq!(find_matches("İstanbul", "İ", false), vec![0..2]);
+        assert_eq!(find_matches("İstanbul", "İ", true), vec![0..2]);
+        assert_eq!(find_matches("xİx İ", "i\u{307}", false), vec![1..3, 5..7]);
+        // A needle never matches half of a character.
+        assert_eq!(find_matches("İ", "i", false), Vec::<Range<usize>>::new());
+        // Final sigma still depends on the letters before it.
+        assert_eq!(find_matches("ΟΔΟΣ", "οδος", false), vec![0..8]);
     }
 
     #[test]
