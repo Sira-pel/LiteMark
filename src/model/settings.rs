@@ -22,6 +22,19 @@ fn default_base_font_size() -> f32 {
     17.0
 }
 
+fn default_zoom_level() -> usize {
+    100
+}
+
+fn default_show_sidebar() -> bool {
+    true
+}
+
+/// Zoom range the zoom in/out commands allow.
+pub const ZOOM_RANGE: std::ops::RangeInclusive<usize> = 50..=200;
+/// Font sizes the settings menu offers.
+pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 13.0..=24.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ContentAlignment {
     #[default]
@@ -33,13 +46,13 @@ pub enum ContentAlignment {
 pub struct EditorSettings {
     #[serde(default)]
     pub theme: ThemeMode,
-    #[serde(default)]
+    #[serde(default = "default_zoom_level")]
     pub zoom_level: usize,
     #[serde(default)]
     pub view_mode: ViewMode,
     #[serde(default)]
     pub show_line_numbers: bool,
-    #[serde(default)]
+    #[serde(default = "default_show_sidebar")]
     pub show_sidebar: bool,
     #[serde(default)]
     pub zen_mode: bool,
@@ -125,11 +138,28 @@ impl EditorSettings {
                 return Self::default();
             }
         };
-        if let Ok(settings) = serde_json::from_str(&content) {
-            return settings;
-        }
-        Self::back_up_unreadable(path);
-        Self::salvage(&content)
+        let settings = match serde_json::from_str::<Self>(&content) {
+            Ok(settings) => settings,
+            Err(_) => {
+                Self::back_up_unreadable(path);
+                Self::salvage(&content)
+            }
+        };
+        settings.clamped()
+    }
+
+    /// Pull out-of-range numbers back to what the UI can produce, so a
+    /// hand-edited or damaged file can't make text invisible or enormous.
+    fn clamped(mut self) -> Self {
+        self.zoom_level = self.zoom_level.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
+        self.base_font_size = if self.base_font_size.is_finite() {
+            self.base_font_size
+                .clamp(*FONT_SIZE_RANGE.start(), *FONT_SIZE_RANGE.end())
+        } else {
+            default_base_font_size()
+        };
+        self.recent_folders.truncate(MAX_RECENT_FOLDERS);
+        self
     }
 
     /// Start from the defaults and apply each stored field that is valid on
@@ -163,12 +193,13 @@ impl EditorSettings {
         }
     }
 
-    pub fn save(&self) {
-        if let Some(path) = Self::config_path() {
-            if let Err(err) = self.save_to(&path) {
-                eprintln!("litemark: couldn't save settings to {}: {err}", path.display());
-            }
-        }
+    /// Save to the config file. The error names the file, for showing to the user.
+    pub fn save(&self) -> Result<(), String> {
+        let Some(path) = Self::config_path() else {
+            return Err("Couldn't save settings: no config folder on this system".into());
+        };
+        self.save_to(&path)
+            .map_err(|err| format!("Couldn't save settings to {}: {err}", path.display()))
     }
 
     /// Write through a temp file and rename, so a crash mid-write leaves the
@@ -236,9 +267,11 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = temp_settings_dir("roundtrip");
         let path = dir.join("litemark").join("settings.json");
-        let mut s = EditorSettings::default();
-        s.zoom_level = 140;
-        s.word_wrap = false;
+        let s = EditorSettings {
+            zoom_level: 140,
+            word_wrap: false,
+            ..Default::default()
+        };
         s.save_to(&path).unwrap();
         let loaded = EditorSettings::load_from(&path);
         assert_eq!(loaded.zoom_level, 140);
@@ -285,6 +318,30 @@ mod tests {
         let loaded = EditorSettings::load_from(&path);
         assert_eq!(loaded.zoom_level, EditorSettings::default().zoom_level);
         assert!(path.with_extension("json.bak").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_fields_get_the_real_defaults() {
+        let parsed: EditorSettings = serde_json::from_str("{}").expect("deserialize");
+        assert_eq!(parsed.zoom_level, 100);
+        assert!(parsed.show_sidebar);
+    }
+
+    #[test]
+    fn out_of_range_numbers_are_clamped_on_load() {
+        let dir = temp_settings_dir("clamp");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{"zoom_level": 18446744073709551615, "base_font_size": -1e30}"#,
+        )
+        .unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, *ZOOM_RANGE.end());
+        assert_eq!(loaded.base_font_size, *FONT_SIZE_RANGE.start());
+        fs::write(&path, r#"{"zoom_level": 0}"#).unwrap();
+        assert_eq!(EditorSettings::load_from(&path).zoom_level, *ZOOM_RANGE.start());
         let _ = fs::remove_dir_all(&dir);
     }
 }

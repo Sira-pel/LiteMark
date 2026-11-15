@@ -149,7 +149,7 @@ impl LiteMarkApp {
                         this.available_update = Some(release);
                     }
                 }
-                this.settings.save();
+                this.save_settings();
                 cx.notify();
             })
             .ok();
@@ -162,7 +162,7 @@ impl LiteMarkApp {
         if !self.settings.check_for_updates {
             self.available_update = None;
         }
-        self.settings.save();
+        self.save_settings();
     }
 
     /// Enter in the search box: select the first match and move keyboard
@@ -555,7 +555,7 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_show_code_files(&mut self) {
         self.settings.show_code_files = !self.settings.show_code_files;
-        self.settings.save();
+        self.save_settings();
         self.rescan_workspace();
     }
 
@@ -575,7 +575,7 @@ impl LiteMarkApp {
     #[allow(dead_code)]
     pub fn handle_toggle_theme(&mut self) {
         self.settings.theme = self.settings.theme.toggle();
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_toggle_zen(&mut self) {
@@ -592,19 +592,19 @@ impl LiteMarkApp {
 
     pub fn handle_zoom_in(&mut self, cx: &mut Context<Self>) {
         self.settings.zoom_level = (self.settings.zoom_level + 10).min(200);
-        self.settings.save();
+        self.save_settings();
         self.flash_zoom(cx);
     }
 
     pub fn handle_zoom_out(&mut self, cx: &mut Context<Self>) {
         self.settings.zoom_level = self.settings.zoom_level.saturating_sub(10).max(50);
-        self.settings.save();
+        self.save_settings();
         self.flash_zoom(cx);
     }
 
     pub fn handle_reset_zoom(&mut self, cx: &mut Context<Self>) {
         self.settings.zoom_level = 100;
-        self.settings.save();
+        self.save_settings();
         self.flash_zoom(cx);
     }
 
@@ -623,7 +623,7 @@ impl LiteMarkApp {
                 tab.snap_wysiwyg_table_delimiter();
             }
         }
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_save_as(&mut self, cx: &mut Context<Self>) {
@@ -760,7 +760,7 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_word_wrap(&mut self) {
         self.settings.word_wrap = !self.settings.word_wrap;
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_set_content_alignment(&mut self, alignment: ContentAlignment) {
@@ -768,7 +768,7 @@ impl LiteMarkApp {
             return;
         }
         self.settings.content_alignment = alignment;
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_toggle_line_numbers(&mut self) {
@@ -776,7 +776,7 @@ impl LiteMarkApp {
             return;
         }
         self.settings.show_line_numbers = !self.settings.show_line_numbers;
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_set_view_mode(&mut self, mode: ViewMode) {
@@ -790,17 +790,17 @@ impl LiteMarkApp {
                 tab.snap_wysiwyg_table_delimiter();
             }
         }
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_set_theme(&mut self, theme: ThemeMode) {
         self.settings.theme = theme;
-        self.settings.save();
+        self.save_settings();
     }
 
     pub fn handle_set_font_size(&mut self, size: f32) {
         self.settings.base_font_size = size;
-        self.settings.save();
+        self.save_settings();
     }
 
     /// Clipboard item for the active selection. Other apps get the text as
