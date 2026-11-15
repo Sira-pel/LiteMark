@@ -326,10 +326,62 @@ pub fn atomic_save_new(dir: &Path, desired_name: &str, content: &str) -> io::Res
     ))
 }
 
+/// Largest note we load. Bigger files take seconds to read and lay out on
+/// the UI thread, which freezes the window.
+pub const MAX_NOTE_BYTES: u64 = 32 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x0004;
+
+/// Why `meta` can't be opened as a note, if it can't.
+fn note_open_block(meta: &fs::Metadata) -> Option<String> {
+    if meta.is_dir() {
+        return Some("it's a folder".into());
+    }
+    if !meta.is_file() {
+        // FIFOs, sockets and devices: reading them can block forever.
+        return Some("not a regular file".into());
+    }
+    if meta.len() > MAX_NOTE_BYTES {
+        return Some(format!(
+            "file is too large ({} MB, limit {} MB)",
+            meta.len() / (1024 * 1024),
+            MAX_NOTE_BYTES / (1024 * 1024)
+        ));
+    }
+    None
+}
+
 /// Read a note. Failure is an error — callers must not substitute an empty document.
+/// Never blocks on a FIFO or device, and refuses files over `MAX_NOTE_BYTES`.
 pub fn read_note(path: &Path) -> Result<String, String> {
+    use std::io::Read;
     let fail = |err: &dyn std::fmt::Display| format!("Couldn't open {}: {err}", path.display());
-    let bytes = fs::read(path).map_err(|err| fail(&err))?;
+    let meta = fs::metadata(path).map_err(|err| fail(&err))?;
+    if let Some(reason) = note_open_block(&meta) {
+        return Err(fail(&reason));
+    }
+    // The path may be swapped for a FIFO after the check above, so open
+    // without blocking and check the handle we actually got.
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    options.custom_flags(O_NONBLOCK);
+    let file = options.open(path).map_err(|err| fail(&err))?;
+    let meta = file.metadata().map_err(|err| fail(&err))?;
+    if let Some(reason) = note_open_block(&meta) {
+        return Err(fail(&reason));
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    // +1 so a file that grew past the limit since the check is caught.
+    file.take(MAX_NOTE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| fail(&err))?;
+    if bytes.len() as u64 > MAX_NOTE_BYTES {
+        return Err(fail(&"file is too large"));
+    }
     if looks_binary(&bytes) {
         return Err(fail(&"binary file, can't open"));
     }
@@ -1178,6 +1230,40 @@ mod tests {
         let good = dir.join("main.rs");
         fs::write(&good, "fn main() {}").unwrap();
         assert_eq!(read_note(&good).unwrap(), "fn main() {}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_note_does_not_hang_on_a_fifo() {
+        let dir = std::env::temp_dir().join(format!("litemark-fifo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("pipe.md");
+        let status = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(status.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_note(&path));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("read_note blocked on a FIFO");
+        assert!(result.unwrap_err().contains("not a regular file"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_note_refuses_oversized_files() {
+        let dir = std::env::temp_dir().join(format!("litemark-big-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("big.md");
+        let file = fs::File::create(&big).unwrap();
+        file.set_len(MAX_NOTE_BYTES + 1).unwrap();
+        drop(file);
+        assert!(read_note(&big).unwrap_err().contains("too large"));
         let _ = fs::remove_dir_all(&dir);
     }
 
