@@ -9,13 +9,12 @@ use ::core::prelude::v1::test as std_test;
 
 fn big_workspace(folders: usize, files_per_folder: usize) -> WorkspaceDirectory {
     let root = PathBuf::from("/litemark-sidebar-test");
-    let mut ws = WorkspaceDirectory {
-        folder_name: "Notes".into(),
-        folder_path: root.clone(),
-        folders: Vec::new(),
-        files: Vec::new(),
-        is_linked_to_local_disk: true,
-    };
+    // Built by a scan of a folder that doesn't exist (so it is empty) rather
+    // than a struct literal, so fields added to WorkspaceDirectory later
+    // (`scan_truncated` in #62) get their real defaults here.
+    let mut ws = crate::services::fs_service::scan_workspace_dir(&root, true);
+    ws.folder_name = "Notes".into();
+    assert!(ws.folders.is_empty() && ws.files.is_empty());
     for d in 0..folders {
         let id = format!("folder-{d}");
         ws.folders.push(crate::model::WorkspaceFolder {
@@ -66,4 +65,21 @@ fn a_frame_with_thousands_of_notes_stays_fast() {
     }
     let per_frame = started.elapsed() / 3;
     assert!(per_frame.as_millis() < 500, "sidebar frame took {per_frame:?}");
+}
+
+#[std_test]
+fn keyboard_selection_finds_its_row_to_scroll_to() {
+    let ws = big_workspace(3, 4);
+    let items = crate::ui::sidebar::build_sidebar_tree(
+        &ws.folders,
+        &ws.files,
+        None,
+    );
+    let file = ws.files.last().unwrap().id.clone();
+    let ix = crate::ui::sidebar::selected_row_index(&items, Some(&file), None).unwrap();
+    assert!(matches!(&items[ix], crate::ui::sidebar::SidebarTreeItem::File { file: f, .. } if f.id == file));
+    let folder = ws.folders[1].id.clone();
+    let ix = crate::ui::sidebar::selected_row_index(&items, None, Some(&folder)).unwrap();
+    assert!(matches!(&items[ix], crate::ui::sidebar::SidebarTreeItem::Folder { folder: f, .. } if f.id == folder));
+    assert_eq!(crate::ui::sidebar::selected_row_index(&items, Some("gone"), None), None);
 }

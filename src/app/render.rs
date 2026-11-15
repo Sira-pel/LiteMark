@@ -946,6 +946,7 @@ impl Render for LiteMarkApp {
         };
 
         let window_width = window.viewport_size().width;
+        let sidebar_scroll_to_selected = std::mem::take(&mut self.sidebar_scroll_to_selected);
         let is_narrow = window_width < px(640.0);
 
         let menu_bar_element = render_menu_bar(
@@ -1418,6 +1419,8 @@ impl Render for LiteMarkApp {
                                             .active_multi()
                                             .map(|m| m.items.clone())
                                             .unwrap_or_default(),
+                                        scroll_handle: self.sidebar_scroll.clone(),
+                                        scroll_to_selected: sidebar_scroll_to_selected,
                                     },
                                     &theme,
                                 );

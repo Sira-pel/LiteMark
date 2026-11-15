@@ -129,6 +129,7 @@ impl LiteMarkApp {
         let targets = self.sidebar_visible_targets();
         if let Some(next) = step_cursor(&targets, self.selected_target.as_ref(), delta) {
             self.extend_selection_to(targets[next].clone());
+            self.sidebar_scroll_to_selected = true;
         }
     }
 
@@ -216,6 +217,7 @@ impl LiteMarkApp {
         self.multi_selection = None;
         self.selected_target = Some(next);
         self.sidebar_keyboard = true;
+        self.sidebar_scroll_to_selected = true;
     }
 
     /// Enter in the sidebar: open the selected note (hands focus to the
