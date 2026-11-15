@@ -151,6 +151,17 @@ fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
 
 /// On Linux, the fallback when `renameat2(RENAME_NOREPLACE)` is unsupported.
 fn rename_noreplace_portable(from: &Path, to: &Path) -> io::Result<()> {
+    rename_noreplace_portable_with(from, to, |a, b| fs::hard_link(a, b), |p| fs::remove_file(p))
+}
+
+/// [`rename_noreplace_portable`] with the hard link and the removal of the
+/// source injected, so tests can force the copy path and a failed removal.
+fn rename_noreplace_portable_with(
+    from: &Path,
+    to: &Path,
+    link: impl Fn(&Path, &Path) -> io::Result<()>,
+    remove: impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     // Directories cannot be hard-linked. Check, then rename; a writer that
     // creates `to` in between is the one race this path does not close.
     if fs::symlink_metadata(from)?.is_dir() {
@@ -159,23 +170,36 @@ fn rename_noreplace_portable(from: &Path, to: &Path) -> io::Result<()> {
         }
         return fs::rename(from, to);
     }
-    match fs::hard_link(from, to) {
-        Ok(()) => fs::remove_file(from),
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(err),
-        Err(_) => {
-            let mut dest = OpenOptions::new().write(true).create_new(true).open(to)?;
-            let copied = (|| {
-                dest.write_all(&fs::read(from)?)?;
-                dest.sync_all()
-            })();
-            drop(dest);
-            if let Err(err) = copied {
-                let _ = fs::remove_file(to);
-                return Err(err);
-            }
-            fs::remove_file(from)
-        }
+    match link(from, to) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Err(err),
+        Err(_) => copy_noreplace(from, to)?,
     }
+    // A move that leaves both names behind is a duplicate, not a move: undo
+    // the new name so the note exists once, under its old name.
+    if let Err(err) = remove(from) {
+        let _ = fs::remove_file(to);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Copy `from` to a new file `to` (never replacing one), streaming the bytes
+/// and keeping the source's permissions. On failure `to` is removed.
+fn copy_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let mut source = fs::File::open(from)?;
+    let permissions = source.metadata()?.permissions();
+    let mut dest = OpenOptions::new().write(true).create_new(true).open(to)?;
+    let copied = (|| {
+        io::copy(&mut source, &mut dest)?;
+        dest.set_permissions(permissions)?;
+        dest.sync_all()
+    })();
+    drop(dest);
+    if copied.is_err() {
+        let _ = fs::remove_file(to);
+    }
+    copied
 }
 
 /// `renameat2(RENAME_NOREPLACE)`. Fails with [`io::ErrorKind::AlreadyExists`]
@@ -1110,6 +1134,60 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(&to).unwrap(), "new", "existing file untouched");
         assert!(from.exists(), "source stays when the target is taken");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn no_hard_links(_: &Path, _: &Path) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+
+    #[test]
+    fn portable_rename_copy_keeps_content_and_permissions() {
+        let dir = std::env::temp_dir().join(format!("litemark-portable-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("from.md");
+        let to = dir.join("to.md");
+        let text = "line\n".repeat(100_000);
+        fs::write(&from, &text).unwrap();
+        let mut perms = fs::metadata(&from).unwrap().permissions();
+        #[cfg(unix)]
+        perms.set_mode(0o600);
+        #[cfg(not(unix))]
+        perms.set_readonly(false);
+        fs::set_permissions(&from, perms.clone()).unwrap();
+
+        rename_noreplace_portable_with(&from, &to, no_hard_links, |p| fs::remove_file(p)).unwrap();
+        assert!(!from.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), text);
+        #[cfg(unix)]
+        assert_eq!(fs::metadata(&to).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn portable_rename_undoes_the_new_name_when_the_source_stays() {
+        let dir = std::env::temp_dir().join(format!("litemark-portable-undo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("from.md");
+        let to = dir.join("to.md");
+        let stuck = |_: &Path| Err(io::Error::from(io::ErrorKind::PermissionDenied));
+
+        for link_fails in [false, true] {
+            fs::write(&from, "note").unwrap();
+            let err = if link_fails {
+                rename_noreplace_portable_with(&from, &to, no_hard_links, stuck)
+            } else {
+                rename_noreplace_portable_with(&from, &to, |a, b| fs::hard_link(a, b), stuck)
+            }
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(fs::read_to_string(&from).unwrap(), "note", "source kept");
+            assert!(!to.exists(), "no duplicate left behind (copy path: {link_fails})");
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }
