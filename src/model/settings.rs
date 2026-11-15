@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
+use crate::services::fs_service::atomic_save;
 use crate::theme::ThemeMode;
 use super::document::ViewMode;
 
@@ -20,6 +22,19 @@ fn default_base_font_size() -> f32 {
     17.0
 }
 
+fn default_zoom_level() -> usize {
+    100
+}
+
+fn default_show_sidebar() -> bool {
+    true
+}
+
+/// Zoom range the zoom in/out commands allow.
+pub const ZOOM_RANGE: std::ops::RangeInclusive<usize> = 50..=200;
+/// Font sizes the settings menu offers.
+pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 13.0..=24.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ContentAlignment {
     #[default]
@@ -31,13 +46,13 @@ pub enum ContentAlignment {
 pub struct EditorSettings {
     #[serde(default)]
     pub theme: ThemeMode,
-    #[serde(default)]
+    #[serde(default = "default_zoom_level")]
     pub zoom_level: usize,
     #[serde(default)]
     pub view_mode: ViewMode,
     #[serde(default)]
     pub show_line_numbers: bool,
-    #[serde(default)]
+    #[serde(default = "default_show_sidebar")]
     pub show_sidebar: bool,
     #[serde(default)]
     pub zen_mode: bool,
@@ -62,6 +77,11 @@ pub struct EditorSettings {
     /// Release version whose notice the user closed.
     #[serde(default)]
     pub dismissed_update: Option<String>,
+    /// Set when settings.json couldn't be read and couldn't be backed up
+    /// either. Saving is refused for the session so the original file is
+    /// never overwritten; the text says why.
+    #[serde(skip)]
+    pub save_blocked: Option<String>,
 }
 
 impl Default for EditorSettings {
@@ -81,9 +101,13 @@ impl Default for EditorSettings {
             check_for_updates: true,
             last_update_check: None,
             dismissed_update: None,
+            save_blocked: None,
         }
     }
 }
+
+/// Backups of a damaged settings file kept side by side before giving up.
+const MAX_SETTINGS_BACKUPS: usize = 100;
 
 /// Most recent workspace folders kept in the switcher.
 pub const MAX_RECENT_FOLDERS: usize = 5;
@@ -105,34 +129,156 @@ impl EditorSettings {
     }
 
     pub fn load() -> Self {
-        if let Some(path) = Self::config_path() {
-            if path.exists() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(settings) = serde_json::from_str(&content) {
-                        return settings;
-                    }
-                }
-            }
+        match Self::config_path() {
+            Some(path) => Self::load_from(&path),
+            None => Self::default(),
         }
-        Self::default()
     }
 
-    pub fn save(&self) {
-        if let Some(path) = Self::config_path() {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
+    /// Read settings from `path`. A missing file gives the defaults. A file
+    /// that can't be fully read or parsed keeps every field that still
+    /// parses, and is copied aside first so the next save can't destroy the
+    /// original.
+    fn load_from(path: &Path) -> Self {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Self::default(),
+            Err(err) => {
+                eprintln!("litemark: couldn't read {}: {err}", path.display());
+                let backed_up = Self::back_up_unreadable(path).is_some();
+                return Self::default().blocked_unless(backed_up, path);
             }
-            if let Ok(json) = serde_json::to_string_pretty(self) {
-                let _ = fs::write(path, json);
+        };
+        let mut backed_up = None;
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
+            Err(err) => {
+                // Damaged bytes inside one value shouldn't cost the others.
+                backed_up = Some(Self::back_up_unreadable(path).is_some());
+                String::from_utf8_lossy(err.as_bytes()).into_owned()
+            }
+        };
+        let settings = match serde_json::from_str::<Self>(&content) {
+            Ok(settings) => settings,
+            Err(_) => {
+                if backed_up.is_none() {
+                    backed_up = Some(Self::back_up_unreadable(path).is_some());
+                }
+                Self::salvage(&content)
+            }
+        };
+        settings
+            .clamped()
+            .blocked_unless(backed_up.unwrap_or(true), path)
+    }
+
+    /// Without a backup, block saving for this session: a save would replace
+    /// the only copy of the file that couldn't be read.
+    fn blocked_unless(mut self, backed_up: bool, path: &Path) -> Self {
+        if !backed_up {
+            self.save_blocked = Some(format!(
+                "Couldn't read or back up {}, so settings won't be saved this session.",
+                path.display()
+            ));
+        }
+        self
+    }
+
+    /// Pull out-of-range numbers back to what the UI can produce, so a
+    /// hand-edited or damaged file can't make text invisible or enormous.
+    fn clamped(mut self) -> Self {
+        self.zoom_level = self.zoom_level.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end());
+        self.base_font_size = if self.base_font_size.is_finite() {
+            self.base_font_size
+                .clamp(*FONT_SIZE_RANGE.start(), *FONT_SIZE_RANGE.end())
+        } else {
+            default_base_font_size()
+        };
+        self.recent_folders.truncate(MAX_RECENT_FOLDERS);
+        self
+    }
+
+    /// Start from the defaults and apply each stored field that is valid on
+    /// its own, so one bad value doesn't reset everything else.
+    fn salvage(content: &str) -> Self {
+        let mut settings = Self::default();
+        let Ok(serde_json::Value::Object(stored)) = serde_json::from_str(content) else {
+            return settings;
+        };
+        for (key, value) in stored {
+            let Ok(serde_json::Value::Object(mut merged)) = serde_json::to_value(&settings) else {
+                break;
+            };
+            merged.insert(key, value);
+            if let Ok(next) = serde_json::from_value(serde_json::Value::Object(merged)) {
+                settings = next;
             }
         }
+        settings
+    }
+
+    /// Copy `path` to the first free `settings.json.bak`, `.bak.1`, `.bak.2`
+    /// and so on, so an earlier backup is never replaced. Returns the copy.
+    fn back_up_unreadable(path: &Path) -> Option<PathBuf> {
+        let result = (|| {
+            let mut source = fs::File::open(path)?;
+            for n in 0..MAX_SETTINGS_BACKUPS {
+                let mut name = path.as_os_str().to_os_string();
+                name.push(if n == 0 { ".bak".to_string() } else { format!(".bak.{n}") });
+                let backup = PathBuf::from(name);
+                let mut dest = match fs::OpenOptions::new().write(true).create_new(true).open(&backup) {
+                    Ok(dest) => dest,
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(err) => return Err(err),
+                };
+                if let Err(err) = io::copy(&mut source, &mut dest) {
+                    drop(dest);
+                    let _ = fs::remove_file(&backup);
+                    return Err(err);
+                }
+                return Ok(backup);
+            }
+            Err(io::Error::other("too many settings backups"))
+        })();
+        match result {
+            Ok(backup) => {
+                eprintln!(
+                    "litemark: {} couldn't be fully read; a copy was kept at {}",
+                    path.display(),
+                    backup.display()
+                );
+                Some(backup)
+            }
+            Err(err) => {
+                eprintln!("litemark: couldn't back up {}: {err}", path.display());
+                None
+            }
+        }
+    }
+
+    /// Save to the config file. The error names the file, for showing to the user.
+    pub fn save(&self) -> Result<(), String> {
+        if let Some(reason) = &self.save_blocked {
+            return Err(reason.clone());
+        }
+        let Some(path) = Self::config_path() else {
+            return Err("Couldn't save settings: no config folder on this system".into());
+        };
+        self.save_to(&path)
+            .map_err(|err| format!("Couldn't save settings to {}: {err}", path.display()))
+    }
+
+    /// Write through a temp file and rename, so a crash mid-write leaves the
+    /// previous settings intact instead of a truncated file.
+    fn save_to(&self, path: &Path) -> io::Result<()> {
+        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
+        atomic_save(path, &json)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn test_content_alignment_serde() {
@@ -174,5 +320,148 @@ mod tests {
         }
         assert_eq!(s.recent_folders.len(), MAX_RECENT_FOLDERS);
         assert_eq!(s.recent_folders[0], PathBuf::from("/old9"));
+    }
+
+    fn temp_settings_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("litemark-settings-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dir = temp_settings_dir("roundtrip");
+        let path = dir.join("litemark").join("settings.json");
+        let s = EditorSettings {
+            zoom_level: 140,
+            word_wrap: false,
+            ..Default::default()
+        };
+        s.save_to(&path).unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, 140);
+        assert!(!loaded.word_wrap);
+        let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("litemark-tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_file_gives_defaults_without_backup() {
+        let dir = temp_settings_dir("missing");
+        let path = dir.join("settings.json");
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, EditorSettings::default().zoom_level);
+        assert!(!path.with_extension("json.bak").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_bad_field_keeps_the_others_and_backs_up_the_file() {
+        let dir = temp_settings_dir("badfield");
+        let path = dir.join("settings.json");
+        let content = r#"{"theme": "SomeFutureTheme", "zoom_level": 150, "word_wrap": false}"#;
+        fs::write(&path, content).unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, 150);
+        assert!(!loaded.word_wrap);
+        assert_eq!(loaded.theme, EditorSettings::default().theme);
+        let backup = path.with_extension("json.bak");
+        assert_eq!(fs::read_to_string(backup).unwrap(), content);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn truncated_file_is_backed_up_before_defaults_are_used() {
+        let dir = temp_settings_dir("truncated");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"zoom_level": 150, "word_wr"#).unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, EditorSettings::default().zoom_level);
+        assert!(path.with_extension("json.bak").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bad_utf8_keeps_the_valid_fields_and_backs_up_the_file() {
+        let dir = temp_settings_dir("badutf8");
+        let path = dir.join("settings.json");
+        let mut content = br#"{"zoom_level": 150, "word_wrap": false, "theme": ""#.to_vec();
+        content.extend_from_slice(&[0xff, 0xfe]);
+        content.extend_from_slice(br#""}"#);
+        fs::write(&path, &content).unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, 150);
+        assert!(!loaded.word_wrap);
+        assert_eq!(fs::read(path.with_extension("json.bak")).unwrap(), content);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_damaged_file_does_not_replace_the_first_backup() {
+        let dir = temp_settings_dir("twobackups");
+        let path = dir.join("settings.json");
+        fs::write(&path, "first damage {").unwrap();
+        EditorSettings::load_from(&path);
+        fs::write(&path, "second damage {").unwrap();
+        EditorSettings::load_from(&path);
+        assert_eq!(
+            fs::read_to_string(dir.join("settings.json.bak")).unwrap(),
+            "first damage {"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("settings.json.bak.1")).unwrap(),
+            "second damage {"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn damaged_file_that_cant_be_backed_up_blocks_saving() {
+        let dir = temp_settings_dir("nobackup");
+        let path = dir.join("settings.json");
+        let damaged = b"{\"zoom_level\": 150, \"theme\": \"\xff\"}";
+        fs::write(&path, damaged).unwrap();
+        // Every backup name is taken, so the copy can't be made.
+        fs::write(dir.join("settings.json.bak"), "old").unwrap();
+        for n in 1..MAX_SETTINGS_BACKUPS {
+            fs::write(dir.join(format!("settings.json.bak.{n}")), "old").unwrap();
+        }
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, 150, "valid fields still load");
+        assert!(loaded.save_blocked.is_some());
+        let err = loaded.save().unwrap_err();
+        assert!(err.contains("won't be saved this session"), "{err}");
+        assert_eq!(fs::read(&path).unwrap(), damaged, "original untouched");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_fields_get_the_real_defaults() {
+        let parsed: EditorSettings = serde_json::from_str("{}").expect("deserialize");
+        assert_eq!(parsed.zoom_level, 100);
+        assert!(parsed.show_sidebar);
+    }
+
+    #[test]
+    fn out_of_range_numbers_are_clamped_on_load() {
+        let dir = temp_settings_dir("clamp");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{"zoom_level": 18446744073709551615, "base_font_size": -1e30}"#,
+        )
+        .unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, *ZOOM_RANGE.end());
+        assert_eq!(loaded.base_font_size, *FONT_SIZE_RANGE.start());
+        fs::write(&path, r#"{"zoom_level": 0}"#).unwrap();
+        assert_eq!(EditorSettings::load_from(&path).zoom_level, *ZOOM_RANGE.start());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

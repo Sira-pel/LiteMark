@@ -87,6 +87,60 @@ pub struct TableGeom {
 #[derive(Clone, Default)]
 pub struct TableWidthCache {
     pub entries: std::collections::HashMap<u64, TableWidthEntry>,
+    /// Measured width of one cell, keyed by `table_cell_key`. An edit in one
+    /// cell changes the table's key but leaves every other cell's entry, so
+    /// column widths are re-measured for the edited cell only.
+    pub cell_widths: std::collections::HashMap<u64, Pixels>,
+    /// Height of one row, keyed by `table_row_key` (its text and the column
+    /// widths it was wrapped to). Lets rows away from the caret and outside
+    /// the shaping band skip shaping even right after an edit.
+    pub row_heights: std::collections::HashMap<u64, Pixels>,
+}
+
+/// Key for one cell's measured width: its text, the hidden markup inside it
+/// (relative to the cell), and the font and size it's drawn in.
+fn table_cell_key(
+    raw: &str,
+    cell_start: usize,
+    hidden: &[Range<usize>],
+    font: &str,
+    mono_font: &str,
+    font_size: Pixels,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut hasher);
+    let cell_end = cell_start + raw.len();
+    for range in hidden {
+        if range.end > cell_start && range.start < cell_end {
+            (range.start.saturating_sub(cell_start), range.end.min(cell_end) - cell_start)
+                .hash(&mut hasher);
+        }
+    }
+    font.hash(&mut hasher);
+    mono_font.hash(&mut hasher);
+    f32::from(font_size).to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Key for one row's height: its text and hidden markup (relative to the
+/// row), the column widths it wraps to, and the font and size.
+fn table_row_key(
+    raw: &str,
+    row_start: usize,
+    hidden: &[Range<usize>],
+    col_widths: &[Pixels],
+    font: &str,
+    mono_font: &str,
+    font_size: Pixels,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    table_cell_key(raw, row_start, hidden, font, mono_font, font_size).hash(&mut hasher);
+    for width in col_widths {
+        f32::from(*width).to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Content width, column widths, and the row heights of the last frame that
@@ -1439,6 +1493,28 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         table_width_cache
             .entries
             .retain(|k, _| live_keys.contains(k));
+        // Cell and row entries are kept across frames (an idle frame measures
+        // nothing, and the next keystroke still needs them) and cleared only
+        // when they outgrow the document's tables several times over.
+        let live_table_cells: usize = table_rows
+            .values()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| match &line.kind {
+                        LineKind::TableRow { body, .. } => body.cells.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>()
+            })
+            .sum();
+        let cache_cap = 4 * live_table_cells + 1024;
+        if table_width_cache.cell_widths.len() > cache_cap {
+            table_width_cache.cell_widths.clear();
+        }
+        if table_width_cache.row_heights.len() > cache_cap {
+            table_width_cache.row_heights.clear();
+        }
 
         let mut table_col_widths: std::collections::HashMap<Range<usize>, Vec<Pixels>> =
             std::collections::HashMap::new();
@@ -1546,10 +1622,23 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         }
                         let empty_lines = Vec::new();
                         let lines = table_rows.get(table_source).unwrap_or(&empty_lines);
+                        let cell_widths = &mut table_width_cache.cell_widths;
                         let mut measure = |pline: &ParsedLine, cell_range: &Range<usize>| -> Pixels {
                             let (row_fs, _, _, _) =
                                 wysiwyg_line_metrics(&pline.kind, self.font_size);
                             let raw = self.content.get(cell_range.clone()).unwrap_or("");
+                            let key = table_cell_key(
+                                raw,
+                                cell_range.start,
+                                &pline.hidden_ranges,
+                                &self.font_family,
+                                &self.mono_font_family,
+                                row_fs,
+                            );
+                            if let Some(width) = cell_widths.get(&key) {
+                                return *width;
+                            }
+                            let width = (|| {
                             let (display, map) = RowOffsetMap::from_hidden(
                                 raw,
                                 cell_range.start,
@@ -1574,6 +1663,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 .text_system()
                                 .shape_line(slice, row_fs, &runs, None)
                                 .width
+                            })();
+                            cell_widths.insert(key, width);
+                            width
                         };
                         let widths = compute_table_column_widths(lines, content_width, &mut measure);
                         table_width_cache
@@ -1593,6 +1685,104 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     cur_col_x += w;
                 }
                 col_x_offsets.push(cur_col_x);
+
+                // Row-level culling inside a table that is being shaped: a
+                // row whose height is known, that is outside the shaping band
+                // and not next to the caret, keeps only its geometry. Before,
+                // a caret anywhere in a table shaped every row of it.
+                let row_ix_in_table = table_heights.get(table_source).map_or(0, Vec::len);
+                let row_key = table_row_key(
+                    self.content.get(parsed_line.source.clone()).unwrap_or(""),
+                    parsed_line.source.start,
+                    &parsed_line.hidden_ranges,
+                    col_widths,
+                    &self.font_family,
+                    &self.mono_font_family,
+                    row_font_size,
+                );
+                // A row whose cells all fit their columns on one line is one
+                // line high; the measured cell widths settle that without
+                // shaping, even when an edit elsewhere moved a column width.
+                let fits_one_line = || -> Option<Pixels> {
+                    for col_idx in 0..num_cols {
+                        let cell_range = cells.get(col_idx)?;
+                        let raw = self.content.get(cell_range.clone()).unwrap_or("");
+                        let key = table_cell_key(
+                            raw,
+                            cell_range.start,
+                            &parsed_line.hidden_ranges,
+                            &self.font_family,
+                            &self.mono_font_family,
+                            row_font_size,
+                        );
+                        let width = *table_width_cache.cell_widths.get(&key)?;
+                        let col_w = col_widths.get(col_idx).copied().unwrap_or(px(48.0));
+                        if width > (col_w - pad_x * 2.0).max(px(0.0)) {
+                            return None;
+                        }
+                    }
+                    Some(row_line_height)
+                };
+                let known_height = table_width_cache
+                    .row_heights
+                    .get(&row_key)
+                    .copied()
+                    .or_else(fits_one_line)
+                    .or_else(|| {
+                        table_width_cache
+                            .entries
+                            .get(&table_key)
+                            .filter(|(width, widths, _)| {
+                                *width == content_width && widths == col_widths
+                            })
+                            .and_then(|(_, _, heights)| heights.get(row_ix_in_table).copied())
+                    });
+                if let Some(height) = known_height {
+                    table_width_cache.row_heights.insert(row_key, height);
+                    let near_anchor = anchor_lines
+                        .iter()
+                        .any(|&a| a + 2 >= line_idx && a <= line_idx + 2);
+                    if !near_anchor && !band.contains(cur_y, height) {
+                        table_heights
+                            .entry(table_source.clone())
+                            .or_default()
+                            .push(height);
+                        let cell_geoms: Vec<(usize, Bounds<Pixels>)> = (0..num_cols)
+                            .map(|col_idx| {
+                                let anchor = raw_cells
+                                    .get(col_idx)
+                                    .or_else(|| cells.get(col_idx))
+                                    .map_or(parsed_line.source.start, |r| r.start);
+                                let cell_x =
+                                    base_x + col_x_offsets.get(col_idx).copied().unwrap_or(px(0.0));
+                                let col_w = col_widths.get(col_idx).copied().unwrap_or(px(48.0));
+                                (anchor, Bounds::new(point(cell_x, cur_y), size(col_w, height)))
+                            })
+                            .collect();
+                        super::table_chrome::record_table_row(
+                            &mut tables,
+                            table_source.clone(),
+                            is_header,
+                            alignments,
+                            Bounds::new(point(base_x, cur_y), size(table_w, height)),
+                            &cell_geoms,
+                        );
+                        rows.push(PaintRow {
+                            line_index: line_idx,
+                            byte_start: parsed_line.source.start,
+                            byte_end: parsed_line.source.end,
+                            origin: point(base_x, cur_y),
+                            line_height: height,
+                            shaped: unshaped.clone(),
+                            offset_map: empty_map.clone(),
+                            checkbox_hit: None,
+                            link_hits: empty_links.clone(),
+                            cells: Vec::new(),
+                        });
+                        cur_y += height;
+                        continue;
+                    }
+                }
 
                 struct CellPrep {
                     cell_range: Range<usize>,
@@ -1712,6 +1902,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
 
                 let max_subrows = cell_preps.iter().map(|p| p.lines.len()).max().unwrap_or(1);
                 let row_height = row_line_height * (max_subrows as f32);
+                table_width_cache.row_heights.insert(row_key, row_height);
                 table_heights
                     .entry(table_source.clone())
                     .or_default()
@@ -1901,13 +2092,17 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     .first()
                     .map(|c| c.shaped.clone())
                     .unwrap_or_else(|| sample.clone());
+                let cell_geoms: Vec<(usize, Bounds<Pixels>)> = paint_cells
+                    .iter()
+                    .map(|cell| (cell.raw_range.start, cell.box_bounds))
+                    .collect();
                 super::table_chrome::record_table_row(
                     &mut tables,
                     table_source.clone(),
                     is_header,
                     alignments,
                     Bounds::new(point(base_x, cur_y), size(table_w, row_height)),
-                    &paint_cells,
+                    &cell_geoms,
                 );
                 rows.push(PaintRow {
                     line_index: line_idx,

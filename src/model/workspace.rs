@@ -30,6 +30,9 @@ pub struct WorkspaceDirectory {
     pub is_linked_to_local_disk: bool,
     pub folders: Vec<WorkspaceFolder>,
     pub files: Vec<WorkspaceFile>,
+    /// The scan stopped at its depth or item limit, so some of the folder
+    /// isn't listed.
+    pub scan_truncated: bool,
 }
 
 /// Default notes folder under `base`: an existing `Notes` folder keeps being
@@ -54,6 +57,7 @@ impl Default for WorkspaceDirectory {
             is_linked_to_local_disk: true,
             folders: Vec::new(),
             files: Vec::new(),
+            scan_truncated: false,
         }
     }
 }
@@ -81,6 +85,141 @@ mod tests {
             path: PathBuf::from(format!("/tmp/{}", name)),
             file_type: FileType::Markdown,
             updated_at: 0,
+        }
+    }
+
+    /// The tree builder before it was made linear, kept to check the new one.
+    fn build_sidebar_tree_reference(
+        folders: &[WorkspaceFolder],
+        files: &[WorkspaceFile],
+        creating: Option<&SidebarCreate>,
+    ) -> Vec<SidebarTreeItem> {
+        let mut items = Vec::new();
+        let folder_ids: std::collections::HashSet<&str> =
+            folders.iter().map(|f| f.id.as_str()).collect();
+
+        fn collect_level(
+            parent_id: Option<&str>,
+            depth: usize,
+            folders: &[WorkspaceFolder],
+            files: &[WorkspaceFile],
+            folder_ids: &std::collections::HashSet<&str>,
+            creating: Option<(Option<&str>, bool)>,
+            out: &mut Vec<SidebarTreeItem>,
+        ) {
+            // The inline create editor sits at the top of the level it targets.
+            if let Some((create_parent, is_folder)) = creating {
+                if create_parent == parent_id {
+                    out.push(SidebarTreeItem::CreateInput { depth, is_folder });
+                }
+            }
+            let mut level_folders: Vec<&WorkspaceFolder> = folders
+                .iter()
+                .filter(|f| {
+                    if let Some(pid) = parent_id {
+                        f.parent_id.as_deref() == Some(pid)
+                    } else {
+                        f.parent_id.is_none()
+                            || f.parent_id.as_deref().is_some_and(|p| !folder_ids.contains(p))
+                    }
+                })
+                .collect();
+            level_folders.sort_by_cached_key(|a| a.name.to_lowercase());
+
+            for folder in level_folders {
+                let is_open = folder.is_open;
+                let fid = folder.id.clone();
+                out.push(SidebarTreeItem::Folder {
+                    folder: folder.clone(),
+                    depth,
+                });
+                if is_open {
+                    collect_level(Some(&fid), depth + 1, folders, files, folder_ids, creating, out);
+                }
+            }
+
+            let mut level_files: Vec<&WorkspaceFile> = files
+                .iter()
+                .filter(|f| {
+                    if let Some(pid) = parent_id {
+                        f.folder_id.as_deref() == Some(pid)
+                    } else {
+                        f.folder_id.is_none()
+                            || f.folder_id.as_deref().is_some_and(|p| !folder_ids.contains(p))
+                    }
+                })
+                .collect();
+            level_files.sort_by_cached_key(|a| a.name.to_lowercase());
+
+            for file in level_files {
+                out.push(SidebarTreeItem::File {
+                    file: file.clone(),
+                    depth,
+                });
+            }
+        }
+
+        collect_level(
+            None,
+            0,
+            folders,
+            files,
+            &folder_ids,
+            creating.map(|c| (c.parent.as_deref(), c.is_folder)),
+            &mut items,
+        );
+        items
+    }
+
+    #[test]
+    fn sidebar_tree_matches_the_old_builder_on_random_workspaces() {
+        // Small LCG so the cases are the same on every run.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        let names = ["b", "A", "a", "c", "B", "Notes", "notes", "z"];
+        for case in 0..300 {
+            let folder_count = next(8);
+            let mut folders = Vec::new();
+            for i in 0..folder_count {
+                // Parents only point backwards (a real scan has no cycles);
+                // some point at ids that don't exist, which land at the root.
+                let parent = match next(4) {
+                    0 if i > 0 => Some(format!("d{}", next(i))),
+                    1 => Some("missing".to_string()),
+                    _ => None,
+                };
+                folders.push(make_folder(
+                    &format!("d{i}"),
+                    names[next(names.len())],
+                    parent.as_deref(),
+                    next(3) != 0,
+                ));
+            }
+            let mut files = Vec::new();
+            for i in 0..next(12) {
+                let folder = match next(3) {
+                    0 if folder_count > 0 => Some(format!("d{}", next(folder_count))),
+                    1 => Some("missing".to_string()),
+                    _ => None,
+                };
+                files.push(make_file(&format!("f{i}"), names[next(names.len())], folder.as_deref()));
+            }
+            let creating = match next(3) {
+                0 => None,
+                1 => Some(SidebarCreate { parent: None, is_folder: next(2) == 0 }),
+                _ => Some(SidebarCreate {
+                    parent: Some(format!("d{}", next(folder_count.max(1)))),
+                    is_folder: next(2) == 0,
+                }),
+            };
+            assert_eq!(
+                build_sidebar_tree(&folders, &files, creating.as_ref()),
+                build_sidebar_tree_reference(&folders, &files, creating.as_ref()),
+                "case {case}"
+            );
         }
     }
 

@@ -10,7 +10,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::markdown::scan_list_marker;
 
 /// Maximum total bytes of deleted + inserted text kept on the undo and redo stacks.
-pub const UNDO_BYTE_BUDGET: usize = 256 * 1024;
+/// Large enough that one whole-document step (Select All + type on a
+/// multi-megabyte note) survives the next keystroke; small next to the
+/// parse cache of the same note.
+pub const UNDO_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 
 /// Typing that continues the same word inside this window is one undo step.
 pub const TYPING_BURST_MS: u64 = 1_000;
@@ -426,31 +429,33 @@ struct TextLine {
 /// The line that contains `offset`. A caret between CR and LF belongs to the
 /// line that owns that CRLF, and its content end is the CR, not the LF.
 fn line_span_at(content: &str, offset: usize) -> TextLine {
+    // Look only around `offset`: callers run this once per line of a
+    // selection, and scanning from the top made those commands O(n²).
     let bytes = content.as_bytes();
     let offset = offset.min(bytes.len());
-    let mut start = 0usize;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let ending = line_ending_len(content, index);
-        if ending > 0 {
-            let next = index + ending;
-            if offset < next {
-                return TextLine {
-                    start,
-                    content_end: index,
-                    next,
-                };
+    let is_eol = |b: &u8| *b == b'\n' || *b == b'\r';
+    // A caret between CR and LF: that CR ends this line, not the previous one.
+    let between_crlf =
+        offset > 0 && bytes.get(offset) == Some(&b'\n') && bytes[offset - 1] == b'\r';
+    let look_back = if between_crlf { offset - 1 } else { offset };
+    let start = bytes[..look_back]
+        .iter()
+        .rposition(is_eol)
+        .map_or(0, |eol| eol + 1);
+    match bytes[start..].iter().position(is_eol) {
+        Some(rel) => {
+            let content_end = start + rel;
+            TextLine {
+                start,
+                content_end,
+                next: content_end + line_ending_len(content, content_end),
             }
-            index = next;
-            start = next;
-        } else {
-            index += 1;
         }
-    }
-    TextLine {
-        start,
-        content_end: bytes.len(),
-        next: bytes.len(),
+        None => TextLine {
+            start,
+            content_end: bytes.len(),
+            next: bytes.len(),
+        },
     }
 }
 
@@ -832,15 +837,14 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
     }
 
     let needle = term.to_lowercase();
-    let needle_chars = needle.chars().count();
-    if needle_chars == 0 {
+    if needle.is_empty() {
         return Vec::new();
     }
     let mut hits = Vec::new();
     let mut start = 0usize;
     while start < content.len() {
         let rest = &content[start..];
-        if let Some(len) = caseless_match_len(rest, &needle, needle_chars) {
+        if let Some(len) = caseless_match_len(rest, &needle) {
             hits.push(start..start + len);
             start += len;
         } else {
@@ -850,35 +854,36 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
     hits
 }
 
-/// Byte length of the first `count` chars of `text` when they lowercase to
-/// `needle`, without allocating. Matches `text[..len].to_lowercase() == needle`.
-fn caseless_match_len(text: &str, needle: &str, count: usize) -> Option<usize> {
-    let mut want = needle.chars();
-    let mut taken = 0usize;
-    let mut end = 0usize;
+/// Byte length of the shortest start of `text` whose lowercase is `needle`,
+/// without allocating. The match ends when the needle is used up at a
+/// character boundary, so a character that lowercases to two (`İ` → `i̇`)
+/// can match, and a needle never matches half of one.
+fn caseless_match_len(text: &str, needle: &str) -> Option<usize> {
+    let mut want = needle.chars().peekable();
     for (index, ch) in text.char_indices() {
-        if taken == count {
-            break;
+        if want.peek().is_none() {
+            return Some(index);
         }
         if ch == '\u{03A3}' {
             // Capital sigma lowercases by context (final sigma), which only
-            // str::to_lowercase knows; compare the whole window that way.
-            let len = text
-                .char_indices()
-                .nth(count)
-                .map_or(text.len(), |(at, _)| at);
-            let enough = text[..len].chars().count() == count;
-            return (enough && text[..len].to_lowercase() == needle).then_some(len);
+            // str::to_lowercase knows. Compare the shortest window from the
+            // match start that lowercases to at least the needle's length.
+            let mut end = index;
+            for (at, c) in text[index..].char_indices() {
+                end = index + at + c.len_utf8();
+                if text[..end].to_lowercase().len() >= needle.len() {
+                    break;
+                }
+            }
+            return (text[..end].to_lowercase() == needle).then_some(end);
         }
         for lower in ch.to_lowercase() {
             if want.next() != Some(lower) {
                 return None;
             }
         }
-        taken += 1;
-        end = index + ch.len_utf8();
     }
-    (taken == count && want.next().is_none()).then_some(end)
+    want.peek().is_none().then_some(text.len())
 }
 
 /// Index of the next hit at or after `cursor`. Wraps to the first hit.
@@ -1131,6 +1136,63 @@ pub fn wysiwyg_list_row_height(font_px: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// The original whole-document scan, kept to check the local version.
+    fn line_span_at_reference(content: &str, offset: usize) -> TextLine {
+        let bytes = content.as_bytes();
+        let offset = offset.min(bytes.len());
+        let mut start = 0usize;
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let ending = line_ending_len(content, index);
+            if ending > 0 {
+                let next = index + ending;
+                if offset < next {
+                    return TextLine {
+                        start,
+                        content_end: index,
+                        next,
+                    };
+                }
+                index = next;
+                start = next;
+            } else {
+                index += 1;
+            }
+        }
+        TextLine {
+            start,
+            content_end: bytes.len(),
+            next: bytes.len(),
+        }
+    }
+
+    #[test]
+    fn line_span_at_matches_the_full_scan_on_every_offset() {
+        let alphabet = *b"a\n\r";
+        // Every string up to 7 bytes over {a, LF, CR}, every offset.
+        for len in 0..=7u32 {
+            for code in 0..3usize.pow(len) {
+                let mut c = code;
+                let text: String = (0..len)
+                    .map(|_| {
+                        let ch = alphabet[c % 3] as char;
+                        c /= 3;
+                        ch
+                    })
+                    .collect();
+                for offset in 0..=text.len() + 1 {
+                    let got = line_span_at(&text, offset);
+                    let want = line_span_at_reference(&text, offset);
+                    assert_eq!(
+                        (got.start, got.content_end, got.next),
+                        (want.start, want.content_end, want.next),
+                        "{text:?} at {offset}"
+                    );
+                }
+            }
+        }
+    }
+
     fn visual_row_count(content: &str, wrap_cols: usize) -> usize {
         visual_row_count_tabbed(content, wrap_cols, 0)
     }
@@ -1281,22 +1343,28 @@ mod tests {
     }
 
     /// The allocation-per-position search `find_matches` replaced.
+    /// Reference: at each position, the shortest window whose lowercase is
+    /// at least as long as the needle's; a hit when it equals the needle.
     fn find_matches_by_lowercasing(content: &str, term: &str) -> Vec<Range<usize>> {
         let needle = term.to_lowercase();
-        let needle_chars = needle.chars().count();
-        let chars: Vec<(usize, char)> = content.char_indices().collect();
         let mut hits = Vec::new();
-        let mut index = 0usize;
-        while needle_chars > 0 && index + needle_chars <= chars.len() {
-            let start = chars[index].0;
-            let end = chars
-                .get(index + needle_chars)
-                .map_or(content.len(), |c| c.0);
+        if needle.is_empty() {
+            return hits;
+        }
+        let mut start = 0usize;
+        while start < content.len() {
+            let mut end = start;
+            for (at, c) in content[start..].char_indices() {
+                end = start + at + c.len_utf8();
+                if content[start..end].to_lowercase().len() >= needle.len() {
+                    break;
+                }
+            }
             if content[start..end].to_lowercase() == needle {
                 hits.push(start..end);
-                index += needle_chars;
+                start = end;
             } else {
-                index += 1;
+                start += content[start..].chars().next().map_or(1, char::len_utf8);
             }
         }
         hits
@@ -1327,6 +1395,14 @@ mod tests {
                 );
             }
         }
+        // Audit B6: `İ` lowercases to two characters and still matches.
+        assert_eq!(find_matches("İstanbul", "İ", false), vec![0..2]);
+        assert_eq!(find_matches("İstanbul", "İ", true), vec![0..2]);
+        assert_eq!(find_matches("xİx İ", "i\u{307}", false), vec![1..3, 5..7]);
+        // A needle never matches half of a character.
+        assert_eq!(find_matches("İ", "i", false), Vec::<Range<usize>>::new());
+        // Final sigma still depends on the letters before it.
+        assert_eq!(find_matches("ΟΔΟΣ", "οδος", false), vec![0..8]);
     }
 
     #[test]
