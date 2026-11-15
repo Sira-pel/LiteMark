@@ -370,6 +370,11 @@ impl LiteMarkApp {
         let Some(path) = pick_open_file() else {
             return;
         };
+        self.open_path(path, cx);
+    }
+
+    /// Open a file as a tab (or switch to it when it is already open).
+    pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let name = path
             .file_name()
             .and_then(|f| f.to_str())

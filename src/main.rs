@@ -12,6 +12,7 @@ mod editor_input;
 mod markdown;
 mod model;
 mod services;
+mod single_instance;
 mod theme;
 mod ui;
 
@@ -46,6 +47,11 @@ impl AssetSource for EmbeddedAssets {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let initial_file = args.get(1).map(PathBuf::from).filter(|p| p.exists());
+    // A file opened while LiteMark is already running goes to that window.
+    let incoming = match single_instance::claim(initial_file.as_deref()) {
+        single_instance::Claim::HandedOff => return,
+        single_instance::Claim::Primary(rx) => rx,
+    };
 
     Application::new()
         .with_assets(EmbeddedAssets)
@@ -313,9 +319,27 @@ fn main() {
             );
             // No display server, or the window system refused the window:
             // say so instead of panicking with a raw unwrap message.
-            if let Err(err) = opened {
-                eprintln!("LiteMark couldn't open its window: {err:#}");
-                std::process::exit(1);
+            let window = match opened {
+                Ok(window) => window,
+                Err(err) => {
+                    eprintln!("LiteMark couldn't open its window: {err:#}");
+                    std::process::exit(1);
+                }
+            };
+            // Files other launches hand over open as tabs here.
+            if let Some(incoming) = incoming {
+                cx.spawn(async move |cx| loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    while let Ok(path) = incoming.try_recv() {
+                        let _ = window.update(cx, |app, window, cx| {
+                            app.open_path(path, cx);
+                            window.activate_window();
+                        });
+                    }
+                })
+                .detach();
             }
         });
 }
