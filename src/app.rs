@@ -757,3 +757,7 @@ mod note_drop_tests;
 #[cfg(test)]
 #[path = "typing_tests.rs"]
 mod typing_tests;
+
+#[cfg(test)]
+#[path = "sidebar_render_tests.rs"]
+mod sidebar_render_tests;
