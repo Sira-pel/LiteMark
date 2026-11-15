@@ -147,6 +147,8 @@ pub struct LiteMarkApp {
     pub appearance_subscription: Option<Subscription>,
     pub tab_ids: TabIds,
     pub error_message: Option<String>,
+    /// The last settings save failed; the error was shown once already.
+    settings_save_failed: bool,
     pub prompt: Option<Prompt>,
     pub prompt_focus_handle: FocusHandle,
     pub prompt_selected_ix: usize,
@@ -212,13 +214,16 @@ pub struct LiteMarkApp {
 impl LiteMarkApp {
     pub fn new(initial_file: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let settings = EditorSettings::load();
+        // Told once here; save_settings stays quiet about it afterwards.
+        let settings_save_failed = settings.save_blocked.is_some();
+        let settings_warning = settings.save_blocked.clone();
         let notes_dir = get_or_create_notes_dir();
         seed_welcome_note(&notes_dir);
         let workspace = scan_workspace_dir(&notes_dir, settings.show_code_files);
 
         let mut tab_ids = TabIds::new();
         let first_id = tab_ids.alloc();
-        let mut error_message = None;
+        let mut error_message = settings_warning;
         let initial_tab = if let Some(path) = initial_file {
             let name = path
                 .file_name()
@@ -477,6 +482,7 @@ impl LiteMarkApp {
             appearance_subscription: None,
             tab_ids,
             error_message,
+            settings_save_failed,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -598,6 +604,7 @@ impl LiteMarkApp {
             appearance_subscription: None,
             tab_ids,
             error_message: None,
+            settings_save_failed: false,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -686,6 +693,20 @@ impl LiteMarkApp {
 
     fn show_error(&mut self, message: impl Into<String>) {
         self.error_message = Some(message.into());
+    }
+
+    /// Save settings, telling the user when it fails. A failure that keeps
+    /// happening (full disk, read-only config folder) is shown only once.
+    fn save_settings(&mut self) {
+        match self.settings.save() {
+            Ok(()) => self.settings_save_failed = false,
+            Err(err) => {
+                if !self.settings_save_failed {
+                    self.show_error(err);
+                }
+                self.settings_save_failed = true;
+            }
+        }
     }
 
     /// For a failed write: save, export, create, rename, move, copy or
