@@ -671,61 +671,70 @@ enum ScanKind {
 /// and a link to /etc would let rename and trash act outside the notes
 /// folder.
 fn read_scan_entries(dir: &Path, show_code_files: bool) -> Vec<ScanEntry> {
-    let Ok(read) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut entries = Vec::new();
-    for entry in read.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if SKIPPED_ENTRIES.contains(&name.as_str()) {
-            continue;
-        }
-        // DirEntry::file_type does not follow symlinks.
-        let Ok(entry_type) = entry.file_type() else {
-            continue;
-        };
-        let kind = if entry_type.is_dir() {
-            ScanKind::Folder
-        } else if entry_type.is_file() {
-            let file_type = FileType::from_filename(&name);
-            let listed = match file_type {
-                FileType::Markdown | FileType::PlainText => true,
-                FileType::Code => show_code_files,
-                FileType::Pdf => false,
-            };
-            if !listed {
-                continue;
-            }
-            let updated_at = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            ScanKind::File {
-                file_type,
-                updated_at,
-            }
-        } else {
-            continue;
-        };
-        entries.push(ScanEntry {
-            name,
-            path: entry.path(),
-            kind,
-        });
-    }
+    let mut entries: Vec<ScanEntry> = listed_entries(dir, show_code_files).collect();
     // Each DirEntry keeps its directory open on Unix; all of them are
     // dropped here, before any child folder is read.
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     entries
 }
 
-fn has_entries(dir: &Path) -> bool {
+/// The children of `dir` the sidebar lists, unsorted, read lazily.
+fn listed_entries(dir: &Path, show_code_files: bool) -> impl Iterator<Item = ScanEntry> {
     fs::read_dir(dir)
-        .map(|mut read| read.next().is_some())
-        .unwrap_or(false)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(move |entry| listed_entry(entry, show_code_files))
+}
+
+/// `entry` as the sidebar lists it, or `None` if it is left out.
+fn listed_entry(entry: fs::DirEntry, show_code_files: bool) -> Option<ScanEntry> {
+    let name = entry.file_name().to_string_lossy().to_string();
+    if SKIPPED_ENTRIES.contains(&name.as_str()) {
+        return None;
+    }
+    // DirEntry::file_type does not follow symlinks.
+    let Ok(entry_type) = entry.file_type() else {
+        return None;
+    };
+    let kind = if entry_type.is_dir() {
+        ScanKind::Folder
+    } else if entry_type.is_file() {
+        let file_type = FileType::from_filename(&name);
+        let listed = match file_type {
+            FileType::Markdown | FileType::PlainText => true,
+            FileType::Code => show_code_files,
+            FileType::Pdf => false,
+        };
+        if !listed {
+            return None;
+        }
+        let updated_at = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        ScanKind::File {
+            file_type,
+            updated_at,
+        }
+    } else {
+        return None;
+    };
+    Some(ScanEntry {
+        name,
+        path: entry.path(),
+        kind,
+    })
+}
+
+/// Whether `dir` holds anything the sidebar would list. A folder holding
+/// only `.DS_Store`, a PDF or a symlink has nothing to show, so leaving it
+/// unread past the depth limit hides nothing.
+fn has_entries(dir: &Path, show_code_files: bool) -> bool {
+    listed_entries(dir, show_code_files).next().is_some()
 }
 
 /// List the notes folder. Dotfiles are listed; only `SKIPPED_ENTRIES` are left out.
@@ -777,7 +786,7 @@ fn scan_workspace_dir_limited(
                 if depth < max_depth {
                     let children = read_scan_entries(&entry.path, show_code_files);
                     stack.push((children.into_iter(), Some(folder_id.clone()), depth + 1));
-                } else if has_entries(&entry.path) {
+                } else if has_entries(&entry.path, show_code_files) {
                     truncated = true;
                 }
                 folders.push(WorkspaceFolder {
@@ -1028,6 +1037,17 @@ mod tests {
         let scan = scan_workspace_dir_limited(&root, true, 2, MAX_SCAN_ITEMS);
         assert_eq!(scan.folders.len(), 2);
         assert!(!scan.scan_truncated);
+
+        // Files the sidebar never lists don't count as hidden items.
+        let deep = root.join("a").join("b");
+        fs::write(deep.join(".DS_Store"), "x").unwrap();
+        fs::write(deep.join("paper.pdf"), "x").unwrap();
+        fs::write(deep.join("main.rs"), "x").unwrap();
+        let scan = scan_workspace_dir_limited(&root, false, 2, MAX_SCAN_ITEMS);
+        assert!(!scan.scan_truncated, "nothing listable below the limit");
+        let scan = scan_workspace_dir_limited(&root, true, 2, MAX_SCAN_ITEMS);
+        assert!(scan.scan_truncated, "code files are listed when shown");
+        fs::remove_file(deep.join("main.rs")).unwrap();
 
         fs::write(root.join("a").join("b").join("hidden.md"), "x").unwrap();
         let scan = scan_workspace_dir_limited(&root, true, 2, MAX_SCAN_ITEMS);
