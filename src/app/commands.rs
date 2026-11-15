@@ -659,7 +659,7 @@ impl LiteMarkApp {
         }
         let content = self
             .active_tab()
-            .map(|tab| tab.content.clone())
+            .map(|tab| tab.file_text())
             .unwrap_or_default();
         match atomic_save(&path, &content) {
             Ok(()) => {

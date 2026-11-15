@@ -21,7 +21,7 @@ impl LiteMarkApp {
             &folder,
             |name| folder.join(name).exists(),
         )?;
-        let content = tab.content.clone();
+        let content = tab.file_text();
         let saved_path = if planned.path.exists() {
             atomic_save(&planned.path, &content)
                 .map_err(|err| format!("Couldn't save {}: {err}", planned.path.display()))?;
