@@ -458,16 +458,6 @@ impl DocumentTab {
         self.cached_parse = None;
     }
 
-    #[allow(dead_code)]
-    pub fn parsed_snapshot(&self) -> Arc<ParsedDocument> {
-        if let Some((rev, ref doc)) = self.cached_parse {
-            if rev == self.revision {
-                return doc.clone();
-            }
-        }
-        Arc::new(parse_document(&self.content))
-    }
-
     /// Re-detect the type after Save As or a rename. A change drops the parse cache,
     /// which was built for the old type. Returns whether the type changed.
     pub fn set_file_type(&mut self, file_type: FileType) -> bool {
@@ -505,7 +495,7 @@ impl DocumentTab {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn undo_stored_bytes(&self) -> usize {
         self.history.stored_bytes()
     }

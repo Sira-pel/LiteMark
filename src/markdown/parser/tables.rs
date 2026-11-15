@@ -125,6 +125,7 @@ pub(super) fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
 }
 
 /// Cell text between unescaped pipes. `\|` stays inside the cell.
+#[cfg(test)]
 pub fn split_table_cells(line: &str) -> Vec<String> {
     table_cell_ranges(line)
         .into_iter()

@@ -8,8 +8,19 @@ macro_rules! platforms {
             #[cfg(any($(target_os = $platform),*))]
             pub use self::$module::*;
 
-            #[cfg(any($(target_os = $platform),*))]
+            // LiteMark patch: libc has no ENOATTR on Linux and Android,
+            // where "attribute not found" is ENODATA. macOS and the BSDs keep
+            // their own ENOATTR, which is a different number there.
+            #[cfg(all(
+                any($(target_os = $platform),*),
+                any(target_os = "linux", target_os = "android")
+            ))]
             pub const ENOATTR: ::libc::c_int = ::libc::ENODATA;
+            #[cfg(all(
+                any($(target_os = $platform),*),
+                not(any(target_os = "linux", target_os = "android"))
+            ))]
+            pub const ENOATTR: ::libc::c_int = ::libc::ENOATTR;
         )*
 
         #[cfg(all(feature = "unsupported", not(any($($(target_os = $platform),*),*))))]

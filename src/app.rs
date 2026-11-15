@@ -154,8 +154,6 @@ pub struct LiteMarkApp {
     pub not_found: bool,
     pub focus_handle: FocusHandle,
     pub menu_focus_handle: FocusHandle,
-    #[allow(dead_code)]
-    pub appearance_subscription: Option<Subscription>,
     pub tab_ids: TabIds,
     pub error_message: Option<String>,
     /// The last settings save failed; the error was shown once already.
@@ -508,7 +506,6 @@ impl LiteMarkApp {
             focus_handle: cx.focus_handle(),
             menu_focus_handle: cx.focus_handle(),
             prompt_focus_handle: cx.focus_handle(),
-            appearance_subscription: None,
             tab_ids,
             error_message,
             settings_save_failed,
@@ -636,7 +633,6 @@ impl LiteMarkApp {
             focus_handle: cx.focus_handle(),
             menu_focus_handle: cx.focus_handle(),
             prompt_focus_handle: cx.focus_handle(),
-            appearance_subscription: None,
             tab_ids,
             error_message: None,
             settings_save_failed: false,

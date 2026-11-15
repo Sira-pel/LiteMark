@@ -3,7 +3,7 @@
 use super::*;
 
 impl DocumentTab {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn apply_format(&mut self, cmd: &str) {
         self.apply_format_in_mode(cmd, ViewMode::Raw);
     }

@@ -864,15 +864,6 @@ pub fn file_dialog_error() -> Option<String> {
     file_dialog_block_reason(probe_file_dialog()).map(str::to_string)
 }
 
-#[allow(dead_code)]
-pub fn safe_delete(path: &Path, is_dir: bool) -> io::Result<()> {
-    if is_dir {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
-}
-
 /// Extensions of common binary formats. Without this every unknown file
 /// counts as plain text, so images, video and disk images show up as notes.
 /// Short or generic extensions (`a`, `o`, `bin`, `dat`, `db`) are left out:

@@ -533,7 +533,6 @@ impl LiteMarkApp {
             text_color: theme.text_primary.into(),
             strong_color: theme.text_strong.into(),
             muted_color: theme.text_muted.into(),
-            faint_color: theme.text_faint.into(),
             h1_color: theme.h1.into(),
             h2_color: theme.h2.into(),
             code_color: theme.code_text.into(),

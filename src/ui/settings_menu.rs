@@ -4,27 +4,6 @@ use crate::theme::{sz, Theme, ThemeMode};
 use super::menu::MenuItem;
 use super::primitives::render_icon;
 
-#[allow(dead_code)]
-pub struct SettingsMenuProps<FToggleTheme, FSetFontSize, FHelp, FAbout, FTogOpen, FClose>
-where
-    FToggleTheme: Fn(ThemeMode, &mut App) + 'static + Clone,
-    FSetFontSize: Fn(f32, &mut App) + 'static + Clone,
-    FHelp: Fn(&mut App) + 'static + Clone,
-    FAbout: Fn(&mut App) + 'static + Clone,
-    FTogOpen: Fn(&mut App) + 'static + Clone,
-    FClose: Fn(&mut App) + 'static + Clone,
-{
-    pub is_open: bool,
-    pub current_theme: ThemeMode,
-    pub base_font_size: f32,
-    pub on_set_theme: FToggleTheme,
-    pub on_set_font_size: FSetFontSize,
-    pub on_open_help: FHelp,
-    pub on_open_about: FAbout,
-    pub on_toggle_open: FTogOpen,
-    pub on_close: FClose,
-}
-
 pub fn render_settings_button<FTogOpen>(
     is_open: bool,
     update_available: bool,

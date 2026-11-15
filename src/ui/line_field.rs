@@ -61,12 +61,6 @@ impl LineField {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn content(&self) -> &str {
-        &self.content
-    }
-
-    #[allow(dead_code)]
     pub fn set_text(&mut self, text: impl Into<SharedString>) {
         self.content = text.into();
         self.selected_range = 0..self.content.len();

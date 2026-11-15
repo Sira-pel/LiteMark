@@ -114,7 +114,7 @@ pub fn export_to_plaintext(markdown: &str) -> String {
     text_output.trim().to_string()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn format_markdown_table(headers: &[String], rows: &[Vec<String>]) -> String {
     let mut out = String::new();
     out.push_str("| ");

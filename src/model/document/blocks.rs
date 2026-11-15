@@ -554,7 +554,6 @@ pub(super) fn parse_line_block_prefix(
     (indent, None, indent)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn block_prefix_len(line: &str) -> usize {
     block_prefix_in(line, 0)
 }
