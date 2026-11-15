@@ -53,7 +53,8 @@ impl LiteMarkApp {
     }
 
     pub(super) fn step_find(&mut self, forward: bool) {
-        if self.find_term.is_empty() {
+        // A prompt is open: the find panel's buttons must not act behind it.
+        if self.input_blocked() || self.find_term.is_empty() {
             return;
         }
         let term = self.find_term.clone();
@@ -72,6 +73,9 @@ impl LiteMarkApp {
     }
 
     pub(super) fn replace_current(&mut self) {
+        if self.input_blocked() {
+            return;
+        }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
             self.show_error("PDF files are read-only.");
             return;
@@ -91,6 +95,9 @@ impl LiteMarkApp {
     }
 
     pub(super) fn replace_all_matches(&mut self) {
+        if self.input_blocked() {
+            return;
+        }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {
             self.show_error("PDF files are read-only.");
             return;

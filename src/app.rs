@@ -778,3 +778,7 @@ mod note_drop_tests;
 #[cfg(test)]
 #[path = "typing_tests.rs"]
 mod typing_tests;
+
+#[cfg(test)]
+#[path = "find_panel_tests.rs"]
+mod find_panel_tests;
