@@ -335,7 +335,7 @@ impl LiteMarkApp {
         }
     }
 
-    pub fn handle_open_file(&mut self) {
+    pub fn handle_open_file(&mut self, cx: &mut Context<Self>) {
         if let Some(message) = file_dialog_error() {
             self.show_error(message);
             return;
@@ -360,26 +360,66 @@ impl LiteMarkApp {
                 self.prompt_selected_ix = 0;
                 return;
             }
-            match extract_text_from_pdf(&path) {
-                Ok((extracted_md, pages)) => {
-                    let new_id = self.tab_ids.alloc();
-                    let mut tab =
-                        DocumentTab::new(new_id.clone(), name, extracted_md, Some(path), None);
-                    tab.file_type = FileType::Pdf;
-                    tab.pdf_page_count = Some(pages);
-                    self.tabs.push(tab);
-                    self.active_tab_id = new_id;
-                    self.show_pdf_modal = true;
-                    self.prompt_selected_ix = 0;
-                }
-                Err(err) => self.show_error(format!("Couldn't open PDF: {err}")),
-            }
+            self.open_pdf_in_background(name, path, cx);
         } else {
             match read_note(&path) {
                 Ok(content) => self.open_loaded_tab(name, content, Some(path), None),
                 Err(err) => self.show_error(err),
             }
         }
+    }
+
+    /// Extract a PDF's text off the UI thread, then open it as a read-only
+    /// tab. One PDF is extracted at a time.
+    fn open_pdf_in_background(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
+        if self.pdf_opening.is_some() {
+            self.show_toast("Still opening a PDF…", cx);
+            return;
+        }
+        self.pdf_opening = Some(path.clone());
+        self.show_toast(format!("Opening {name}…"), cx);
+        let task = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { extract_text_from_pdf(&path) }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.pdf_opening = None;
+                this.saved_toast = None;
+                match result {
+                    Ok((extracted_md, pages)) => {
+                        let paths: Vec<Option<&Path>> = this
+                            .tabs
+                            .iter()
+                            .map(|tab| tab.file_path.as_deref())
+                            .collect();
+                        if let Some(index) = tab_index_for_path(&paths, &path) {
+                            this.active_tab_id = this.tabs[index].id.clone();
+                        } else {
+                            let new_id = this.tab_ids.alloc();
+                            let mut tab = DocumentTab::new(
+                                new_id.clone(),
+                                name,
+                                extracted_md,
+                                Some(path),
+                                None,
+                            );
+                            tab.file_type = FileType::Pdf;
+                            tab.pdf_page_count = Some(pages);
+                            this.tabs.push(tab);
+                            this.active_tab_id = new_id;
+                        }
+                        this.show_pdf_modal = true;
+                        this.prompt_selected_ix = 0;
+                    }
+                    Err(err) => this.show_error(format!("Couldn't open PDF: {err}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn handle_export(&mut self, format: &'static str, cx: &mut Context<Self>) {
