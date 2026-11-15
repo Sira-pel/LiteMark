@@ -31,7 +31,7 @@ if ! grep -Fxq "fmt_gate=pass" "${clean_log}"; then
   echo "missing fmt_gate=pass under max_width=40" >&2
   exit 1
 fi
-if ! grep -Fxq "fmt_observed_hunks=201" "${clean_log}"; then
+if ! grep -Fxq "fmt_observed_hunks=0" "${clean_log}"; then
   echo "observed hunks changed under max_width=40" >&2
   grep '^fmt_' "${clean_log}" >&2 || true
   exit 1
@@ -41,7 +41,7 @@ if ! grep -Fxq "fmt_baseline_stale=0" "${clean_log}"; then
   exit 1
 fi
 echo "fmt_gate=pass"
-echo "fmt_observed_hunks=201"
+echo "fmt_observed_hunks=0"
 echo "fmt_baseline_stale=0"
 echo "proof=M4 rc=${clean_rc} line=fmt_gate=pass"
 
@@ -70,8 +70,4 @@ run_red() {
   echo "proof=M4 script=${name} rc=1 line=${token}"
 }
 
-run_red prove-fmt-absorb.sh "fmt_hunk_body=src/theme.rs:22"
-run_red prove-fmt-collide.sh "fmt_hunk_body=src/model/settings.rs:1"
-run_red prove-fmt-shift.sh "fmt_new_hunk=src/theme.rs:42"
 run_red prove-fmt-red.sh "fmt_new_file=src/markdown/render_dump.rs"
-run_red prove-fmt-stale.sh "fmt_baseline_stale=1"

@@ -55,15 +55,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      # Enforce formatting only when the tree is already fmt-clean.
-      # A dirty tree skips the check instead of failing the job.
+      # The tree is fmt-clean (rustfmt.toml at the root); keep it that way.
       - name: Format
-        run: |
-          if cargo fmt --check; then
-            echo "Tree is fmt-clean."
-          else
-            echo "Tree is not fmt-clean; skipping cargo fmt --check."
-          fi
+        run: cargo fmt --check
 
   # Windows and macOS: the app must at least build and pass its tests there.
   test-desktop:

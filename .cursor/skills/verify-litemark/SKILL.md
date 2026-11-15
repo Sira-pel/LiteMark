@@ -68,7 +68,7 @@ cargo clippy --all-targets -- -D warnings
 
 Job `verify-kit` in `.github/workflows/ci.yml` runs the format-toggle gate and the table-ops gate on `pull_request` types `opened`, `synchronize`, and `reopened`. It installs the same apt packages as the `test` job. The `test` job is unchanged.
 
-The kit commit `4e72b711` recorded `fmt_baseline_files=19` and `fmt_baseline_hunks=201` after the `src/markdown/mod.rs` reorder. This branch's `fixtures/fmt-baseline.hunks` is regenerated with `scripts/fmt-hunks.py tokens` when a leaf-block edit moves a header; the file is that token list (`fmt_baseline_hunks=206`). `cargo fmt --check` on `main` (`fc681a8`) is 20 files and 202 hunks. The only header on main that the kit tip does not have is `src/markdown/mod.rs:1`. The kit tip adds no dirty hunk of its own.
+The tree is fmt-clean since audit finding F19 (one `cargo fmt` pass, with the repo-root `rustfmt.toml` holding the same settings as the kit's). `fixtures/fmt-baseline.files` and `fixtures/fmt-baseline.hunks` are empty, so any dirty hunk fails the gate, and GitHub CI runs `cargo fmt --check` without the old skip. The absorption, collision, shift and stale proofs were removed with the baseline entries they relied on; `prove-fmt-red.sh` still covers the gate failing.
 
 `ci.sh` does not install packages. The blob's apt list includes `libxcb1-dev` and `libfreetype6-dev`. This kit does not install those. `ci.sh` still runs build, test, the format-toggle gate, clippy, and the fmt gate when an earlier step fails, then prints `ci_fail=`. GitHub Actions stops the job at the first failing step.
 
@@ -80,10 +80,6 @@ source .cursor/skills/verify-litemark/scripts/env.sh
 Fmt red fixtures, each of which restores the file:
 
 - `scripts/prove-fmt-red.sh` appends `fn zz_fmt_red(){let _x=1;}` to `src/markdown/render_dump.rs` (absent from `fmt-baseline.files`), runs `ci.sh`, and requires `fmt_new_file=src/markdown/render_dump.rs` plus a non-zero exit.
-- `scripts/prove-fmt-absorb.sh` inserts `let _new_break=1;` inside the `src/theme.rs:22` hunk and requires `fmt_hunk_body=src/theme.rs:22`.
-- `scripts/prove-fmt-collide.sh` rustfmts `src/model/settings.rs`, prepends `fn zz_coincide(){let _x=1;}`, and requires `fmt_hunk_body=src/model/settings.rs:1`.
-- `scripts/prove-fmt-shift.sh` puts 20 `// pad` lines at the top of `src/theme.rs` and requires `fmt_new_hunk=src/theme.rs:42`.
-- `scripts/prove-fmt-stale.sh` runs `rustfmt --config-path` on `src/theme.rs` and requires `fmt_baseline_stale=1` with gate exit 1.
 
 ### Environment prerequisites (Linux)
 
@@ -150,11 +146,8 @@ Harness name: **control-litemark**.
 .cursor/skills/verify-litemark/scripts/ci.sh
 .cursor/skills/verify-litemark/scripts/format-toggle-gate.sh
 
-# Fmt reds: new file, absorption, collision, shift.
+# Fmt red: an unformatted line in a new file fails the gate.
 .cursor/skills/verify-litemark/scripts/prove-fmt-red.sh
-.cursor/skills/verify-litemark/scripts/prove-fmt-absorb.sh
-.cursor/skills/verify-litemark/scripts/prove-fmt-collide.sh
-.cursor/skills/verify-litemark/scripts/prove-fmt-shift.sh
 
 # Window features. Exit 2. Do not launch the app yourself.
 .cursor/skills/verify-litemark/scripts/refuse-gui.sh
@@ -205,9 +198,6 @@ Proof standards:
 - `prove-large-doc-seed.sh` must print `green_fail=1` and `sha256_self=ok`, and must not print `unbound variable` or `PASS fixture=`.
 - `prove-red-mutants.sh` must print `prove_red_mutants=pass`. Each row is `MUTANT fixture=` with `rc=` other than 0 and `broken_line_absent=`.
 - `prove-fmt-red.sh` must print `fmt_new_file=src/markdown/render_dump.rs` and `ci_fail=1`.
-- `prove-fmt-absorb.sh` must print `fmt_hunk_body=src/theme.rs:22`.
-- `prove-fmt-collide.sh` must print `fmt_hunk_body=src/model/settings.rs:1`.
-- `prove-fmt-shift.sh` must print `fmt_new_hunk=src/theme.rs:42`.
 - Command output from the latest run is in `EVIDENCE.md`.
 - Do not report a refused window journey as verified.
 
@@ -244,10 +234,6 @@ Rules:
 | `scripts/prove-red-mutants.sh` | One renderer mutant per red fixture; each red check must exit non-zero |
 | `scripts/red-mutants.py` | The source replacements `prove-red-mutants.sh` applies |
 | `scripts/prove-fmt-red.sh` | Seed `fn zz_fmt_red(){let _x=1;}` in `src/markdown/render_dump.rs`, require `fmt_new_file=src/markdown/render_dump.rs` |
-| `scripts/prove-fmt-absorb.sh` | `let _new_break=1;` inside `src/theme.rs:22`, require `fmt_hunk_body=src/theme.rs:22` |
-| `scripts/prove-fmt-collide.sh` | `fn zz_coincide(){let _x=1;}` at `src/model/settings.rs:1`, require `fmt_hunk_body=src/model/settings.rs:1` |
-| `scripts/prove-fmt-shift.sh` | 20 `// pad` lines, require `fmt_new_hunk=src/theme.rs:42` |
-| `scripts/prove-fmt-stale.sh` | `rustfmt src/theme.rs`, require `fmt_baseline_stale=1` and gate exit 1 |
 | `scripts/prove-fmt-user-config.sh` | `~/.config/rustfmt/rustfmt.toml` `max_width=40` keeps `fmt_gate=pass` and the fmt red fixtures failing |
 | `scripts/prove-ci-test-result.sh` | `.cargo/config.toml` `runner = "true"` plus a panicking test, require `test_result_ok=missing` |
 | `scripts/prove-fmt-gate-pass-line.sh` | `python3` stub that exits 0, require `fmt_gate_pass=missing` |
