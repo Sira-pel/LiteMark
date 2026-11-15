@@ -1649,7 +1649,7 @@ impl Render for LiteMarkApp {
                                                 let version = version.clone();
                                                 view.update(cx, |this, cx| {
                                                     this.settings.dismissed_update = Some(version);
-                                                    this.settings.save();
+                                                    this.save_settings();
                                                     this.available_update = None;
                                                     cx.notify();
                                                 });

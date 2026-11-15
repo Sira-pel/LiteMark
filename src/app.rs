@@ -147,6 +147,8 @@ pub struct LiteMarkApp {
     pub appearance_subscription: Option<Subscription>,
     pub tab_ids: TabIds,
     pub error_message: Option<String>,
+    /// The last settings save failed; the error was shown once already.
+    settings_save_failed: bool,
     pub prompt: Option<Prompt>,
     pub prompt_focus_handle: FocusHandle,
     pub prompt_selected_ix: usize,
@@ -477,6 +479,7 @@ impl LiteMarkApp {
             appearance_subscription: None,
             tab_ids,
             error_message,
+            settings_save_failed: false,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -598,6 +601,7 @@ impl LiteMarkApp {
             appearance_subscription: None,
             tab_ids,
             error_message: None,
+            settings_save_failed: false,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -686,6 +690,20 @@ impl LiteMarkApp {
 
     fn show_error(&mut self, message: impl Into<String>) {
         self.error_message = Some(message.into());
+    }
+
+    /// Save settings, telling the user when it fails. A failure that keeps
+    /// happening (full disk, read-only config folder) is shown only once.
+    fn save_settings(&mut self) {
+        match self.settings.save() {
+            Ok(()) => self.settings_save_failed = false,
+            Err(err) => {
+                if !self.settings_save_failed {
+                    self.show_error(err);
+                }
+                self.settings_save_failed = true;
+            }
+        }
     }
 
     /// For a failed write: save, export, create, rename, move, copy or
