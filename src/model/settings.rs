@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
+use crate::services::fs_service::atomic_save;
 use crate::theme::ThemeMode;
 use super::document::ViewMode;
 
@@ -105,34 +107,81 @@ impl EditorSettings {
     }
 
     pub fn load() -> Self {
-        if let Some(path) = Self::config_path() {
-            if path.exists() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(settings) = serde_json::from_str(&content) {
-                        return settings;
-                    }
-                }
+        match Self::config_path() {
+            Some(path) => Self::load_from(&path),
+            None => Self::default(),
+        }
+    }
+
+    /// Read settings from `path`. A missing file gives the defaults. A file
+    /// that can't be fully parsed keeps every field that still parses, and
+    /// is copied aside first so the next save can't destroy the original.
+    fn load_from(path: &Path) -> Self {
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Self::default(),
+            Err(err) => {
+                eprintln!("litemark: couldn't read {}: {err}", path.display());
+                return Self::default();
+            }
+        };
+        if let Ok(settings) = serde_json::from_str(&content) {
+            return settings;
+        }
+        Self::back_up_unreadable(path);
+        Self::salvage(&content)
+    }
+
+    /// Start from the defaults and apply each stored field that is valid on
+    /// its own, so one bad value doesn't reset everything else.
+    fn salvage(content: &str) -> Self {
+        let mut settings = Self::default();
+        let Ok(serde_json::Value::Object(stored)) = serde_json::from_str(content) else {
+            return settings;
+        };
+        for (key, value) in stored {
+            let Ok(serde_json::Value::Object(mut merged)) = serde_json::to_value(&settings) else {
+                break;
+            };
+            merged.insert(key, value);
+            if let Ok(next) = serde_json::from_value(serde_json::Value::Object(merged)) {
+                settings = next;
             }
         }
-        Self::default()
+        settings
+    }
+
+    fn back_up_unreadable(path: &Path) {
+        let backup = path.with_extension("json.bak");
+        match fs::copy(path, &backup) {
+            Ok(_) => eprintln!(
+                "litemark: {} couldn't be fully read; a copy was kept at {}",
+                path.display(),
+                backup.display()
+            ),
+            Err(err) => eprintln!("litemark: couldn't back up {}: {err}", path.display()),
+        }
     }
 
     pub fn save(&self) {
         if let Some(path) = Self::config_path() {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Ok(json) = serde_json::to_string_pretty(self) {
-                let _ = fs::write(path, json);
+            if let Err(err) = self.save_to(&path) {
+                eprintln!("litemark: couldn't save settings to {}: {err}", path.display());
             }
         }
+    }
+
+    /// Write through a temp file and rename, so a crash mid-write leaves the
+    /// previous settings intact instead of a truncated file.
+    fn save_to(&self, path: &Path) -> io::Result<()> {
+        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
+        atomic_save(path, &json)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn test_content_alignment_serde() {
@@ -174,5 +223,68 @@ mod tests {
         }
         assert_eq!(s.recent_folders.len(), MAX_RECENT_FOLDERS);
         assert_eq!(s.recent_folders[0], PathBuf::from("/old9"));
+    }
+
+    fn temp_settings_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("litemark-settings-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dir = temp_settings_dir("roundtrip");
+        let path = dir.join("litemark").join("settings.json");
+        let mut s = EditorSettings::default();
+        s.zoom_level = 140;
+        s.word_wrap = false;
+        s.save_to(&path).unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, 140);
+        assert!(!loaded.word_wrap);
+        let leftovers: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("litemark-tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_file_gives_defaults_without_backup() {
+        let dir = temp_settings_dir("missing");
+        let path = dir.join("settings.json");
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, EditorSettings::default().zoom_level);
+        assert!(!path.with_extension("json.bak").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_bad_field_keeps_the_others_and_backs_up_the_file() {
+        let dir = temp_settings_dir("badfield");
+        let path = dir.join("settings.json");
+        let content = r#"{"theme": "SomeFutureTheme", "zoom_level": 150, "word_wrap": false}"#;
+        fs::write(&path, content).unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, 150);
+        assert!(!loaded.word_wrap);
+        assert_eq!(loaded.theme, EditorSettings::default().theme);
+        let backup = path.with_extension("json.bak");
+        assert_eq!(fs::read_to_string(backup).unwrap(), content);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn truncated_file_is_backed_up_before_defaults_are_used() {
+        let dir = temp_settings_dir("truncated");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"zoom_level": 150, "word_wr"#).unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, EditorSettings::default().zoom_level);
+        assert!(path.with_extension("json.bak").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
