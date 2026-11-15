@@ -329,6 +329,16 @@ impl LiteMarkApp {
             self.begin_save_naming(&id, cx);
             return;
         }
+        match self.disk_change_for(&id) {
+            DiskChange::Unchanged => {}
+            change => {
+                self.show_prompt(Prompt::ExternalChange {
+                    id,
+                    deleted: change == DiskChange::Deleted,
+                });
+                return;
+            }
+        }
         match self.save_tab(&id) {
             Ok(title) => self.show_toast(format!("Saved {title}"), cx),
             Err(err) => self.show_file_error(err),
@@ -671,6 +681,7 @@ impl LiteMarkApp {
                     }
                     type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
                     tab.is_modified = false;
+                    tab.disk_version = disk_version(&path, &tab.content);
                     let title = tab.title.clone();
                     self.show_toast(format!("Saved {title}"), cx);
                 }

@@ -1,6 +1,7 @@
 use crate::model::{
-    file_dialog_block_reason, looks_binary, unique_name, FileType, PortalProbe, WorkspaceDirectory,
-    WorkspaceFile, WorkspaceFolder, CODE_EXTENSIONS, TEXT_EXTENSIONS,
+    content_hash, file_dialog_block_reason, looks_binary, unique_name, DiskChange, DiskVersion,
+    FileType, PortalProbe, WorkspaceDirectory, WorkspaceFile, WorkspaceFolder, CODE_EXTENSIONS,
+    TEXT_EXTENSIONS,
 };
 #[cfg(target_os = "linux")]
 use std::ffi::{c_char, CString};
@@ -9,7 +10,7 @@ use std::io::{self, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::Command;
@@ -72,14 +73,55 @@ pub fn seed_welcome_note(notes_dir: &Path) {
 }
 
 pub fn sanitize_name(name: &str) -> String {
+    // Path separators, characters Windows refuses in a name (`<>:"|?*`) and
+    // control characters all become `_`, so a name typed on one system can
+    // be saved and synced to another.
+    let replaced: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
     // Trim whitespace first so a leading dot after spaces is still stripped:
     // " .hidden" must become "hidden", not ".hidden" (which would create a
     // note that never shows up in the sidebar).
-    name.replace(['/', '\\', '\0'], "_")
-        .trim()
-        .trim_matches('.')
-        .trim()
-        .to_string()
+    let trimmed = replaced.trim().trim_matches('.').trim().to_string();
+    avoid_reserved_device_name(trimmed)
+}
+
+/// Windows maps `CON`, `NUL`, `COM1` and the like to devices whatever the
+/// extension (`con.md` too), so such a note can't be created or opened
+/// there. Add `_` after the stem: `CON.md` becomes `CON_.md`.
+fn avoid_reserved_device_name(name: String) -> String {
+    let stem_end = name.find('.').unwrap_or(name.len());
+    if is_reserved_device_name(name[..stem_end].trim_end()) {
+        format!("{}_{}", &name[..stem_end], &name[stem_end..])
+    } else {
+        name
+    }
+}
+
+fn is_reserved_device_name(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let Some(rest) = upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"))
+    else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+    )
 }
 
 /// Follow a symlink chain so a save replaces the target file and leaves the link in place.
@@ -209,6 +251,10 @@ fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// Write `content` to a new temporary file next to `target`. When `target`
+/// exists, the temp file gets its permissions and, on Unix, its owner and
+/// group; if the owner or group can't be given away the result is a
+/// `PermissionDenied` error, like a directory the user can't create files in.
 fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
     let parent = target.parent().unwrap_or(Path::new("."));
     let parent = if parent.as_os_str().is_empty() {
@@ -246,6 +292,10 @@ fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
             Err(err) => return Err(err),
         };
         let write_result = (|| {
+            #[cfg(unix)]
+            if let Some(meta) = &original {
+                match_owner(&file, meta)?;
+            }
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
             if let Some(meta) = &original {
@@ -263,15 +313,134 @@ fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
     Err(last_err)
 }
 
+/// Give the temp file the owner and group of the file it will replace, so a
+/// note shared in a group folder stays readable by the others.
+#[cfg(unix)]
+fn match_owner(temp: &fs::File, original: &fs::Metadata) -> io::Result<()> {
+    let current = temp.metadata()?;
+    if current.uid() == original.uid() && current.gid() == original.gid() {
+        return Ok(());
+    }
+    // Any failure (EPERM for an ordinary user, or a filesystem that doesn't
+    // support it) means the owner can't be kept, so it is reported as
+    // PermissionDenied and the caller writes in place instead.
+    std::os::unix::fs::fchown(temp, Some(original.uid()), Some(original.gid())).map_err(|err| {
+        if err.kind() == io::ErrorKind::PermissionDenied {
+            err
+        } else {
+            io::Error::new(io::ErrorKind::PermissionDenied, err)
+        }
+    })
+}
+
+/// Saving by rename would change something about the file besides its
+/// text: another name (hard link) shares it and would keep the old text.
+fn rename_would_split(meta: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        meta.nlink() > 1
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
+/// Overwrite the open file in place. Not atomic: a crash mid-write can
+/// leave a mix of old and new text. Used only when replacing the file would
+/// split a hard link, lose its owner, or isn't possible in its folder. The
+/// text is written before the length is cut, so the file is never empty
+/// while the write runs.
+fn write_in_place(mut file: fs::File, content: &str) -> io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(content.as_bytes())?;
+    file.set_len(content.len() as u64)?;
+    file.sync_all()
+}
+
+/// Save over an existing file (or create it). Normally the text goes to a
+/// temp file that is renamed over the target, so a crash never leaves a
+/// half-written note. When that would split a hard link or reset the owner,
+/// or the folder doesn't allow new files, the file is overwritten in place
+/// instead. A file the user may not write is refused, as a direct write
+/// would be, rather than replaced.
 pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
     let target = resolve_symlink_chain(path)?;
-    let temp_path = write_temp(&target, content)?;
+    let existing = match fs::metadata(&target) {
+        Ok(meta) => Some(meta),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err),
+    };
+    // Opening for writing checks the real permission (mode bits, ACLs,
+    // read-only attribute) without changing the file.
+    let in_place = match &existing {
+        Some(meta) if meta.is_file() => Some(OpenOptions::new().write(true).open(&target)?),
+        _ => None,
+    };
+    if let (Some(meta), Some(file)) = (&existing, in_place.as_ref()) {
+        if rename_would_split(meta) {
+            let file = file.try_clone()?;
+            return write_in_place(file, content);
+        }
+    }
+    let temp_path = match write_temp(&target, content) {
+        Ok(temp_path) => temp_path,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            return match in_place {
+                Some(file) => write_in_place(file, content),
+                None => Err(err),
+            };
+        }
+        Err(err) => return Err(err),
+    };
+    drop(in_place);
     if let Err(err) = fs::rename(&temp_path, &target) {
         let _ = fs::remove_file(&temp_path);
         return Err(err);
     }
     fsync_parent(&target)?;
     Ok(())
+}
+
+/// Record what `path` looks like now, holding `content` (the text just read
+/// from it or written to it). `None` when the file can't be inspected.
+pub fn disk_version(path: &Path, content: &str) -> Option<DiskVersion> {
+    let meta = fs::metadata(path).ok()?;
+    Some(version_from(&meta, content_hash(content.as_bytes())))
+}
+
+fn version_from(meta: &fs::Metadata, content_hash: u64) -> DiskVersion {
+    #[cfg(unix)]
+    let file_id = Some((meta.dev(), meta.ino()));
+    #[cfg(not(unix))]
+    let file_id = None;
+    DiskVersion {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+        file_id,
+        content_hash,
+    }
+}
+
+/// Has `path` changed since `seen` was recorded? Only when size, time or
+/// file id differ is the file read, and then the bytes decide, so a
+/// `touch` or a copy that kept the text doesn't count as a change.
+pub fn disk_change(path: &Path, seen: &DiskVersion) -> DiskChange {
+    let meta = match fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return DiskChange::Deleted,
+        // Can't tell; let the save itself report the problem.
+        Err(_) => return DiskChange::Unchanged,
+    };
+    if version_from(&meta, seen.content_hash).same_metadata(seen) {
+        return DiskChange::Unchanged;
+    }
+    match fs::read(path) {
+        Ok(bytes) if content_hash(&bytes) == seen.content_hash => DiskChange::Unchanged,
+        _ => DiskChange::Changed,
+    }
 }
 
 /// Create `dir/desired_name` without replacing an existing file.
@@ -772,6 +941,29 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_name_drops_characters_windows_refuses() {
+        assert_eq!(sanitize_name(r#"a<b>c:d"e|f?g*h.md"#), "a_b_c_d_e_f_g_h.md");
+        assert_eq!(sanitize_name("x\ny.md"), "x_y.md");
+        assert_eq!(sanitize_name("tab\there"), "tab_here");
+        assert_eq!(sanitize_name("C:\\notes\\a.md"), "C__notes_a.md");
+    }
+
+    #[test]
+    fn sanitize_name_avoids_windows_device_names() {
+        assert_eq!(sanitize_name("CON"), "CON_");
+        assert_eq!(sanitize_name("con.md"), "con_.md");
+        assert_eq!(sanitize_name("Nul.tar.gz"), "Nul_.tar.gz");
+        assert_eq!(sanitize_name("COM1.md"), "COM1_.md");
+        assert_eq!(sanitize_name("lpt9"), "lpt9_");
+        assert_eq!(sanitize_name("COM\u{b9}.md"), "COM\u{b9}_.md");
+        // Only the exact names; longer words are fine.
+        assert_eq!(sanitize_name("CONTACTS.md"), "CONTACTS.md");
+        assert_eq!(sanitize_name("COM10.md"), "COM10.md");
+        assert_eq!(sanitize_name("console.md"), "console.md");
+        assert_eq!(sanitize_name("my con.md"), "my con.md");
+    }
+
+    #[test]
     fn test_atomic_save_and_read() {
         let temp_dir = std::env::temp_dir().join(format!("litemark-test-{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
@@ -1086,6 +1278,158 @@ mod tests {
         assert!(leftovers.is_empty());
         assert!(!temp_dir.join(".blocked.md.litemark-tmp").exists());
 
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_keeps_hard_links_together() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-hardlink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let a = temp_dir.join("note.md");
+        let b = temp_dir.join("same-note-other-name.md");
+        fs::write(&a, "a much longer first version").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        let ino = fs::metadata(&a).unwrap().ino();
+
+        atomic_save(&a, "v2").unwrap();
+
+        let meta = fs::metadata(&a).unwrap();
+        assert_eq!(meta.ino(), ino);
+        assert_eq!(meta.nlink(), 2);
+        assert_eq!(fs::read_to_string(&a).unwrap(), "v2");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "v2");
+        let leftovers = fs::read_dir(&temp_dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains("litemark-tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_still_replaces_a_plain_file() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let a = temp_dir.join("note.md");
+        fs::write(&a, "v1").unwrap();
+        let ino = fs::metadata(&a).unwrap().ino();
+        atomic_save(&a, "v2").unwrap();
+        assert_ne!(
+            fs::metadata(&a).unwrap().ino(),
+            ino,
+            "saved through a temp file"
+        );
+        assert_eq!(fs::read_to_string(&a).unwrap(), "v2");
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Ownership can only be given away with privileges, so this runs as
+    /// root (CI containers) and is skipped otherwise.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_keeps_owner_and_group_when_allowed() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp_dir = std::env::temp_dir().join(format!("litemark-owner-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let a = temp_dir.join("shared.md");
+        fs::write(&a, "v1").unwrap();
+        if std::os::unix::fs::chown(&a, Some(1234), Some(4321)).is_err() {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+        atomic_save(&a, "v2").unwrap();
+        let meta = fs::metadata(&a).unwrap();
+        assert_eq!((meta.uid(), meta.gid()), (1234, 4321));
+        assert_eq!(fs::read_to_string(&a).unwrap(), "v2");
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// A read-only file is refused rather than replaced. Root may write
+    /// anything, so the check is skipped there.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_refuses_a_read_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-readonly-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let a = temp_dir.join("locked.md");
+        fs::write(&a, "v1").unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o444)).unwrap();
+        if OpenOptions::new().write(true).open(&a).is_ok() {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+        let err = atomic_save(&a, "v2").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_to_string(&a).unwrap(), "v1");
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// A writable file in a folder that doesn't allow new files is written
+    /// in place. (As root the folder allows it anyway and the normal path runs.)
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_writes_in_place_when_the_folder_is_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = std::env::temp_dir().join(format!("litemark-rodir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        let dir = temp_dir.join("locked");
+        fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("note.md");
+        fs::write(&a, "a longer first version").unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o666)).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let saved = atomic_save(&a, "v2");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        saved.unwrap();
+        assert_eq!(fs::read_to_string(&a).unwrap(), "v2");
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn disk_change_notices_edits_and_deletes_but_not_touches() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("litemark-diskchange-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let a = temp_dir.join("note.md");
+        fs::write(&a, "seen").unwrap();
+        let seen = disk_version(&a, "seen").unwrap();
+        assert_eq!(disk_change(&a, &seen), DiskChange::Unchanged);
+
+        let file = OpenOptions::new().write(true).open(&a).unwrap();
+        file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+            .unwrap();
+        drop(file);
+        assert_eq!(disk_change(&a, &seen), DiskChange::Unchanged);
+
+        fs::write(&a, "same length? no").unwrap();
+        assert_eq!(disk_change(&a, &seen), DiskChange::Changed);
+        fs::write(&a, "SEEN").unwrap();
+        assert_eq!(disk_change(&a, &seen), DiskChange::Changed);
+
+        fs::remove_file(&a).unwrap();
+        assert_eq!(disk_change(&a, &seen), DiskChange::Deleted);
+        assert!(disk_version(&a, "seen").is_none());
         let _ = fs::remove_dir_all(&temp_dir);
     }
 

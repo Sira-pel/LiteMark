@@ -274,6 +274,33 @@ impl LiteMarkApp {
                     vec![("Not now", false), ("Copy note", true)],
                 )
             }
+            Prompt::ExternalChange { id, deleted } => {
+                let name = self
+                    .tabs
+                    .iter()
+                    .find(|tab| &tab.id == id)
+                    .map(|tab| tab.title.clone())
+                    .unwrap_or_else(|| "this note".into());
+                // Cancel is the default: Enter must never throw away either
+                // version.
+                if *deleted {
+                    (
+                        "Deleted on disk",
+                        format!(
+                            "Another program deleted {name} after you opened it. Save your version again?"
+                        ),
+                        vec![("Cancel", true), ("Save", false)],
+                    )
+                } else {
+                    (
+                        "Changed on disk",
+                        format!(
+                            "Another program changed {name} after you opened it. Keep your version and overwrite the file, or reload the file and lose your changes?"
+                        ),
+                        vec![("Cancel", true), ("Reload", false), ("Overwrite", false)],
+                    )
+                }
+            }
         }
     }
 
@@ -411,6 +438,18 @@ impl LiteMarkApp {
                     self.apply_workspace_switch(new_dir, current);
                 }
                 "Not now" => self.apply_workspace_switch(new_dir, None),
+                _ => {}
+            },
+            Prompt::ExternalChange { id, .. } => match choice {
+                "Overwrite" | "Save" => match self.overwrite_tab(&id) {
+                    Ok(title) => self.show_toast(format!("Saved {title}"), cx),
+                    Err(err) => self.show_file_error(err),
+                },
+                "Reload" => {
+                    if let Err(err) = self.reload_tab(&id) {
+                        self.show_error(err);
+                    }
+                }
                 _ => {}
             },
         }

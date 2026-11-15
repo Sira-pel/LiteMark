@@ -58,6 +58,7 @@ impl LiteMarkApp {
                 if let Some(name) = new_path.file_name().and_then(|n| n.to_str()) {
                     tab.title = name.to_string();
                 }
+                tab.disk_version = disk_version(&new_path, &tab.content);
                 tab.file_path = Some(new_path);
                 tab.is_modified = false;
             }
@@ -291,10 +292,9 @@ impl LiteMarkApp {
         let Some(tab_id) = self.save_as_tab.clone() else {
             return;
         };
-        let raw = name_override
-            .unwrap_or_else(|| self.rename_value.clone())
-            .trim()
-            .to_string();
+        // The same cleanup as New Note and Rename: no folders, `..` or
+        // absolute paths, and no names Windows can't hold.
+        let raw = sanitize_name(&name_override.unwrap_or_else(|| self.rename_value.clone()));
         if raw.is_empty() {
             self.show_error("Enter a name.");
             return;
