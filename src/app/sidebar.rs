@@ -129,7 +129,7 @@ impl LiteMarkApp {
         let targets = self.sidebar_visible_targets();
         if let Some(next) = step_cursor(&targets, self.selected_target.as_ref(), delta) {
             self.extend_selection_to(targets[next].clone());
-            self.sidebar_scroll_to_selected = true;
+            self.sidebar_scroll_to_selected = Some(sidebar_scroll_strategy(delta));
         }
     }
 
@@ -217,7 +217,7 @@ impl LiteMarkApp {
         self.multi_selection = None;
         self.selected_target = Some(next);
         self.sidebar_keyboard = true;
-        self.sidebar_scroll_to_selected = true;
+        self.sidebar_scroll_to_selected = Some(sidebar_scroll_strategy(delta));
     }
 
     /// Enter in the sidebar: open the selected note (hands focus to the
@@ -409,5 +409,28 @@ impl LiteMarkApp {
         } else {
             0
         }
+    }
+}
+
+/// Where a keyboard move scrolls the selected row to: moving down brings it
+/// in at the bottom (one row of scroll per step), moving up at the top.
+pub(super) fn sidebar_scroll_strategy(delta: i32) -> ScrollStrategy {
+    if delta > 0 {
+        ScrollStrategy::Bottom
+    } else {
+        ScrollStrategy::Top
+    }
+}
+
+#[cfg(test)]
+mod scroll_strategy_tests {
+    use super::*;
+    // `use gpui::*` brings in a `test` attribute that is not Rust's `#[test]`.
+    use ::core::prelude::v1::test as std_test;
+
+    #[std_test]
+    fn moving_down_scrolls_from_the_bottom() {
+        assert_eq!(sidebar_scroll_strategy(1), ScrollStrategy::Bottom);
+        assert_eq!(sidebar_scroll_strategy(-1), ScrollStrategy::Top);
     }
 }

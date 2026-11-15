@@ -291,7 +291,7 @@ pub struct SidebarProps<
     /// Scroll position of the row list.
     pub scroll_handle: UniformListScrollHandle,
     /// Bring the selected row into view this frame (the keyboard moved it).
-    pub scroll_to_selected: bool,
+    pub scroll_to_selected: Option<ScrollStrategy>,
 }
 
 /// Row of the selected file or folder in `items`, if it is listed.
@@ -410,14 +410,14 @@ where
         && props.workspace.files.is_empty();
     let show_empty_search = is_searching && tree_items.is_empty();
     let row_count = tree_items.len();
-    if props.scroll_to_selected {
+    if let Some(strategy) = props.scroll_to_selected {
         if let Some(ix) = selected_row_index(
             &tree_items,
             selected_file_id.as_deref(),
             selected_folder_id.as_deref(),
         ) {
             // Not strict: a row already in view stays where it is.
-            props.scroll_handle.scroll_to_item(ix, ScrollStrategy::Top);
+            props.scroll_handle.scroll_to_item(ix, strategy);
         }
     }
     let scroll_handle = props.scroll_handle.clone();

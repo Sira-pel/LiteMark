@@ -135,8 +135,8 @@ pub struct LiteMarkApp {
     /// Scroll position of the sidebar's virtualized list.
     pub sidebar_scroll: UniformListScrollHandle,
     /// Set when the keyboard moves the sidebar selection; the next frame
-    /// scrolls the selected row into view.
-    pub sidebar_scroll_to_selected: bool,
+    /// scrolls the selected row into view, from this side.
+    pub sidebar_scroll_to_selected: Option<ScrollStrategy>,
     pub zen_mode: bool,
     pub zen_notice: bool,
     pub saved_toast: Option<String>,
@@ -468,7 +468,7 @@ impl LiteMarkApp {
             sidebar_keyboard: false,
             sidebar_focus_handle: cx.focus_handle(),
             sidebar_scroll: UniformListScrollHandle::new(),
-            sidebar_scroll_to_selected: false,
+            sidebar_scroll_to_selected: None,
             zen_mode: false,
             zen_notice: false,
             saved_toast: None,
@@ -591,7 +591,7 @@ impl LiteMarkApp {
             sidebar_keyboard: false,
             sidebar_focus_handle: cx.focus_handle(),
             sidebar_scroll: UniformListScrollHandle::new(),
-            sidebar_scroll_to_selected: false,
+            sidebar_scroll_to_selected: None,
             zen_mode: false,
             zen_notice: false,
             saved_toast: None,
