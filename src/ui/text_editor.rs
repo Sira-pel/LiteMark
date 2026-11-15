@@ -3325,9 +3325,6 @@ fn paint_ranges_mapped(
     }
     let clamped_start = range.start.clamp(row_start, row_end);
     let clamped_end = range.end.clamp(row_start, row_end);
-    if clamped_end <= clamped_start && range.start < row_end {
-        return;
-    }
     let local_start = offset_map.source_to_display(clamped_start);
     let local_end = offset_map.source_to_display(clamped_end);
     let x0 = shaped.x_for_index(local_start);
@@ -3376,6 +3373,24 @@ mod tests {
                 })
                 .sum::<f32>())
         }
+    }
+
+    #[test]
+    fn selection_highlights_an_empty_row_it_spans() {
+        // "a\n\nb": the empty row is at offset 2, selected from 0..4.
+        let mut quads = Vec::new();
+        super::paint_ranges_mapped(
+            &mut quads,
+            point(px(0.0), px(0.0)),
+            px(20.0),
+            2,
+            2,
+            &RowOffsetMap::identity(2, 2),
+            &ShapedLine::default(),
+            &(0..4),
+            gpui::hsla(0.0, 0.0, 1.0, 0.5),
+        );
+        assert_eq!(quads.len(), 1);
     }
 
     #[test]

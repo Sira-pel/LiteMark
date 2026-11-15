@@ -39,7 +39,7 @@ unsafe extern "C" {
 
 pub const INITIAL_MARKDOWN: &str = r#"# Welcome to LiteMark
 
-LiteMark is a native Markdown and text editor. Notes start in `~/Documents/Notes`.
+LiteMark is a native Markdown and text editor. Notes start in `~/Documents/Notes`. Press `Ctrl+\` (`Cmd+\` on Mac) to show or hide the sidebar.
 
 ## Formatting
 

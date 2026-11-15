@@ -27,7 +27,7 @@ fn default_zoom_level() -> usize {
 }
 
 fn default_show_sidebar() -> bool {
-    true
+    false
 }
 
 /// Zoom range the zoom in/out commands allow.
@@ -91,7 +91,7 @@ impl Default for EditorSettings {
             zoom_level: 100,
             view_mode: ViewMode::Wysiwyg,
             show_line_numbers: false,
-            show_sidebar: true,
+            show_sidebar: false,
             zen_mode: false,
             show_code_files: true,
             word_wrap: true,
@@ -460,7 +460,7 @@ mod tests {
     fn missing_fields_get_the_real_defaults() {
         let parsed: EditorSettings = serde_json::from_str("{}").expect("deserialize");
         assert_eq!(parsed.zoom_level, 100);
-        assert!(parsed.show_sidebar);
+        assert!(!parsed.show_sidebar);
     }
 
     #[test]

@@ -653,6 +653,8 @@ impl LiteMarkApp {
 
     pub fn handle_toggle_sidebar(&mut self) {
         self.show_sidebar = !self.show_sidebar;
+        self.settings.show_sidebar = self.show_sidebar;
+        self.save_settings();
         if !self.show_sidebar {
             // Hand input back to the editor; the sidebar can no longer take it.
             self.sidebar_keyboard = false;
