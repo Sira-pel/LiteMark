@@ -331,7 +331,16 @@ impl LiteMarkApp {
             && self.effective_view_mode() == ViewMode::Wysiwyg
         {
             if let Some(url) = clicked_link {
-                cx.open_url(&url);
+                match openable_link(&url) {
+                    Some(target) => cx.open_url(target),
+                    None => {
+                        self.show_error(format!(
+                            "LiteMark only opens web (http, https) and email (mailto) links. Blocked: {}",
+                            describe_blocked_link(&url)
+                        ));
+                        cx.notify();
+                    }
+                }
                 return;
             }
         }

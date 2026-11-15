@@ -145,6 +145,8 @@ impl DocumentTab {
             self.code_newline(range);
             return;
         }
+        // The ending the line already uses, so a CRLF file stays CRLF.
+        let nl = self.line_break(range.start);
         if is_shift {
             // Shift+Enter in a table cell leaves the table without touching it.
             if let Some(table) = self.table_at(range.start) {
@@ -152,17 +154,17 @@ impl DocumentTab {
                 return;
             }
             if let Some(at) = self.heading_newline_at(&range) {
-                self.edit(at..at, "\n");
+                self.edit(at..at, nl);
                 return;
             }
             if self.bare_cr_needs_extra_break(&range) {
                 self.edit(range.start..range.start, "\n\n");
                 return;
             }
-            if self.split_inline_span_newline(&range, "\n") {
+            if self.split_inline_span_newline(&range, nl) {
                 return;
             }
-            self.edit(range, "\n");
+            self.edit(range, nl);
             return;
         }
 
@@ -210,9 +212,9 @@ impl DocumentTab {
                             }
                         }
                         // Otherwise insert first body row after delimiter
-                        let new_row = format!("\n|{}", "  |".repeat(col_count));
+                        let new_row = format!("{nl}|{}", "  |".repeat(col_count));
                         self.edit(after_delim..after_delim, &new_row);
-                        let target = (after_delim + 3).min(self.content.len());
+                        let target = (after_delim + nl.len() + 2).min(self.content.len());
                         self.caret.move_to(floor_boundary(&self.content, target));
                         self.refresh_cursor();
                         return;
@@ -245,12 +247,9 @@ impl DocumentTab {
                         }
                     }
                     // Last empty row: remove it, keeping the header, and exit below the table
+                    // The whole ending before the row, CR included.
                     let remove_start =
-                        if line_start > 0 && self.content.as_bytes()[line_start - 1] == b'\n' {
-                            line_start - 1
-                        } else {
-                            line_start
-                        };
+                        line_start - line_ending_len_before(&self.content, line_start);
                     self.apply_table_exit(remove_start, line_end_pos);
                     return;
                 } else {
@@ -310,14 +309,14 @@ impl DocumentTab {
                                 new_cells.push("  ".to_string());
                             }
                         }
-                        let new_row = format!("\n|{}|", new_cells.join("|"));
+                        let new_row = format!("{nl}|{}|", new_cells.join("|"));
                         let combined =
                             format!("{}{}{}{}", span_close, tail, rest_of_line, new_row);
                         let new_row_start = edit_start
                             + span_close.len()
                             + tail.len()
                             + rest_of_line.len()
-                            + 1;
+                            + nl.len();
                         self.edit(edit_start..line_end_pos, &combined);
 
                         let mut target = new_row_start + 1;
@@ -332,9 +331,9 @@ impl DocumentTab {
                         return;
                     }
 
-                    let new_row = format!("\n|{}", "  |".repeat(col_count));
+                    let new_row = format!("{nl}|{}", "  |".repeat(col_count));
                     self.edit(line_end_pos..line_end_pos, &new_row);
-                    let target = (line_end_pos + 3).min(self.content.len());
+                    let target = (line_end_pos + nl.len() + 2).min(self.content.len());
                     self.caret.move_to(floor_boundary(&self.content, target));
                     self.refresh_cursor();
                     return;
@@ -343,7 +342,7 @@ impl DocumentTab {
         }
 
         if let Some(at) = self.heading_newline_at(&range) {
-            self.edit(at..at, "\n");
+            self.edit(at..at, nl);
             return;
         }
         if self.bare_cr_needs_extra_break(&range) {
@@ -367,7 +366,7 @@ impl DocumentTab {
             let is_empty = body.trim().is_empty() && !cr_keeps_item;
             if is_empty {
                 if !range.is_empty() {
-                    self.edit(range, "\n");
+                    self.edit(range, nl);
                     return;
                 }
                 if item.indent_bytes > 0 {
@@ -392,13 +391,22 @@ impl DocumentTab {
                 if range.is_empty() && cursor < line_start + item.prefix_end() {
                     // Caret at or inside the marker: open a blank line above
                     // instead of copying the marker onto the moved text.
-                    self.edit(line_start..line_start, "\n");
-                    self.caret.move_to(cursor + 1);
+                    self.edit(line_start..line_start, nl);
+                    self.caret.move_to(cursor + nl.len());
                     self.refresh_cursor();
                     return;
                 }
+                // `1000000000.` has ten digits and is no longer a list
+                // marker, so the list ends here with a plain break.
+                if item.ordered && item.number >= MAX_LIST_NUMBER {
+                    if self.split_inline_span_newline(&range, nl) {
+                        return;
+                    }
+                    self.edit(range, nl);
+                    return;
+                }
                 let kept = &line[..item.indent_bytes];
-                let cont = item.continuation(kept);
+                let cont = item.continuation(kept).replacen('\n', nl, 1);
                 if self.split_inline_span_newline(&range, &cont) {
                     return;
                 }
@@ -414,16 +422,16 @@ impl DocumentTab {
                 || trimmed_start[1..].trim().is_empty();
             if is_empty_quote {
                 if !range.is_empty() {
-                    self.edit(range, "\n");
+                    self.edit(range, nl);
                 } else {
                     self.edit(line_start..line_end_pos, "");
                 }
             } else if range.is_empty() && cursor < line_start + indent.len() + 2 {
-                self.edit(line_start..line_start, "\n");
-                self.caret.move_to(cursor + 1);
+                self.edit(line_start..line_start, nl);
+                self.caret.move_to(cursor + nl.len());
                 self.refresh_cursor();
             } else {
-                let ins = format!("\n{}> ", indent);
+                let ins = format!("{nl}{indent}> ");
                 if self.split_inline_span_newline(&range, &ins) {
                     return;
                 }
@@ -441,15 +449,15 @@ impl DocumentTab {
             let text_start = line_start + block_prefix_in(&self.content, line_start);
             if range.is_empty() && cursor <= text_start && !line[text_start - line_start..].trim().is_empty() {
                 // Before the heading text: push the heading down, keep it a heading.
-                self.edit(line_start..line_start, "\n");
-                self.caret.move_to(cursor + 1);
+                self.edit(line_start..line_start, nl);
+                self.caret.move_to(cursor + nl.len());
                 self.refresh_cursor();
                 return;
             }
-            if self.split_inline_span_newline(&range, "\n") {
+            if self.split_inline_span_newline(&range, nl) {
                 return;
             }
-            self.edit(range, "\n");
+            self.edit(range, nl);
             return;
         }
 
@@ -469,7 +477,7 @@ impl DocumentTab {
 
         // 6. Indented code/text: maintain indentation
         if !indent.is_empty() && !trimmed_start.is_empty() {
-            let ins = format!("\n{}", indent);
+            let ins = format!("{nl}{indent}");
             if self.split_inline_span_newline(&range, &ins) {
                 return;
             }
@@ -478,10 +486,10 @@ impl DocumentTab {
         }
 
         // 7. Default newline
-        if self.split_inline_span_newline(&range, "\n") {
+        if self.split_inline_span_newline(&range, nl) {
             return;
         }
-        self.edit(range, "\n");
+        self.edit(range, nl);
     }
 
     /// The line break to insert at `offset`: the ending of the line being split, else

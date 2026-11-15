@@ -144,16 +144,64 @@ fn off_screen_table_keeps_its_height_without_shaping() {
     let tables = view.read_with(&cx, |app, _| app.editor_paint.borrow().tables.len());
     assert_eq!(tables, 0, "an off-screen table records no chrome");
 
-    // Put the caret in the table: it is shaped as a whole, same geometry.
+    // Put the caret in the table: rows next to it are shaped, same geometry.
     place_caret(&view, &mut cx, table_start + 2);
     assert_eq!(geometry(&view, &cx), first);
     let shaped = shaped_rows(&view, &cx);
-    // Header and two body rows; the delimiter line has no row.
-    for row in table_row..table_row + 3 {
+    // Header and the first body row (the delimiter line has no row).
+    for row in table_row..table_row + 2 {
         assert!(shaped.contains(&row), "table row {row} is shaped");
     }
-    let tables = view.read_with(&cx, |app, _| app.editor_paint.borrow().tables.len());
-    assert_eq!(tables, 1);
+    // Every row is still recorded for the table chrome, shaped or not.
+    let rows = view.read_with(&cx, |app, _| {
+        let paint = app.editor_paint.borrow();
+        assert_eq!(paint.tables.len(), 1);
+        paint.tables[0].rows.len()
+    });
+    assert_eq!(rows, 3);
+}
+
+fn big_table(rows: usize) -> String {
+    let mut table = String::from("| Name | Value | Note |\n| --- | --- | --- |\n");
+    for i in 0..rows {
+        table.push_str(&format!("| row {i} | {} | some **bold** text {i} |\n", i * 7));
+    }
+    table
+}
+
+#[std_test]
+fn caret_in_a_large_table_shapes_only_nearby_rows() {
+    // F13: a caret anywhere in a table shaped every row of it on every
+    // frame, and each keystroke re-measured every cell.
+    let rows = 2000;
+    let content = big_table(rows);
+    let (view, mut cx) = harness(&content, ViewMode::Wysiwyg);
+    let first = geometry(&view, &cx);
+    redraw(&mut cx);
+
+    // Caret in a cell far down the table.
+    let target = content.find("| row 1500 |").unwrap() + 4;
+    place_caret(&view, &mut cx, target);
+    assert_eq!(geometry(&view, &cx), first);
+    let shaped = shaped_rows(&view, &cx);
+    let caret_row = row_of(&view, &cx, target);
+    assert!(shaped.contains(&caret_row), "the caret's row is shaped");
+    assert!(shaped.len() < rows / 10, "{} of {rows} rows shaped", shaped.len());
+
+    // Typing in the cell changes the table's key; the other rows keep
+    // their cached heights and stay unshaped.
+    view.update(&mut cx, |app, _cx| {
+        let tab = app.active_tab_mut().expect("tab");
+        let at = tab.caret.range.clone();
+        tab.insert_text_in_mode(at, "x", ViewMode::Wysiwyg);
+    });
+    redraw(&mut cx);
+    let shaped = shaped_rows(&view, &cx);
+    assert!(shaped.len() < rows / 10, "{} of {rows} rows shaped after typing", shaped.len());
+    let after = geometry(&view, &cx);
+    assert_eq!(after.len(), first.len());
+    let chrome_rows = view.read_with(&cx, |app, _| app.editor_paint.borrow().tables[0].rows.len());
+    assert_eq!(chrome_rows, rows + 1, "header and every body row recorded");
 }
 
 #[std_test]
@@ -297,3 +345,4 @@ fn typing_above_tables_keeps_far_tables_unshaped() {
         "an edit above a table must not shape it again"
     );
 }
+

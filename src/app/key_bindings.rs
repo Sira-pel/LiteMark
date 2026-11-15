@@ -115,7 +115,7 @@ impl LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenFile, _window, cx| {
-                this.handle_open_file();
+                this.handle_open_file(cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &NewTab, _window, cx| {
@@ -147,16 +147,7 @@ impl LiteMarkApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FindReplace, _window, cx| {
-                this.show_find_replace = !this.show_find_replace;
-                if this.show_find_replace {
-                    this.refresh_find();
-                    this.pending_find_focus = true;
-                } else {
-                    this.refresh_find();
-                    this.pending_find_focus = false;
-                    this.applied_focus = None;
-                    this.field_owns_keys = false;
-                }
+                this.toggle_find_panel();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
