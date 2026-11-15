@@ -425,7 +425,9 @@ impl LiteMarkApp {
             .iter()
             .map(|tab| tab.file_path.as_deref())
             .collect();
-        let id = if let Some(index) = tab_index_for_path(&paths, &path) {
+        let existing = tab_index_for_path(&paths, &path);
+        let opened_new = existing.is_none();
+        let id = if let Some(index) = existing {
             self.tabs[index].id.clone()
         } else {
             let new_id = self.tab_ids.alloc();
@@ -439,7 +441,7 @@ impl LiteMarkApp {
             self.active_tab_id = id;
             self.show_pdf_modal = true;
             self.prompt_selected_ix = 0;
-        } else {
+        } else if opened_new {
             self.show_toast(format!("Opened {name} in a new tab"), cx);
         }
     }

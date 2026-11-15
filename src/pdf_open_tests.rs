@@ -37,6 +37,13 @@ fn finished_pdf_takes_over_only_the_tab_it_was_opened_from() {
         assert_eq!(app.active_tab_id, note, "focus stays where the user is");
         assert!(!app.show_pdf_modal);
         assert_eq!(app.tabs[pdf_tab].title, "b.pdf", "the PDF still opens, in the background");
+        assert_eq!(app.saved_toast.as_deref(), Some("Opened b.pdf in a new tab"));
+
+        // Already open in a tab: no new tab, so no "new tab" toast.
+        app.show_toast("Opening b.pdf…", cx);
+        let started = PdfOpenStart { tab_id: "some-other-tab".into(), toast_epoch: app.toast_epoch };
+        app.finish_pdf_open("b.pdf".into(), "/x/b.pdf".into(), extracted(), &started, cx);
+        assert_eq!(app.saved_toast, None);
 
         // A newer toast (here "Saved") is kept when the extraction ends.
         app.show_toast("Opening c.pdf…", cx);
