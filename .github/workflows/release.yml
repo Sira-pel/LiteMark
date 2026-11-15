@@ -4,14 +4,19 @@ on:
   push:
     tags: ["v*"]
 
+# Build jobs run `cargo test` and `cargo build`, which execute the build
+# scripts of every dependency, so they only get a read-only token. Only the
+# publish job, which runs no project code, may write to the release.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   deb:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Check the tag matches Cargo.toml
         run: |
@@ -33,7 +38,8 @@ jobs:
             libxcb1-dev \
             libfreetype6-dev
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # Fixed compiler version, so a release build is reproducible.
+      - uses: dtolnay/rust-toolchain@fa51344246423bb1896f389ae2a83b9784ddb363 # 1.97.0
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
@@ -48,25 +54,22 @@ jobs:
           cd build
           sha256sum litemark_*_amd64.deb > SHA256SUMS
 
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "LiteMark ${GITHUB_REF_NAME#v}" \
-            --generate-notes \
-            build/litemark_*_amd64.deb build/SHA256SUMS
-          # Fixed-name copy so the README can link to releases/latest/download/.
-          cp build/litemark_*_amd64.deb build/litemark_amd64.deb
-          gh release upload "${GITHUB_REF_NAME}" build/litemark_amd64.deb
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deb
+          path: |
+            build/litemark_*_amd64.deb
+            build/SHA256SUMS
+          if-no-files-found: error
 
   windows:
-    needs: deb
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@fa51344246423bb1896f389ae2a83b9784ddb363 # 1.97.0
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
@@ -85,27 +88,25 @@ jobs:
         shell: pwsh
         run: ./scripts/build-windows.ps1
 
-      - name: Add to the release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${GITHUB_REF_NAME}" \
-            build/LiteMark-*-windows-x64-setup.exe build/SHA256SUMS-windows.txt
-          # Fixed-name copy so the README can link to releases/latest/download/.
-          cp build/LiteMark-*-windows-x64-setup.exe build/LiteMark-windows-x64-setup.exe
-          gh release upload "${GITHUB_REF_NAME}" build/LiteMark-windows-x64-setup.exe
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows
+          path: |
+            build/LiteMark-*-windows-x64-setup.exe
+            build/SHA256SUMS-windows.txt
+          if-no-files-found: error
 
   macos:
-    needs: deb
     strategy:
       matrix:
         os: [macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@fa51344246423bb1896f389ae2a83b9784ddb363 # 1.97.0
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
@@ -115,14 +116,42 @@ jobs:
       - name: Build the .dmg
         run: bash scripts/build-macos.sh
 
-      - name: Add to the release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-${{ matrix.os }}
+          path: |
+            build/LiteMark-*-macos-*.dmg
+            build/SHA256SUMS-macos-*.txt
+          if-no-files-found: error
+
+  # Runs only after every platform built and passed its tests, so a release
+  # is never published with some installers missing. No checkout and no
+  # project code: it only uploads the files the build jobs produced.
+  publish:
+    needs: [deb, windows, macos]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" \
-            build/LiteMark-*-macos-*.dmg build/SHA256SUMS-macos-*.txt
+          cd dist
           # Fixed-name copies so the README can link to releases/latest/download/.
-          for f in build/LiteMark-*-macos-*.dmg; do
-            cp "$f" "build/LiteMark-macos-${f##*-macos-}"
-            gh release upload "${GITHUB_REF_NAME}" "build/LiteMark-macos-${f##*-macos-}"
+          cp litemark_*_amd64.deb litemark_amd64.deb
+          cp LiteMark-*-windows-x64-setup.exe LiteMark-windows-x64-setup.exe
+          for f in LiteMark-*-macos-*.dmg; do
+            cp "$f" "LiteMark-macos-${f##*-macos-}"
           done
+          ls -l
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "LiteMark ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            ./*
