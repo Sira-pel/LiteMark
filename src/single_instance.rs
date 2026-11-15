@@ -67,6 +67,8 @@ fn claim_at(sock: &std::path::Path, file: Option<&std::path::Path>) -> Claim {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            // A client that connects and says nothing must not block the rest.
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
             let mut line = Vec::new();
             // A path is short; cap the read so a stray client can't grow it.
             if BufReader::new(stream.take(8192))
