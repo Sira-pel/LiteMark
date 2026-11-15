@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// Largest ordered-list number: CommonMark allows at most nine digits.
+pub const MAX_LIST_NUMBER: usize = 999_999_999;
+
 /// One list marker, shared by the parser and the editing helpers.
 ///
 /// Ordered markers are 1–9 digits and then `.` or `)`. Padding after `.`, `)`,

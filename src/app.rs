@@ -132,6 +132,11 @@ pub struct LiteMarkApp {
     /// True while the sidebar tree owns arrow-key navigation.
     pub sidebar_keyboard: bool,
     pub sidebar_focus_handle: FocusHandle,
+    /// Scroll position of the sidebar's virtualized list.
+    pub sidebar_scroll: UniformListScrollHandle,
+    /// Set when the keyboard moves the sidebar selection; the next frame
+    /// scrolls the selected row into view, from this side.
+    pub sidebar_scroll_to_selected: Option<ScrollStrategy>,
     pub zen_mode: bool,
     pub zen_notice: bool,
     pub saved_toast: Option<String>,
@@ -147,6 +152,8 @@ pub struct LiteMarkApp {
     pub appearance_subscription: Option<Subscription>,
     pub tab_ids: TabIds,
     pub error_message: Option<String>,
+    /// The last settings save failed; the error was shown once already.
+    settings_save_failed: bool,
     pub prompt: Option<Prompt>,
     pub prompt_focus_handle: FocusHandle,
     pub prompt_selected_ix: usize,
@@ -175,6 +182,8 @@ pub struct LiteMarkApp {
     pub toast_epoch: u64,
     /// An update check is running; further checks are ignored until it ends.
     update_check_running: bool,
+    /// The PDF whose text is being extracted in the background, if any.
+    pdf_opening: Option<PathBuf>,
     pub available_update: Option<ReleaseInfo>,
     pub pending_find_focus: bool,
     pub pending_rename_focus: bool,
@@ -215,13 +224,16 @@ pub struct LiteMarkApp {
 impl LiteMarkApp {
     pub fn new(initial_file: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let settings = EditorSettings::load();
+        // Told once here; save_settings stays quiet about it afterwards.
+        let settings_save_failed = settings.save_blocked.is_some();
+        let settings_warning = settings.save_blocked.clone();
         let notes_dir = get_or_create_notes_dir();
         seed_welcome_note(&notes_dir);
         let workspace = scan_workspace_dir(&notes_dir, settings.show_code_files);
 
         let mut tab_ids = TabIds::new();
         let first_id = tab_ids.alloc();
-        let mut error_message = None;
+        let mut error_message = settings_warning;
         let initial_tab = if let Some(path) = initial_file {
             let name = path
                 .file_name()
@@ -238,6 +250,9 @@ impl LiteMarkApp {
         } else {
             Self::welcome_tab(&workspace, first_id.clone())
         };
+        if workspace.scan_truncated && error_message.is_none() {
+            error_message = Some(scan_truncated_message());
+        }
 
         let app_handle = cx.weak_entity();
         let find_field = cx.new({
@@ -465,6 +480,8 @@ impl LiteMarkApp {
             menu_items_cache: Vec::new(),
             sidebar_keyboard: false,
             sidebar_focus_handle: cx.focus_handle(),
+            sidebar_scroll: UniformListScrollHandle::new(),
+            sidebar_scroll_to_selected: None,
             zen_mode: false,
             zen_notice: false,
             saved_toast: None,
@@ -480,6 +497,7 @@ impl LiteMarkApp {
             appearance_subscription: None,
             tab_ids,
             error_message,
+            settings_save_failed,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -501,6 +519,7 @@ impl LiteMarkApp {
             zoom_epoch: 0,
             toast_epoch: 0,
             update_check_running: false,
+            pdf_opening: None,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
@@ -569,6 +588,7 @@ impl LiteMarkApp {
                 is_linked_to_local_disk: false,
                 folders: Vec::new(),
                 files: Vec::new(),
+                scan_truncated: false,
             },
             settings: EditorSettings {
                 check_for_updates: false,
@@ -587,6 +607,8 @@ impl LiteMarkApp {
             menu_items_cache: Vec::new(),
             sidebar_keyboard: false,
             sidebar_focus_handle: cx.focus_handle(),
+            sidebar_scroll: UniformListScrollHandle::new(),
+            sidebar_scroll_to_selected: None,
             zen_mode: false,
             zen_notice: false,
             saved_toast: None,
@@ -602,6 +624,7 @@ impl LiteMarkApp {
             appearance_subscription: None,
             tab_ids,
             error_message: None,
+            settings_save_failed: false,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -623,6 +646,7 @@ impl LiteMarkApp {
             zoom_epoch: 0,
             toast_epoch: 0,
             update_check_running: false,
+            pdf_opening: None,
             available_update: None,
             pending_find_focus: false,
             pending_rename_focus: false,
@@ -691,6 +715,20 @@ impl LiteMarkApp {
 
     fn show_error(&mut self, message: impl Into<String>) {
         self.error_message = Some(message.into());
+    }
+
+    /// Save settings, telling the user when it fails. A failure that keeps
+    /// happening (full disk, read-only config folder) is shown only once.
+    fn save_settings(&mut self) {
+        match self.settings.save() {
+            Ok(()) => self.settings_save_failed = false,
+            Err(err) => {
+                if !self.settings_save_failed {
+                    self.show_error(err);
+                }
+                self.settings_save_failed = true;
+            }
+        }
     }
 
     /// For a failed write: save, export, create, rename, move, copy or
@@ -762,3 +800,15 @@ mod note_drop_tests;
 #[cfg(test)]
 #[path = "typing_tests.rs"]
 mod typing_tests;
+
+#[cfg(test)]
+#[path = "find_panel_tests.rs"]
+mod find_panel_tests;
+
+#[cfg(test)]
+#[path = "pdf_open_tests.rs"]
+mod pdf_open_tests;
+
+#[cfg(test)]
+#[path = "sidebar_render_tests.rs"]
+mod sidebar_render_tests;

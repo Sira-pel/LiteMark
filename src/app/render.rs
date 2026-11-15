@@ -115,7 +115,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.handle_open_file();
+                    this.handle_open_file(cx);
                     cx.notify();
                 });
             }
@@ -542,16 +542,7 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.show_find_replace = !this.show_find_replace;
-                    if this.show_find_replace {
-                        this.refresh_find();
-                        this.pending_find_focus = true;
-                    } else {
-                        this.refresh_find();
-                        this.pending_find_focus = false;
-                        this.applied_focus = None;
-                        this.field_owns_keys = false;
-                    }
+                    this.toggle_find_panel();
                     cx.notify();
                 });
             }
@@ -610,6 +601,7 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.show_replace_row = !this.show_replace_row;
+                    this.pending_find_focus = true;
                     cx.notify();
                 });
             }
@@ -955,6 +947,7 @@ impl Render for LiteMarkApp {
         };
 
         let window_width = window.viewport_size().width;
+        let sidebar_scroll_to_selected = std::mem::take(&mut self.sidebar_scroll_to_selected);
         let is_narrow = window_width < px(640.0);
 
         let menu_bar_element = render_menu_bar(
@@ -1350,28 +1343,6 @@ impl Render for LiteMarkApp {
                         },
                         &theme,
                     ))
-                    // 3. Find & Replace Bar (Overlay if enabled)
-                    .when(self.show_find_replace, |s| {
-                        s.child(render_find_replace_bar(
-                            FindReplaceBarProps {
-                                find_field: self.find_field.clone(),
-                                replace_field: self.replace_field.clone(),
-                                match_label: self.match_label(),
-                                match_case: self.match_case,
-                                not_found: self.not_found,
-                                on_find_next: on_find_next.clone(),
-                                on_find_prev: on_find_prev.clone(),
-                                on_replace: on_replace.clone(),
-                                on_replace_all: on_replace_all.clone(),
-                                on_close: on_find_close.clone(),
-                                on_toggle_case: on_toggle_case.clone(),
-                                show_replace: self.show_replace_row,
-                                width: window_width,
-                                on_toggle_replace: on_toggle_replace.clone(),
-                            },
-                            &theme,
-                        ))
-                    })
                     // 4. Middle Area: Sidebar + Editor
                     .child(
                         div()
@@ -1427,6 +1398,8 @@ impl Render for LiteMarkApp {
                                             .active_multi()
                                             .map(|m| m.items.clone())
                                             .unwrap_or_default(),
+                                        scroll_handle: self.sidebar_scroll.clone(),
+                                        scroll_to_selected: sidebar_scroll_to_selected,
                                     },
                                     &theme,
                                 );
@@ -1478,6 +1451,31 @@ impl Render for LiteMarkApp {
                                 },
                                 &theme,
                             ))
+                            // Find panel: after the editor so it draws above it and
+                            // gets its clicks, before the workspace menu so that menu
+                            // still covers it. Menus, the narrow sidebar drawer and
+                            // prompts draw later (or deferred), so they cover it too.
+                            .when(self.show_find_replace, |s| {
+                                s.child(render_find_replace_bar(
+                                    FindReplaceBarProps {
+                                        find_field: self.find_field.clone(),
+                                        replace_field: self.replace_field.clone(),
+                                        match_label: self.match_label(),
+                                        match_case: self.match_case,
+                                        not_found: self.not_found,
+                                        on_find_next: on_find_next.clone(),
+                                        on_find_prev: on_find_prev.clone(),
+                                        on_replace: on_replace.clone(),
+                                        on_replace_all: on_replace_all.clone(),
+                                        on_close: on_find_close.clone(),
+                                        on_toggle_case: on_toggle_case.clone(),
+                                        show_replace: self.show_replace_row,
+                                        on_toggle_replace: on_toggle_replace.clone(),
+                                        window_width,
+                                    },
+                                    &theme,
+                                ))
+                            })
                             .when(self.workspace_menu_open && self.show_sidebar, |parent| {
                 let recents: Vec<(String, PathBuf)> = self
                     .workspace_menu_recents
@@ -1657,7 +1655,7 @@ impl Render for LiteMarkApp {
                                                 let version = version.clone();
                                                 view.update(cx, |this, cx| {
                                                     this.settings.dismissed_update = Some(version);
-                                                    this.settings.save();
+                                                    this.save_settings();
                                                     this.available_update = None;
                                                     cx.notify();
                                                 });
@@ -1912,6 +1910,9 @@ impl LiteMarkApp {
         if self.allow_window_close {
             window.remove_window();
         }
+        if self.show_find_replace && !self.show_replace_row && self.field_focus == TextInput::Replace {
+            self.field_focus = TextInput::Find;
+        }
         if !self.show_find_replace
             && matches!(self.field_focus, TextInput::Find | TextInput::Replace)
         {
@@ -1989,11 +1990,13 @@ impl LiteMarkApp {
         let placeholder_color = theme.placeholder;
         let field_bg = theme.bg_input;
         let field_border = theme.border_primary;
+        // The find panel draws its own input boxes, so the find and replace
+        // fields stay transparent.
         self.find_field.update(cx, |field, _cx| {
-            field.set_colors(text_color, placeholder_color, field_bg, field_border);
+            field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
         });
         self.replace_field.update(cx, |field, _cx| {
-            field.set_colors(text_color, placeholder_color, field_bg, field_border);
+            field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));
         });
         self.search_field.update(cx, |field, _cx| {
             field.set_colors(text_color, placeholder_color, rgba(0x00000000), rgba(0x00000000));

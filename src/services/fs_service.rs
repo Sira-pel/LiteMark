@@ -72,13 +72,13 @@ pub fn seed_welcome_note(notes_dir: &Path) {
 }
 
 pub fn sanitize_name(name: &str) -> String {
-    // Trim whitespace first so a leading dot after spaces is still stripped:
-    // " .hidden" must become "hidden", not ".hidden" (which would create a
-    // note that never shows up in the sidebar).
+    // Leading dots stay (`.gitignore`, `.env`): dotfiles are listed in the
+    // sidebar. Trailing dots and spaces go, since Windows drops them and
+    // "notes." would silently become "notes". That also turns "." and ".."
+    // into "", which callers reject as an empty name.
     name.replace(['/', '\\', '\0'], "_")
         .trim()
-        .trim_matches('.')
-        .trim()
+        .trim_end_matches(['.', ' '])
         .to_string()
 }
 
@@ -137,14 +137,8 @@ fn random_suffix() -> u64 {
 /// `renameat2(RENAME_NOREPLACE)` is missing on this filesystem.
 /// ENOSYS is the usual code; some filesystems return EINVAL instead.
 #[cfg(target_os = "linux")]
-pub(crate) fn noreplace_unsupported(err: &io::Error) -> bool {
+fn noreplace_unsupported(err: &io::Error) -> bool {
     matches!(err.raw_os_error(), Some(ENOSYS) | Some(EINVAL))
-}
-
-/// Only Linux's `renameat2` can report this; the portable version never does.
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn noreplace_unsupported(_err: &io::Error) -> bool {
-    false
 }
 
 /// Move `from` to `to` without replacing an existing `to`. A hard link fails
@@ -155,9 +149,19 @@ fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     rename_noreplace_portable(from, to)
 }
 
-/// Compiled on Linux only for tests, so the portable path is exercised there.
-#[cfg(any(test, not(target_os = "linux")))]
+/// On Linux, the fallback when `renameat2(RENAME_NOREPLACE)` is unsupported.
 fn rename_noreplace_portable(from: &Path, to: &Path) -> io::Result<()> {
+    rename_noreplace_portable_with(from, to, |a, b| fs::hard_link(a, b), |p| fs::remove_file(p))
+}
+
+/// [`rename_noreplace_portable`] with the hard link and the removal of the
+/// source injected, so tests can force the copy path and a failed removal.
+fn rename_noreplace_portable_with(
+    from: &Path,
+    to: &Path,
+    link: impl Fn(&Path, &Path) -> io::Result<()>,
+    remove: impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     // Directories cannot be hard-linked. Check, then rename; a writer that
     // creates `to` in between is the one race this path does not close.
     if fs::symlink_metadata(from)?.is_dir() {
@@ -166,33 +170,69 @@ fn rename_noreplace_portable(from: &Path, to: &Path) -> io::Result<()> {
         }
         return fs::rename(from, to);
     }
-    match fs::hard_link(from, to) {
-        Ok(()) => fs::remove_file(from),
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Err(err),
-        Err(_) => {
-            let mut dest = OpenOptions::new().write(true).create_new(true).open(to)?;
-            let copied = (|| {
-                dest.write_all(&fs::read(from)?)?;
-                dest.sync_all()
-            })();
-            drop(dest);
-            if let Err(err) = copied {
-                let _ = fs::remove_file(to);
-                return Err(err);
-            }
-            fs::remove_file(from)
-        }
+    match link(from, to) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Err(err),
+        Err(_) => copy_noreplace(from, to)?,
     }
+    // A move that leaves both names behind is a duplicate, not a move: undo
+    // the new name so the note exists once, under its old name.
+    if let Err(err) = remove(from) {
+        let _ = fs::remove_file(to);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Copy `from` to a new file `to` (never replacing one), streaming the bytes
+/// and keeping the source's permissions. On failure `to` is removed.
+fn copy_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let mut source = fs::File::open(from)?;
+    let permissions = source.metadata()?.permissions();
+    let mut dest = OpenOptions::new().write(true).create_new(true).open(to)?;
+    let copied = (|| {
+        io::copy(&mut source, &mut dest)?;
+        dest.set_permissions(permissions)?;
+        dest.sync_all()
+    })();
+    drop(dest);
+    if copied.is_err() {
+        let _ = fs::remove_file(to);
+    }
+    copied
 }
 
 /// `renameat2(RENAME_NOREPLACE)`. Fails with [`io::ErrorKind::AlreadyExists`]
 /// when `to` is already present, including across a race with another writer.
+/// Filesystems without it (some NFS and FUSE mounts report ENOSYS or EINVAL)
+/// use the hard-link fallback, so rename, move and save work there too.
 #[cfg(target_os = "linux")]
 fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    rename_noreplace_with(from, to, renameat2_noreplace)
+}
+
+/// [`rename_noreplace`] with the `renameat2` call injected, so tests can make
+/// it report an unsupported filesystem.
+#[cfg(target_os = "linux")]
+fn rename_noreplace_with(
+    from: &Path,
+    to: &Path,
+    native: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match native(from, to) {
+        Err(err) if noreplace_unsupported(&err) => rename_noreplace_portable(from, to),
+        result => result,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn renameat2_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     let from_c = CString::new(from.as_os_str().as_bytes())
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     let to_c = CString::new(to.as_os_str().as_bytes())
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    // SAFETY: both CStrings outlive the call and are NUL-terminated; the
+    // signature matches glibc/musl `renameat2`.
     let rc = unsafe {
         renameat2(
             AT_FDCWD,
@@ -209,6 +249,9 @@ fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// Suffix of the temporary files `atomic_save` writes next to their target.
+const TEMP_SUFFIX: &str = ".litemark-tmp";
+
 fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
     let parent = target.parent().unwrap_or(Path::new("."));
     let parent = if parent.as_os_str().is_empty() {
@@ -224,14 +267,11 @@ fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
         .as_ref()
         .map(|meta| meta.permissions().mode() & 0o777)
         .unwrap_or(0o644);
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("tmp");
-
     let mut last_err = io::Error::other("couldn't create a temporary file");
     for _ in 0..8 {
-        let temp_path = parent.join(format!(".{file_name}.{}.litemark-tmp", random_suffix()));
+        // Fixed length (30 bytes) whatever the target's name, so a name near
+        // the 255-byte limit can still be saved.
+        let temp_path = parent.join(format!(".{:016x}{TEMP_SUFFIX}", random_suffix()));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -294,25 +334,6 @@ pub fn atomic_save_new(dir: &Path, desired_name: &str, content: &str) -> io::Res
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                 let _ = fs::remove_file(&temp_path);
                 blocked.push(name);
-            }
-            Err(err) if noreplace_unsupported(&err) => {
-                // ENOSYS or EINVAL: fall back to a same-directory hard link,
-                // which also fails when the destination exists.
-                match fs::hard_link(&temp_path, &path) {
-                    Ok(()) => {
-                        let _ = fs::remove_file(&temp_path);
-                        fsync_parent(&path)?;
-                        return Ok(path);
-                    }
-                    Err(link_err) if link_err.kind() == io::ErrorKind::AlreadyExists => {
-                        let _ = fs::remove_file(&temp_path);
-                        blocked.push(name);
-                    }
-                    Err(link_err) => {
-                        let _ = fs::remove_file(&temp_path);
-                        return Err(link_err);
-                    }
-                }
             }
             Err(err) => {
                 let _ = fs::remove_file(&temp_path);
@@ -724,9 +745,126 @@ pub fn modified_secs(path: &Path) -> Option<u64> {
     modified.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
+/// Folders nested deeper than this below the notes folder are not listed.
+pub const MAX_SCAN_DEPTH: usize = 64;
+/// The scan stops after listing this many folders and notes.
+pub const MAX_SCAN_ITEMS: usize = 50_000;
+
+/// Shown when [`WorkspaceDirectory::scan_truncated`] is set. The numbers
+/// match [`MAX_SCAN_ITEMS`] and [`MAX_SCAN_DEPTH`] (checked by a test).
+pub fn scan_truncated_message() -> String {
+    "This folder is too large to list completely. The sidebar shows up to 50,000 items \
+     and folders up to 64 levels deep."
+        .to_string()
+}
+
+/// One listed child of a folder, read and released before the scan goes
+/// deeper, so no directory handle stays open across levels.
+struct ScanEntry {
+    name: String,
+    path: PathBuf,
+    kind: ScanKind,
+}
+
+enum ScanKind {
+    Folder,
+    File {
+        file_type: FileType,
+        updated_at: u64,
+    },
+}
+
+/// The listed children of `dir`, sorted by name. Unreadable folders are
+/// empty. Symlinks are never listed: a link back to a parent would loop,
+/// and a link to /etc would let rename and trash act outside the notes
+/// folder.
+fn read_scan_entries(dir: &Path, show_code_files: bool) -> Vec<ScanEntry> {
+    let mut entries: Vec<ScanEntry> = listed_entries(dir, show_code_files).collect();
+    // Each DirEntry keeps its directory open on Unix; all of them are
+    // dropped here, before any child folder is read.
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
+/// The children of `dir` the sidebar lists, unsorted, read lazily.
+fn listed_entries(dir: &Path, show_code_files: bool) -> impl Iterator<Item = ScanEntry> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(move |entry| listed_entry(entry, show_code_files))
+}
+
+/// `entry` as the sidebar lists it, or `None` if it is left out.
+fn listed_entry(entry: fs::DirEntry, show_code_files: bool) -> Option<ScanEntry> {
+    let name = entry.file_name().to_string_lossy().to_string();
+    // Temp files of an interrupted save are not notes.
+    if SKIPPED_ENTRIES.contains(&name.as_str()) || name.ends_with(TEMP_SUFFIX) {
+        return None;
+    }
+    // DirEntry::file_type does not follow symlinks.
+    let Ok(entry_type) = entry.file_type() else {
+        return None;
+    };
+    let kind = if entry_type.is_dir() {
+        ScanKind::Folder
+    } else if entry_type.is_file() {
+        let file_type = FileType::from_filename(&name);
+        let listed = match file_type {
+            FileType::Markdown => true,
+            FileType::PlainText => !has_binary_extension(&name),
+            FileType::Code => show_code_files,
+            FileType::Pdf => false,
+        };
+        if !listed {
+            return None;
+        }
+        let updated_at = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        ScanKind::File {
+            file_type,
+            updated_at,
+        }
+    } else {
+        return None;
+    };
+    Some(ScanEntry {
+        name,
+        path: entry.path(),
+        kind,
+    })
+}
+
+/// Whether `dir` holds anything the sidebar would list. A folder holding
+/// only `.DS_Store`, a PDF or a symlink has nothing to show, so leaving it
+/// unread past the depth limit hides nothing.
+fn has_entries(dir: &Path, show_code_files: bool) -> bool {
+    listed_entries(dir, show_code_files).next().is_some()
+}
+
 /// List the notes folder. Dotfiles are listed; only `SKIPPED_ENTRIES` are left out.
 /// Code files are listed only when `show_code_files` is set.
+///
+/// The walk uses its own stack instead of recursion, so a deeply nested
+/// folder can't overflow the thread's stack, and holds no directory handle
+/// open while it goes deeper. It stops at [`MAX_SCAN_DEPTH`] levels and
+/// [`MAX_SCAN_ITEMS`] items and then sets `scan_truncated`. Items come out in
+/// the same order as a depth-first walk: each folder, then its contents.
 pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirectory {
+    scan_workspace_dir_limited(dir, show_code_files, MAX_SCAN_DEPTH, MAX_SCAN_ITEMS)
+}
+
+fn scan_workspace_dir_limited(
+    dir: &Path,
+    show_code_files: bool,
+    max_depth: usize,
+    max_items: usize,
+) -> WorkspaceDirectory {
     let folder_name = if let Some(name) = dir.file_name().and_then(|f| f.to_str()) {
         format!("📁 {}", name)
     } else {
@@ -735,76 +873,53 @@ pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirecto
 
     let mut folders = Vec::new();
     let mut files = Vec::new();
+    let mut truncated = false;
 
-    fn walk(
-        current: &Path,
-        parent_id: Option<String>,
-        show_code_files: bool,
-        folders: &mut Vec<WorkspaceFolder>,
-        files: &mut Vec<WorkspaceFile>,
-    ) {
-        if let Ok(entries) = fs::read_dir(current) {
-            let mut entries: Vec<_> = entries.flatten().collect();
-            entries.sort_by_key(|e| e.file_name());
-
-            for entry in entries {
-                let path = entry.path();
-                let file_name = entry.file_name().to_string_lossy().to_string();
-
-                if SKIPPED_ENTRIES.contains(&file_name.as_str()) {
-                    continue;
+    // Per open folder: its remaining children, its id, and how deep they sit
+    // (children of the notes folder are at depth 1).
+    let mut stack: Vec<(std::vec::IntoIter<ScanEntry>, Option<String>, usize)> =
+        vec![(read_scan_entries(dir, show_code_files).into_iter(), None, 1)];
+    'walk: while let Some((children, parent_id, depth)) = stack.last_mut() {
+        let Some(entry) = children.next() else {
+            stack.pop();
+            continue;
+        };
+        if folders.len() + files.len() >= max_items {
+            truncated = true;
+            break 'walk;
+        }
+        let parent_id = parent_id.clone();
+        let depth = *depth;
+        match entry.kind {
+            ScanKind::Folder => {
+                let folder_id = format!("folder-{}", entry.path.display());
+                if depth < max_depth {
+                    let children = read_scan_entries(&entry.path, show_code_files);
+                    stack.push((children.into_iter(), Some(folder_id.clone()), depth + 1));
+                } else if has_entries(&entry.path, show_code_files) {
+                    truncated = true;
                 }
-
-                // DirEntry::file_type does not follow symlinks: symlinked
-                // folders must not be expanded (a link back to a parent would
-                // recurse forever, and a link to /etc would let rename/trash
-                // act on real files outside the notes folder).
-                let Ok(entry_type) = entry.file_type() else {
-                    continue;
-                };
-
-                if entry_type.is_dir() {
-                    let folder_id = format!("folder-{}", path.display());
-                    folders.push(WorkspaceFolder {
-                        id: folder_id.clone(),
-                        name: file_name,
-                        parent_id: parent_id.clone(),
-                        path: path.clone(),
-                        is_open: true,
-                    });
-                    walk(&path, Some(folder_id), show_code_files, folders, files);
-                } else if entry_type.is_file() {
-                    let file_type = FileType::from_filename(&file_name);
-                    let listed = match file_type {
-                        FileType::PlainText => !has_binary_extension(&file_name),
-                        FileType::Markdown => true,
-                        FileType::Code => show_code_files,
-                        FileType::Pdf => false,
-                    };
-                    if listed {
-                        let updated_at = entry
-                            .metadata()
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-
-                        files.push(WorkspaceFile {
-                            id: format!("file-{}", path.display()),
-                            name: file_name,
-                            folder_id: parent_id.clone(),
-                            path,
-                            file_type,
-                            updated_at,
-                        });
-                    }
-                }
+                folders.push(WorkspaceFolder {
+                    id: folder_id,
+                    name: entry.name,
+                    parent_id,
+                    path: entry.path,
+                    is_open: true,
+                });
             }
+            ScanKind::File {
+                file_type,
+                updated_at,
+            } => files.push(WorkspaceFile {
+                id: format!("file-{}", entry.path.display()),
+                name: entry.name,
+                folder_id: parent_id,
+                path: entry.path,
+                file_type,
+                updated_at,
+            }),
         }
     }
-
-    walk(dir, None, show_code_files, &mut folders, &mut files);
 
     WorkspaceDirectory {
         folder_name,
@@ -812,6 +927,7 @@ pub fn scan_workspace_dir(dir: &Path, show_code_files: bool) -> WorkspaceDirecto
         is_linked_to_local_disk: true,
         folders,
         files,
+        scan_truncated: truncated,
     }
 }
 
@@ -861,12 +977,18 @@ mod tests {
 
     #[test]
     fn test_sanitize_name() {
-        assert_eq!(sanitize_name("../../etc/passwd"), "_.._etc_passwd");
+        // Separators are replaced, so the result is always one path component.
+        assert_eq!(sanitize_name("../../etc/passwd"), ".._.._etc_passwd");
         assert_eq!(sanitize_name("My Notes/File.md"), "My Notes_File.md");
-        assert_eq!(sanitize_name("..hidden.."), "hidden");
-        // Leading whitespace must not hide a dot from the trim, or the
-        // created note would be invisible in the sidebar.
-        assert_eq!(sanitize_name(" .hidden"), "hidden");
+        assert_eq!(sanitize_name("a\\b\0c"), "a_b_c");
+        // Leading dots are kept (audit F22); trailing dots and spaces are not.
+        assert_eq!(sanitize_name(".gitignore"), ".gitignore");
+        assert_eq!(sanitize_name(" .hidden"), ".hidden");
+        assert_eq!(sanitize_name("..hidden.."), "..hidden");
+        assert_eq!(sanitize_name("notes. . "), "notes");
+        assert_eq!(sanitize_name("."), "");
+        assert_eq!(sanitize_name(".."), "");
+        assert_eq!(sanitize_name(" ... "), "");
         assert_eq!(sanitize_name("  "), "");
     }
 
@@ -969,6 +1091,134 @@ mod tests {
         assert!(renamed_folder.is_dir());
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    fn nested_tree(root: &Path, levels: usize) -> PathBuf {
+        let mut path = root.to_path_buf();
+        for _ in 0..levels {
+            path.push("d");
+        }
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("deepest.md"), "bottom").unwrap();
+        path
+    }
+
+    /// The old recursive walk overflowed small stacks (1 MiB on the Windows
+    /// main thread) on deep trees. The loop needs the same stack at any depth.
+    #[test]
+    fn deep_folder_tree_scans_on_a_small_stack() {
+        let root = std::env::temp_dir().join(format!("litemark-deepscan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        nested_tree(&root, 300);
+
+        let scan_root = root.clone();
+        let (full, capped) = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                (
+                    scan_workspace_dir_limited(&scan_root, true, 1_000, MAX_SCAN_ITEMS),
+                    scan_workspace_dir(&scan_root, true),
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(full.folders.len(), 300);
+        assert_eq!(full.files.len(), 1);
+        assert!(!full.scan_truncated);
+
+        assert_eq!(capped.folders.len(), MAX_SCAN_DEPTH);
+        assert!(capped.files.is_empty());
+        assert!(capped.scan_truncated);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_stops_at_the_item_limit() {
+        let root = std::env::temp_dir().join(format!("litemark-scanitems-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for i in 0..10 {
+            fs::write(root.join(format!("note-{i}.md")), "x").unwrap();
+        }
+        let scan = scan_workspace_dir_limited(&root, true, MAX_SCAN_DEPTH, 4);
+        assert_eq!(scan.files.len(), 4);
+        assert!(scan.scan_truncated);
+        let names: Vec<_> = scan.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["note-0.md", "note-1.md", "note-2.md", "note-3.md"]);
+
+        let exact = scan_workspace_dir_limited(&root, true, MAX_SCAN_DEPTH, 10);
+        assert_eq!(exact.files.len(), 10);
+        assert!(!exact.scan_truncated);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_folder_at_the_depth_limit_is_not_a_truncation() {
+        let root = std::env::temp_dir().join(format!("litemark-scanedge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a").join("b")).unwrap();
+        let scan = scan_workspace_dir_limited(&root, true, 2, MAX_SCAN_ITEMS);
+        assert_eq!(scan.folders.len(), 2);
+        assert!(!scan.scan_truncated);
+
+        // Files the sidebar never lists don't count as hidden items.
+        let deep = root.join("a").join("b");
+        fs::write(deep.join(".DS_Store"), "x").unwrap();
+        fs::write(deep.join("paper.pdf"), "x").unwrap();
+        fs::write(deep.join("main.rs"), "x").unwrap();
+        let scan = scan_workspace_dir_limited(&root, false, 2, MAX_SCAN_ITEMS);
+        assert!(!scan.scan_truncated, "nothing listable below the limit");
+        let scan = scan_workspace_dir_limited(&root, true, 2, MAX_SCAN_ITEMS);
+        assert!(scan.scan_truncated, "code files are listed when shown");
+        fs::remove_file(deep.join("main.rs")).unwrap();
+
+        fs::write(root.join("a").join("b").join("hidden.md"), "x").unwrap();
+        let scan = scan_workspace_dir_limited(&root, true, 2, MAX_SCAN_ITEMS);
+        assert!(scan.files.is_empty());
+        assert!(scan.scan_truncated);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Folders come out before their contents, in name order, as the old
+    /// recursive walk produced them.
+    #[test]
+    fn scan_keeps_depth_first_name_order() {
+        let root = std::env::temp_dir().join(format!("litemark-scanorder-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("b").join("inner")).unwrap();
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::write(root.join("b").join("inner").join("deep.md"), "x").unwrap();
+        fs::write(root.join("b").join("note.md"), "x").unwrap();
+        fs::write(root.join("a").join("first.md"), "x").unwrap();
+        fs::write(root.join("top.md"), "x").unwrap();
+
+        let scan = scan_workspace_dir(&root, true);
+        let folders: Vec<_> = scan.folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(folders, ["a", "b", "inner"]);
+        let files: Vec<_> = scan.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(files, ["first.md", "deep.md", "note.md", "top.md"]);
+        let inner = scan.folders.iter().find(|f| f.name == "inner").unwrap();
+        assert_eq!(
+            inner.parent_id.as_deref(),
+            Some(scan.folders[1].id.as_str())
+        );
+        let deep = scan.files.iter().find(|f| f.name == "deep.md").unwrap();
+        assert_eq!(deep.folder_id.as_deref(), Some(inner.id.as_str()));
+        assert!(!scan.scan_truncated);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn truncation_message_names_the_limits() {
+        let message = scan_truncated_message();
+        assert_eq!(MAX_SCAN_ITEMS, 50_000);
+        assert_eq!(MAX_SCAN_DEPTH, 64);
+        assert!(message.contains("50,000 items"), "{message}");
+        assert!(message.contains("64 levels"), "{message}");
     }
 
     #[cfg(unix)]
@@ -1183,7 +1433,6 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains("litemark-tmp"))
             .collect();
         assert!(leftovers.is_empty());
-        assert!(!temp_dir.join(".blocked.md.litemark-tmp").exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -1207,6 +1456,145 @@ mod tests {
         assert_eq!(fs::read_to_string(&to).unwrap(), "new", "existing file untouched");
         assert!(from.exists(), "source stays when the target is taken");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn no_hard_links(_: &Path, _: &Path) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+
+    #[test]
+    fn portable_rename_copy_keeps_content_and_permissions() {
+        let dir = std::env::temp_dir().join(format!("litemark-portable-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("from.md");
+        let to = dir.join("to.md");
+        let text = "line\n".repeat(100_000);
+        fs::write(&from, &text).unwrap();
+        let mut perms = fs::metadata(&from).unwrap().permissions();
+        #[cfg(unix)]
+        perms.set_mode(0o600);
+        #[cfg(not(unix))]
+        perms.set_readonly(false);
+        fs::set_permissions(&from, perms.clone()).unwrap();
+
+        rename_noreplace_portable_with(&from, &to, no_hard_links, |p| fs::remove_file(p)).unwrap();
+        assert!(!from.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), text);
+        #[cfg(unix)]
+        assert_eq!(fs::metadata(&to).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn portable_rename_undoes_the_new_name_when_the_source_stays() {
+        let dir = std::env::temp_dir().join(format!("litemark-portable-undo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("from.md");
+        let to = dir.join("to.md");
+        let stuck = |_: &Path| Err(io::Error::from(io::ErrorKind::PermissionDenied));
+
+        for link_fails in [false, true] {
+            fs::write(&from, "note").unwrap();
+            let err = if link_fails {
+                rename_noreplace_portable_with(&from, &to, no_hard_links, stuck)
+            } else {
+                rename_noreplace_portable_with(&from, &to, |a, b| fs::hard_link(a, b), stuck)
+            }
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(fs::read_to_string(&from).unwrap(), "note", "source kept");
+            assert!(!to.exists(), "no duplicate left behind (copy path: {link_fails})");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Audit F11: on a filesystem without `RENAME_NOREPLACE` the fallback
+    /// still moves files and folders and still refuses to replace.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unsupported_renameat2_falls_back_for_files_and_folders() {
+        let dir = std::env::temp_dir().join(format!("litemark-nofs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for errno in [ENOSYS, EINVAL] {
+            let unsupported = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(errno));
+            let (from, to) = (dir.join("a.md"), dir.join("b.md"));
+            fs::write(&from, "note").unwrap();
+            rename_noreplace_with(&from, &to, unsupported).unwrap();
+            assert!(!from.exists());
+            assert_eq!(fs::read_to_string(&to).unwrap(), "note");
+
+            fs::write(&from, "other").unwrap();
+            let err = rename_noreplace_with(&from, &to, unsupported).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(fs::read_to_string(&to).unwrap(), "note");
+
+            let (src, dest) = (dir.join("folder"), dir.join("moved"));
+            fs::create_dir(&src).unwrap();
+            fs::write(src.join("inside.md"), "x").unwrap();
+            rename_noreplace_with(&src, &dest, unsupported).unwrap();
+            assert!(dest.join("inside.md").exists() && !src.exists());
+
+            for path in [&from, &to] {
+                let _ = fs::remove_file(path);
+            }
+            fs::remove_dir_all(&dest).unwrap();
+        }
+        // Other errors are passed through, not retried.
+        let (from, to) = (dir.join("c.md"), dir.join("d.md"));
+        fs::write(&from, "c").unwrap();
+        let denied = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(13));
+        let err = rename_noreplace_with(&from, &to, denied).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(13));
+        assert!(from.exists() && !to.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Audit F22: the temp name no longer grows with the target's name, so
+    /// names near the 255-byte limit save, and temp files stay out of the
+    /// sidebar.
+    #[test]
+    fn long_names_save_and_temp_files_are_not_listed() {
+        let dir = std::env::temp_dir().join(format!("litemark-longname-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let name = format!("{}.md", "n".repeat(250));
+        assert_eq!(name.len(), 253);
+        let path = dir.join(&name);
+        fs::write(&path, "old").unwrap();
+        atomic_save(&path, "new").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let saved = atomic_save_new(&dir, &format!("{}.md", "m".repeat(250)), "x").unwrap();
+        assert_eq!(fs::read_to_string(saved).unwrap(), "x");
+
+        let temp = write_temp(&path, "pending").unwrap();
+        let temp_name = temp.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(temp_name.len(), 30, "{temp_name}");
+        let listed = scan_workspace_dir(&dir, false);
+        assert!(listed
+            .files
+            .iter()
+            .all(|file| !file.name.ends_with(TEMP_SUFFIX)));
+        assert_eq!(listed.files.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_keeps_leading_dots() {
+        let dir = std::env::temp_dir().join(format!("litemark-dotname-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gitignore");
+        fs::write(&file, "target/").unwrap();
+        let renamed = safe_rename(&file, ".gitignore").unwrap();
+        assert_eq!(renamed.file_name().unwrap(), ".gitignore");
+        let err = safe_rename(&renamed, "..").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         let _ = fs::remove_dir_all(&dir);
     }
 
