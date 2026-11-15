@@ -121,8 +121,71 @@ fn near_any(anchors: &[usize], index: usize) -> bool {
     anchors.iter().any(|&a| a + 2 >= index && a <= index + 2)
 }
 
+/// One parsed line split into visual rows: the display range of each row,
+/// for the wrap width it was split at. Relative to the line's display text,
+/// so it stays right when an edit above moves the line.
+pub struct LineRows {
+    wrap_cols: usize,
+    rows: Vec<(usize, usize)>,
+}
+
+/// Layout work that depends only on the parse and the wrap width, kept
+/// between frames so an idle redraw doesn't re-wrap every line of the
+/// document, and kept across an edit for every line the edit didn't touch.
+#[derive(Clone, Default)]
+pub struct LayoutCache {
+    /// `ParseMeta::generation` of the parse these entries belong to.
+    generation: u64,
+    /// WYSIWYG: per parsed line, its rows at the last wrap width used.
+    lines: Vec<Option<Rc<LineRows>>>,
+    /// Per parsed line, its share of `request_layout`'s height estimate, for
+    /// the wrap columns and font size in `estimate_key`.
+    estimate: Vec<Option<Pixels>>,
+    estimate_key: (usize, u32),
+    /// Raw mode: wrap columns, tab width, and every row with its offset map.
+    raw_rows: Option<(usize, usize, Rc<RawRows>)>,
+}
+
+/// Raw mode rows: byte range and offset map of each.
+type RawRows = Vec<(usize, usize, Arc<RowOffsetMap>)>;
+
+impl LayoutCache {
+    /// Line up the cache with `doc`: keep it for the same parse, follow an
+    /// incremental update from the cached one (entries for replaced lines
+    /// are dropped, the rest kept), otherwise start over.
+    fn keep_for(&mut self, doc: &ParsedDocument) {
+        let meta = &doc.meta;
+        if self.generation == meta.generation && self.lines.len() == doc.lines.len() {
+            return;
+        }
+        match meta.last_splice {
+            Some((from, start, removed, inserted))
+                if from == self.generation
+                    && start + removed <= self.lines.len()
+                    && self.lines.len() - removed + inserted == doc.lines.len() =>
+            {
+                self.lines
+                    .splice(start..start + removed, std::iter::repeat_n(None, inserted));
+                if self.estimate.len() == self.lines.len() - inserted + removed {
+                    self.estimate
+                        .splice(start..start + removed, std::iter::repeat_n(None, inserted));
+                } else {
+                    self.estimate = vec![None; doc.lines.len()];
+                }
+            }
+            _ => {
+                self.lines = vec![None; doc.lines.len()];
+                self.estimate = vec![None; doc.lines.len()];
+            }
+        }
+        self.generation = meta.generation;
+        self.raw_rows = None;
+    }
+}
+
 #[derive(Clone)]
 pub struct EditorPaint {
+    pub layout_cache: LayoutCache,
     pub wrap_cols: usize,
     pub line_height: Pixels,
     pub total_height: Pixels,
@@ -139,6 +202,7 @@ pub struct EditorPaint {
 impl Default for EditorPaint {
     fn default() -> Self {
         Self {
+            layout_cache: LayoutCache::default(),
             wrap_cols: usize::MAX,
             line_height: px(28.0),
             total_height: px(0.0),
@@ -955,6 +1019,7 @@ pub struct Prepaint {
     gutter_box: Pixels,
     table_width_cache: TableWidthCache,
     tables: Vec<TableGeom>,
+    layout_cache: LayoutCache,
 }
 
 /// Space on each side of a line number inside the gutter, and between the
@@ -986,27 +1051,34 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let paint_borrow = self.paint.borrow();
+        let mut paint_borrow = self.paint.borrow_mut();
         let wrap_cols = if self.word_wrap {
             paint_borrow.wrap_cols
         } else {
             usize::MAX
         };
+        paint_borrow.layout_cache.keep_for(&self.parsed);
         let estimated_height = if self.view_mode == ViewMode::Wysiwyg {
+            let cache = &mut paint_borrow.layout_cache;
+            let key = (wrap_cols, f32::from(self.font_size).to_bits());
+            if cache.estimate_key != key || cache.estimate.len() != self.parsed.lines.len() {
+                cache.estimate = vec![None; self.parsed.lines.len()];
+                cache.estimate_key = key;
+            }
             let mut h = px(32.0);
-            for line in &self.parsed.lines {
-                if matches!(line.kind, LineKind::TableDelimiter) {
-                    continue;
-                }
-                let (font_sz, line_h, top_gap, _) =
-                    wysiwyg_line_metrics(&line.kind, self.font_size);
-                let _ = font_sz;
-                let wrapped = if line.display_text.is_empty() {
-                    1
-                } else {
-                    visual_row_count_tabbed(&line.display_text, wrap_cols, 0).max(1)
-                };
-                h += top_gap + line_h * wrapped as f32;
+            for (line, slot) in self.parsed.lines.iter().zip(cache.estimate.iter_mut()) {
+                h += *slot.get_or_insert_with(|| {
+                    if matches!(line.kind, LineKind::TableDelimiter) {
+                        return px(0.0);
+                    }
+                    let (_, line_h, top_gap, _) = wysiwyg_line_metrics(&line.kind, self.font_size);
+                    let wrapped = if line.display_text.is_empty() {
+                        1
+                    } else {
+                        visual_row_count_tabbed(&line.display_text, wrap_cols, 0).max(1)
+                    };
+                    top_gap + line_h * wrapped as f32
+                });
             }
             h.max(paint_borrow.total_height)
         } else {
@@ -1086,8 +1158,30 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
         let unshaped = Rc::new(ShapedLine::default());
 
+        let mut layout_cache = std::mem::take(&mut self.paint.borrow_mut().layout_cache);
+        layout_cache.keep_for(&self.parsed);
+        // Rows outside the shaping band share these instead of their line's
+        // map and links: the parse can then move lines after an edit in
+        // place, without copying maps that last frame's rows still hold.
+        // Code reading an off-screen row clamps to its byte range.
+        let empty_map = Arc::new(RowOffsetMap::default());
+        let empty_links: Arc<Vec<(Range<usize>, String)>> = Arc::default();
+
         if self.view_mode == ViewMode::Raw {
-            let rows_src = visual_rows_tabbed(&self.content, wrap_cols, self.tab_width);
+            let raw_rows = match &layout_cache.raw_rows {
+                Some((cols, tab, rows)) if *cols == wrap_cols && *tab == self.tab_width => rows.clone(),
+                _ => {
+                    let rows: RawRows =
+                        visual_rows_tabbed(&self.content, wrap_cols, self.tab_width)
+                            .into_iter()
+                            .map(|(start, end)| (start, end, Arc::new(RowOffsetMap::identity(start, end))))
+                            .collect();
+                    let rows = Rc::new(rows);
+                    layout_cache.raw_rows = Some((wrap_cols, self.tab_width, rows.clone()));
+                    rows
+                }
+            };
+            let rows_src: Vec<(usize, usize)> = raw_rows.iter().map(|&(s, e, _)| (s, e)).collect();
             let anchor_rows: Vec<usize> = anchors
                 .iter()
                 .map(|&offset| {
@@ -1128,7 +1222,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         origin,
                         line_height: base_line_height,
                         shaped: unshaped.clone(),
-                        offset_map: Arc::new(RowOffsetMap::identity(start, end)),
+                        offset_map: raw_rows[index].2.clone(),
                         checkbox_hit: None,
                         link_hits: Arc::default(),
                         cells: Vec::new(),
@@ -1295,6 +1389,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 gutter_box,
                 table_width_cache,
                 tables: Vec::new(),
+                layout_cache,
             };
         }
 
@@ -1426,9 +1521,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         origin: point(base_x, cur_y),
                         line_height: row_height,
                         shaped: unshaped.clone(),
-                        offset_map: parsed_line.offset_map.clone(),
+                        offset_map: empty_map.clone(),
                         checkbox_hit: None,
-                        link_hits,
+                        link_hits: empty_links.clone(),
                         cells: Vec::new(),
                     });
                     cur_y += row_height;
@@ -1833,36 +1928,54 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 usize::MAX
             };
 
-            let sub_rows = visual_rows_tabbed(&parsed_line.display_text, row_wrap_cols, 0);
+            let line_rows = match layout_cache.lines.get(line_idx) {
+                Some(Some(cached)) if cached.wrap_cols == row_wrap_cols => cached.clone(),
+                _ => {
+                    let built = Rc::new(LineRows {
+                        wrap_cols: row_wrap_cols,
+                        rows: visual_rows_tabbed(&parsed_line.display_text, row_wrap_cols, 0),
+                    });
+                    if let Some(slot) = layout_cache.lines.get_mut(line_idx) {
+                        *slot = Some(built.clone());
+                    }
+                    built
+                }
+            };
+            let single_row = line_rows.rows.len() == 1;
 
-            for (sub_idx, (d_start, d_end)) in sub_rows.iter().copied().enumerate() {
-                let is_last_sub = sub_idx + 1 == sub_rows.len();
-                let sub_map = if sub_rows.len() == 1 {
-                    parsed_line.offset_map.clone()
-                } else {
-                    Arc::new(parsed_line.offset_map.slice_display(d_start..d_end))
-                };
+            for (sub_idx, &(d_start, d_end)) in line_rows.rows.iter().enumerate() {
+                let is_last_sub = sub_idx + 1 == line_rows.rows.len();
 
                 let row_origin = point(base_x + indent_x, cur_y);
                 let near_anchor = anchor_lines
                     .iter()
                     .any(|&a| a + 2 >= parsed_line.line_index && a <= parsed_line.line_index + 2);
                 if !band.contains(cur_y, row_line_height) && !near_anchor {
+                    let (byte_start, byte_end) = if single_row {
+                        (parsed_line.offset_map.line_start, parsed_line.offset_map.line_end)
+                    } else {
+                        parsed_line.offset_map.slice_bounds(d_start..d_end)
+                    };
                     rows.push(PaintRow {
                         line_index: line_idx,
-                        byte_start: sub_map.line_start,
-                        byte_end: sub_map.line_end,
+                        byte_start,
+                        byte_end,
                         origin: row_origin,
                         line_height: row_line_height,
                         shaped: unshaped.clone(),
-                        offset_map: sub_map,
+                        offset_map: empty_map.clone(),
                         checkbox_hit: None,
-                        link_hits: link_hits.clone(),
+                        link_hits: empty_links.clone(),
                         cells: Vec::new(),
                     });
                     cur_y += row_line_height;
                     continue;
                 }
+                let sub_map = if single_row {
+                    parsed_line.offset_map.clone()
+                } else {
+                    Arc::new(parsed_line.offset_map.slice_display(d_start..d_end))
+                };
 
                 // Block backgrounds / decorations
                 match &parsed_line.kind {
@@ -2211,6 +2324,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             gutter_box,
             table_width_cache,
             tables,
+            layout_cache,
         }
     }
 
@@ -2275,6 +2389,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
         for row in &prepaint.rows {
             if row.cells.is_empty() {
+                // Rows outside the shaping band carry an empty line; there's
+                // nothing to draw, so skip them instead of a call per row.
+                if row.shaped.text.is_empty() {
+                    continue;
+                }
                 let _ = row.shaped.paint(row.origin, row.line_height, window, cx);
             } else {
                 for cell in &row.cells {
@@ -2312,6 +2431,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 paint.wrap_cols = usize::MAX;
             }
             paint.table_width_cache = std::mem::take(&mut prepaint.table_width_cache);
+            paint.layout_cache = std::mem::take(&mut prepaint.layout_cache);
             paint.tables = std::mem::take(&mut prepaint.tables);
             for table in &mut paint.tables {
                 table.viewport = Some(bounds);
@@ -3098,6 +3218,7 @@ mod tests {
         };
 
         let paint = EditorPaint {
+            layout_cache: super::LayoutCache::default(),
             wrap_cols: 80,
             line_height: px(28.0),
             total_height: px(84.0),
@@ -3191,6 +3312,7 @@ mod tests {
         };
 
         let paint = EditorPaint {
+            layout_cache: super::LayoutCache::default(),
             wrap_cols: 80,
             line_height: px(28.0),
             total_height: px(56.0),
@@ -3259,6 +3381,7 @@ mod tests {
         };
 
         let paint = EditorPaint {
+            layout_cache: super::LayoutCache::default(),
             wrap_cols: 80,
             line_height: px(28.0),
             total_height: px(56.0),
@@ -3352,6 +3475,7 @@ mod tests {
         };
 
         let paint = EditorPaint {
+            layout_cache: super::LayoutCache::default(),
             wrap_cols: 80,
             line_height: px(28.0),
             total_height: px(112.0),
@@ -3548,6 +3672,7 @@ mod tests {
         };
 
         let paint = EditorPaint {
+            layout_cache: super::LayoutCache::default(),
             wrap_cols: 80,
             line_height: px(28.0),
             total_height: px(28.0),

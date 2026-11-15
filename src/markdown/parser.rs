@@ -1014,6 +1014,30 @@ impl RowOffsetMap {
     }
 
     /// Slice a sub-map for a wrapped visual row covering `disp_range` in `display_text`.
+    /// `(line_start, line_end)` of `slice_display(disp_range)`, without
+    /// building the sliced map.
+    pub fn slice_bounds(&self, disp_range: std::ops::Range<usize>) -> (usize, usize) {
+        let mut first = None;
+        let mut last = None;
+        for (d, s) in &self.segments {
+            if d.end <= disp_range.start || d.start >= disp_range.end {
+                continue;
+            }
+            let overlap_start = d.start.max(disp_range.start);
+            let overlap_end = d.end.min(disp_range.end);
+            if overlap_end > overlap_start
+                || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end)
+            {
+                first.get_or_insert(s.start + (overlap_start - d.start));
+                last = Some(s.start + (overlap_end - d.start));
+            }
+        }
+        (
+            first.unwrap_or_else(|| self.display_to_source(disp_range.start)),
+            last.unwrap_or_else(|| self.display_to_source(disp_range.end)),
+        )
+    }
+
     pub fn slice_display(&self, disp_range: std::ops::Range<usize>) -> Self {
         let mut sub_segments = Vec::new();
         for (d, s) in &self.segments {
@@ -1084,7 +1108,32 @@ pub struct ParsedDocument {
     pub lines: Vec<ParsedLine>,
     /// Fenced code block ranges `(open_fence_line_range, close_fence_line_range)`
     pub code_blocks: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
+    /// Bookkeeping for incremental updates; not part of equality.
+    pub meta: ParseMeta,
 }
+
+/// What an incremental update and the caches built on a parse need, beyond
+/// the parse itself. Two parses of the same text compare equal whatever
+/// their meta.
+#[derive(Clone, Debug, Default)]
+pub struct ParseMeta {
+    /// Parser state before every `CHECKPOINT_EVERY`-th line (and wherever
+    /// an update resumed), to resume after an edit.
+    pub(crate) checkpoints: Vec<(usize, ParseState)>,
+    /// Changes whenever the lines change, so caches can tell parses apart.
+    pub generation: u64,
+    /// The last incremental update: `(generation before it, first line,
+    /// lines removed, lines inserted)`. Lets caches keyed by line index
+    /// follow the edit instead of starting over.
+    pub last_splice: Option<(u64, usize, usize, usize)>,
+}
+
+impl PartialEq for ParseMeta {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for ParseMeta {}
 
 impl ParsedDocument {
     /// Every inline delimiter pair in the document, line by line. Only the
@@ -1966,9 +2015,259 @@ fn normalize_shared_run_pairs(inline_pairs: &mut [InlinePair]) {
     }
 }
 
-#[allow(clippy::single_range_in_vec_init)]
 pub fn parse_document(markdown: &str) -> ParsedDocument {
-    let raw_lines = if markdown.is_empty() {
+    let raw_lines = all_source_lines(markdown);
+    let mut lines = Vec::with_capacity(raw_lines.len());
+    let mut state = ParseState::default();
+    let mut checkpoints = Vec::with_capacity(raw_lines.len() / CHECKPOINT_EVERY + 1);
+    parse_lines(&raw_lines, 0, &mut state, &mut lines, |i, _, state| {
+        if i % CHECKPOINT_EVERY == 0 {
+            checkpoints.push((i, state.clone()));
+        }
+        Step::Parse
+    });
+    let code_blocks = code_blocks_of(&lines, markdown.len());
+    ParsedDocument {
+        lines,
+        code_blocks,
+        meta: ParseMeta {
+            checkpoints,
+            generation: next_generation(),
+            last_splice: None,
+        },
+    }
+}
+
+/// Source lines of `text` from byte `from` (a line start) to the end, with
+/// the same final empty line as `all_source_lines`.
+fn source_lines_from(text: &str, from: usize) -> Vec<SourceLine<'_>> {
+    if text.is_empty() {
+        return all_source_lines(text);
+    }
+    let mut v: Vec<SourceLine<'_>> = source_lines(&text[from..])
+        .into_iter()
+        .map(|line| SourceLine {
+            start: line.start + from,
+            end: line.end + from,
+            text: line.text,
+        })
+        .collect();
+    if text.ends_with('\n') || text.ends_with('\r') {
+        v.push(SourceLine {
+            start: text.len(),
+            end: text.len(),
+            text: "",
+        });
+    }
+    v
+}
+
+/// Where an edit sits and how far it moves what follows it: old positions at
+/// or past `old_end` move by `delta` bytes, old lines at or past `old_line`
+/// by `line_delta` lines.
+#[derive(Clone, Copy)]
+struct Shift {
+    old_end: usize,
+    delta: isize,
+    old_line: usize,
+    line_delta: isize,
+}
+
+impl Shift {
+    fn pos(self, p: usize) -> usize {
+        if p >= self.old_end {
+            (p as isize + self.delta) as usize
+        } else {
+            p
+        }
+    }
+
+    fn range(self, r: &mut std::ops::Range<usize>) {
+        r.start = self.pos(r.start);
+        r.end = self.pos(r.end);
+    }
+
+    fn line(self, l: usize) -> usize {
+        if l >= self.old_line {
+            (l as isize + self.line_delta) as usize
+        } else {
+            l
+        }
+    }
+
+    fn state(self, state: &ParseState) -> ParseState {
+        let mut state = state.clone();
+        if let Some(fence) = &mut state.open_fence {
+            self.range(&mut fence.open_range);
+        }
+        if let Some(table) = &mut state.table {
+            table.first = self.line(table.first);
+            table.last = self.line(table.last);
+            table.delimiter = self.line(table.delimiter);
+            self.range(&mut table.source);
+        }
+        state
+    }
+
+    /// Move a line that comes after the edit. Its text is unchanged, so
+    /// every position in it moves by the same amount.
+    fn parsed_line(self, line: &mut ParsedLine) {
+        line.line_index = self.line(line.line_index);
+        if self.delta == 0 {
+            return;
+        }
+        self.range(&mut line.source);
+        self.range(&mut line.prefix_range);
+        for r in &mut line.hidden_ranges {
+            self.range(r);
+        }
+        for pair in &mut line.inline_pairs {
+            self.range(&mut pair.open_delim);
+            self.range(&mut pair.inner);
+            self.range(&mut pair.close_delim);
+            pair.group_open_start = self.pos(pair.group_open_start);
+            pair.group_close_end = self.pos(pair.group_close_end);
+        }
+        for seg in &mut line.styled_segments {
+            self.range(&mut seg.source);
+        }
+        match &mut line.kind {
+            LineKind::ListItem {
+                checkbox_source: Some(r),
+                ..
+            } => self.range(r),
+            LineKind::TableRow { body, .. } => {
+                for r in body.cells.iter_mut().chain(body.raw_cells.iter_mut()) {
+                    self.range(r);
+                }
+                self.range(&mut body.table_source);
+            }
+            _ => {}
+        }
+        let map = Arc::make_mut(&mut line.offset_map);
+        for (_, source) in &mut map.segments {
+            self.range(source);
+        }
+        map.line_start = self.pos(map.line_start);
+        map.line_end = self.pos(map.line_end);
+        map.visible_start = self.pos(map.visible_start);
+        if !line.link_hits.is_empty() {
+            for (r, _) in Arc::make_mut(&mut line.link_hits) {
+                self.range(r);
+            }
+        }
+    }
+}
+
+impl ParsedDocument {
+    /// Bring this parse up to date after an edit that replaced the bytes
+    /// `old` of the parsed text with `new_len` bytes, giving `text`.
+    ///
+    /// Parsing resumes from the last checkpoint before the edit (one line
+    /// early, since a table header depends on the line under it, and outside
+    /// any table, whose rows were found by looking ahead) and stops at the
+    /// first old checkpoint after the edit where the parser state matches
+    /// the old one moved by the edit. From there on the old lines are the
+    /// right ones, moved in place. The result equals `parse_document(text)`.
+    pub fn apply_edit(&mut self, text: &str, old: std::ops::Range<usize>, new_len: usize) {
+        let checkpoints = &self.meta.checkpoints;
+        if self.lines.is_empty() || checkpoints.first().is_none_or(|(l, _)| *l != 0) {
+            *self = parse_document(text);
+            return;
+        }
+        let delta = new_len as isize - (old.end - old.start) as isize;
+        let new_edit_end = old.start + new_len;
+        // Last line starting at or before the edit (an offset inside a CRLF
+        // belongs to no line's range, so not `line_index_at`).
+        let first = self
+            .lines
+            .partition_point(|l| l.source.start <= old.start)
+            .saturating_sub(1);
+        let target = first.saturating_sub(1);
+        let below = checkpoints.partition_point(|(l, _)| *l <= target);
+        let (restart, restart_state) = checkpoints[..below]
+            .iter()
+            .rev()
+            .find(|(_, state)| state.table.is_none())
+            .cloned()
+            .unwrap_or_else(|| (0, ParseState::default()));
+        let restart_byte = self.lines[restart].source.start;
+        let raw = source_lines_from(text, restart_byte);
+
+        let old_lines = &self.lines;
+        let mut new_lines = Vec::new();
+        let mut new_checkpoints = Vec::new();
+        let mut resync = None;
+        let mut state = restart_state;
+        parse_lines(&raw, restart, &mut state, &mut new_lines, |i, start, now| {
+            if start >= new_edit_end && i > restart {
+                let old_start = (start as isize - delta) as usize;
+                let k = old_lines.partition_point(|l| l.source.start < old_start);
+                let at_line_start = old_lines.get(k).is_some_and(|l| l.source.start == old_start);
+                if at_line_start {
+                    if let Ok(ix) = checkpoints.binary_search_by_key(&k, |(l, _)| *l) {
+                        let shift = Shift {
+                            old_end: old.end,
+                            delta,
+                            old_line: k,
+                            line_delta: i as isize - k as isize,
+                        };
+                        if shift.state(&checkpoints[ix].1) == *now {
+                            resync = Some((i, k, ix, shift));
+                            return Step::Stop;
+                        }
+                    }
+                }
+            }
+            if (i - restart) % CHECKPOINT_EVERY == 0 {
+                new_checkpoints.push((i, now.clone()));
+            }
+            Step::Parse
+        });
+
+        let inserted = new_lines.len();
+        let old_generation = self.meta.generation;
+        let mut checkpoints: Vec<(usize, ParseState)> = self
+            .meta
+            .checkpoints
+            .iter()
+            .take_while(|(l, _)| *l < restart)
+            .cloned()
+            .collect();
+        checkpoints.extend(new_checkpoints);
+        let removed = match resync {
+            Some((_, k, ix, shift)) => {
+                self.lines.splice(restart..k, new_lines);
+                for line in &mut self.lines[restart + inserted..] {
+                    shift.parsed_line(line);
+                }
+                checkpoints.extend(
+                    self.meta.checkpoints[ix..]
+                        .iter()
+                        .map(|(l, state)| (shift.line(*l), shift.state(state))),
+                );
+                k - restart
+            }
+            None => {
+                let removed = self.lines.len() - restart;
+                self.lines.truncate(restart);
+                self.lines.extend(new_lines);
+                removed
+            }
+        };
+        self.code_blocks = code_blocks_of(&self.lines, text.len());
+        self.meta = ParseMeta {
+            checkpoints,
+            generation: next_generation(),
+            last_splice: Some((old_generation, restart, removed, inserted)),
+        };
+    }
+}
+
+/// Every source line of `markdown`, plus the empty last line after a final
+/// line ending.
+fn all_source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
+    if markdown.is_empty() {
         vec![SourceLine {
             start: 0,
             end: 0,
@@ -1985,25 +2284,146 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             });
         }
         v
-    };
-
-    let mut lines = Vec::with_capacity(raw_lines.len());
-    let mut list_quote_tracker = InListOrQuoteTracker::default();
-    let mut code_blocks = Vec::new();
-
-    let mut open_fence: Option<OpenFence> = None;
-    let mut table: Option<DetectedTable> = None;
-
-    let mut list_walk = ListWalk::default();
-
-    macro_rules! push_line {
-        ($line:expr) => {{
-            let p = $line;
-            list_quote_tracker.push(&p.kind);
-            lines.push(p);
-        }};
     }
-    for (i, sline) in raw_lines.iter().enumerate() {
+}
+
+/// Lines between checkpoints of the parser state.
+pub(crate) const CHECKPOINT_EVERY: usize = 64;
+
+/// What `parse_lines` does with the next line.
+pub(crate) enum Step {
+    Parse,
+    Stop,
+}
+
+/// Everything the parse of one line depends on besides the line itself and
+/// the lines after it: lets a parse resume in the middle of a document.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParseState {
+    tracker: InListOrQuoteTracker,
+    open_fence: Option<OpenFence>,
+    table: Option<DetectedTable>,
+    list_walk: ListWalk,
+    /// The previous line ends a block (or there is none): indented code may
+    /// start here.
+    prev_ends_block: bool,
+    /// The last non-blank line is code, so an indented line continues it.
+    last_content_is_code: bool,
+}
+
+impl Default for ParseState {
+    fn default() -> Self {
+        Self {
+            tracker: InListOrQuoteTracker::default(),
+            open_fence: None,
+            table: None,
+            list_walk: ListWalk::default(),
+            prev_ends_block: true,
+            last_content_is_code: false,
+        }
+    }
+}
+
+fn next_generation() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn fill_link_hits(line: &mut ParsedLine) {
+    let links: Vec<_> = line
+        .styled_segments
+        .iter()
+        .filter_map(|seg| match &seg.link_url {
+            Some(url) if seg.source.end > seg.source.start => {
+                Some((seg.source.clone(), url.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    if !links.is_empty() {
+        line.link_hits = Arc::new(links);
+    }
+}
+
+/// Fenced code blocks `(opening line incl. ending, closing line incl.
+/// ending)`; an unclosed fence runs to the end of the document.
+fn code_blocks_of(
+    lines: &[ParsedLine],
+    text_len: usize,
+) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let with_ending = |j: usize| -> std::ops::Range<usize> {
+        let end = lines.get(j + 1).map_or(text_len, |next| next.source.start);
+        lines[j].source.start..end
+    };
+    let mut blocks = Vec::new();
+    let mut open = None;
+    for (j, line) in lines.iter().enumerate() {
+        if let LineKind::CodeFence { opening, .. } = line.kind {
+            if opening {
+                open = Some(with_ending(j));
+            } else if let Some(open_range) = open.take() {
+                blocks.push((open_range, with_ending(j)));
+            }
+        }
+    }
+    if let Some(open_range) = open {
+        blocks.push((open_range, text_len..text_len));
+    }
+    blocks
+}
+
+/// Parse `raw_lines` (line `base` of the document first) onto `lines`.
+/// `on_line` sees each line's index, start byte and the state before it, and
+/// can stop the parse there; the return value is then that line's position
+/// in `raw_lines`.
+// The line loop moved here from parse_document, with its allow.
+#[allow(clippy::single_range_in_vec_init)]
+fn parse_lines(
+    raw_lines: &[SourceLine<'_>],
+    base: usize,
+    state: &mut ParseState,
+    lines: &mut Vec<ParsedLine>,
+    mut on_line: impl FnMut(usize, usize, &ParseState) -> Step,
+) -> Option<usize> {
+    for (local, sline) in raw_lines.iter().enumerate() {
+        let i = base + local;
+        // A table that ended above this line is gone: the next table check
+        // runs either way, and dropping it keeps states comparable.
+        if state.table.as_ref().is_some_and(|t| i > t.last) {
+            state.table = None;
+        }
+        match on_line(i, sline.start, &*state) {
+            Step::Parse => {}
+            Step::Stop => return Some(local),
+        }
+        let ParseState {
+            tracker: list_quote_tracker,
+            open_fence,
+            table,
+            list_walk,
+            prev_ends_block,
+            last_content_is_code,
+        } = &mut *state;
+        macro_rules! push_line {
+            ($line:expr) => {{
+                let mut p = $line;
+                list_quote_tracker.push(&p.kind);
+                *prev_ends_block = matches!(
+                    p.kind,
+                    LineKind::Empty
+                        | LineKind::Heading { .. }
+                        | LineKind::HorizontalRule
+                        | LineKind::CodeLine
+                        | LineKind::CodeFence { opening: false, .. }
+                );
+                if !matches!(p.kind, LineKind::Empty) {
+                    *last_content_is_code = matches!(p.kind, LineKind::CodeLine);
+                }
+                fill_link_hits(&mut p);
+                lines.push(p);
+            }};
+        }
         let line = sline.text;
         let line_start = sline.start;
         let line_end = line_start + line.len();
@@ -2027,8 +2447,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 }
             });
             if closes {
-                let fence = open_fence.take().expect("fence");
-                code_blocks.push((fence.open_range, sline.start..sline.end));
+                let _fence = open_fence.take().expect("fence");
                 let parsed = fence_marker_line(
                     i,
                     line_source,
@@ -2058,7 +2477,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             };
         if let Some((marker, len, indent, language)) = open_top {
             list_walk.note_block(line);
-            open_fence = Some(OpenFence {
+            *open_fence = Some(OpenFence {
                 strict: true,
                 marker,
                 len,
@@ -2082,16 +2501,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         // indented code itself); after paragraph, list or quote text the line
         // is a lazy continuation. Inside a list item the indent belongs to
         // the item. The first four columns are hidden like a fence's indent.
-        let after_block = lines.last().is_none_or(|prev: &ParsedLine| {
-            matches!(
-                prev.kind,
-                LineKind::Empty
-                    | LineKind::Heading { .. }
-                    | LineKind::HorizontalRule
-                    | LineKind::CodeLine
-                    | LineKind::CodeFence { opening: false, .. }
-            )
-        });
+        let after_block = *prev_ends_block;
         // `\t- foo` stays a list item, as `take_list` accepts it (red parity).
         let indented_code = after_block
             && !trimmed.is_empty()
@@ -2102,12 +2512,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         // code. Red's trimmed-backtick rule below would open a fence there and
         // swallow the rest of the document. A fence is open only in the
         // branch above, so a code line before the blanks is indented code.
-        let continues_indented_code = indented_code
-            && lines
-                .iter()
-                .rev()
-                .find(|prev| !matches!(prev.kind, LineKind::Empty))
-                .is_some_and(|prev| matches!(prev.kind, LineKind::CodeLine));
+        let continues_indented_code = indented_code && *last_content_is_code;
         if continues_indented_code {
             list_walk.note_block(line);
             let strip = prefix_through_column(line, 4);
@@ -2123,7 +2528,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
                 .strip_prefix("```")
                 .map(|info| info.trim().to_string())
                 .filter(|info| !info.is_empty());
-            open_fence = Some(OpenFence {
+            *open_fence = Some(OpenFence {
                 strict: false,
                 marker: b'`',
                 len: 3,
@@ -2150,7 +2555,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             let lang = Some(trimmed.trim_start_matches('~').trim())
                 .filter(|info| !info.is_empty())
                 .map(str::to_string);
-            open_fence = Some(OpenFence {
+            *open_fence = Some(OpenFence {
                 strict: false,
                 marker: b'~',
                 len: 3,
@@ -2220,13 +2625,13 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         // Table rows. Detection starts only on a line the fence walk did not
         // consume, and the block follows the delimiter row's column shape.
         if table.as_ref().is_none_or(|t| i > t.last) {
-            table = table_block(&raw_lines, i).map(|block| {
-                let byte_start = raw_lines[i].start;
+            *table = table_block(raw_lines, local).map(|block| {
+                let byte_start = raw_lines[local].start;
                 let last_line = &raw_lines[block.last];
                 DetectedTable {
                     first: i,
-                    last: block.last,
-                    delimiter: block.delimiter,
+                    last: base + block.last,
+                    delimiter: base + block.delimiter,
                     source: byte_start..(last_line.start + last_line.text.len()),
                     alignments: block.alignments.into(),
                 }
@@ -2376,32 +2781,11 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             styled_segments,
         });
     }
-
-    if let Some(fence) = open_fence {
-        code_blocks.push((fence.open_range, markdown.len()..markdown.len()));
-    }
-
-    for line in &mut lines {
-        let links: Vec<_> = line
-            .styled_segments
-            .iter()
-            .filter_map(|seg| match &seg.link_url {
-                Some(url) if seg.source.end > seg.source.start => {
-                    Some((seg.source.clone(), url.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        if !links.is_empty() {
-            line.link_hits = Arc::new(links);
-        }
-    }
-
-    ParsedDocument {
-        lines,
-        code_blocks,
-    }
+    None
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod incremental_tests;

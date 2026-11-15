@@ -5974,3 +5974,43 @@ fn compute_stats_is_lazy_until_ensure_stats() {
     doc.ensure_stats();
     assert_eq!(doc.word_count, before.words);
 }
+
+#[test]
+fn parse_stays_equal_to_a_full_parse_through_edits_undo_and_redo() {
+    // F15: parsed() updates the cached parse in place after each edit.
+    let mut seed = 0x0dd5_eed5u64;
+    let mut next = |n: usize| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % n.max(1)
+    };
+    let pieces = ["# Title\n", "- item\n", "1. one\n", "> quote\n", "```\ncode\n```\n",
+        "| a | b |\n| --- | --- |\n| 1 | 2 |\n", "text **bold**\n", "\n", "    indented\n"];
+    let mut source = String::new();
+    for _ in 0..300 {
+        source.push_str(pieces[next(pieces.len())]);
+    }
+    let mut doc = DocumentTab::new("t".into(), "Doc.md".into(), source, None, None);
+    let snippets = ["x", "\n", "| c |", "```", "- ", "# ", "  ", "**"];
+    for step in 0..400 {
+        let _ = doc.parsed();
+        match next(6) {
+            0 if doc.undo() => {}
+            1 if doc.redo() => {}
+            _ => {
+                let len = doc.content.len();
+                let mut start = next(len + 1);
+                while !doc.content.is_char_boundary(start) {
+                    start -= 1;
+                }
+                let mut end = (start + next(12)).min(len);
+                while !doc.content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let text = if next(3) == 0 { "" } else { snippets[next(snippets.len())] };
+                doc.edit(start..end.max(start), text);
+            }
+        }
+        let fresh = parse_document(&doc.content);
+        assert!(*doc.parsed() == fresh, "step {step}: cached parse differs from a full parse");
+    }
+}

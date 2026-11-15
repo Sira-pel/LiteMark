@@ -189,6 +189,7 @@ pub(super) fn line_is_blank(line: &str) -> bool {
 
 /// Open list items, so a marker can be refused when it would interrupt a
 /// paragraph or when it starts at column 4 or later outside a parent item.
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ListWalk {
     pub(super) open: Vec<usize>,
     /// Paragraph-open flag per container. Index 0 is the document. Index

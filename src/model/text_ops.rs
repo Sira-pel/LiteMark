@@ -37,6 +37,8 @@ pub struct SelectionSnap {
 pub struct HistoryRestore {
     pub caret: usize,
     pub selection: Option<SelectionSnap>,
+    /// The bytes replaced in the content and the length written there.
+    pub replaced: (std::ops::Range<usize>, usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +215,7 @@ impl UndoHistory {
         }
         let inserted = edit.deleted;
         content.replace_range(edit.start..end, &inserted);
+        let replaced = (edit.start..end, inserted.len());
         let caret = edit.undo_caret.min(content.len());
         let selection = edit.undo_sel.clone();
         let inverse = DiffEdit {
@@ -226,7 +229,11 @@ impl UndoHistory {
         };
         self.redo_bytes += inverse.cost();
         self.redo.push(inverse);
-        Some(HistoryRestore { caret, selection })
+        Some(HistoryRestore {
+            caret,
+            selection,
+            replaced,
+        })
     }
 
     /// Redo the latest undone edit.
@@ -244,6 +251,7 @@ impl UndoHistory {
         }
         let inserted = edit.deleted;
         content.replace_range(edit.start..end, &inserted);
+        let replaced = (edit.start..end, inserted.len());
         let caret = edit.undo_caret.min(content.len());
         let selection = edit.undo_sel.clone();
         let inverse = DiffEdit {
@@ -257,7 +265,11 @@ impl UndoHistory {
         };
         self.undo_bytes += inverse.cost();
         self.undo.push(inverse);
-        Some(HistoryRestore { caret, selection })
+        Some(HistoryRestore {
+            caret,
+            selection,
+            replaced,
+        })
     }
 }
 
