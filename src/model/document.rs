@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    accepted_list_marker, accepted_list_marker_in, parse_document, unescaped_pipe_offsets,
-    InlinePair, InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment,
-    TableColumnAlign, TableRowBody, MAX_LIST_NUMBER,
+    accepted_list_marker_in, parse_document, unescaped_pipe_offsets, InlinePair, InlineTagKind,
+    LineKind, ParsedDocument, ParsedLine, StyledSegment, TableColumnAlign, TableRowBody,
+    MAX_LIST_NUMBER,
 };
 
 use super::table_ops::{self, TableOp};

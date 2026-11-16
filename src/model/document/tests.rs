@@ -6548,3 +6548,45 @@ fn edge_case_edits_from_the_audit() {
     t.smart_newline(false);
     assert_eq!(t.content, "999999998. x\n999999999. \n");
 }
+
+#[test]
+fn enter_on_no_space_blockquote_continues_quote() {
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), ">foo".into(), None, None);
+    t.caret.move_to(4);
+    t.refresh_cursor();
+    t.smart_newline(false);
+    assert_eq!(t.content, ">foo\n> ");
+}
+
+#[test]
+fn enter_on_empty_blockquote_exits_quote() {
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), ">".into(), None, None);
+    t.caret.move_to(1);
+    t.refresh_cursor();
+    t.smart_newline(false);
+    assert_eq!(t.content, "");
+}
+
+#[test]
+fn toggle_quote_off_no_space_blockquote() {
+    let mut t = DocumentTab::new("t".into(), "t.md".into(), ">foo".into(), None, None);
+    t.caret.move_to(4);
+    t.refresh_cursor();
+    t.apply_format_in_mode("quote", ViewMode::Wysiwyg);
+    assert_eq!(t.content, "foo");
+}
+
+#[test]
+fn enter_on_blockquote_inside_list_item_continues_quote() {
+    let mut t = DocumentTab::new(
+        "t".into(),
+        "t.md".into(),
+        "10. item\n    > quote".into(),
+        None,
+        None,
+    );
+    t.caret.move_to(t.content.len());
+    t.refresh_cursor();
+    t.smart_newline(false);
+    assert_eq!(t.content, "10. item\n    > quote\n    > ");
+}

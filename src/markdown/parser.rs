@@ -1971,12 +1971,11 @@ fn parse_lines(
         let line_end = line_start + line.len();
         let line_source = line_start..line_end;
         let trimmed = line.trim();
-        let trimmed_start = line.trim_start();
-        let indent_len = line.len() - trimmed_start.len();
+        let (indent_bytes, indent_cols) = split_indent(line);
+        let after_indent = &line[indent_bytes..];
 
         // Fences. Top-level backtick and tilde fences follow CommonMark. A
-        // fence in a list item or quote, and a tab-indented backtick fence,
-        // keep red's trimmed-marker rule.
+        // fence in a list item or quote keeps red's trimmed-marker rule.
         if open_fence.is_some() {
             list_walk.note_block(line);
             let closes = open_fence.as_ref().is_some_and(|fence| {
@@ -2050,10 +2049,9 @@ fn parse_lines(
             && leading_column(line) >= 4
             && list_walk.thematic_parent_col(line) == 0
             && !(single_tab_marker(line) && scan_list_marker(line).is_some());
-        // Inside an indented code block (blank lines included) a ```` line is
-        // code. Red's trimmed-backtick rule below would open a fence there and
-        // swallow the rest of the document. A fence is open only in the
-        // branch above, so a code line before the blanks is indented code.
+        // Inside an indented code block (blank lines included, even after a
+        // list or quote) a ```` line continues indented code instead of
+        // falling through to the trimmed fence rules below.
         let continues_indented_code = indented_code && *last_content_is_code;
         if continues_indented_code {
             list_walk.note_block(line);
@@ -2063,9 +2061,7 @@ fn parse_lines(
             continue;
         }
 
-        let skip_rejected =
-            !list_quote_tracker.is_in_list_or_quote() && backtick_info_rejects_fence(line);
-        if trimmed.starts_with("```") && !skip_rejected {
+        if list_quote_tracker.is_in_list_or_quote() && trimmed.starts_with("```") {
             list_walk.note_block(line);
             let lang = trimmed
                 .strip_prefix("```")
@@ -2285,14 +2281,18 @@ fn parse_lines(
                 ordered: item.ordered,
                 number: item.number,
                 task: item.task.as_ref().map(|task| task.checked),
-                indent_cols: indent_len,
+                indent_cols,
                 checkbox_source,
             };
             prefix_len = item.prefix_end();
-        } else if trimmed_start.starts_with("> ") {
+        } else if after_indent.starts_with('>')
+            && indent_cols.saturating_sub(list_walk.thematic_parent_col(line)) <= 3
+        {
             list_walk.note_block(line);
             kind = LineKind::Blockquote;
-            prefix_len = indent_len + 2;
+            let space_or_tab =
+                usize::from(matches!(after_indent.as_bytes().get(1), Some(b' ' | b'\t')));
+            prefix_len = indent_bytes + 1 + space_or_tab;
         } else {
             list_walk.note_paragraph();
         }

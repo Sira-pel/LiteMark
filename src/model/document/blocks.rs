@@ -545,11 +545,13 @@ pub(super) fn parse_line_block_prefix(
         };
         return (item.indent_bytes, Some(target), item.prefix_end());
     }
-    if trimmed.starts_with("> ") {
-        return (indent, Some(BlockFormatTarget::Blockquote), indent + 2);
-    }
-    if trimmed == ">" {
-        return (indent, Some(BlockFormatTarget::Blockquote), indent + 1);
+    if let Some(prefix_len) = blockquote_prefix_in(parsed, line_start) {
+        let quote_indent = crate::markdown::parser::split_indent(line).0;
+        return (
+            quote_indent,
+            Some(BlockFormatTarget::Blockquote),
+            prefix_len,
+        );
     }
     (indent, None, indent)
 }
@@ -573,13 +575,19 @@ pub fn block_prefix_in(content: &str, line_start: usize) -> usize {
         }
     }
 
-    if let Some(item) = accepted_list_marker(content, line_start) {
+    let parsed = parse_document(content);
+    if let Some(item) = accepted_list_marker_in(&parsed, content, line_start) {
         return item.prefix_end();
     }
+    blockquote_prefix_in(&parsed, line_start).unwrap_or(0)
+}
 
-    if trimmed_start.starts_with("> ") {
-        return indent_len + 2;
-    }
-
-    0
+/// Prefix length of the blockquote line starting at `line_start`, as the
+/// parser sees it. Only the parser knows whether a `>` sits in a list item,
+/// where its indent counts from the item's content column.
+fn blockquote_prefix_in(parsed: &ParsedDocument, line_start: usize) -> Option<usize> {
+    parsed
+        .line_at_offset(line_start)
+        .filter(|l| l.kind == LineKind::Blockquote && l.source.start == line_start)
+        .map(|l| l.prefix_range.end - l.source.start)
 }
