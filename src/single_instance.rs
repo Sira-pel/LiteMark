@@ -1,8 +1,8 @@
 //! One running LiteMark per user: launching the app again with a file hands
 //! that file to the running window instead of opening a second window.
 //!
-//! Unix only, over a socket in the user's runtime directory. Elsewhere the
-//! app always starts its own window.
+//! Over a socket in the user's runtime directory on Unix, and over a named
+//! pipe on Windows.
 
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -33,9 +33,155 @@ pub fn claim(file: Option<&std::path::Path>) -> Claim {
     claim_at(&private.join("litemark.sock"), file)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn claim(file: Option<&std::path::Path>) -> Claim {
+    // Pipe names are machine-wide, so keep each user's apart.
+    let user: String = std::env::var("USERNAME")
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    claim_at(&format!(r"\\.\pipe\litemark-{user}"), file)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn claim(_file: Option<&std::path::Path>) -> Claim {
     Claim::Primary(None)
+}
+
+/// `canonicalize` gives `\\?\C:\...` on Windows; drop the prefix so the path
+/// matches the ones tabs already hold.
+#[cfg(windows)]
+fn plain_path(path: &std::path::Path) -> PathBuf {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
+#[cfg(windows)]
+fn connect_pipe(pipe: &str) -> Option<std::fs::File> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    for _ in 0..20 {
+        match std::fs::OpenOptions::new().write(true).open(pipe) {
+            Ok(f) => return Some(f),
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// One server end of the pipe. The first one claims the name, so a second
+/// LiteMark can't also become the main one. Returned as an integer so it can
+/// move between threads.
+#[cfg(windows)]
+fn create_pipe_instance(pipe: &str, first: bool) -> Option<usize> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND,
+    };
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    };
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(pipe)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut open_mode = PIPE_ACCESS_INBOUND;
+    if first {
+        open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+    }
+    // Default security: only this user (and admins) may write to the pipe.
+    let handle = unsafe {
+        CreateNamedPipeW(
+            wide.as_ptr(),
+            open_mode,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_UNLIMITED_INSTANCES,
+            0,
+            8192,
+            0,
+            std::ptr::null(),
+        )
+    };
+    (handle != INVALID_HANDLE_VALUE).then_some(handle as usize)
+}
+
+#[cfg(windows)]
+fn claim_at(pipe: &str, file: Option<&std::path::Path>) -> Claim {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_PIPE_CONNECTED};
+    use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
+
+    if let Some(mut stream) = connect_pipe(pipe) {
+        let Some(file) = file else {
+            // Another LiteMark is already running: open a plain window.
+            return Claim::Primary(None);
+        };
+        let mut message = plain_path(file).to_string_lossy().into_owned().into_bytes();
+        message.push(b'\n');
+        return if stream.write_all(&message).is_ok() {
+            Claim::HandedOff
+        } else {
+            // It answered but took nothing.
+            Claim::Primary(None)
+        };
+    }
+    let Some(first) = create_pipe_instance(pipe, true) else {
+        return Claim::Primary(None);
+    };
+    let pipe = pipe.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut current = first;
+        loop {
+            let connected = unsafe { ConnectNamedPipe(current as _, std::ptr::null_mut()) };
+            if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
+                unsafe { CloseHandle(current as _) };
+                match create_pipe_instance(&pipe, false) {
+                    Some(next) => current = next,
+                    None => return,
+                }
+                continue;
+            }
+            // Open the next end before serving this one, so the name is never
+            // free for another process to claim.
+            let next = create_pipe_instance(&pipe, false);
+            let stream = unsafe { std::fs::File::from_raw_handle(current as RawHandle) };
+            let tx = tx.clone();
+            // Its own thread: a client that connects and says nothing must
+            // not block the rest.
+            std::thread::spawn(move || {
+                let mut line = Vec::new();
+                // A path is short; cap the read so a stray client can't grow it.
+                if BufReader::new(stream.take(8192))
+                    .read_until(b'\n', &mut line)
+                    .is_err()
+                {
+                    return;
+                }
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                if !line.is_empty() {
+                    let _ = tx.send(PathBuf::from(String::from_utf8_lossy(&line).into_owned()));
+                }
+            });
+            match next {
+                Some(next) => current = next,
+                None => return,
+            }
+        }
+    });
+    Claim::Primary(Some(rx))
 }
 
 #[cfg(unix)]
@@ -111,6 +257,32 @@ mod tests {
         assert!(matches!(claim_at(&sock, Some(&file)), Claim::HandedOff));
         let got = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
         assert_eq!(got, file.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_launch_hands_its_file_to_the_first() {
+        let pipe = format!(r"\\.\pipe\litemark-test-{}", std::process::id());
+        let dir = std::env::temp_dir().join(format!("litemark-si-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.md");
+        std::fs::write(&file, "x").unwrap();
+
+        let Claim::Primary(Some(rx)) = claim_at(&pipe, None) else {
+            panic!("first launch should be the main one");
+        };
+        // A launch with no file leaves the pipe alone.
+        assert!(matches!(claim_at(&pipe, None), Claim::Primary(None)));
+        for _ in 0..2 {
+            assert!(matches!(claim_at(&pipe, Some(&file)), Claim::HandedOff));
+            let got = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+            assert_eq!(got, plain_path(&file));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
