@@ -68,6 +68,10 @@ pub struct EditorSettings {
     /// Workspace folders used before, most recent first (never the current one).
     #[serde(default)]
     pub recent_folders: Vec<PathBuf>,
+    /// The workspace folder in use when the app last closed; reopened at
+    /// startup while it still exists.
+    #[serde(default)]
+    pub workspace_folder: Option<PathBuf>,
     /// Look for a newer release on GitHub at startup (at most once a day).
     #[serde(default = "default_check_for_updates")]
     pub check_for_updates: bool,
@@ -98,6 +102,7 @@ impl Default for EditorSettings {
             base_font_size: 17.0,
             content_alignment: ContentAlignment::Centered,
             recent_folders: Vec::new(),
+            workspace_folder: None,
             check_for_updates: true,
             last_update_check: None,
             dismissed_update: None,
@@ -121,6 +126,11 @@ impl EditorSettings {
             self.recent_folders.insert(0, left.to_path_buf());
         }
         self.recent_folders.truncate(MAX_RECENT_FOLDERS);
+    }
+
+    /// Drop a folder from the recent list (the folder itself is untouched).
+    pub fn forget_folder(&mut self, folder: &std::path::Path) {
+        self.recent_folders.retain(|p| p != folder);
     }
 
     fn config_path() -> Option<PathBuf> {

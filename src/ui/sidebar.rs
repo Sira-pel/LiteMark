@@ -1167,16 +1167,18 @@ where
 
 /// Dropdown under the sidebar header: current folder, recent folders and a
 /// "Choose folder" entry. Click outside to dismiss.
-pub fn render_workspace_menu<FPick, FChoose, FDismiss>(
+pub fn render_workspace_menu<FPick, FForget, FChoose, FDismiss>(
     current_path: String,
     recents: Vec<(String, std::path::PathBuf)>,
     on_pick: FPick,
+    on_forget: FForget,
     on_choose: FChoose,
     on_dismiss: FDismiss,
     theme: &Theme,
 ) -> impl IntoElement
 where
     FPick: Fn(std::path::PathBuf, &mut App) + 'static + Clone,
+    FForget: Fn(std::path::PathBuf, &mut App) + 'static + Clone,
     FChoose: Fn(&mut App) + 'static + Clone,
     FDismiss: Fn(&mut App) + 'static + Clone,
 {
@@ -1258,12 +1260,15 @@ where
                         )
                         .children(recents.into_iter().enumerate().map(|(ix, (name, path))| {
                             let pick = on_pick.clone();
+                            let forget = on_forget.clone();
                             let target = path.clone();
+                            let forget_target = path.clone();
                             row(SharedString::from(format!("workspace-recent-{ix}")))
                                 .on_click(move |_, _, cx| pick(target.clone(), cx))
                                 .child(render_icon("folder", 14.0, theme.text_muted))
                                 .child(
                                     div()
+                                        .flex_1()
                                         .flex()
                                         .flex_col()
                                         .min_w_0()
@@ -1275,6 +1280,27 @@ where
                                                 .truncate()
                                                 .child(path.display().to_string()),
                                         ),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("workspace-forget-{ix}")))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(22.0))
+                                        .flex_none()
+                                        .rounded(sz::R_SM)
+                                        .hover(|h| h.bg(theme.bg_active))
+                                        // Keep the row's own click (switching folders)
+                                        // from firing for this button.
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            forget(forget_target.clone(), cx)
+                                        })
+                                        .child(render_icon("x", 12.0, theme.text_muted)),
                                 )
                         }))
                 })

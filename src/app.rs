@@ -250,8 +250,16 @@ impl LiteMarkApp {
         // Told once here; save_settings stays quiet about it afterwards.
         let settings_save_failed = settings.save_blocked.is_some();
         let settings_warning = settings.save_blocked.clone();
-        let notes_dir = get_or_create_notes_dir();
-        seed_welcome_note(&notes_dir);
+        // Reopen the folder the user last switched to; fall back to the
+        // default notes folder when it is gone.
+        let notes_dir = match settings.workspace_folder.clone().filter(|p| p.is_dir()) {
+            Some(dir) => dir,
+            None => {
+                let dir = get_or_create_notes_dir();
+                seed_welcome_note(&dir);
+                dir
+            }
+        };
         let workspace = scan_workspace_dir(&notes_dir, settings.show_code_files);
 
         let mut tab_ids = TabIds::new();

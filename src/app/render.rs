@@ -1508,6 +1508,17 @@ impl Render for LiteMarkApp {
                                     },
                                     {
                                         let view = view.clone();
+                                        move |dir: PathBuf, cx: &mut App| {
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.settings.forget_folder(&dir);
+                                                this.workspace_menu_recents.retain(|p| *p != dir);
+                                                this.save_settings();
+                                                cx.notify();
+                                            });
+                                        }
+                                    },
+                                    {
+                                        let view = view.clone();
                                         let choose = on_choose_dir.clone();
                                         move |cx: &mut App| {
                                             let _ = view.update(cx, |this, cx| {
