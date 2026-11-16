@@ -545,14 +545,12 @@ pub(super) fn parse_line_block_prefix(
         };
         return (item.indent_bytes, Some(target), item.prefix_end());
     }
-    let (q_indent_bytes, q_indent_cols) = crate::markdown::parser::split_indent(line);
-    let q_after = &line[q_indent_bytes..];
-    if q_indent_cols <= 3 && q_after.starts_with('>') {
-        let space_or_tab = usize::from(matches!(q_after.as_bytes().get(1), Some(b' ' | b'\t')));
+    if let Some(prefix_len) = blockquote_prefix_in(parsed, line_start) {
+        let quote_indent = crate::markdown::parser::split_indent(line).0;
         return (
-            q_indent_bytes,
+            quote_indent,
             Some(BlockFormatTarget::Blockquote),
-            q_indent_bytes + 1 + space_or_tab,
+            prefix_len,
         );
     }
     (indent, None, indent)
@@ -577,16 +575,19 @@ pub fn block_prefix_in(content: &str, line_start: usize) -> usize {
         }
     }
 
-    if let Some(item) = accepted_list_marker(content, line_start) {
+    let parsed = parse_document(content);
+    if let Some(item) = accepted_list_marker_in(&parsed, content, line_start) {
         return item.prefix_end();
     }
+    blockquote_prefix_in(&parsed, line_start).unwrap_or(0)
+}
 
-    let (q_indent_bytes, q_indent_cols) = crate::markdown::parser::split_indent(line);
-    let q_after = &line[q_indent_bytes..];
-    if q_indent_cols <= 3 && q_after.starts_with('>') {
-        let space_or_tab = usize::from(matches!(q_after.as_bytes().get(1), Some(b' ' | b'\t')));
-        return q_indent_bytes + 1 + space_or_tab;
-    }
-
-    0
+/// Prefix length of the blockquote line starting at `line_start`, as the
+/// parser sees it. Only the parser knows whether a `>` sits in a list item,
+/// where its indent counts from the item's content column.
+fn blockquote_prefix_in(parsed: &ParsedDocument, line_start: usize) -> Option<usize> {
+    parsed
+        .line_at_offset(line_start)
+        .filter(|l| l.kind == LineKind::Blockquote && l.source.start == line_start)
+        .map(|l| l.prefix_range.end - l.source.start)
 }

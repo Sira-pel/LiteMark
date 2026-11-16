@@ -3672,3 +3672,15 @@ fn top_level_four_space_backticks_do_not_swallow_document() {
     assert_eq!(after_para.lines[1].kind, LineKind::Paragraph);
     assert_eq!(after_para.lines[2].kind, LineKind::Paragraph);
 }
+
+#[test]
+fn blockquote_indent_counts_from_the_list_item_content_column() {
+    let kind_of = |src: &str, line: usize| parse_document(src).lines[line].kind.clone();
+    // Inside an item the indent is relative to its content column.
+    assert_eq!(kind_of("- item\n\n    > quote", 2), LineKind::Blockquote);
+    assert_eq!(kind_of("10. item\n    > quote", 1), LineKind::Blockquote);
+    assert_eq!(kind_of("- a\n  - b\n      > deep", 2), LineKind::Blockquote);
+    // Still capped at 3 columns past the content column, and at the margin.
+    assert_eq!(kind_of("- item\n\n      > code", 2), LineKind::Paragraph);
+    assert_eq!(kind_of("para\n\n    > code", 2), LineKind::CodeLine);
+}

@@ -237,7 +237,8 @@ pub(super) fn is_structural_line(line: &str, parent_col: usize) -> bool {
         return true;
     }
     let (indent_bytes, indent_cols) = split_indent(line);
-    if indent_cols <= 3 && line[indent_bytes..].starts_with('>') {
+    // Indent counts from the list item's content column, not the margin.
+    if indent_cols.saturating_sub(parent_col) <= 3 && line[indent_bytes..].starts_with('>') {
         return true;
     }
     trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2
@@ -354,13 +355,9 @@ impl ListWalk {
     }
 }
 
-/// The list marker `parse_document` keeps for the line that begins at `line_start`.
-pub fn accepted_list_marker(markdown: &str, line_start: usize) -> Option<ListMarker> {
-    accepted_list_marker_in(&parse_document(markdown), markdown, line_start)
-}
-
-/// [`accepted_list_marker`] against `doc`, the parse of `markdown`, so
-/// callers that already hold the parse do not pay for another one.
+/// The list marker `parse_document` keeps for the line that begins at
+/// `line_start`, read from `doc`, the parse of `markdown`, so callers that
+/// already hold the parse do not pay for another one.
 pub fn accepted_list_marker_in(
     doc: &ParsedDocument,
     markdown: &str,

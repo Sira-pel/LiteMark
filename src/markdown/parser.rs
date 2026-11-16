@@ -2285,7 +2285,9 @@ fn parse_lines(
                 checkbox_source,
             };
             prefix_len = item.prefix_end();
-        } else if indent_cols <= 3 && after_indent.starts_with('>') {
+        } else if after_indent.starts_with('>')
+            && indent_cols.saturating_sub(list_walk.thematic_parent_col(line)) <= 3
+        {
             list_walk.note_block(line);
             kind = LineKind::Blockquote;
             let space_or_tab =
