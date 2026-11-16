@@ -35,13 +35,78 @@ pub fn claim(file: Option<&std::path::Path>) -> Claim {
 
 #[cfg(windows)]
 pub fn claim(file: Option<&std::path::Path>) -> Claim {
-    // Pipe names are machine-wide, so keep each user's apart.
+    // Pipe names are machine-wide, so keep each user's, and each sign-in
+    // session's (Remote Desktop next to the local screen), apart.
     let user: String = std::env::var("USERNAME")
         .unwrap_or_default()
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
         .collect();
-    claim_at(&format!(r"\\.\pipe\litemark-{user}"), file)
+    claim_at(&format!(r"\\.\pipe\litemark-{user}-{}", session_id()), file)
+}
+
+#[cfg(windows)]
+fn session_id() -> u32 {
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    let mut session = 0;
+    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) };
+    session
+}
+
+/// The user a process runs as, as a `TOKEN_USER` buffer (8-byte aligned).
+#[cfg(windows)]
+fn token_user(process: windows_sys::Win32::Foundation::HANDLE) -> Option<Vec<u64>> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY};
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+        return None;
+    }
+    let mut len = 0;
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+    let ok = len != 0
+        && unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) }
+            != 0;
+    unsafe { CloseHandle(token) };
+    ok.then_some(buf)
+}
+
+/// Whether the process serving this pipe runs as the same user as we do. The
+/// pipe name is machine-wide, so another user could have created it first and
+/// would otherwise be handed our file paths.
+#[cfg(windows)]
+fn served_by_us(pipe: &std::fs::File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{EqualSid, TOKEN_USER};
+    use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let mut pid = 0;
+    if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle() as _, &mut pid) } == 0 {
+        return false;
+    }
+    let server = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if server.is_null() {
+        return false;
+    }
+    let theirs = token_user(server);
+    unsafe { CloseHandle(server) };
+    let ours = token_user(unsafe { GetCurrentProcess() });
+    match (theirs, ours) {
+        (Some(a), Some(b)) => unsafe {
+            let a = (*(a.as_ptr() as *const TOKEN_USER)).User.Sid;
+            let b = (*(b.as_ptr() as *const TOKEN_USER)).User.Sid;
+            EqualSid(a, b) != 0
+        },
+        _ => false,
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -117,15 +182,19 @@ fn create_pipe_instance(pipe: &str, first: bool) -> Option<usize> {
 #[cfg(windows)]
 fn claim_at(pipe: &str, file: Option<&std::path::Path>) -> Claim {
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_PIPE_CONNECTED};
     use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
+    use windows_sys::Win32::System::IO::CancelIoEx;
 
     if let Some(mut stream) = connect_pipe(pipe) {
         let Some(file) = file else {
             // Another LiteMark is already running: open a plain window.
             return Claim::Primary(None);
         };
+        if !served_by_us(&stream) {
+            return Claim::Primary(None);
+        }
         let mut message = plain_path(file).to_string_lossy().into_owned().into_bytes();
         message.push(b'\n');
         return if stream.write_all(&message).is_ok() {
@@ -155,19 +224,33 @@ fn claim_at(pipe: &str, file: Option<&std::path::Path>) -> Claim {
             // Open the next end before serving this one, so the name is never
             // free for another process to claim.
             let next = create_pipe_instance(&pipe, false);
-            let stream = unsafe { std::fs::File::from_raw_handle(current as RawHandle) };
+            let stream = std::sync::Arc::new(unsafe {
+                std::fs::File::from_raw_handle(current as RawHandle)
+            });
             let tx = tx.clone();
             // Its own thread: a client that connects and says nothing must
             // not block the rest.
             std::thread::spawn(move || {
-                let mut line = Vec::new();
-                // A path is short; cap the read so a stray client can't grow it.
-                if BufReader::new(stream.take(8192))
-                    .read_until(b'\n', &mut line)
-                    .is_err()
-                {
-                    return;
-                }
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let reader = stream.clone();
+                std::thread::spawn(move || {
+                    let mut line = Vec::new();
+                    // A path is short; cap the read so a stray client can't
+                    // grow it.
+                    let read = BufReader::new((&*reader).take(8192)).read_until(b'\n', &mut line);
+                    let _ = done_tx.send(read.map(|_| line));
+                });
+                let mut line = match done_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                    Ok(Ok(line)) => line,
+                    Ok(Err(_)) => return,
+                    Err(_) => {
+                        // Silent client: abort the blocked read so its thread
+                        // ends and the pipe closes. `stream` is still held
+                        // here, so the handle is valid.
+                        unsafe { CancelIoEx(stream.as_raw_handle() as _, std::ptr::null()) };
+                        return;
+                    }
+                };
                 while matches!(line.last(), Some(b'\n' | b'\r')) {
                     line.pop();
                 }
@@ -278,11 +361,35 @@ mod windows_tests {
         };
         // A launch with no file leaves the pipe alone.
         assert!(matches!(claim_at(&pipe, None), Claim::Primary(None)));
+        // The name is taken: nobody else can claim it as the first instance.
+        assert!(create_pipe_instance(&pipe, true).is_none());
         for _ in 0..2 {
             assert!(matches!(claim_at(&pipe, Some(&file)), Claim::HandedOff));
             let got = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
             assert_eq!(got, plain_path(&file));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_silent_client_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn a_silent_client_is_dropped_and_does_not_block_others() {
+        let pipe = format!(r"\\.\pipe\litemark-test-silent-{}", std::process::id());
+        let Claim::Primary(Some(rx)) = claim_at(&pipe, None) else {
+            panic!("first launch should be the main one");
+        };
+        let mut silent = connect_pipe(&pipe).unwrap();
+        // Another launch still gets through while the silent one is connected.
+        let file = std::env::temp_dir();
+        assert!(matches!(claim_at(&pipe, Some(&file)), Claim::HandedOff));
+        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        // After the timeout the server closes its end, so writing fails.
+        std::thread::sleep(std::time::Duration::from_millis(3000));
+        assert!(silent.write_all(b"late\n").is_err());
     }
 }
