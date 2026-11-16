@@ -361,6 +361,10 @@ mod windows_tests {
         };
         // A launch with no file leaves the pipe alone.
         assert!(matches!(claim_at(&pipe, None), Claim::Primary(None)));
+        // A pipe this process created passes the owner check.
+        let client = connect_pipe(&pipe).unwrap();
+        assert!(served_by_us(&client));
+        drop(client);
         // The name is taken: nobody else can claim it as the first instance.
         assert!(create_pipe_instance(&pipe, true).is_none());
         for _ in 0..2 {
