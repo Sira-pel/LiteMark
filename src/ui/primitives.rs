@@ -14,13 +14,16 @@ pub fn render_icon(name: &str, size_px: f32, color: Rgba) -> impl IntoElement {
 }
 
 pub struct SimpleTooltip {
-    text: &'static str,
+    text: SharedString,
     theme: Theme,
 }
 
 impl SimpleTooltip {
-    pub fn new(text: &'static str, theme: Theme) -> Self {
-        Self { text, theme }
+    pub fn new(text: impl Into<SharedString>, theme: Theme) -> Self {
+        Self {
+            text: text.into(),
+            theme,
+        }
     }
 }
 
@@ -36,7 +39,7 @@ impl Render for SimpleTooltip {
             .shadow_md()
             .text_size(px(11.0))
             .text_color(self.theme.text_primary)
-            .child(self.text)
+            .child(self.text.clone())
     }
 }
 
@@ -82,13 +85,7 @@ where
 
     if !tooltip.is_empty() {
         let th = *theme;
-        el.tooltip(move |_, cx| {
-            cx.new(|_| SimpleTooltip {
-                text: tooltip,
-                theme: th,
-            })
-            .into()
-        })
+        el.tooltip(move |_, cx| cx.new(|_| SimpleTooltip::new(tooltip, th)).into())
     } else {
         el
     }

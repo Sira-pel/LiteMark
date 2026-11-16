@@ -1,5 +1,5 @@
 use super::line_field::LineField;
-use super::primitives::{icon_button, render_icon};
+use super::primitives::{icon_button, render_icon, SimpleTooltip};
 use crate::model::{sidebar_folder_search_matches, sidebar_search_matches};
 use crate::model::{WorkspaceDirectory, WorkspaceFile};
 use crate::theme::{sz, Theme};
@@ -1269,6 +1269,13 @@ where
                                 .h_auto()
                                 .min_h(px(32.0))
                                 .py(px(5.0))
+                                .tooltip({
+                                    let full = path.display().to_string();
+                                    let th = *theme;
+                                    move |_, cx| {
+                                        cx.new(|_| SimpleTooltip::new(full.clone(), th)).into()
+                                    }
+                                })
                                 .on_click(move |_, _, cx| pick(target.clone(), cx))
                                 .child(render_icon("folder", 14.0, theme.text_muted))
                                 .child(
