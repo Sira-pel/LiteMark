@@ -2038,5 +2038,10 @@ impl LiteMarkApp {
         self.create_field.update(cx, |field, _cx| {
             field.set_colors(text_color, placeholder_color, field_bg, field_border);
         });
+        // The rename / "Save note" box had no theme colors, so it stayed
+        // dark in light mode.
+        self.rename_field.update(cx, |field, _cx| {
+            field.set_colors(text_color, placeholder_color, field_bg, field_border);
+        });
     }
 }
