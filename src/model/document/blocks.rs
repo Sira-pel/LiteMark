@@ -560,6 +560,21 @@ pub fn block_prefix_len(line: &str) -> usize {
 
 /// Prefix length of the line that starts at `line_start` in `content`.
 pub fn block_prefix_in(content: &str, line_start: usize) -> usize {
+    block_prefix_with(content, line_start, accepted_list_marker)
+}
+
+/// [`block_prefix_in`] against an existing parse of `content`.
+pub fn block_prefix_in_parsed(parsed: &ParsedDocument, content: &str, line_start: usize) -> usize {
+    block_prefix_with(content, line_start, |c, s| {
+        accepted_list_marker_in(parsed, c, s)
+    })
+}
+
+fn block_prefix_with(
+    content: &str,
+    line_start: usize,
+    list_marker: impl FnOnce(&str, usize) -> Option<crate::markdown::ListMarker>,
+) -> usize {
     let line_end_pos = crate::model::text_ops::line_end(content, line_start);
     let line = &content[line_start..line_end_pos];
     let trimmed_start = line.trim_start();
@@ -573,7 +588,7 @@ pub fn block_prefix_in(content: &str, line_start: usize) -> usize {
         }
     }
 
-    if let Some(item) = accepted_list_marker(content, line_start) {
+    if let Some(item) = list_marker(content, line_start) {
         return item.prefix_end();
     }
 

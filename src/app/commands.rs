@@ -642,7 +642,12 @@ impl LiteMarkApp {
             .tabs
             .iter_mut()
             .find(|t| t.id == self.active_tab_id)
-            .and_then(|tab| retarget_hover(&tab.parsed(), &tab.content, &hover));
+            .and_then(|tab| {
+                tab.file_type
+                    .supports_markdown_features()
+                    .then(|| retarget_hover(&tab.parsed(), &tab.content, &hover))
+                    .flatten()
+            });
         self.table_hover = next;
     }
 

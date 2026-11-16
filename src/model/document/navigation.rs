@@ -318,7 +318,7 @@ impl DocumentTab {
         let nl = self.content[start..]
             .find('\n')
             .map_or(self.content.len(), |i| start + i);
-        let target = if extend {
+        let target = if extend || !self.file_type.supports_markdown_features() {
             nl
         } else {
             self.parsed()
@@ -369,6 +369,20 @@ impl DocumentTab {
 
     pub fn select_line_down(&mut self) {
         let cursor = self.cursor_offset();
+        if !self.file_type.supports_markdown_features() {
+            let source_end = crate::model::text_ops::line_end(&self.content, cursor);
+            let target = if cursor < source_end {
+                source_end + line_ending_len(&self.content, source_end).saturating_sub(1)
+            } else if source_end < self.content.len() {
+                let next = source_end + line_ending_len(&self.content, source_end);
+                let next_end = crate::model::text_ops::line_end(&self.content, next);
+                next_end + line_ending_len(&self.content, next_end).saturating_sub(1)
+            } else {
+                self.content.len()
+            };
+            self.place(target, true);
+            return;
+        }
         let parsed = self.parsed();
         let source_end = parsed
             .line_at_offset(cursor)
@@ -414,14 +428,16 @@ impl DocumentTab {
             self.cursor_offset()
         };
         let mut target = crate::model::text_ops::word_right(&self.content, origin);
-        if let Some(line) = self.parsed().line_at_offset(origin) {
-            let vend = visible_line_end(line, self.view_mode);
-            if vend < line.source.end
-                && origin <= vend
-                && target > vend
-                && target <= line.source.end
-            {
-                target = line.source.end;
+        if self.file_type.supports_markdown_features() {
+            if let Some(line) = self.parsed().line_at_offset(origin) {
+                let vend = visible_line_end(line, self.view_mode);
+                if vend < line.source.end
+                    && origin <= vend
+                    && target > vend
+                    && target <= line.source.end
+                {
+                    target = line.source.end;
+                }
             }
         }
         self.place(target, extend);
@@ -455,10 +471,12 @@ impl DocumentTab {
         let mut offset = floor_boundary(&self.content, offset);
         if !extend {
             offset = snap_off_ending_interior(&self.content, offset);
-            if let Some(line) = self.parsed().line_at_offset(offset) {
-                let vend = visible_line_end(line, self.view_mode);
-                if offset > vend && offset <= line.source.end {
-                    offset = vend;
+            if self.file_type.supports_markdown_features() {
+                if let Some(line) = self.parsed().line_at_offset(offset) {
+                    let vend = visible_line_end(line, self.view_mode);
+                    if offset > vend && offset <= line.source.end {
+                        offset = vend;
+                    }
                 }
             }
         }
