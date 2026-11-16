@@ -1264,6 +1264,11 @@ where
                             let target = path.clone();
                             let forget_target = path.clone();
                             row(SharedString::from(format!("workspace-recent-{ix}")))
+                                // Two lines of text (name and path) don't fit
+                                // the 32px single-line row height.
+                                .h_auto()
+                                .min_h(px(32.0))
+                                .py(px(5.0))
                                 .on_click(move |_, _, cx| pick(target.clone(), cx))
                                 .child(render_icon("folder", 14.0, theme.text_muted))
                                 .child(
