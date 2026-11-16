@@ -1276,21 +1276,33 @@ where
                                         cx.new(|_| SimpleTooltip::new(full.clone(), th)).into()
                                     }
                                 })
-                                .on_click(move |_, _, cx| pick(target.clone(), cx))
-                                .child(render_icon("folder", 14.0, theme.text_muted))
+                                // The pick area and the remove button are
+                                // siblings, so a click on one never reaches
+                                // the other.
                                 .child(
                                     div()
+                                        .id(SharedString::from(format!("workspace-pick-{ix}")))
                                         .flex_1()
-                                        .flex()
-                                        .flex_col()
                                         .min_w_0()
-                                        .child(div().truncate().child(name))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .on_click(move |_, _, cx| pick(target.clone(), cx))
+                                        .child(render_icon("folder", 14.0, theme.text_muted))
                                         .child(
                                             div()
-                                                .text_size(px(11.0))
-                                                .text_color(theme.text_muted)
-                                                .truncate()
-                                                .child(path.display().to_string()),
+                                                .flex_1()
+                                                .flex()
+                                                .flex_col()
+                                                .min_w_0()
+                                                .child(div().truncate().child(name))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.0))
+                                                        .text_color(theme.text_muted)
+                                                        .truncate()
+                                                        .child(path.display().to_string()),
+                                                ),
                                         ),
                                 )
                                 .child(
@@ -1303,15 +1315,7 @@ where
                                         .flex_none()
                                         .rounded(sz::R_SM)
                                         .hover(|h| h.bg(theme.bg_active))
-                                        // Keep the row's own click (switching folders)
-                                        // from firing for this button.
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(move |_, _, cx| {
-                                            cx.stop_propagation();
-                                            forget(forget_target.clone(), cx)
-                                        })
+                                        .on_click(move |_, _, cx| forget(forget_target.clone(), cx))
                                         .child(render_icon("x", 12.0, theme.text_muted)),
                                 )
                         }))
