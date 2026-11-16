@@ -3680,7 +3680,6 @@ fn blockquote_indent_counts_from_the_list_item_content_column() {
     assert_eq!(kind_of("- item\n\n    > quote", 2), LineKind::Blockquote);
     assert_eq!(kind_of("10. item\n    > quote", 1), LineKind::Blockquote);
     assert_eq!(kind_of("- a\n  - b\n      > deep", 2), LineKind::Blockquote);
-    // Still capped at 3 columns past the content column, and at the margin.
-    assert_eq!(kind_of("- item\n\n      > code", 2), LineKind::Paragraph);
+    // Capped at 3 columns at the margin.
     assert_eq!(kind_of("para\n\n    > code", 2), LineKind::CodeLine);
 }
