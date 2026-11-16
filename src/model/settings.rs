@@ -346,6 +346,23 @@ mod tests {
         assert_eq!(s.recent_folders[0], PathBuf::from("/old9"));
     }
 
+    #[test]
+    fn forgetting_a_recent_folder_removes_only_it() {
+        let mut s = EditorSettings::default();
+        s.remember_folders(Path::new("/a"), Path::new("/b"));
+        s.remember_folders(Path::new("/b"), Path::new("/c"));
+        s.forget_folder(Path::new("/a"));
+        assert_eq!(s.recent_folders, [PathBuf::from("/b")]);
+    }
+
+    #[test]
+    fn workspace_folder_survives_a_reload() {
+        let s: EditorSettings = serde_json::from_str(r#"{"workspace_folder":"/notes"}"#).unwrap();
+        assert_eq!(s.workspace_folder, Some(PathBuf::from("/notes")));
+        let none: EditorSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(none.workspace_folder, None);
+    }
+
     fn temp_settings_dir(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("litemark-settings-{tag}-{}", std::process::id()));
