@@ -335,6 +335,9 @@ fn main() {
                     while let Ok(path) = incoming.try_recv() {
                         let updated = window.update(cx, |app, window, cx| {
                             app.open_path(path, cx);
+                            // Redraw now, or the new tab only shows once the
+                            // user next moves the mouse over the window.
+                            cx.notify();
                             window.activate_window();
                         });
                         // The window is gone: stop polling.
