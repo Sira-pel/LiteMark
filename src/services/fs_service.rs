@@ -576,7 +576,22 @@ pub fn read_note(path: &Path) -> Result<String, String> {
 }
 
 pub fn move_to_trash(path: &Path) -> Result<(), String> {
-    trash::delete(path).map_err(|err| format!("Couldn't move {} to Trash: {err}", path.display()))
+    // Runs on a thread of its own. On Windows the `trash` crate initialises
+    // COM as single-threaded and panics if the thread already did so another
+    // way, as the UI toolkit's worker threads do. A panic there aborts the
+    // whole app, so a fresh thread is used and any panic becomes an error.
+    let target = path.to_path_buf();
+    let fail = |detail: &dyn std::fmt::Display| {
+        format!("Couldn't move {} to Trash: {detail}", path.display())
+    };
+    let handle = std::thread::Builder::new()
+        .name("litemark-trash".into())
+        .spawn(move || trash::delete(&target))
+        .map_err(|err| fail(&err))?;
+    match handle.join() {
+        Ok(result) => result.map_err(|err| fail(&err)),
+        Err(_) => Err(fail(&"the system Trash is unavailable")),
+    }
 }
 
 pub fn safe_create_file(parent: &Path, name: &str, content: &str) -> io::Result<PathBuf> {
