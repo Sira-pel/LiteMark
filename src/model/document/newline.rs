@@ -372,7 +372,7 @@ impl DocumentTab {
             return;
         }
 
-        let (list_item, heading_prefix_len, exit_indented_code) = {
+        let (list_item, heading_prefix_len, exit_indented_code, quote_prefix_len) = {
             let parsed = self.parsed();
             let list_item = accepted_list_marker_in(&parsed, &self.content, line_start);
             let line = &self.content[line_start..line_end_pos];
@@ -392,7 +392,16 @@ impl DocumentTab {
                     .and_then(|line| line.line_index.checked_sub(1))
                     .and_then(|index| parsed.lines.get(index))
                     .is_some_and(|line| is_indented_code(&parsed, line));
-            (list_item, heading_prefix_len, exit_indented_code)
+            let quote_prefix_len = parsed
+                .line_at_offset(line_start)
+                .filter(|l| l.kind == LineKind::Blockquote)
+                .map(|l| l.prefix_range.end - l.source.start);
+            (
+                list_item,
+                heading_prefix_len,
+                exit_indented_code,
+                quote_prefix_len,
+            )
         };
         let line = &self.content[line_start..line_end_pos];
         let trimmed_start = line.trim_start();
@@ -458,23 +467,23 @@ impl DocumentTab {
             return;
         }
 
-        // Blockquotes: "> "
-        if trimmed_start.starts_with("> ") || trimmed_start == ">" {
-            let is_empty_quote = trimmed_start == ">"
-                || trimmed_start == "> "
-                || trimmed_start[1..].trim().is_empty();
+        // Blockquotes: ">", "> ", ">\t", or ">text" (up to 3 columns of indent)
+        if let Some(prefix_len) = quote_prefix_len {
+            let body = &line[prefix_len..];
+            let is_empty_quote = body.trim().is_empty();
             if is_empty_quote {
                 if !range.is_empty() {
                     self.edit(range, nl);
                 } else {
                     self.edit(line_start..line_end_pos, "");
                 }
-            } else if range.is_empty() && cursor < line_start + indent.len() + 2 {
+            } else if range.is_empty() && cursor < line_start + prefix_len {
                 self.edit(line_start..line_start, nl);
                 self.caret.move_to(cursor + nl.len());
                 self.refresh_cursor();
             } else {
-                let ins = format!("{nl}{indent}> ");
+                let q_indent = &line[..crate::markdown::parser::split_indent(line).0];
+                let ins = format!("{nl}{q_indent}> ");
                 if self.split_inline_span_newline(&range, &ins) {
                     return;
                 }

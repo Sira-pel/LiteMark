@@ -34,7 +34,7 @@ pub(super) fn exact_thematic_break(line: &str, parent_col: usize) -> bool {
 }
 
 /// `(bytes, column)` of the first non-space, non-tab. Tabs advance to the next multiple of 4.
-pub(super) fn split_indent(line: &str) -> (usize, usize) {
+pub(crate) fn split_indent(line: &str) -> (usize, usize) {
     let bytes = line.as_bytes();
     let mut column = 0usize;
     let mut index = 0usize;

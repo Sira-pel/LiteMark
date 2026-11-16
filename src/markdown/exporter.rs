@@ -56,6 +56,7 @@ pub fn export_to_html(title: &str, markdown: &str) -> String {
     h1, h2, h3 {{ color: #111; }}
     code {{ background: #f4f4f4; padding: 2px 5px; border-radius: 4px; font-family: 'Ubuntu Mono', monospace; }}
     pre {{ background: #282c34; color: #abb2bf; padding: 16px; border-radius: 6px; overflow-x: auto; }}
+    pre code {{ background: none; padding: 0; color: inherit; }}
     blockquote {{ border-left: 4px solid #888; padding-left: 14px; color: #555; margin: 16px 0; }}
     table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
     th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
@@ -89,9 +90,58 @@ pub fn export_to_plaintext(markdown: &str) -> String {
 
     let parser = Parser::new_ext(markdown, options);
     let mut text_output = String::new();
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
+    let mut first_cell_in_row = false;
 
     for event in parser {
         match event {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::List(start)) => {
+                if !list_stack.is_empty() && !text_output.ends_with('\n') {
+                    text_output.push('\n');
+                }
+                list_stack.push(start);
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::List(_)) => {
+                list_stack.pop();
+                if list_stack.is_empty() && !text_output.ends_with("\n\n") {
+                    text_output.push('\n');
+                }
+            }
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Item) => {
+                let depth = list_stack.len().saturating_sub(1);
+                for _ in 0..depth {
+                    text_output.push_str("  ");
+                }
+                match list_stack.last_mut() {
+                    Some(Some(next)) => {
+                        text_output.push_str(&format!("{next}. "));
+                        *next += 1;
+                    }
+                    _ => text_output.push_str("- "),
+                }
+            }
+            pulldown_cmark::Event::TaskListMarker(checked) => {
+                text_output.push_str(if checked { "[x] " } else { "[ ] " });
+            }
+            pulldown_cmark::Event::Start(
+                pulldown_cmark::Tag::TableHead | pulldown_cmark::Tag::TableRow,
+            ) => {
+                first_cell_in_row = true;
+            }
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::TableCell) => {
+                if !first_cell_in_row {
+                    text_output.push('\t');
+                }
+                first_cell_in_row = false;
+            }
+            pulldown_cmark::Event::End(
+                pulldown_cmark::TagEnd::TableHead | pulldown_cmark::TagEnd::TableRow,
+            ) => {
+                text_output.push('\n');
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Table) => {
+                text_output.push('\n');
+            }
             pulldown_cmark::Event::Text(t) => text_output.push_str(&t),
             pulldown_cmark::Event::Code(c) => text_output.push_str(&c),
             pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => {
@@ -103,7 +153,11 @@ pub fn export_to_plaintext(markdown: &str) -> String {
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Heading(_)) => {
                 text_output.push_str("\n\n")
             }
-            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Item) => text_output.push('\n'),
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Item) => {
+                if !text_output.ends_with('\n') {
+                    text_output.push('\n');
+                }
+            }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::BlockQuote(_)) => {
                 text_output.push('\n')
             }
@@ -179,6 +233,37 @@ mod tests {
         let text = render_export("txt", "Page Title", "# Body Heading").unwrap();
         assert!(text.contains("Body Heading"));
         assert!(!text.contains('#'));
+    }
+
+    #[test]
+    fn test_export_to_html_pre_code_inherits_dark_background() {
+        let html = export_to_html("Code", "```rust\nlet x = 1;\n```");
+        assert!(html.contains("pre code { background: none; padding: 0; color: inherit; }"));
+        assert!(html.contains("<pre><code class=\"language-rust\">"));
+    }
+
+    #[test]
+    fn test_export_to_plaintext_tables_lists_and_tasks() {
+        let md = "\
+| A | B |
+| --- | --- |
+| 1 | 2 |
+
+- bullet one
+- bullet two
+  - nested bullet
+
+3. third
+4. fourth
+
+- [ ] todo
+- [x] done
+";
+        let plain = export_to_plaintext(md);
+        assert_eq!(
+            plain,
+            "A\tB\n1\t2\n\n- bullet one\n- bullet two\n  - nested bullet\n\n3. third\n4. fourth\n\n- [ ] todo\n- [x] done"
+        );
     }
 
     #[test]
