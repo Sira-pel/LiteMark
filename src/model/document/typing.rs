@@ -13,6 +13,7 @@ impl DocumentTab {
             return;
         }
         if mode == ViewMode::Wysiwyg
+            && self.file_type.supports_markdown_features()
             && !range.is_empty()
             && !text.is_empty()
             && text != "\n"
@@ -21,40 +22,49 @@ impl DocumentTab {
             return;
         }
         if text.trim().is_empty() {
-            if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() {
-                let parsed = self.parsed();
-                // A Markdown closer cannot sit right after whitespace, so whitespace
-                // typed at the end of a `*`/`**`/`~~` span goes after the whole
-                // closing run; the span's formats stay armed for what is typed
-                // next. Extra whitespace keeps stacking outside the closer.
-                let line_pairs = line_pair_refs(&parsed, range.start);
-                let pair = line_pairs
-                    .iter()
-                    .rev()
-                    .find(|p| {
-                        matches!(
-                            p.kind,
-                            InlineTagKind::Bold
-                                | InlineTagKind::Italic
-                                | InlineTagKind::Strike
-                                | InlineTagKind::Underline
-                                | InlineTagKind::Code
-                        ) && range.start == p.close_delim.start
-                            && !line_pairs.iter().any(|o| {
-                                o.kind != InlineTagKind::Link
-                                    && o.inner.start <= p.inner.start
-                                    && o.inner.end >= p.inner.end
-                                    && o.inner != p.inner
-                            })
+            if mode == ViewMode::Wysiwyg
+                && self.file_type.supports_markdown_features()
+                && range.is_empty()
+                && !text.is_empty()
+            {
+                let close_hit = {
+                    let parsed = self.parsed();
+                    // A Markdown closer cannot sit right after whitespace, so whitespace
+                    // typed at the end of a `*`/`**`/`~~` span goes after the whole
+                    // closing run; the span's formats stay armed for what is typed
+                    // next. Extra whitespace keeps stacking outside the closer.
+                    let line_pairs = line_pair_refs(&parsed, range.start);
+                    let pair = line_pairs
+                        .iter()
+                        .rev()
+                        .find(|p| {
+                            matches!(
+                                p.kind,
+                                InlineTagKind::Bold
+                                    | InlineTagKind::Italic
+                                    | InlineTagKind::Strike
+                                    | InlineTagKind::Underline
+                                    | InlineTagKind::Code
+                            ) && range.start == p.close_delim.start
+                                && !line_pairs.iter().any(|o| {
+                                    o.kind != InlineTagKind::Link
+                                        && o.inner.start <= p.inner.start
+                                        && o.inner.end >= p.inner.end
+                                        && o.inner != p.inner
+                                })
+                        })
+                        .cloned();
+                    pair.map(|pair| {
+                        let pending = if self.has_pending_inline_formats() {
+                            self.pending_formats
+                        } else {
+                            pending_formats_at(&parsed, range.start)
+                        };
+                        let at = span_close_end(&parsed, &pair);
+                        (at, pending)
                     })
-                    .cloned();
-                if let Some(pair) = pair {
-                    let pending = if self.has_pending_inline_formats() {
-                        self.pending_formats
-                    } else {
-                        pending_formats_at(&parsed, range.start)
-                    };
-                    let at = span_close_end(&parsed, &pair);
+                };
+                if let Some((at, pending)) = close_hit {
                     self.edit(at..at, text);
                     self.pending_formats = pending;
                     self.caret
@@ -68,15 +78,21 @@ impl DocumentTab {
             self.pending_formats = pf;
             return;
         }
-        if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() && text != "\n" {
+        if mode == ViewMode::Wysiwyg
+            && self.file_type.supports_markdown_features()
+            && range.is_empty()
+            && !text.is_empty()
+            && text != "\n"
+        {
             let pf = self.pending_formats;
             if self.has_pending_inline_formats() {
-                let parsed = self.parsed();
-                // The armed formats extend a span ending right at the caret
-                // (with or without a trailing space) or continue a subset of its formats.
-                if let Some((run_range, repl, caret)) =
+                let extended = {
+                    let parsed = self.parsed();
+                    // The armed formats extend a span ending right at the caret
+                    // (with or without a trailing space) or continue a subset of its formats.
                     extend_or_splice_span(&self.content, &parsed, &pf, range.start, text)
-                {
+                };
+                if let Some((run_range, repl, caret)) = extended {
                     self.pending_formats = ActiveFormats::default();
                     self.edit(run_range, &repl);
                     self.caret.move_to(floor_boundary(&self.content, caret));
@@ -134,7 +150,12 @@ impl DocumentTab {
         // be escaped inside a code span, so the span is re-fenced with a
         // longer backtick run instead.
         let mut escaped: Option<String> = None;
-        if mode == ViewMode::Wysiwyg && range.is_empty() && !text.is_empty() {
+        let mut refence_pair: Option<InlinePair> = None;
+        if mode == ViewMode::Wysiwyg
+            && self.file_type.supports_markdown_features()
+            && range.is_empty()
+            && !text.is_empty()
+        {
             let parsed = self.parsed();
             if let Some(pair) = line_pair_refs(&parsed, range.start)
                 .iter()
@@ -153,27 +174,36 @@ impl DocumentTab {
                         }
                     }
                     InlineTagKind::Code if text.contains('`') => {
-                        // The backtick is literal content: re-fence the span
-                        // with a longer run so it stays intact.
-                        self.refence_code_span(pair, range.start, text);
-                        return;
+                        refence_pair = Some(pair.clone());
                     }
                     _ => {}
                 }
             }
+        }
+        if let Some(pair) = refence_pair {
+            // The backtick is literal content: re-fence the span
+            // with a longer run so it stays intact.
+            self.refence_code_span(&pair, range.start, text);
+            return;
         }
         let text = escaped.as_deref().unwrap_or(text);
 
         // A literally typed `<` must not start an HTML tag (`<u>a<b>c</u>`);
         // escape it so it renders as text. Skipped inside code spans, whose
         // content is literal.
-        if mode == ViewMode::Wysiwyg && range.is_empty() && text.chars().count() == 1 {
-            let parsed = self.parsed();
-            let in_code = line_pair_refs(&parsed, range.start).iter().any(|p| {
-                p.kind == InlineTagKind::Code
-                    && range.start > p.inner.start
-                    && range.start < p.inner.end
-            });
+        if mode == ViewMode::Wysiwyg
+            && self.file_type.supports_markdown_features()
+            && range.is_empty()
+            && text.chars().count() == 1
+        {
+            let in_code = {
+                let parsed = self.parsed();
+                line_pair_refs(&parsed, range.start).iter().any(|p| {
+                    p.kind == InlineTagKind::Code
+                        && range.start > p.inner.start
+                        && range.start < p.inner.end
+                })
+            };
             if !in_code {
                 let next_char = self.content[range.start..].chars().next();
                 let starts_tag = next_char.is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
@@ -216,47 +246,50 @@ impl DocumentTab {
     /// the surrounding spans so unselected text keeps its formats and the
     /// typed text is inserted plain (`**He**Xld` not `**He*X*rld`).
     pub(super) fn replace_wysiwyg_selection(&mut self, range: Range<usize>, text: &str) -> bool {
-        let parsed = self.parsed();
-        let overlapping = nearby_pair_refs(&parsed, range.clone()).iter().any(|p| {
-            p.kind != InlineTagKind::Link
-                && p.open_delim.start < range.end
-                && p.close_delim.end > range.start
-        });
-        if !overlapping {
-            return false;
-        }
-        let group_pairs = collect_group_pairs(&parsed, range.clone());
-        let replace_start = group_pairs
-            .iter()
-            .map(|p| p.open_delim.start)
-            .min()
-            .unwrap_or(range.start)
-            .min(range.start);
-        let replace_end = group_pairs
-            .iter()
-            .map(|p| span_close_end(&parsed, p))
-            .max()
-            .unwrap_or(range.end)
-            .max(range.end);
-        let skip: Vec<Range<usize>> = group_pairs
-            .iter()
-            .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
-            .collect();
-        let segs: Vec<&StyledSegment> = parsed
-            .lines_overlapping(replace_start..replace_end)
-            .iter()
-            .flat_map(|l| l.styled_segments.iter())
-            .collect();
-        let local_pairs = nearby_pair_refs(&parsed, replace_start..replace_end);
-        let slices = collect_rewrite_slices(
-            &self.content,
-            &local_pairs,
-            &segs,
-            replace_start..replace_end,
-            range.clone(),
-            &skip,
-            None,
-        );
+        let (replace_start, replace_end, slices) = {
+            let parsed = self.parsed();
+            let overlapping = nearby_pair_refs(&parsed, range.clone()).iter().any(|p| {
+                p.kind != InlineTagKind::Link
+                    && p.open_delim.start < range.end
+                    && p.close_delim.end > range.start
+            });
+            if !overlapping {
+                return false;
+            }
+            let group_pairs = collect_group_pairs(&parsed, range.clone());
+            let replace_start = group_pairs
+                .iter()
+                .map(|p| p.open_delim.start)
+                .min()
+                .unwrap_or(range.start)
+                .min(range.start);
+            let replace_end = group_pairs
+                .iter()
+                .map(|p| span_close_end(&parsed, p))
+                .max()
+                .unwrap_or(range.end)
+                .max(range.end);
+            let skip: Vec<Range<usize>> = group_pairs
+                .iter()
+                .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
+                .collect();
+            let segs: Vec<&StyledSegment> = parsed
+                .lines_overlapping(replace_start..replace_end)
+                .iter()
+                .flat_map(|l| l.styled_segments.iter())
+                .collect();
+            let local_pairs = nearby_pair_refs(&parsed, replace_start..replace_end);
+            let slices = collect_rewrite_slices(
+                &self.content,
+                &local_pairs,
+                &segs,
+                replace_start..replace_end,
+                range.clone(),
+                &skip,
+                None,
+            );
+            (replace_start, replace_end, slices)
+        };
         let selected: Vec<&StyledSlice> = slices.iter().filter(|s| s.is_selected).collect();
         let typed_flags =
             if !selected.is_empty() && selected.iter().all(|s| s.flags == selected[0].flags) {
@@ -328,7 +361,7 @@ impl DocumentTab {
 
     pub fn smart_backspace_in_mode(&mut self, mode: ViewMode) -> bool {
         self.pending_formats = ActiveFormats::default();
-        if mode == ViewMode::Raw {
+        if mode == ViewMode::Raw || !self.file_type.supports_markdown_features() {
             return self.smart_backspace();
         }
         if self.is_read_only() {
@@ -343,57 +376,94 @@ impl DocumentTab {
         if cursor == 0 {
             return false;
         }
-        let parsed = self.parsed();
+        enum BackspaceAction {
+            DeleteSpan {
+                start: usize,
+                end: usize,
+            },
+            DeleteLastGrapheme {
+                prev_g: usize,
+                prev_vis: usize,
+                caret_after: usize,
+            },
+            Fallthrough,
+        }
+        let action = {
+            let parsed = self.parsed();
 
-        // Guard table pipe delimiters in WYSIWYG mode
-        if let Some(pline) = parsed.line_at_offset(cursor) {
-            if let LineKind::TableRow { ref body, .. } = pline.kind {
-                let TableRowBody {
-                    cells, raw_cells, ..
-                } = &**body;
-                let at_cell_start_or_pipe = raw_cells
-                    .iter()
-                    .zip(cells.iter())
-                    .find(|(rc, _)| cursor >= rc.start && cursor <= rc.end)
-                    .map(|(_, c)| cursor <= c.start)
-                    .unwrap_or(true);
-                if at_cell_start_or_pipe {
-                    return false;
+            // Guard table pipe delimiters in WYSIWYG mode
+            if let Some(pline) = parsed.line_at_offset(cursor) {
+                if let LineKind::TableRow { ref body, .. } = pline.kind {
+                    let TableRowBody {
+                        cells, raw_cells, ..
+                    } = &**body;
+                    let at_cell_start_or_pipe = raw_cells
+                        .iter()
+                        .zip(cells.iter())
+                        .find(|(rc, _)| cursor >= rc.start && cursor <= rc.end)
+                        .map(|(_, c)| cursor <= c.start)
+                        .unwrap_or(true);
+                    if at_cell_start_or_pipe {
+                        return false;
+                    }
                 }
             }
-        }
 
-        // 1. Check if cursor is inside or immediately after an InlinePair
-        for pair in line_pair_refs(&parsed, cursor).iter().rev() {
-            let group_end = span_close_end(&parsed, pair);
-            let prev_vis = if cursor >= pair.inner.end && cursor <= group_end {
-                pair.inner.end
-            } else {
-                cursor
-            };
-            if prev_vis > pair.inner.start && prev_vis <= pair.inner.end {
-                let prev_g = previous_grapheme(&self.content, prev_vis);
-                if prev_g <= pair.inner.start && prev_vis == pair.inner.end {
-                    // Only 1 visible grapheme inside this formatted span! Delete the whole span + delimiters!
-                    let start = span_open_start(&parsed, pair);
-                    self.edit(start..group_end, "");
-                    self.caret.move_to(start);
-                    self.refresh_cursor();
-                    return true;
-                } else if cursor >= pair.inner.end && cursor <= group_end {
-                    // Cursor was right outside the closing run -> delete the last
-                    // visible grapheme inside `word`; never split a delimiter.
-                    let deleted = prev_vis - prev_g;
-                    self.edit(prev_g..prev_vis, "");
-                    self.caret
-                        .move_to(floor_boundary(&self.content, group_end - deleted));
-                    self.refresh_cursor();
-                    return true;
+            // 1. Check if cursor is inside or immediately after an InlinePair
+            let mut found = BackspaceAction::Fallthrough;
+            for pair in line_pair_refs(&parsed, cursor).iter().rev() {
+                let group_end = span_close_end(&parsed, pair);
+                let prev_vis = if cursor >= pair.inner.end && cursor <= group_end {
+                    pair.inner.end
+                } else {
+                    cursor
+                };
+                if prev_vis > pair.inner.start && prev_vis <= pair.inner.end {
+                    let prev_g = previous_grapheme(&self.content, prev_vis);
+                    if prev_g <= pair.inner.start && prev_vis == pair.inner.end {
+                        // Only 1 visible grapheme inside this formatted span! Delete the whole span + delimiters!
+                        let start = span_open_start(&parsed, pair);
+                        found = BackspaceAction::DeleteSpan {
+                            start,
+                            end: group_end,
+                        };
+                        break;
+                    } else if cursor >= pair.inner.end && cursor <= group_end {
+                        // Cursor was right outside the closing run -> delete the last
+                        // visible grapheme inside `word`; never split a delimiter.
+                        let deleted = prev_vis - prev_g;
+                        found = BackspaceAction::DeleteLastGrapheme {
+                            prev_g,
+                            prev_vis,
+                            caret_after: group_end - deleted,
+                        };
+                        break;
+                    }
                 }
             }
-        }
+            found
+        };
 
-        self.smart_backspace()
+        match action {
+            BackspaceAction::DeleteSpan { start, end } => {
+                self.edit(start..end, "");
+                self.caret.move_to(start);
+                self.refresh_cursor();
+                true
+            }
+            BackspaceAction::DeleteLastGrapheme {
+                prev_g,
+                prev_vis,
+                caret_after,
+            } => {
+                self.edit(prev_g..prev_vis, "");
+                self.caret
+                    .move_to(floor_boundary(&self.content, caret_after));
+                self.refresh_cursor();
+                true
+            }
+            BackspaceAction::Fallthrough => self.smart_backspace(),
+        }
     }
 
     pub fn delete_forward_in_mode(&mut self, mode: ViewMode) {
@@ -409,96 +479,155 @@ impl DocumentTab {
         if cursor >= self.content.len() {
             return;
         }
-        if mode == ViewMode::Wysiwyg {
-            let parsed = self.parsed();
-            if let Some(pline) = parsed.line_at_offset(cursor) {
-                if let LineKind::TableRow { ref body, .. } = pline.kind {
-                    let TableRowBody {
-                        cells, raw_cells, ..
-                    } = &**body;
-                    let at_cell_end_or_pipe = raw_cells
-                        .iter()
-                        .zip(cells.iter())
-                        .find(|(rc, _)| cursor >= rc.start && cursor <= rc.end)
-                        .map(|(_, c)| cursor >= c.end)
-                        .unwrap_or(true);
-                    if at_cell_end_or_pipe {
-                        return;
+        if mode == ViewMode::Wysiwyg && self.file_type.supports_markdown_features() {
+            enum DeleteAction {
+                Done,
+                JoinLines {
+                    range: Range<usize>,
+                },
+                DeleteSpan {
+                    start: usize,
+                    end: usize,
+                },
+                DeleteChar {
+                    start: usize,
+                    end: usize,
+                    caret_after: usize,
+                },
+                Raw,
+            }
+            let action = {
+                let parsed = self.parsed();
+                if let Some(pline) = parsed.line_at_offset(cursor) {
+                    if let LineKind::TableRow { ref body, .. } = pline.kind {
+                        let TableRowBody {
+                            cells, raw_cells, ..
+                        } = &**body;
+                        let at_cell_end_or_pipe = raw_cells
+                            .iter()
+                            .zip(cells.iter())
+                            .find(|(rc, _)| cursor >= rc.start && cursor <= rc.end)
+                            .map(|(_, c)| cursor >= c.end)
+                            .unwrap_or(true);
+                        if at_cell_end_or_pipe {
+                            return;
+                        }
                     }
-                }
-                let vend = visible_line_end(pline, self.view_mode);
-                if cursor == vend
-                    && (vend < pline.source.end
-                        || line_ending_len(&self.content, pline.source.end) > 0)
-                {
-                    let after = pline.source.end;
-                    let break_len = line_ending_len(&self.content, after);
-                    if break_len > 0 {
-                        // The joined line's hidden marker would show as text.
-                        let text_line = |k: &LineKind| {
-                            matches!(
-                                k,
-                                LineKind::Paragraph
-                                    | LineKind::Heading { .. }
-                                    | LineKind::Blockquote
-                                    | LineKind::ListItem { .. }
-                            )
-                        };
-                        let next_is_block =
-                            parsed.lines.get(pline.line_index + 1).is_some_and(|n| {
+                    let vend = visible_line_end(pline, self.view_mode);
+                    if cursor == vend
+                        && (vend < pline.source.end
+                            || line_ending_len(&self.content, pline.source.end) > 0)
+                    {
+                        let after = pline.source.end;
+                        let break_len = line_ending_len(&self.content, after);
+                        if break_len > 0 {
+                            // The joined line's hidden marker would show as text.
+                            let text_line = |k: &LineKind| {
                                 matches!(
-                                    n.kind,
-                                    LineKind::Heading { .. }
+                                    k,
+                                    LineKind::Paragraph
+                                        | LineKind::Heading { .. }
                                         | LineKind::Blockquote
                                         | LineKind::ListItem { .. }
                                 )
-                            });
-                        let own_text =
-                            pline.source.start + block_prefix_in(&self.content, pline.source.start);
-                        let strip = if text_line(&pline.kind) && next_is_block && own_text < cursor
-                        {
-                            block_prefix_in(&self.content, after + break_len)
+                            };
+                            let next_is_block =
+                                parsed.lines.get(pline.line_index + 1).is_some_and(|n| {
+                                    matches!(
+                                        n.kind,
+                                        LineKind::Heading { .. }
+                                            | LineKind::Blockquote
+                                            | LineKind::ListItem { .. }
+                                    )
+                                });
+                            let own_text = pline.source.start
+                                + block_prefix_in_parsed(
+                                    &parsed,
+                                    &self.content,
+                                    pline.source.start,
+                                );
+                            let strip = if text_line(&pline.kind)
+                                && next_is_block
+                                && own_text < cursor
+                            {
+                                block_prefix_in_parsed(&parsed, &self.content, after + break_len)
+                            } else {
+                                0
+                            };
+                            DeleteAction::JoinLines {
+                                range: after..after + break_len + strip,
+                            }
                         } else {
-                            0
-                        };
-                        self.edit(after..after + break_len + strip, "");
+                            DeleteAction::Done
+                        }
+                    } else {
+                        // Delete skips hidden delimiters like Backspace does, and
+                        // drops a span whose last visible grapheme it removes
+                        // instead of leaving lone markers behind.
+                        let next_vis = next_visible_pos(&parsed, cursor);
+                        if next_vis >= self.content.len() {
+                            return;
+                        }
+                        let mut found = None;
+                        for pair in line_pair_refs(&parsed, next_vis).iter().rev() {
+                            if next_vis < pair.inner.start || next_vis >= pair.inner.end {
+                                continue;
+                            }
+                            let only = previous_grapheme(&self.content, pair.inner.end)
+                                <= pair.inner.start;
+                            if only {
+                                found = Some(DeleteAction::DeleteSpan {
+                                    start: span_open_start(&parsed, pair),
+                                    end: span_close_end(&parsed, pair),
+                                });
+                            } else {
+                                let g_end = next_grapheme(&self.content, next_vis);
+                                found = Some(DeleteAction::DeleteChar {
+                                    start: next_vis,
+                                    end: g_end,
+                                    caret_after: cursor.min(next_vis),
+                                });
+                            }
+                            break;
+                        }
+                        found.unwrap_or_else(|| {
+                            let g_end = next_grapheme(&self.content, next_vis);
+                            DeleteAction::DeleteChar {
+                                start: next_vis,
+                                end: g_end,
+                                caret_after: cursor.min(next_vis),
+                            }
+                        })
                     }
-                    return;
+                } else {
+                    DeleteAction::Raw
                 }
+            };
 
-                // Delete skips hidden delimiters like Backspace does, and
-                // drops a span whose last visible grapheme it removes
-                // instead of leaving lone markers behind.
-                let next_vis = next_visible_pos(&parsed, cursor);
-                if next_vis >= self.content.len() {
+            match action {
+                DeleteAction::Done => return,
+                DeleteAction::JoinLines { range } => {
+                    self.edit(range, "");
                     return;
                 }
-                for pair in line_pair_refs(&parsed, next_vis).iter().rev() {
-                    if next_vis < pair.inner.start || next_vis >= pair.inner.end {
-                        continue;
-                    }
-                    let only = previous_grapheme(&self.content, pair.inner.end) <= pair.inner.start;
-                    if only {
-                        let start = span_open_start(&parsed, pair);
-                        let end = span_close_end(&parsed, pair);
-                        self.edit(start..end, "");
-                        self.caret.move_to(floor_boundary(&self.content, start));
-                        self.refresh_cursor();
-                        return;
-                    }
-                    let g_end = next_grapheme(&self.content, next_vis);
-                    self.edit(next_vis..g_end, "");
-                    self.caret
-                        .move_to(floor_boundary(&self.content, cursor.min(next_vis)));
+                DeleteAction::DeleteSpan { start, end } => {
+                    self.edit(start..end, "");
+                    self.caret.move_to(floor_boundary(&self.content, start));
                     self.refresh_cursor();
                     return;
                 }
-                let g_end = next_grapheme(&self.content, next_vis);
-                self.edit(next_vis..g_end, "");
-                self.caret
-                    .move_to(floor_boundary(&self.content, cursor.min(next_vis)));
-                self.refresh_cursor();
-                return;
+                DeleteAction::DeleteChar {
+                    start,
+                    end,
+                    caret_after,
+                } => {
+                    self.edit(start..end, "");
+                    self.caret
+                        .move_to(floor_boundary(&self.content, caret_after));
+                    self.refresh_cursor();
+                    return;
+                }
+                DeleteAction::Raw => {}
             }
         }
         let next = next_grapheme(&self.content, cursor);
@@ -529,10 +658,12 @@ impl DocumentTab {
         } else {
             let cursor = self.cursor_offset();
             let mut target = crate::model::text_ops::word_right(&self.content, cursor);
-            if let Some(line) = self.parsed().line_at_offset(cursor) {
-                let vend = visible_line_end(line, self.view_mode);
-                if vend < line.source.end && cursor <= vend && target > vend {
-                    target = vend;
+            if self.file_type.supports_markdown_features() {
+                if let Some(line) = self.parsed().line_at_offset(cursor) {
+                    let vend = visible_line_end(line, self.view_mode);
+                    if vend < line.source.end && cursor <= vend && target > vend {
+                        target = vend;
+                    }
                 }
             }
             if target > cursor {
@@ -550,7 +681,7 @@ impl DocumentTab {
         } else {
             let cursor = self.cursor_offset();
             let target = crate::model::text_ops::home_offset(&self.content, cursor);
-            let end = {
+            let end = if self.file_type.supports_markdown_features() {
                 let parsed = self.parsed();
                 match parsed.line_at_offset(cursor) {
                     Some(line) => {
@@ -563,6 +694,8 @@ impl DocumentTab {
                     }
                     None => cursor,
                 }
+            } else {
+                cursor
             };
             if target < end {
                 self.edit(target..end, "");
@@ -579,15 +712,19 @@ impl DocumentTab {
         } else {
             let cursor = self.cursor_offset();
             let raw = crate::model::text_ops::line_end(&self.content, cursor);
-            let target = self.parsed().line_at_offset(cursor).map_or(raw, |line| {
-                let vend = visible_line_end(line, self.view_mode);
-                if cursor < vend {
-                    let end = line.source.end;
-                    end + line_ending_len(&self.content, end).saturating_sub(1)
-                } else {
-                    vend
-                }
-            });
+            let target = if self.file_type.supports_markdown_features() {
+                self.parsed().line_at_offset(cursor).map_or(raw, |line| {
+                    let vend = visible_line_end(line, self.view_mode);
+                    if cursor < vend {
+                        let end = line.source.end;
+                        end + line_ending_len(&self.content, end).saturating_sub(1)
+                    } else {
+                        vend
+                    }
+                })
+            } else {
+                raw
+            };
             if target > cursor {
                 self.edit(cursor..target, "");
             }

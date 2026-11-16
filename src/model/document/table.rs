@@ -186,9 +186,11 @@ impl DocumentTab {
         }
         let cursor = self.cursor_offset();
         let original_sel = self.selection_snap();
-        let Some(plan) = table_ops::plan(&self.content, pos, op) else {
+        let parsed = self.parsed();
+        let Some(plan) = table_ops::plan(&self.content, &parsed, pos, op) else {
             return false;
         };
+        drop(parsed);
         let mapped = original_sel
             .as_ref()
             .map(|sel| mapped_selection(sel, &plan));

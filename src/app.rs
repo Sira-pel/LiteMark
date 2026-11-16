@@ -2,7 +2,7 @@ use crate::actions::*;
 use crate::editor_input::{
     dispatch_editor_input, swallow_table_drag_input, DispatchOutcome, EditorInput,
 };
-use crate::markdown::{export_stem, parse_document, render_export, TableColumnAlign};
+use crate::markdown::{empty_parsed_document, export_stem, render_export, TableColumnAlign};
 use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::table_ops::TableOp;
 use crate::model::text_ops::{

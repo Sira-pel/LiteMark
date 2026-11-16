@@ -501,13 +501,14 @@ impl LiteMarkApp {
             tab.release_parse_cache();
         }
         let (parsed, selection, marked) = if let Some(tab) = self.active_tab_mut() {
-            (
-                tab.parsed(),
-                tab.selection_range(),
-                tab.marked_range.clone(),
-            )
+            let parsed = if tab.file_type.supports_markdown_features() {
+                tab.parsed()
+            } else {
+                empty_parsed_document()
+            };
+            (parsed, tab.selection_range(), tab.marked_range.clone())
         } else {
-            (Arc::new(parse_document("")), 0..0, None)
+            (empty_parsed_document(), 0..0, None)
         };
         let font_family = match view_mode {
             ViewMode::Wysiwyg => Theme::FONT_PROSE.into(),

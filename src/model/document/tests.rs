@@ -6550,6 +6550,123 @@ fn edge_case_edits_from_the_audit() {
 }
 
 #[test]
+fn wysiwyg_typing_backspace_delete_and_enter_never_clone_cached_parse() {
+    let src = "# Heading\n\nHello **world** here\n- item one\n- item two\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+    let mut doc = DocumentTab::new("t".into(), "note.md".into(), src.into(), None, None);
+    doc.view_mode = ViewMode::Wysiwyg;
+    assert_eq!(doc.full_parse_count, 1);
+
+    // Typing inside a bold span and after it
+    let world_end = doc.content.find("** here").unwrap();
+    doc.caret.move_to(world_end);
+    doc.insert_text_in_mode(world_end..world_end, "s", ViewMode::Wysiwyg);
+    doc.insert_text_in_mode(
+        doc.cursor_offset()..doc.cursor_offset(),
+        " ",
+        ViewMode::Wysiwyg,
+    );
+    assert_eq!(doc.parse_clone_count, 0);
+
+    // Backspace inside text and inside a formatted span
+    assert!(doc.smart_backspace_in_mode(ViewMode::Wysiwyg));
+    assert!(doc.smart_backspace_in_mode(ViewMode::Wysiwyg));
+    assert_eq!(doc.parse_clone_count, 0);
+
+    // Delete forward at end of list line and inside text
+    let item_one_end = doc.content.find("\n- item two").unwrap();
+    doc.caret.move_to(item_one_end);
+    doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+    let after_heading = doc.content.find("\n\nHello").unwrap() + 2;
+    doc.caret.move_to(after_heading);
+    doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+    assert_eq!(doc.parse_clone_count, 0);
+
+    // Enter on list item, inside bold span, and inside table row
+    let list_end = doc.content.find("\n\n| A | B |").unwrap();
+    doc.caret.move_to(list_end);
+    doc.smart_newline(false);
+    let inside_bold = doc.content.find("worl").unwrap() + 2;
+    doc.caret.move_to(inside_bold);
+    doc.smart_newline(false);
+    let table_cell = doc.content.find("| 1 |").unwrap() + 2;
+    doc.caret.move_to(table_cell);
+    doc.smart_newline(false);
+
+    assert_eq!(doc.parse_clone_count, 0);
+    assert_eq!(doc.full_parse_count, 1);
+    let cached = doc
+        .cached_parse
+        .as_ref()
+        .expect("markdown tab keeps cached parse");
+    assert_eq!(Arc::strong_count(&cached.1), 1);
+}
+
+#[test]
+fn delete_at_end_of_list_line_strips_next_list_marker() {
+    let mut doc = DocumentTab::new(
+        "t".into(),
+        "list.md".into(),
+        "- alpha\n- beta\n- [ ] gamma\n".into(),
+        None,
+        None,
+    );
+    doc.view_mode = ViewMode::Wysiwyg;
+    doc.caret.move_to("- alpha".len());
+    doc.delete_forward_in_mode(ViewMode::Wysiwyg);
+    assert_eq!(doc.content, "- alphabeta\n- [ ] gamma\n");
+    assert_eq!(doc.cursor_offset(), "- alpha".len());
+
+    // Empty list item does not strip the following item's marker.
+    let mut empty_item = DocumentTab::new(
+        "t2".into(),
+        "list.md".into(),
+        "- \n- beta\n".into(),
+        None,
+        None,
+    );
+    empty_item.view_mode = ViewMode::Wysiwyg;
+    empty_item.caret.move_to(2);
+    empty_item.delete_forward_in_mode(ViewMode::Wysiwyg);
+    assert_eq!(empty_item.content, "- - beta\n");
+}
+
+#[test]
+fn plain_text_tab_with_markdown_text_never_builds_parse() {
+    let src = "# Heading\n- **bold** item\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+    let mut txt = DocumentTab::new("t".into(), "notes.txt".into(), src.into(), None, None);
+    assert!(txt.cached_parse.is_none());
+    assert_eq!(txt.full_parse_count, 0);
+
+    txt.caret.move_to(2);
+    txt.insert_text_in_mode(2..2, "added ", ViewMode::Raw);
+    txt.smart_backspace_in_mode(ViewMode::Raw);
+    txt.delete_forward_in_mode(ViewMode::Raw);
+    txt.smart_newline(false);
+    txt.move_end(false);
+    txt.move_word_right(false);
+    txt.select_line_down();
+    txt.place(5, false);
+    txt.delete_word_right();
+    txt.delete_to_line_end();
+    txt.delete_to_line_start();
+    txt.undo();
+    txt.redo();
+    assert!(!txt.apply_table_op(TableOp::InsertRowBelow));
+    assert!(txt.parsed().lines.is_empty());
+
+    assert!(txt.cached_parse.is_none());
+    assert_eq!(txt.full_parse_count, 0);
+    assert_eq!(txt.parse_clone_count, 0);
+
+    // Raw mode on a .md tab still parses as before.
+    let mut md = DocumentTab::new("m".into(), "notes.md".into(), src.into(), None, None);
+    md.view_mode = ViewMode::Raw;
+    assert!(md.cached_parse.is_some());
+    assert_eq!(md.full_parse_count, 1);
+    assert!(!md.parsed().lines.is_empty());
+}
+
+#[test]
 fn enter_on_no_space_blockquote_continues_quote() {
     let mut t = DocumentTab::new("t".into(), "t.md".into(), ">foo".into(), None, None);
     t.caret.move_to(4);

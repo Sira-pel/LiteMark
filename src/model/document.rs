@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::markdown::{
-    accepted_list_marker_in, parse_document, unescaped_pipe_offsets, InlinePair, InlineTagKind,
-    LineKind, ParsedDocument, ParsedLine, StyledSegment, TableColumnAlign, TableRowBody,
-    MAX_LIST_NUMBER,
+    accepted_list_marker_in, empty_parsed_document, parse_document, unescaped_pipe_offsets,
+    InlinePair, InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment,
+    TableColumnAlign, TableRowBody, MAX_LIST_NUMBER,
 };
 
 use super::table_ops::{self, TableOp};
@@ -330,6 +330,10 @@ pub struct DocumentTab {
     next_undo_sel: Option<SelectionSnap>,
     /// Selection restored by redo of the next edit.
     next_redo_sel: Option<SelectionSnap>,
+    #[cfg(test)]
+    pub(crate) parse_clone_count: usize,
+    #[cfg(test)]
+    pub(crate) full_parse_count: usize,
 }
 
 impl DocumentTab {
@@ -387,6 +391,10 @@ impl DocumentTab {
             next_redo_caret: None,
             next_undo_sel: None,
             next_redo_sel: None,
+            #[cfg(test)]
+            parse_clone_count: 0,
+            #[cfg(test)]
+            full_parse_count: 0,
         };
         tab.refresh_cursor();
         tab
@@ -429,6 +437,9 @@ impl DocumentTab {
     }
 
     pub fn parsed(&mut self) -> Arc<ParsedDocument> {
+        if !self.file_type.supports_markdown_features() {
+            return empty_parsed_document();
+        }
         if let Some((rev, ref doc)) = self.cached_parse {
             if rev == self.revision {
                 return doc.clone();
@@ -442,10 +453,18 @@ impl DocumentTab {
             if rev == edit_rev && rev.wrapping_add(1) == self.revision {
                 let (range, new_len) = (range.clone(), *new_len);
                 let (_, mut doc) = self.cached_parse.take().expect("cached parse");
+                #[cfg(test)]
+                if Arc::strong_count(&doc) > 1 {
+                    self.parse_clone_count += 1;
+                }
                 Arc::make_mut(&mut doc).apply_edit(&self.content, range, new_len);
                 self.cached_parse = Some((self.revision, doc.clone()));
                 return doc;
             }
+        }
+        #[cfg(test)]
+        {
+            self.full_parse_count += 1;
         }
         let doc = Arc::new(parse_document(&self.content));
         self.cached_parse = Some((self.revision, doc.clone()));

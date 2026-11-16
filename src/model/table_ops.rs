@@ -68,8 +68,7 @@ use std::ops::Range;
 
 use crate::markdown::parser::{delimiter_alignments, line_breaks_table};
 use crate::markdown::{
-    parse_document, unescaped_pipe_offsets, LineKind, ParsedDocument, TableColumnAlign,
-    TableRowBody,
+    unescaped_pipe_offsets, LineKind, ParsedDocument, TableColumnAlign, TableRowBody,
 };
 
 /// One table edit. The anchor row and column come from the caret.
@@ -130,8 +129,9 @@ impl TablePlan {
 /// Parser range of the table that contains `pos`, without the line ending
 /// that follows the last row. `None` when `pos` is not in a table, which
 /// includes a table written inside a block quote or a list item.
+#[cfg(test)]
 pub fn parsed_table_source(content: &str, pos: usize) -> Option<Range<usize>> {
-    parsed_table_source_in(&parse_document(content), pos)
+    parsed_table_source_in(&crate::markdown::parse_document(content), pos)
 }
 
 /// [`parsed_table_source`] against an existing parse of the content.
@@ -147,10 +147,10 @@ pub fn parsed_table_source_in(parsed: &ParsedDocument, pos: usize) -> Option<Ran
     None
 }
 
-/// Plan `op` at `pos`. `None` when there is no table, the op is refused, or
-/// the bytes would not change.
-pub fn plan(content: &str, pos: usize, op: TableOp) -> Option<TablePlan> {
-    let source = parsed_table_source(content, pos)?;
+/// Plan `op` at `pos` against `parsed`. `None` when there is no table, the op
+/// is refused, or the bytes would not change.
+pub fn plan(content: &str, parsed: &ParsedDocument, pos: usize, op: TableOp) -> Option<TablePlan> {
+    let source = parsed_table_source_in(parsed, pos)?;
     let end = extend_through_ending(content, source.end);
     let range = source.start..end;
     let block = content.get(range.clone())?;
@@ -1148,7 +1148,7 @@ fn align_cell(raw: &str, align: TableColumnAlign) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::markdown::markdown_to_html_body;
+    use crate::markdown::{markdown_to_html_body, parse_document};
 
     fn roundtrip(line: &str) {
         assert_eq!(join_parts(&split_parts(line)), line, "roundtrip {line:?}");
@@ -1206,9 +1206,15 @@ mod tests {
         panic!("no cell {row},{col} in {content:?}");
     }
 
+    fn plan_src(content: &str, pos: usize, op: TableOp) -> Option<TablePlan> {
+        let parsed = parse_document(content);
+        plan(content, &parsed, pos, op)
+    }
+
     fn apply(content: &str, row: usize, col: usize, op: TableOp) -> (String, usize) {
         let pos = cell_start(content, row, col);
-        let plan = plan(content, pos, op).unwrap_or_else(|| panic!("op refused on {content:?}"));
+        let plan =
+            plan_src(content, pos, op).unwrap_or_else(|| panic!("op refused on {content:?}"));
         let mut out = content.to_string();
         out.replace_range(plan.range.clone(), &plan.new_text);
         (out, plan.caret)
@@ -1253,11 +1259,11 @@ mod tests {
     fn header_is_not_deleted_or_moved_under_the_delimiter() {
         let src = "| A | B |\n| --- | --- |\n| d | e |\n| g | h |\n";
         let pos = cell_start(src, 0, 0);
-        assert!(plan(src, pos, TableOp::DeleteRow).is_none());
-        assert!(plan(src, pos, TableOp::InsertRowAbove).is_none());
-        assert!(plan(src, pos, TableOp::MoveRow { to_index: 1 }).is_none());
+        assert!(plan_src(src, pos, TableOp::DeleteRow).is_none());
+        assert!(plan_src(src, pos, TableOp::InsertRowAbove).is_none());
+        assert!(plan_src(src, pos, TableOp::MoveRow { to_index: 1 }).is_none());
         let body = cell_start(src, 1, 0);
-        assert!(plan(src, body, TableOp::MoveRow { to_index: 0 }).is_none());
+        assert!(plan_src(src, body, TableOp::MoveRow { to_index: 0 }).is_none());
         assert_eq!(src, src);
     }
 
@@ -1265,7 +1271,7 @@ mod tests {
     fn single_column_delete_is_refused() {
         let src = "| A |\n| --- |\n| d |\n";
         let pos = cell_start(src, 1, 0);
-        assert!(plan(src, pos, TableOp::DeleteCol).is_none());
+        assert!(plan_src(src, pos, TableOp::DeleteCol).is_none());
     }
 
     #[test]
@@ -1295,7 +1301,7 @@ mod tests {
         let quote = "> | A | B |\n> | --- | --- |\n> | d | e |\n";
         assert!(parsed_table_source(quote, 2).is_none());
         let list = "- | A | B |\n  | --- | --- |\n  | d | e |\n";
-        assert!(plan(list, 2, TableOp::InsertRowBelow).is_none());
+        assert!(plan_src(list, 2, TableOp::InsertRowBelow).is_none());
     }
 
     fn table_row_count(content: &str) -> usize {
@@ -1376,7 +1382,7 @@ mod tests {
         assert_eq!(out, "a | b\n--|--\n1 | 2\n| | |\n");
         assert_eq!(table_row_count(&out), 3);
         assert_eq!(table_col_count(&out), 2);
-        let plan = plan(&out, caret, TableOp::DeleteRow)
+        let plan = plan_src(&out, caret, TableOp::DeleteRow)
             .unwrap_or_else(|| panic!("delete of the new row refused on {out:?}"));
         let mut restored = out;
         restored.replace_range(plan.range, &plan.new_text);
@@ -1460,7 +1466,7 @@ mod tests {
                             0
                         };
                         let pos = cell_start(&src, 0, col);
-                        let Some(plan) = plan(&src, pos, op) else {
+                        let Some(plan) = plan_src(&src, pos, op) else {
                             failures.push(format!(
                                 "{op_name} mid={mid:?} indent={indent:?} refused src={src:?}"
                             ));

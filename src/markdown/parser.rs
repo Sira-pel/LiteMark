@@ -1572,6 +1572,14 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
     }
 }
 
+/// Shared empty parse for tabs that do not use Markdown structure.
+pub fn empty_parsed_document() -> Arc<ParsedDocument> {
+    static EMPTY: std::sync::OnceLock<Arc<ParsedDocument>> = std::sync::OnceLock::new();
+    EMPTY
+        .get_or_init(|| Arc::new(ParsedDocument::default()))
+        .clone()
+}
+
 /// Source lines of `text` from byte `from` (a line start) to the end, with
 /// the same final empty line as `all_source_lines`.
 fn source_lines_from(text: &str, from: usize) -> Vec<SourceLine<'_>> {

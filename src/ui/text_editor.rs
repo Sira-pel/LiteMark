@@ -196,8 +196,8 @@ pub struct LayoutCache {
     /// the wrap columns and font size in `estimate_key`.
     estimate: Vec<Option<Pixels>>,
     estimate_key: (usize, u32),
-    /// Raw mode: wrap columns, tab width, and every row with its offset map.
-    raw_rows: Option<(usize, usize, Rc<RawRows>)>,
+    /// Raw mode: content snapshot, wrap columns, tab width, and every row with its offset map.
+    raw_rows: Option<(SharedString, usize, usize, Rc<RawRows>)>,
 }
 
 /// Raw mode rows: byte range and offset map of each.
@@ -1235,7 +1235,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         );
         let char_width = sample.width.max(px(1.0));
         // The parse is cached per revision, so this is O(1) per redraw.
-        let line_count = self.parsed.lines.len();
+        let line_count = if self.parsed.lines.is_empty() {
+            logical_line_number(&self.content, self.content.len())
+        } else {
+            self.parsed.lines.len()
+        };
         let inset = gutter_pad(bounds.size.width);
         let (gutter_box, gutter) = self.gutter(char_width, line_count, inset);
         let available_width = (bounds.size.width - gutter - px(48.0)).max(px(32.0));
@@ -1285,7 +1289,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
 
         if self.view_mode == ViewMode::Raw {
             let raw_rows = match &layout_cache.raw_rows {
-                Some((cols, tab, rows)) if *cols == wrap_cols && *tab == self.tab_width => {
+                Some((text, cols, tab, rows))
+                    if *text == self.content && *cols == wrap_cols && *tab == self.tab_width =>
+                {
                     rows.clone()
                 }
                 _ => {
@@ -1297,7 +1303,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             })
                             .collect();
                     let rows = Rc::new(rows);
-                    layout_cache.raw_rows = Some((wrap_cols, self.tab_width, rows.clone()));
+                    layout_cache.raw_rows = Some((
+                        self.content.clone(),
+                        wrap_cols,
+                        self.tab_width,
+                        rows.clone(),
+                    ));
                     rows
                 }
             };
