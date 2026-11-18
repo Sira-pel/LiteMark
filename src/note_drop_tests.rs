@@ -83,3 +83,40 @@ fn resaving_a_listed_note_does_not_rescan_the_workspace() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[std_test]
+fn not_now_switches_folder_without_copying_the_note() {
+    let root = std::env::temp_dir().join(format!("litemark-notnow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (old, new) = (root.join("old"), root.join("new"));
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(&new).unwrap();
+    std::fs::write(old.join("note.md"), "text").unwrap();
+
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, cx| {
+        // Never touch the real settings file from a test.
+        app.settings.save_blocked = Some("test".into());
+        app.workspace = scan_workspace_dir(&old, true);
+        app.refresh_workspace_ids();
+        let id = app.workspace.files[0].id.clone();
+        app.open_loaded_tab(
+            "note.md".into(),
+            "text".into(),
+            Some(old.join("note.md")),
+            Some(id),
+        );
+        app.prepare_workspace_switch(new.clone());
+        assert!(matches!(app.prompt, Some(Prompt::SwitchWorkspace { .. })));
+        app.answer_prompt("Not now", cx);
+        assert_eq!(app.workspace.folder_path, new);
+        assert_eq!(
+            app.settings.workspace_folder.as_deref(),
+            Some(new.as_path())
+        );
+    });
+    assert!(!new.join("note.md").exists(), "Not now must not copy");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

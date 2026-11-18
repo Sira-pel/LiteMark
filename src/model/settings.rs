@@ -68,6 +68,10 @@ pub struct EditorSettings {
     /// Workspace folders used before, most recent first (never the current one).
     #[serde(default)]
     pub recent_folders: Vec<PathBuf>,
+    /// The workspace folder in use when the app last closed; reopened at
+    /// startup while it still exists.
+    #[serde(default)]
+    pub workspace_folder: Option<PathBuf>,
     /// Look for a newer release on GitHub at startup (at most once a day).
     #[serde(default = "default_check_for_updates")]
     pub check_for_updates: bool,
@@ -98,6 +102,7 @@ impl Default for EditorSettings {
             base_font_size: 17.0,
             content_alignment: ContentAlignment::Centered,
             recent_folders: Vec::new(),
+            workspace_folder: None,
             check_for_updates: true,
             last_update_check: None,
             dismissed_update: None,
@@ -121,6 +126,11 @@ impl EditorSettings {
             self.recent_folders.insert(0, left.to_path_buf());
         }
         self.recent_folders.truncate(MAX_RECENT_FOLDERS);
+    }
+
+    /// Drop a folder from the recent list (the folder itself is untouched).
+    pub fn forget_folder(&mut self, folder: &std::path::Path) {
+        self.recent_folders.retain(|p| p != folder);
     }
 
     fn config_path() -> Option<PathBuf> {
@@ -334,6 +344,23 @@ mod tests {
         }
         assert_eq!(s.recent_folders.len(), MAX_RECENT_FOLDERS);
         assert_eq!(s.recent_folders[0], PathBuf::from("/old9"));
+    }
+
+    #[test]
+    fn forgetting_a_recent_folder_removes_only_it() {
+        let mut s = EditorSettings::default();
+        s.remember_folders(Path::new("/a"), Path::new("/b"));
+        s.remember_folders(Path::new("/b"), Path::new("/c"));
+        s.forget_folder(Path::new("/a"));
+        assert_eq!(s.recent_folders, [PathBuf::from("/b")]);
+    }
+
+    #[test]
+    fn workspace_folder_survives_a_reload() {
+        let s: EditorSettings = serde_json::from_str(r#"{"workspace_folder":"/notes"}"#).unwrap();
+        assert_eq!(s.workspace_folder, Some(PathBuf::from("/notes")));
+        let none: EditorSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(none.workspace_folder, None);
     }
 
     fn temp_settings_dir(tag: &str) -> PathBuf {

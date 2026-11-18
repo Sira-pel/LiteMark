@@ -1,5 +1,5 @@
 use super::line_field::LineField;
-use super::primitives::{icon_button, render_icon};
+use super::primitives::{icon_button, render_icon, SimpleTooltip};
 use crate::model::{sidebar_folder_search_matches, sidebar_search_matches};
 use crate::model::{WorkspaceDirectory, WorkspaceFile};
 use crate::theme::{sz, Theme};
@@ -1167,16 +1167,18 @@ where
 
 /// Dropdown under the sidebar header: current folder, recent folders and a
 /// "Choose folder" entry. Click outside to dismiss.
-pub fn render_workspace_menu<FPick, FChoose, FDismiss>(
+pub fn render_workspace_menu<FPick, FForget, FChoose, FDismiss>(
     current_path: String,
     recents: Vec<(String, std::path::PathBuf)>,
     on_pick: FPick,
+    on_forget: FForget,
     on_choose: FChoose,
     on_dismiss: FDismiss,
     theme: &Theme,
 ) -> impl IntoElement
 where
     FPick: Fn(std::path::PathBuf, &mut App) + 'static + Clone,
+    FForget: Fn(std::path::PathBuf, &mut App) + 'static + Clone,
     FChoose: Fn(&mut App) + 'static + Clone,
     FDismiss: Fn(&mut App) + 'static + Clone,
 {
@@ -1258,23 +1260,68 @@ where
                         )
                         .children(recents.into_iter().enumerate().map(|(ix, (name, path))| {
                             let pick = on_pick.clone();
+                            let forget = on_forget.clone();
                             let target = path.clone();
+                            let forget_target = path.clone();
                             row(SharedString::from(format!("workspace-recent-{ix}")))
+                                // Two lines of text (name and path) don't fit
+                                // the 32px single-line row height.
+                                .h_auto()
+                                .min_h(px(32.0))
+                                .py(px(5.0))
                                 .on_click(move |_, _, cx| pick(target.clone(), cx))
-                                .child(render_icon("folder", 14.0, theme.text_muted))
+                                // Keep the path tooltip on the inner pick area
+                                // so hovering the remove button does not show it.
                                 .child(
                                     div()
-                                        .flex()
-                                        .flex_col()
+                                        .id(SharedString::from(format!("workspace-pick-{ix}")))
+                                        .flex_1()
                                         .min_w_0()
-                                        .child(div().truncate().child(name))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .tooltip({
+                                            let full = path.display().to_string();
+                                            let th = *theme;
+                                            move |_, cx| {
+                                                cx.new(|_| SimpleTooltip::new(full.clone(), th))
+                                                    .into()
+                                            }
+                                        })
+                                        .child(render_icon("folder", 14.0, theme.text_muted))
                                         .child(
                                             div()
-                                                .text_size(px(11.0))
-                                                .text_color(theme.text_muted)
-                                                .truncate()
-                                                .child(path.display().to_string()),
+                                                .flex_1()
+                                                .flex()
+                                                .flex_col()
+                                                .min_w_0()
+                                                .child(div().truncate().child(name))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.0))
+                                                        .text_color(theme.text_muted)
+                                                        .truncate()
+                                                        .child(path.display().to_string()),
+                                                ),
                                         ),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("workspace-forget-{ix}")))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(22.0))
+                                        .flex_none()
+                                        .rounded(sz::R_SM)
+                                        .hover(|h| h.bg(theme.bg_active))
+                                        // Stop propagation so clicking X only forgets
+                                        // and does not trigger the row's pick handler.
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            forget(forget_target.clone(), cx);
+                                        })
+                                        .child(render_icon("x", 12.0, theme.text_muted)),
                                 )
                         }))
                 })

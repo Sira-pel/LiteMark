@@ -63,6 +63,7 @@ impl LiteMarkApp {
             self.show_error(message);
         }
         self.settings.remember_folders(&left, &new_dir);
+        self.settings.workspace_folder = Some(new_dir.clone());
         self.save_settings();
         self.workspace_menu_open = false;
         if let Some(new_path) = migrated {
