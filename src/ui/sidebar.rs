@@ -1269,16 +1269,9 @@ where
                                 .h_auto()
                                 .min_h(px(32.0))
                                 .py(px(5.0))
-                                .tooltip({
-                                    let full = path.display().to_string();
-                                    let th = *theme;
-                                    move |_, cx| {
-                                        cx.new(|_| SimpleTooltip::new(full.clone(), th)).into()
-                                    }
-                                })
-                                // The pick area and the remove button are
-                                // siblings, so a click on one never reaches
-                                // the other.
+                                .on_click(move |_, _, cx| pick(target.clone(), cx))
+                                // Keep the path tooltip on the inner pick area
+                                // so hovering the remove button does not show it.
                                 .child(
                                     div()
                                         .id(SharedString::from(format!("workspace-pick-{ix}")))
@@ -1287,7 +1280,14 @@ where
                                         .flex()
                                         .items_center()
                                         .gap(px(8.0))
-                                        .on_click(move |_, _, cx| pick(target.clone(), cx))
+                                        .tooltip({
+                                            let full = path.display().to_string();
+                                            let th = *theme;
+                                            move |_, cx| {
+                                                cx.new(|_| SimpleTooltip::new(full.clone(), th))
+                                                    .into()
+                                            }
+                                        })
                                         .child(render_icon("folder", 14.0, theme.text_muted))
                                         .child(
                                             div()
@@ -1315,7 +1315,12 @@ where
                                         .flex_none()
                                         .rounded(sz::R_SM)
                                         .hover(|h| h.bg(theme.bg_active))
-                                        .on_click(move |_, _, cx| forget(forget_target.clone(), cx))
+                                        // Stop propagation so clicking X only forgets
+                                        // and does not trigger the row's pick handler.
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            forget(forget_target.clone(), cx);
+                                        })
                                         .child(render_icon("x", 12.0, theme.text_muted)),
                                 )
                         }))
