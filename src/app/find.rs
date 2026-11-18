@@ -6,7 +6,7 @@ impl LiteMarkApp {
     pub(super) fn refresh_find(&mut self) {
         if !self.show_find_replace {
             // Don't search a hidden bar; reopening re-runs it.
-            self.find_hits.clear();
+            self.find_hits = Vec::new().into();
             self.find_index = None;
             self.not_found = false;
             return;
@@ -14,7 +14,8 @@ impl LiteMarkApp {
         self.find_hits = self
             .active_tab()
             .map(|tab| tab.find_hit_ranges(&self.find_term, self.match_case))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into();
         if self.find_term.is_empty() {
             self.find_index = None;
             self.not_found = false;

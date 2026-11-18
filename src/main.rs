@@ -44,7 +44,44 @@ impl AssetSource for EmbeddedAssets {
     }
 }
 
+/// Release builds abort on panic and, on Windows, have no console, so a
+/// crash used to leave no trace. Append what panicked to
+/// `<config>/litemark/crash.log` (kept under 256 KiB), then run the default
+/// hook. Every step is best-effort: the hook itself must never panic.
+fn install_crash_log() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = dirs::config_dir().map(|base| base.join("litemark")) {
+            let _ = write_crash_report(&dir, &info.to_string());
+        }
+        default_hook(info);
+    }));
+}
+
+fn write_crash_report(dir: &std::path::Path, report: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    const MAX_LOG_BYTES: u64 = 256 * 1024;
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("crash.log");
+    let too_big = std::fs::metadata(&path).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(!too_big)
+        .write(true)
+        .truncate(too_big)
+        .open(&path)?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    writeln!(
+        file,
+        "[unix {secs}] LiteMark {} panicked: {report}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 fn main() {
+    install_crash_log();
     let args: Vec<String> = env::args().collect();
     let initial_file = args.get(1).map(PathBuf::from).filter(|p| p.exists());
     // A file opened while LiteMark is already running goes to that window.
@@ -365,5 +402,28 @@ fn window_titlebar() -> Option<TitlebarOptions> {
         })
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod crash_log_tests {
+    use super::write_crash_report;
+
+    #[test]
+    fn crash_reports_append_and_the_log_is_capped() {
+        let dir = std::env::temp_dir().join(format!("litemark-crash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_crash_report(&dir, "first").unwrap();
+        write_crash_report(&dir, "second").unwrap();
+        let log = std::fs::read_to_string(dir.join("crash.log")).unwrap();
+        assert!(log.contains("panicked: first") && log.contains("panicked: second"));
+
+        // Past the cap the next report starts the file over.
+        std::fs::write(dir.join("crash.log"), vec![b'x'; 300 * 1024]).unwrap();
+        write_crash_report(&dir, "third").unwrap();
+        let log = std::fs::read_to_string(dir.join("crash.log")).unwrap();
+        assert!(log.starts_with("[unix ") && log.contains("panicked: third"));
+        assert!(log.len() < 1024);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

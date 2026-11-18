@@ -463,20 +463,19 @@ fn line_span_at(content: &str, offset: usize) -> TextLine {
 pub fn line_col(content: &str, offset: usize) -> (usize, usize) {
     let offset = floor_char_boundary(content, offset.min(content.len()));
     let span = line_span_at(content, offset);
-    let mut line = 1usize;
-    let mut index = 0usize;
-    while index < span.start {
-        let ending = line_ending_len(content, index);
-        if ending > 0 {
-            line += 1;
-            index += ending;
-        } else {
-            index += 1;
-        }
-    }
+    let line = 1 + count_line_endings(&content.as_bytes()[..span.start]);
     let end = offset.min(span.content_end);
     let col = content[span.start..end].chars().count() + 1;
     (line, col)
+}
+
+/// Line endings in `bytes`: each LF, and each CR not followed by an LF (a
+/// CRLF counts once). Runs on every caret move in raw tabs, so it uses
+/// memchr rather than a byte-by-byte walk.
+fn count_line_endings(bytes: &[u8]) -> usize {
+    memchr::memchr2_iter(b'\n', b'\r', bytes)
+        .filter(|&at| bytes[at] == b'\n' || bytes.get(at + 1) != Some(&b'\n'))
+        .count()
 }
 
 pub fn line_start(content: &str, line_1: usize) -> usize {
@@ -1164,6 +1163,48 @@ mod tests {
             start,
             content_end: bytes.len(),
             next: bytes.len(),
+        }
+    }
+
+    #[test]
+    fn line_col_matches_the_byte_walk_on_every_offset() {
+        // The walk `line_col` used before it counted endings with memchr.
+        fn reference(content: &str, offset: usize) -> (usize, usize) {
+            let offset = floor_char_boundary(content, offset.min(content.len()));
+            let span = line_span_at(content, offset);
+            let mut line = 1usize;
+            let mut index = 0usize;
+            while index < span.start {
+                let ending = line_ending_len(content, index);
+                if ending > 0 {
+                    line += 1;
+                    index += ending;
+                } else {
+                    index += 1;
+                }
+            }
+            let end = offset.min(span.content_end);
+            (line, content[span.start..end].chars().count() + 1)
+        }
+        let alphabet = ['a', '\n', '\r', 'é'];
+        for len in 0..=6u32 {
+            for code in 0..4usize.pow(len) {
+                let mut c = code;
+                let text: String = (0..len)
+                    .map(|_| {
+                        let ch = alphabet[c % 4];
+                        c /= 4;
+                        ch
+                    })
+                    .collect();
+                for offset in 0..=text.len() + 1 {
+                    assert_eq!(
+                        line_col(&text, offset),
+                        reference(&text, offset),
+                        "{text:?} at {offset}"
+                    );
+                }
+            }
         }
     }
 

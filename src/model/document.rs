@@ -429,10 +429,17 @@ impl DocumentTab {
     /// The text to write to the file: `content`, with the byte order mark
     /// put back if the file had one.
     pub fn file_text(&self) -> String {
+        self.file_text_ref().into_owned()
+    }
+
+    /// [`DocumentTab::file_text`] without copying the document when the
+    /// file has no byte order mark (the usual case). For hashing and
+    /// comparing, which only read it.
+    pub fn file_text_ref(&self) -> std::borrow::Cow<'_, str> {
         if self.has_bom {
-            format!("\u{feff}{}", self.content)
+            std::borrow::Cow::Owned(format!("\u{feff}{}", self.content))
         } else {
-            self.content.clone()
+            std::borrow::Cow::Borrowed(&self.content)
         }
     }
 

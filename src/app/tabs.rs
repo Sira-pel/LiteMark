@@ -33,7 +33,7 @@ impl LiteMarkApp {
             tab.disk_version = tab
                 .file_path
                 .as_deref()
-                .and_then(|path| disk_version(path, &tab.file_text()));
+                .and_then(|path| disk_version(path, &tab.file_text_ref()));
         }
     }
 
@@ -184,7 +184,7 @@ impl LiteMarkApp {
                 let tab = &mut self.tabs[index];
                 if !tab.is_modified {
                     // `content` is the raw file, BOM included.
-                    if tab.file_text() != content {
+                    if tab.file_text_ref() != content.as_str() {
                         tab.reload(content);
                     }
                     self.record_disk_version(&id);

@@ -71,7 +71,8 @@ impl LiteMarkApp {
                 if let Some(name) = new_path.file_name().and_then(|n| n.to_str()) {
                     tab.title = name.to_string();
                 }
-                tab.disk_version = disk_version(&new_path, &tab.file_text());
+                let version = disk_version(&new_path, &tab.file_text_ref());
+                tab.disk_version = version;
                 tab.file_path = Some(new_path);
                 tab.is_modified = false;
             }

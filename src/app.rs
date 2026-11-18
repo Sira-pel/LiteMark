@@ -181,6 +181,9 @@ pub struct LiteMarkApp {
     /// and length. Frames and IME queries between edits share this one copy
     /// instead of cloning the whole document each time.
     content_snapshot: Option<(String, u64, usize, SharedString)>,
+    /// Word count of the selection, keyed by tab id, revision and range, so
+    /// a frame (caret blink, hover) doesn't rescan a large selection.
+    selection_words: Option<(String, u64, Range<usize>, Option<usize>)>,
     pub editor_scroll: ScrollHandle,
     /// Tab, caret and length the editor last scrolled to follow, so only a
     /// real edit or caret move scrolls (not the wheel or a repaint).
@@ -192,7 +195,9 @@ pub struct LiteMarkApp {
     pub(crate) scroll_clock: Option<std::time::Instant>,
     pub find_field: Entity<LineField>,
     pub replace_field: Entity<LineField>,
-    pub find_hits: Vec<Range<usize>>,
+    /// Shared with the editor element, so a frame borrows the hits
+    /// instead of copying every match.
+    pub find_hits: Rc<[Range<usize>]>,
     pub find_index: Option<usize>,
     pub applied_focus: Option<FocusSlot>,
     pub close_hook_installed: bool,
@@ -274,7 +279,8 @@ impl LiteMarkApp {
             match read_note(&path) {
                 Ok(content) => {
                     let mut tab = DocumentTab::new(first_id.clone(), name, content, None, None);
-                    tab.disk_version = disk_version(&path, &tab.file_text());
+                    let version = disk_version(&path, &tab.file_text_ref());
+                    tab.disk_version = version;
                     tab.file_path = Some(path);
                     tab
                 }
@@ -539,6 +545,7 @@ impl LiteMarkApp {
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             content_snapshot: None,
+            selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
             caret_follow_waits: 0,
@@ -546,7 +553,7 @@ impl LiteMarkApp {
             scroll_clock: None,
             find_field,
             replace_field,
-            find_hits: Vec::new(),
+            find_hits: Vec::new().into(),
             find_index: None,
             applied_focus: None,
             close_hook_installed: false,
@@ -666,6 +673,7 @@ impl LiteMarkApp {
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             content_snapshot: None,
+            selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
             caret_follow_waits: 0,
@@ -673,7 +681,7 @@ impl LiteMarkApp {
             scroll_clock: None,
             find_field: Self::dummy_line_field(cx, "find-field"),
             replace_field: Self::dummy_line_field(cx, "replace-field"),
-            find_hits: Vec::new(),
+            find_hits: Vec::new().into(),
             find_index: None,
             applied_focus: None,
             close_hook_installed: false,
@@ -726,7 +734,8 @@ impl LiteMarkApp {
                     Some(file.path.clone()),
                     Some(file.id.clone()),
                 );
-                tab.disk_version = disk_version(&file.path, &tab.file_text());
+                let version = disk_version(&file.path, &tab.file_text_ref());
+                tab.disk_version = version;
                 return tab;
             }
         }

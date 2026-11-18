@@ -1033,7 +1033,7 @@ pub struct EditorElement<V: 'static> {
     pub view_mode: ViewMode,
     pub selection: Range<usize>,
     pub marked: Option<Range<usize>>,
-    pub find_hits: Vec<Range<usize>>,
+    pub find_hits: Rc<[Range<usize>]>,
     pub active_find: Option<usize>,
     pub show_line_numbers: bool,
     pub word_wrap: bool,
@@ -1290,7 +1290,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         if self.view_mode == ViewMode::Raw {
             let raw_rows = match &layout_cache.raw_rows {
                 Some((text, cols, tab, rows))
-                    if *text == self.content && *cols == wrap_cols && *tab == self.tab_width =>
+                    if same_text(text, &self.content)
+                        && *cols == wrap_cols
+                        && *tab == self.tab_width =>
                 {
                     rows.clone()
                 }
@@ -3301,6 +3303,13 @@ fn raw_line_runs(
     let local_start = marked.start.saturating_sub(line_start).min(len);
     let local_end = marked.end.saturating_sub(line_start).min(len);
     apply_underline_to_runs(vec![base], local_start..local_end, color)
+}
+
+/// Equal texts. Between edits the app hands every frame the same shared
+/// string, so the pointer check answers without comparing the document.
+fn same_text(a: &SharedString, b: &SharedString) -> bool {
+    let (a, b) = (a.as_str(), b.as_str());
+    (a.len() == b.len() && std::ptr::eq(a.as_ptr(), b.as_ptr())) || a == b
 }
 
 /// Find hits that can paint on a row spanning `row_start..=row_end`, with
