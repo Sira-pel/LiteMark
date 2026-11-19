@@ -6185,6 +6185,74 @@ fn compute_stats_is_lazy_until_ensure_stats() {
 }
 
 #[test]
+fn incremental_stats_match_compute_stats_through_edits_undo_redo_and_reload() {
+    let mut doc = DocumentTab::new(
+        "s".into(),
+        "s.md".into(),
+        "hello world\r\nsecond line\n".into(),
+        None,
+        None,
+    );
+    let mut seed = 0x57a7_5eed_u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % n.max(1)
+    };
+    let tokens = [
+        "a", " ", "  ", "\n", "\r\n", "\r", "word", "é", "😀", "\t", "",
+    ];
+    for step in 0..400 {
+        let bounds: Vec<usize> = doc
+            .content
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(doc.content.len()))
+            .collect();
+        let i1 = next(bounds.len());
+        let i2 = next(bounds.len());
+        let range = bounds[i1.min(i2)]..bounds[i1.max(i2)];
+        let rep = tokens[next(tokens.len())];
+        doc.edit(range, rep);
+        if step % 17 == 0 {
+            doc.undo();
+        } else if step % 23 == 0 {
+            doc.redo();
+        } else if step % 97 == 0 {
+            let reloaded = format!("reloaded\nstep {step}\r\n");
+            doc.reload(reloaded);
+        }
+        if step % 3 == 0 {
+            doc.ensure_stats();
+            let expected = compute_stats(&doc.content);
+            assert_eq!(
+                doc.word_count, expected.words,
+                "words mismatch at step {step}"
+            );
+            assert_eq!(
+                doc.char_count, expected.chars,
+                "chars mismatch at step {step}"
+            );
+            assert_eq!(
+                doc.line_count, expected.lines,
+                "lines mismatch at step {step}"
+            );
+            assert_eq!(
+                doc.reading_time_min, expected.reading_time_min,
+                "reading_time mismatch at step {step}"
+            );
+        }
+    }
+    doc.ensure_stats();
+    let expected = compute_stats(&doc.content);
+    assert_eq!(doc.word_count, expected.words);
+    assert_eq!(doc.char_count, expected.chars);
+    assert_eq!(doc.line_count, expected.lines);
+    assert_eq!(doc.reading_time_min, expected.reading_time_min);
+}
+
+#[test]
 fn parse_stays_equal_to_a_full_parse_through_edits_undo_and_redo() {
     // F15: parsed() updates the cached parse in place after each edit.
     let mut seed = 0x0dd5_eed5u64;
@@ -6706,4 +6774,33 @@ fn enter_on_blockquote_inside_list_item_continues_quote() {
     t.refresh_cursor();
     t.smart_newline(false);
     assert_eq!(t.content, "10. item\n    > quote\n    > ");
+}
+
+#[test]
+fn line_count_treats_a_lone_cr_as_a_line_ending() {
+    for (text, lines) in [
+        ("", 1),
+        ("a", 1),
+        ("a\n", 1),
+        ("a\r\n", 1),
+        ("\r", 1),
+        ("a\rb", 2),
+        ("a\r\rb", 3),
+        ("a\r\nb\rc\n", 3),
+    ] {
+        assert_eq!(compute_stats(text).lines, lines, "{text:?}");
+    }
+    // Typing "\n" after a lone CR joins them into one CRLF ending.
+    let mut doc = DocumentTab::new("c".into(), "c.md".into(), "a\rb".into(), None, None);
+    doc.ensure_stats();
+    assert_eq!(doc.line_count, 2);
+    doc.edit(2..2, "\n");
+    doc.ensure_stats();
+    assert_eq!(doc.line_count, 2);
+    doc.edit(1..2, "");
+    doc.ensure_stats();
+    assert_eq!(doc.line_count, 2);
+    doc.edit(0..0, "x\r");
+    doc.ensure_stats();
+    assert_eq!(doc.line_count, compute_stats(&doc.content).lines);
 }

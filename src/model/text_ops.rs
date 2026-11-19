@@ -472,7 +472,7 @@ pub fn line_col(content: &str, offset: usize) -> (usize, usize) {
 /// Line endings in `bytes`: each LF, and each CR not followed by an LF (a
 /// CRLF counts once). Runs on every caret move in raw tabs, so it uses
 /// memchr rather than a byte-by-byte walk.
-fn count_line_endings(bytes: &[u8]) -> usize {
+pub fn count_line_endings(bytes: &[u8]) -> usize {
     memchr::memchr2_iter(b'\n', b'\r', bytes)
         .filter(|&at| bytes[at] == b'\n' || bytes.get(at + 1) != Some(&b'\n'))
         .count()
@@ -842,6 +842,42 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
     }
     let mut hits = Vec::new();
     let mut start = 0usize;
+    let first_ch = needle.chars().next().unwrap();
+    if first_ch.is_ascii() {
+        let lower = first_ch as u8;
+        let upper = lower.to_ascii_uppercase();
+        // Only two non-ASCII Unicode scalar values lowercase to a sequence
+        // starting with an ASCII byte: U+0130 ('İ' -> "i\u{307}", lead 0xC4)
+        // and U+212A ('K' -> "k", lead 0xE2). UTF-8 lead bytes (>= 0xC0) and
+        // ASCII bytes (< 0x80) can never appear mid-character, so `pos` is
+        // always a valid char boundary.
+        let extra_lead = match lower {
+            b'i' => Some(0xC4u8),
+            b'k' => Some(0xE2u8),
+            _ => None,
+        };
+        let bytes = content.as_bytes();
+        while start < bytes.len() {
+            let rel = match extra_lead {
+                Some(lead) => memchr::memchr3(lower, upper, lead, &bytes[start..]),
+                None if lower == upper => memchr::memchr(lower, &bytes[start..]),
+                None => memchr::memchr2(lower, upper, &bytes[start..]),
+            };
+            let Some(rel) = rel else {
+                break;
+            };
+            let pos = start + rel;
+            let rest = &content[pos..];
+            if let Some(len) = caseless_match_len(rest, &needle) {
+                hits.push(pos..pos + len);
+                start = pos + len;
+            } else {
+                start = pos + rest.chars().next().map_or(1, char::len_utf8);
+            }
+        }
+        return hits;
+    }
+
     while start < content.len() {
         let rest = &content[start..];
         if let Some(len) = caseless_match_len(rest, &needle) {
@@ -974,14 +1010,43 @@ pub fn offset_from_utf16(content: &str, utf16_offset: usize) -> usize {
 }
 
 pub fn range_to_utf16(content: &str, range: &Range<usize>) -> Range<usize> {
-    offset_to_utf16(content, range.start)..offset_to_utf16(content, range.end)
+    let start = floor_char_boundary(content, range.start.min(content.len()));
+    let end = floor_char_boundary(content, range.end.min(content.len()));
+    let start_u16: usize = content[..start].chars().map(char::len_utf16).sum();
+    if end == start {
+        return start_u16..start_u16;
+    }
+    if end > start {
+        let delta: usize = content[start..end].chars().map(char::len_utf16).sum();
+        return start_u16..(start_u16 + delta);
+    }
+    let end_u16: usize = content[..end].chars().map(char::len_utf16).sum();
+    start_u16..end_u16
 }
 
 pub fn range_from_utf16(content: &str, range: &Range<usize>) -> Range<usize> {
-    offset_from_utf16(content, range.start)..offset_from_utf16(content, range.end)
+    if range.end < range.start {
+        return offset_from_utf16(content, range.start)..offset_from_utf16(content, range.end);
+    }
+    let mut utf16_count = 0usize;
+    let mut start_byte = None;
+    for (index, ch) in content.char_indices() {
+        if start_byte.is_none() && utf16_count >= range.start {
+            start_byte = Some(index);
+            if range.end == range.start {
+                return index..index;
+            }
+        }
+        if utf16_count >= range.end {
+            return start_byte.unwrap_or(index)..index;
+        }
+        utf16_count += ch.len_utf16();
+    }
+    let start_byte = start_byte.unwrap_or(content.len());
+    start_byte..content.len()
 }
 
-/// Visual rows as `(byte_start, byte_end)` exclusive of the newline.
+/// Visual rows as `(byte_start, byte_end)` exclusive of the line ending (`\r\n`, `\n`, or `\r`).
 /// `wrap_cols == usize::MAX` keeps one row per logical line.
 #[cfg(test)]
 pub fn visual_rows(content: &str, wrap_cols: usize) -> Vec<(usize, usize)> {
@@ -996,12 +1061,18 @@ pub fn visual_rows_tabbed(
     tab_width: usize,
 ) -> Vec<(usize, usize)> {
     let mut rows = Vec::new();
+    let bytes = content.as_bytes();
     let mut line_start = 0usize;
-    for (index, byte) in content.bytes().enumerate() {
-        if byte == b'\n' {
-            push_wrapped(&mut rows, content, line_start, index, wrap_cols, tab_width);
-            line_start = index + 1;
-        }
+    while let Some(rel) = memchr::memchr2(b'\n', b'\r', &bytes[line_start..]) {
+        let line_end = line_start + rel;
+        push_wrapped(
+            &mut rows, content, line_start, line_end, wrap_cols, tab_width,
+        );
+        line_start = if bytes[line_end] == b'\r' && bytes.get(line_end + 1) == Some(&b'\n') {
+            line_end + 2
+        } else {
+            line_end + 1
+        };
     }
     push_wrapped(
         &mut rows,
@@ -1021,9 +1092,10 @@ pub fn visual_rows_tabbed(
 /// content that fits on one row (the common case).
 pub fn visual_row_count_tabbed(content: &str, wrap_cols: usize, tab_width: usize) -> usize {
     if wrap_cols == 0 || wrap_cols == usize::MAX {
-        return content.bytes().filter(|&b| b == b'\n').count() + 1;
+        return count_line_endings(content.as_bytes()) + 1;
     }
     let mut count = 0usize;
+    let bytes = content.as_bytes();
     let mut line_start = 0usize;
     let mut tally = |start: usize, end: usize| {
         count += if fits_one_row(content, start, end, wrap_cols, tab_width) {
@@ -1034,11 +1106,14 @@ pub fn visual_row_count_tabbed(content: &str, wrap_cols: usize, tab_width: usize
             rows.len()
         };
     };
-    for (index, byte) in content.bytes().enumerate() {
-        if byte == b'\n' {
-            tally(line_start, index);
-            line_start = index + 1;
-        }
+    while let Some(rel) = memchr::memchr2(b'\n', b'\r', &bytes[line_start..]) {
+        let line_end = line_start + rel;
+        tally(line_start, line_end);
+        line_start = if bytes[line_end] == b'\r' && bytes.get(line_end + 1) == Some(&b'\n') {
+            line_end + 2
+        } else {
+            line_end + 1
+        };
     }
     tally(line_start, content.len());
     count
@@ -1695,6 +1770,58 @@ mod tests {
                 "1 MB line took {:?}",
                 started_line.elapsed()
             );
+        }
+    }
+
+    #[test]
+    fn visual_rows_strip_crlf_and_split_lone_cr() {
+        // CRLF line whose visible text equals wrap_cols must not wrap a phantom "\r" row.
+        assert_eq!(visual_rows("hello\r\nworld", 5), vec![(0, 5), (7, 12)]);
+        assert_eq!(visual_row_count("hello\r\nworld", 5), 2);
+        assert_eq!(visual_rows("ab\r\n", usize::MAX), vec![(0, 2), (4, 4)]);
+        assert_eq!(visual_row_count("ab\r\n", usize::MAX), 2);
+
+        // Lone CR files split into lines consistently with source_lines/line_col.
+        assert_eq!(visual_rows("hello\rworld", 80), vec![(0, 5), (6, 11)]);
+        assert_eq!(visual_row_count("hello\rworld", 80), 2);
+        assert_eq!(
+            visual_rows("a\rb\r", usize::MAX),
+            vec![(0, 1), (2, 3), (4, 4)]
+        );
+        assert_eq!(visual_row_count("a\rb\r", usize::MAX), 3);
+
+        // Mixed endings match row count across widths.
+        let mixed = "a\r\nb\rc\nd\r\n\r\n";
+        for cols in [0, 1, 2, 5, usize::MAX] {
+            assert_eq!(
+                visual_row_count_tabbed(mixed, cols, 4),
+                visual_rows_tabbed(mixed, cols, 4).len(),
+                "cols={cols}"
+            );
+        }
+    }
+
+    #[test]
+    fn range_utf16_matches_single_endpoint_conversions() {
+        let sample = "a😀éカ\r\n🔥z";
+        for s in 0..=sample.len() + 2 {
+            for e in 0..=sample.len() + 2 {
+                assert_eq!(
+                    range_to_utf16(sample, &(s..e)),
+                    offset_to_utf16(sample, s)..offset_to_utf16(sample, e),
+                    "range_to_utf16({s}..{e})"
+                );
+            }
+        }
+        let max_u16 = offset_to_utf16(sample, sample.len());
+        for s in 0..=max_u16 + 2 {
+            for e in 0..=max_u16 + 2 {
+                assert_eq!(
+                    range_from_utf16(sample, &(s..e)),
+                    offset_from_utf16(sample, s)..offset_from_utf16(sample, e),
+                    "range_from_utf16({s}..{e})"
+                );
+            }
         }
     }
 }

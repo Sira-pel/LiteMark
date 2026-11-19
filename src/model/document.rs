@@ -12,10 +12,11 @@ use crate::markdown::{
 
 use super::table_ops::{self, TableOp};
 use super::text_ops::{
-    find_matches, find_next, find_prev, format_replacement, home_offset, line_col, line_end,
-    line_ending_len, line_ending_len_before, line_start_flags, move_vertical_collapsed,
-    next_grapheme, previous_grapheme, replace_all, snap_off_ending_interior, Caret, DiffEdit,
-    HistoryRestore, SelectionSnap, UndoHistory, TAB_DISPLAY_COLUMNS,
+    count_line_endings, find_matches, find_next, find_prev, format_replacement, home_offset,
+    line_col, line_end, line_ending_len, line_ending_len_before, line_start_flags,
+    move_vertical_collapsed, next_grapheme, previous_grapheme, replace_all,
+    snap_off_ending_interior, Caret, DiffEdit, HistoryRestore, SelectionSnap, UndoHistory,
+    TAB_DISPLAY_COLUMNS,
 };
 
 mod blocks;
@@ -257,22 +258,73 @@ pub struct DocumentStats {
     pub reading_time_min: usize,
 }
 
+#[cfg(test)]
 pub fn compute_stats(content: &str) -> DocumentStats {
+    stats_and_line_endings(content).0
+}
+
+/// [`compute_stats`] plus the line endings it counted, which
+/// [`StagedStats`] keeps up to date from each edit.
+fn stats_and_line_endings(content: &str) -> (DocumentStats, usize) {
     let chars = content.chars().count();
     let words = content.split_whitespace().count();
-    let lines = if content.is_empty() {
-        1
-    } else {
-        content.lines().count().max(1)
-    };
-    let reading_time_min = (words / 200).max(1);
-
-    DocumentStats {
+    let endings = count_line_endings(content.as_bytes());
+    let stats = DocumentStats {
         words,
         chars,
-        lines,
-        reading_time_min,
+        lines: line_total(content, endings),
+        reading_time_min: (words / 200).max(1),
+    };
+    (stats, endings)
+}
+
+/// Lines in `content`, given its count of line endings (LF, CRLF or a lone
+/// CR, as the raw view's gutter counts them). A final line ending doesn't
+/// start a new line, and empty text is one line.
+fn line_total(content: &str, endings: usize) -> usize {
+    if content.ends_with(['\n', '\r']) {
+        endings.max(1)
+    } else {
+        endings + 1
     }
+}
+
+/// Line endings in `before + mid + after`. CRLF is two bytes, so one byte
+/// of context on each side of an edit catches every ending it joins or splits.
+fn window_line_endings(before: Option<u8>, mid: &str, after: Option<u8>) -> usize {
+    let mut window = Vec::with_capacity(mid.len() + 2);
+    window.extend(before);
+    window.extend_from_slice(mid.as_bytes());
+    window.extend(after);
+    count_line_endings(&window)
+}
+
+/// Incrementally maintained stats staged during `DocumentTab::edit` so
+/// `ensure_stats` can publish up-to-date counts in O(1) without rescanning the
+/// whole document on every keystroke.
+#[derive(Debug, Clone, Copy)]
+struct StagedStats {
+    revision: u64,
+    words: usize,
+    chars: usize,
+    line_endings: usize,
+}
+
+/// Count whitespace-delimited words across `prefix + mid + suffix`. Expanding
+/// an edited range by one char on each side captures every word-boundary
+/// transition affected by the edit.
+fn count_window_words(prefix: Option<char>, mid: &str, suffix: Option<char>) -> usize {
+    let mut words = 0usize;
+    let mut in_word = false;
+    for ch in prefix.into_iter().chain(mid.chars()).chain(suffix) {
+        if ch.is_whitespace() {
+            in_word = false;
+        } else if !in_word {
+            in_word = true;
+            words += 1;
+        }
+    }
+    words
 }
 
 #[derive(Debug, Clone)]
@@ -314,6 +366,7 @@ pub struct DocumentTab {
     /// `parsed()` update the cached parse instead of parsing everything.
     last_edit: Option<(u64, Range<usize>, usize)>,
     stats_revision: Option<u64>,
+    staged_stats: Option<StagedStats>,
     history: UndoHistory,
     /// Set right before the edit that wraps freshly typed text into a new
     /// formatted span, so that edit and the typing after it share one undo
@@ -349,7 +402,7 @@ impl DocumentTab {
             None => (content, false),
         };
         let file_type = FileType::from_filename(&title);
-        let stats = compute_stats(&content);
+        let (stats, line_endings) = stats_and_line_endings(&content);
         let default_style = indent_style(&title, file_type);
         let indent_style = if file_type.is_code() {
             detect_indent_style(&content, default_style)
@@ -385,6 +438,12 @@ impl DocumentTab {
             cached_parse: None,
             last_edit: None,
             stats_revision: Some(1),
+            staged_stats: Some(StagedStats {
+                revision: 1,
+                words: stats.words,
+                chars: stats.chars,
+                line_endings,
+            }),
             history: UndoHistory::default(),
             next_edit_opens_span_group: false,
             next_undo_caret: None,
@@ -417,6 +476,9 @@ impl DocumentTab {
         fresh.disk_version = self.disk_version.clone();
         fresh.revision = self.revision + 1;
         fresh.stats_revision = Some(fresh.revision);
+        if let Some(staged) = &mut fresh.staged_stats {
+            staged.revision = fresh.revision;
+        }
         let cursor = floor_boundary(
             &fresh.content,
             self.cursor_offset().min(fresh.content.len()),
@@ -595,6 +657,44 @@ impl DocumentTab {
         }
         let cursor_at = range.start + new_text.len();
         self.last_edit = Some((self.revision, range.clone(), new_text.len()));
+        if let Some(staged) = self.staged_stats {
+            let staged_next = (staged.revision == self.revision)
+                .then(|| {
+                    let old_slice = &self.content[range.clone()];
+                    let before = &self.content[..range.start];
+                    let after = &self.content[range.end..];
+                    // Counts in a window around the edit, before and after it.
+                    let shift =
+                        |total: usize, new: usize, old: usize| (total + new).checked_sub(old);
+                    let chars = shift(
+                        staged.chars,
+                        new_text.chars().count(),
+                        old_slice.chars().count(),
+                    )?;
+                    let (b, a) = (before.bytes().last(), after.bytes().next());
+                    let line_endings = shift(
+                        staged.line_endings,
+                        window_line_endings(b, new_text, a),
+                        window_line_endings(b, old_slice, a),
+                    )?;
+                    let (b, a) = (before.chars().next_back(), after.chars().next());
+                    let words = shift(
+                        staged.words,
+                        count_window_words(b, new_text, a),
+                        count_window_words(b, old_slice, a),
+                    )?;
+                    Some(StagedStats {
+                        revision: self.revision.wrapping_add(1),
+                        words,
+                        chars,
+                        line_endings,
+                    })
+                })
+                .flatten();
+            // A count that would go negative means the staged numbers are
+            // off; dropping them makes the next read recount from scratch.
+            self.staged_stats = staged_next;
+        }
         self.content.replace_range(range, new_text);
         let cursor = snap_off_ending_interior(&self.content, cursor_at);
         self.revision = self.revision.wrapping_add(1);
@@ -691,6 +791,25 @@ impl DocumentTab {
         find_matches(&self.content, term, match_case)
     }
 
+    pub fn select_match_in(
+        &mut self,
+        hits: &[Range<usize>],
+        current: Option<usize>,
+        forward: bool,
+    ) -> Option<usize> {
+        let index = if forward {
+            find_next(hits, self.cursor_offset(), current)
+        } else {
+            find_prev(hits, self.selection_range().start, current)
+        }?;
+        let hit = hits.get(index)?.clone();
+        self.caret.range = hit;
+        self.caret.reversed = false;
+        self.caret.preferred_col = None;
+        self.refresh_cursor();
+        Some(index)
+    }
+
     pub fn select_match(
         &mut self,
         term: &str,
@@ -699,17 +818,7 @@ impl DocumentTab {
         forward: bool,
     ) -> Option<usize> {
         let hits = find_matches(&self.content, term, match_case);
-        let index = if forward {
-            find_next(&hits, self.cursor_offset(), current)
-        } else {
-            find_prev(&hits, self.selection_range().start, current)
-        }?;
-        let hit = hits.get(index)?.clone();
-        self.caret.range = hit;
-        self.caret.reversed = false;
-        self.caret.preferred_col = None;
-        self.refresh_cursor();
-        Some(index)
+        self.select_match_in(&hits, current, forward)
     }
 
     pub fn replace_current_match(
@@ -743,18 +852,32 @@ impl DocumentTab {
     }
 
     pub fn refresh_stats(&mut self) {
-        let stats = compute_stats(&self.content);
+        let (stats, line_endings) = stats_and_line_endings(&self.content);
         self.word_count = stats.words;
         self.char_count = stats.chars;
         self.line_count = stats.lines;
         self.reading_time_min = stats.reading_time_min;
         self.stats_revision = Some(self.revision);
+        self.staged_stats = Some(StagedStats {
+            revision: self.revision,
+            words: stats.words,
+            chars: stats.chars,
+            line_endings,
+        });
     }
 
     /// Compute word/char/line stats only when a reader (the status bar) needs
     /// them, keyed by document revision so edits themselves skip the scan.
     pub fn ensure_stats(&mut self) {
         if self.stats_revision == Some(self.revision) {
+            return;
+        }
+        if let Some(staged) = self.staged_stats.filter(|s| s.revision == self.revision) {
+            self.word_count = staged.words;
+            self.char_count = staged.chars;
+            self.line_count = line_total(&self.content, staged.line_endings);
+            self.reading_time_min = (staged.words / 200).max(1);
+            self.stats_revision = Some(self.revision);
             return;
         }
         self.refresh_stats();
@@ -786,6 +909,7 @@ impl DocumentTab {
             restore.replaced.0.clone(),
             restore.replaced.1,
         ));
+        self.staged_stats = None;
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);
@@ -803,6 +927,7 @@ impl DocumentTab {
             restore.replaced.0.clone(),
             restore.replaced.1,
         ));
+        self.staged_stats = None;
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);

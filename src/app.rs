@@ -199,6 +199,8 @@ pub struct LiteMarkApp {
     /// instead of copying every match.
     pub find_hits: Rc<[Range<usize>]>,
     pub find_index: Option<usize>,
+    /// `(tab_id, revision, term, match_case)` that `find_hits` was computed for.
+    find_hits_key: Option<(String, u64, String, bool)>,
     pub applied_focus: Option<FocusSlot>,
     pub close_hook_installed: bool,
     pub allow_window_close: bool,
@@ -555,6 +557,7 @@ impl LiteMarkApp {
             replace_field,
             find_hits: Vec::new().into(),
             find_index: None,
+            find_hits_key: None,
             applied_focus: None,
             close_hook_installed: false,
             allow_window_close: false,
@@ -683,6 +686,7 @@ impl LiteMarkApp {
             replace_field: Self::dummy_line_field(cx, "replace-field"),
             find_hits: Vec::new().into(),
             find_index: None,
+            find_hits_key: None,
             applied_focus: None,
             close_hook_installed: false,
             allow_window_close: false,
