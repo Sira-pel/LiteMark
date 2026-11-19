@@ -72,6 +72,8 @@ pub fn build_settings_menu_items(
     check_for_updates: bool,
     on_toggle_update_checks: impl Fn(&mut App) + 'static + Clone,
     on_check_now: impl Fn(&mut App) + 'static + Clone,
+    reopen_tabs: bool,
+    on_toggle_reopen_tabs: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
     let t_dark = on_set_theme.clone();
     let t_light = on_set_theme.clone();
@@ -123,12 +125,13 @@ pub fn build_settings_menu_items(
         ),
         MenuItem::divider(),
         MenuItem {
-            label: "Font size",
+            label: "Font size".into(),
             icon: None,
             shortcut: None,
             kind: super::menu::MenuItemKind::Submenu(font_sub_items),
             disabled: false,
             hint: Some(current_size_label.into()),
+            detail: None,
             action: std::sync::Arc::new(|_, _| {}),
         },
         MenuItem::divider(),
@@ -138,6 +141,11 @@ pub fn build_settings_menu_items(
         }),
         MenuItem::check("Check automatically", check_for_updates, None, {
             let t = on_toggle_update_checks.clone();
+            move |_, cx| t(cx)
+        }),
+        MenuItem::divider(),
+        MenuItem::check("Reopen notes on startup", reopen_tabs, None, {
+            let t = on_toggle_reopen_tabs.clone();
             move |_, cx| t(cx)
         }),
         MenuItem::divider(),
@@ -170,6 +178,8 @@ mod tests {
             true,
             |_| {},
             |_| {},
+            true,
+            |_| {},
         );
 
         let font_item = items
@@ -182,7 +192,7 @@ mod tests {
         );
 
         if let MenuItemKind::Submenu(sub) = &font_item.kind {
-            let labels: Vec<&str> = sub.iter().map(|s| s.label).collect();
+            let labels: Vec<&str> = sub.iter().map(|s| s.label.as_ref()).collect();
             assert_eq!(
                 labels,
                 vec![
@@ -224,12 +234,19 @@ mod tests {
                 enabled,
                 |_| {},
                 |_| {},
+                !enabled,
+                |_| {},
             );
             let item = items
                 .iter()
                 .find(|i| i.label == "Check automatically")
                 .expect("item exists");
             assert!(matches!(item.kind, MenuItemKind::Check(c) if c == enabled));
+            let reopen = items
+                .iter()
+                .find(|i| i.label == "Reopen notes on startup")
+                .expect("reopen item exists");
+            assert!(matches!(reopen.kind, MenuItemKind::Check(c) if c != enabled));
         }
     }
 }

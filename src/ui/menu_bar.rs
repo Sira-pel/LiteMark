@@ -144,9 +144,50 @@ where
     }
 }
 
+/// One recent note for the File menu: name, dimmed folder, and its path.
+pub struct RecentNoteEntry {
+    pub name: SharedString,
+    pub folder: SharedString,
+    pub path: std::path::PathBuf,
+}
+
+/// Items of the "Open Recent" submenu: the notes, a separator and "Clear
+/// recent", or a disabled "No recent notes" when there are none.
+pub fn build_recent_menu_items(
+    entries: Vec<RecentNoteEntry>,
+    on_open_recent: impl Fn(std::path::PathBuf, &mut App) + 'static + Clone,
+    on_clear_recent: impl Fn(&mut App) + 'static + Clone,
+) -> Vec<MenuItem> {
+    if entries.is_empty() {
+        return vec![MenuItem::disabled_action("No recent notes", None, None)];
+    }
+    let mut items: Vec<MenuItem> = entries
+        .into_iter()
+        .map(|entry| {
+            let f = on_open_recent.clone();
+            let path = entry.path;
+            MenuItem::entry(entry.name, Some(entry.folder), move |_, cx| {
+                f(path.clone(), cx)
+            })
+        })
+        .collect();
+    items.push(MenuItem::divider());
+    items.push(MenuItem::action(
+        "Clear recent",
+        None,
+        None,
+        move |_, cx| on_clear_recent(cx),
+    ));
+    items
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_file_menu_items(
     has_pdf: bool,
+    recent: Vec<MenuItem>,
+    // The narrow-window menu already shows File as a submenu, and submenus
+    // don't nest, so there the recent notes are listed inline instead.
+    recent_inline: bool,
     on_new_note: impl Fn(&mut App) + 'static + Clone,
     on_new_folder: impl Fn(&mut App) + 'static + Clone,
     on_open_file: impl Fn(&mut App) + 'static + Clone,
@@ -172,6 +213,16 @@ pub fn build_file_menu_items(
             let f = on_open_file.clone();
             move |_, cx| f(cx)
         }),
+    ];
+    if recent_inline {
+        items.push(MenuItem::divider());
+        items.push(MenuItem::heading("OPEN RECENT"));
+        items.extend(recent);
+        items.push(MenuItem::divider());
+    } else {
+        items.push(MenuItem::submenu("Open Recent", None, recent));
+    }
+    items.extend([
         MenuItem::action("Change folder…", None, None, {
             let f = on_choose_folder.clone();
             move |_, cx| f(cx)
@@ -198,7 +249,7 @@ pub fn build_file_menu_items(
             move |_, cx| f(cx)
         }),
         MenuItem::disabled_action("Export as PDF", None, Some("Soon")),
-    ];
+    ]);
 
     if has_pdf {
         items.push(MenuItem::action("Original PDF", None, None, {
@@ -387,4 +438,64 @@ pub fn build_view_menu_items(
     };
     items.extend(shared);
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::MenuItemKind;
+    // `use gpui::*` re-exports a `test` attribute that is not Rust's
+    // `#[test]`. Pin the std one so these stay ordinary unit tests.
+    use ::core::prelude::v1::test as std_test;
+
+    fn file_menu(recent: Vec<MenuItem>, inline: bool) -> Vec<MenuItem> {
+        let n = |_: &mut App| {};
+        build_file_menu_items(false, recent, inline, n, n, n, n, n, n, n, n, n, n, n)
+    }
+
+    fn labels(items: &[MenuItem]) -> Vec<&str> {
+        items.iter().map(|it| it.label.as_ref()).collect()
+    }
+
+    #[std_test]
+    fn no_recent_notes_shows_one_disabled_item() {
+        let items = build_recent_menu_items(Vec::new(), |_, _| {}, |_| {});
+        assert_eq!(labels(&items), ["No recent notes"]);
+        assert!(items[0].disabled);
+    }
+
+    #[std_test]
+    fn recent_notes_list_names_with_folders_then_clear() {
+        let entries = vec![
+            RecentNoteEntry {
+                name: "a.md".into(),
+                folder: "Notes".into(),
+                path: "/n/a.md".into(),
+            },
+            RecentNoteEntry {
+                name: "b.md".into(),
+                folder: "work".into(),
+                path: "/n/work/b.md".into(),
+            },
+        ];
+        let items = build_recent_menu_items(entries, |_, _| {}, |_| {});
+        assert_eq!(labels(&items), ["a.md", "b.md", "", "Clear recent"]);
+        assert_eq!(items[1].detail.as_ref().map(|d| d.as_ref()), Some("work"));
+        assert!(matches!(items[2].kind, MenuItemKind::Divider));
+    }
+
+    #[std_test]
+    fn open_recent_follows_open_in_the_file_menu() {
+        let recent = build_recent_menu_items(Vec::new(), |_, _| {}, |_| {});
+        let items = file_menu(recent.clone(), false);
+        let open = labels(&items).iter().position(|l| *l == "Open…").unwrap();
+        assert_eq!(items[open + 1].label, "Open Recent");
+        assert!(matches!(items[open + 1].kind, MenuItemKind::Submenu(_)));
+
+        // The narrow-window menu can't nest submenus, so it lists them inline.
+        let inline = file_menu(recent, true);
+        let l = labels(&inline);
+        let open = l.iter().position(|l| *l == "Open…").unwrap();
+        assert_eq!(l[open + 2..open + 4], ["OPEN RECENT", "No recent notes"]);
+    }
 }

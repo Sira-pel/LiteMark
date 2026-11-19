@@ -24,6 +24,7 @@ impl Render for LiteMarkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::resolve(self.settings.theme, window.appearance());
         self.sync_frame_state(&theme, window, cx);
+        self.sync_tab_settings();
 
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.ensure_stats();
@@ -324,6 +325,36 @@ impl Render for LiteMarkApp {
             move |cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.handle_toggle_update_checks();
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_toggle_reopen_tabs = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_toggle_reopen_tabs();
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_open_recent = {
+            let view = view.clone();
+            move |path: PathBuf, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.open_recent(path, cx);
+                    cx.notify();
+                });
+            }
+        };
+
+        let on_clear_recent = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.clear_recent_notes();
                     cx.notify();
                 });
             }
@@ -984,6 +1015,10 @@ impl Render for LiteMarkApp {
         )
         .into_any_element();
 
+        // Recent notes are checked on disk once per File menu opening.
+        if !matches!(self.open_menu, Some(MenuId::File | MenuId::Hamburger)) {
+            self.recent_menu_cache = None;
+        }
         let menu_overlay: Option<AnyElement> = if let Some(open_id) = self.open_menu {
             if open_id == MenuId::Table {
                 let table_menu_x = if is_narrow {
@@ -1014,6 +1049,28 @@ impl Render for LiteMarkApp {
                     .into_any_element(),
                 )
             } else {
+                let recent_items = if matches!(open_id, MenuId::File | MenuId::Hamburger) {
+                    let root = self.workspace.folder_path.clone();
+                    let entries = self
+                        .recent_notes_for_menu()
+                        .into_iter()
+                        .map(|path| {
+                            let (name, folder) = recent_note_label(&path, &root);
+                            RecentNoteEntry {
+                                name: name.into(),
+                                folder: folder.into(),
+                                path,
+                            }
+                        })
+                        .collect();
+                    build_recent_menu_items(
+                        entries,
+                        on_open_recent.clone(),
+                        on_clear_recent.clone(),
+                    )
+                } else {
+                    Vec::new()
+                };
                 let (point, anchor, width, items) = match open_id {
                     MenuId::File => (
                         Point::new(px(8.0), px(76.0)),
@@ -1021,6 +1078,8 @@ impl Render for LiteMarkApp {
                         px(220.0),
                         build_file_menu_items(
                             active_tab_has_pdf,
+                            recent_items,
+                            false,
                             // "New note" starts the inline sidebar editor so the
                             // user names the file, not an auto "Untitled-N" tab.
                             {
@@ -1092,11 +1151,15 @@ impl Render for LiteMarkApp {
                             self.settings.check_for_updates,
                             on_toggle_update_checks.clone(),
                             on_check_updates_now.clone(),
+                            self.settings.reopen_tabs_on_startup,
+                            on_toggle_reopen_tabs.clone(),
                         ),
                     ),
                     MenuId::Hamburger => {
                         let file_items = build_file_menu_items(
                             active_tab_has_pdf,
+                            recent_items,
+                            true,
                             // "New note" starts the inline sidebar editor, same as
                             // the File menu.
                             {
