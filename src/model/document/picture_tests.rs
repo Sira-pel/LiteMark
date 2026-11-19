@@ -300,3 +300,39 @@ after
         )
     );
 }
+
+#[test]
+fn formatting_never_wraps_a_picture() {
+    let src = format!("intro\n{PIC}\n");
+    let start = start_of(&src);
+    for cmd in [
+        "bold",
+        "italic",
+        "underline",
+        "strike",
+        "code",
+        "h1",
+        "ul",
+        "quote",
+    ] {
+        let mut d = doc(&src);
+        d.select_picture(start..start + PIC.len());
+        d.apply_format_in_mode(cmd, MODE);
+        assert_eq!(d.content, src, "{cmd} changed the picture line");
+    }
+}
+
+#[test]
+fn word_deletes_remove_the_picture_not_pieces_of_its_markdown() {
+    let src = format!("intro\n{PIC}\nafter\n");
+    let start = start_of(&src);
+    let mut d = doc(&src);
+    d.place(start + PIC.len(), false);
+    d.delete_word_left();
+    assert_eq!(d.content, "intro\nafter\n");
+
+    let mut d = doc(&src);
+    d.place(start, false);
+    d.delete_word_right();
+    assert_eq!(d.content, "intro\nafter\n");
+}

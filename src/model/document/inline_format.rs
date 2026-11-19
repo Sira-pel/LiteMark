@@ -16,6 +16,17 @@ impl DocumentTab {
         // here so text typed after the toggle starts a new step.
         self.history.seal();
 
+        // A picture is not text: bold, links, headings and the like would
+        // wrap its Markdown and turn it into raw text.
+        let sel = self.selection_range();
+        if mode == ViewMode::Wysiwyg
+            && self
+                .picture_block_at(sel.start)
+                .is_some_and(|block| sel.end <= block.end)
+        {
+            return;
+        }
+
         // 1. Block-level formats: h1, h2, h3, ul, ol, checklist, quote
         let block_target = match cmd {
             "h1" => Some(BlockFormatTarget::Heading(1)),

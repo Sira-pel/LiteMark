@@ -650,6 +650,9 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
+        if self.picture_remove(false) {
+            return;
+        }
         if !self.caret.range.is_empty() {
             self.edit(self.selection_range(), "");
         } else {
@@ -663,6 +666,9 @@ impl DocumentTab {
 
     pub fn delete_word_right(&mut self) {
         if self.is_read_only() {
+            return;
+        }
+        if self.picture_remove(true) || self.picture_guard_join() {
             return;
         }
         if !self.caret.range.is_empty() {
