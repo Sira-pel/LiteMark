@@ -25,6 +25,7 @@ impl Render for LiteMarkApp {
         let theme = Theme::resolve(self.settings.theme, window.appearance());
         self.sync_frame_state(&theme, window, cx);
         self.sync_tab_settings();
+        self.schedule_tab_settings_save(cx);
 
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.ensure_stats();
@@ -1051,9 +1052,17 @@ impl Render for LiteMarkApp {
             } else {
                 let recent_items = if matches!(open_id, MenuId::File | MenuId::Hamburger) {
                     let root = self.workspace.folder_path.clone();
+                    // The narrow-window menu lists recent notes inline, so
+                    // only the newest few, to keep that menu short.
+                    let shown = if open_id == MenuId::Hamburger {
+                        MAX_INLINE_RECENT_NOTES
+                    } else {
+                        usize::MAX
+                    };
                     let entries = self
                         .recent_notes_for_menu()
                         .into_iter()
+                        .take(shown)
                         .map(|path| {
                             let (name, folder) = recent_note_label(&path, &root);
                             RecentNoteEntry {
@@ -2046,6 +2055,7 @@ impl LiteMarkApp {
         self.coast_scroll(window);
         self.install_close_hook(window, cx);
         if self.allow_window_close {
+            self.flush_tab_settings();
             window.remove_window();
         }
         if self.show_find_replace

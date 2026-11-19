@@ -230,6 +230,12 @@ pub struct LiteMarkApp {
     /// Recent notes that still exist, checked when the File menu opens
     /// rather than on every frame it is open.
     recent_menu_cache: Option<Vec<PathBuf>>,
+    /// The open tabs or recent notes changed since settings.json was last
+    /// written. They are written a moment later, or when the window closes,
+    /// so switching tabs quickly doesn't write the file each time.
+    tab_settings_dirty: bool,
+    /// A delayed write of the tab settings is already scheduled.
+    tab_settings_save_pending: bool,
     pub rename_target: Option<SidebarTarget>,
     pub rename_value: String,
     pub rename_field: Entity<LineField>,
@@ -629,6 +635,8 @@ impl LiteMarkApp {
             workspace_menu_recents: Vec::new(),
             recent_seen: None,
             recent_menu_cache: None,
+            tab_settings_dirty: false,
+            tab_settings_save_pending: false,
             rename_target: None,
             rename_value: String::new(),
             rename_field,
@@ -772,6 +780,8 @@ impl LiteMarkApp {
             workspace_menu_recents: Vec::new(),
             recent_seen: None,
             recent_menu_cache: None,
+            tab_settings_dirty: false,
+            tab_settings_save_pending: false,
             rename_target: None,
             rename_value: String::new(),
             rename_field: Self::dummy_line_field(cx, "rename-field"),
@@ -846,6 +856,8 @@ impl LiteMarkApp {
     /// Save settings, telling the user when it fails. A failure that keeps
     /// happening (full disk, read-only config folder) is shown only once.
     fn save_settings(&mut self) {
+        // Every write includes the tab settings, so none are pending after it.
+        self.tab_settings_dirty = false;
         match self.settings.save() {
             Ok(()) => self.settings_save_failed = false,
             Err(err) => {

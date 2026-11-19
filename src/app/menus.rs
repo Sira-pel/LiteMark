@@ -527,6 +527,7 @@ impl LiteMarkApp {
         window.on_window_should_close(cx, move |_window, cx| {
             view.update(cx, |this, cx| {
                 if this.allow_window_close {
+                    this.flush_tab_settings();
                     return true;
                 }
                 if this.tabs.iter().any(|tab| tab.is_modified) {
@@ -534,6 +535,7 @@ impl LiteMarkApp {
                     cx.notify();
                     false
                 } else {
+                    this.flush_tab_settings();
                     true
                 }
             })

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 /// Most notes the recent list keeps.
 pub const MAX_RECENT_NOTES: usize = 20;
+/// Most recent notes the narrow-window menu lists inline.
+pub const MAX_INLINE_RECENT_NOTES: usize = 5;
 
 /// Put `path` at the front of `list`, dropping any older copy and anything
 /// past the cap. Returns whether the list changed.

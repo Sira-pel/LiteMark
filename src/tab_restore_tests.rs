@@ -194,3 +194,38 @@ fn the_recent_menu_drops_missing_notes() {
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[std_test]
+fn tab_switches_are_written_once_after_a_pause_or_on_close() {
+    let root = temp_workspace("batch", &["a.md", "b.md"]);
+    let (a, b) = (root.join("a.md"), root.join("b.md"));
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, cx| {
+        use_workspace(app, &root);
+        app.open_loaded_tab("a.md".into(), "# a.md\n".into(), Some(a.clone()), None);
+        app.sync_tab_settings();
+        assert!(app.tab_settings_dirty, "marked, not written yet");
+        app.schedule_tab_settings_save(cx);
+        assert!(app.tab_settings_save_pending);
+        app.open_loaded_tab("b.md".into(), "# b.md\n".into(), Some(b.clone()), None);
+        app.sync_tab_settings();
+        // A second switch joins the write already scheduled.
+        app.schedule_tab_settings_save(cx);
+        assert!(app.tab_settings_dirty);
+    });
+    cx.executor().advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    view.update(cx, |app, _cx| {
+        assert!(!app.tab_settings_dirty, "written after the pause");
+        assert!(!app.tab_settings_save_pending);
+        assert_eq!(app.settings.open_tabs, [a.clone(), b.clone()]);
+
+        // Closing the window writes what is pending straight away.
+        app.open_loaded_tab("a.md".into(), "# a.md\n".into(), Some(a.clone()), None);
+        app.flush_tab_settings();
+        assert!(!app.tab_settings_dirty);
+        assert_eq!(app.settings.active_tab, Some(a.clone()));
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
