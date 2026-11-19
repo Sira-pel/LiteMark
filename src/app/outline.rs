@@ -30,9 +30,19 @@ impl LiteMarkApp {
         !self.zen_mode && !self.outline_headings().is_empty()
     }
 
+    /// The card is pinned and the editor is wide enough to keep it open
+    /// beside the text. In a narrow editor a pinned card would squeeze the
+    /// text, so it shows as the strip instead (and still opens on hover).
+    fn outline_pinned_open(&self) -> bool {
+        let width = self.editor_scroll.bounds().size.width;
+        // Before the first layout the width is unknown: keep it pinned.
+        self.settings.outline_pinned
+            && (width <= px(0.0) || width >= px(OUTLINE_PINNED_MIN_EDITOR_W))
+    }
+
     /// Whether the open card (not just the strip) is showing.
     pub(super) fn outline_expanded(&self) -> bool {
-        self.settings.outline_pinned || self.outline_hover
+        self.outline_pinned_open() || self.outline_hover
     }
 
     /// The outline element and the right padding the editor text needs for
@@ -92,10 +102,12 @@ impl LiteMarkApp {
             theme,
         )
         .into_any_element();
-        let inset = if self.settings.outline_pinned {
+        // Keep the text clear of whichever part is always there: the pinned
+        // card, or the strip. A card opened by hovering floats over the text.
+        let inset = if self.outline_pinned_open() {
             px(OUTLINE_PINNED_INSET)
         } else {
-            px(0.0)
+            px(OUTLINE_STRIP_INSET)
         };
         Some((element, inset))
     }

@@ -12,6 +12,13 @@ pub const OUTLINE_CARD_W: f32 = 220.0;
 pub const OUTLINE_EDGE: f32 = 8.0;
 /// Room the editor text must leave on the right while the card is pinned.
 pub const OUTLINE_PINNED_INSET: f32 = OUTLINE_CARD_W + 2.0 * OUTLINE_EDGE;
+/// Width of the collapsed strip, which the editor text also leaves free.
+pub const OUTLINE_STRIP_W: f32 = 26.0;
+/// Room the editor text leaves on the right for the collapsed strip.
+pub const OUTLINE_STRIP_INSET: f32 = OUTLINE_STRIP_W;
+/// Narrowest editor that keeps a pinned card open. Below it the card would
+/// leave the text too little room, so it shows as the strip.
+pub const OUTLINE_PINNED_MIN_EDITOR_W: f32 = 640.0;
 const STRIP_PITCH: f32 = 8.0;
 const STRIP_MAX_LINES: usize = 40;
 
@@ -165,7 +172,7 @@ pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
             .map(|(index, _)| strip_width(props.items[*index].level))
             .collect();
         root.right(px(0.0))
-            .w(px(26.0))
+            .w(px(OUTLINE_STRIP_W))
             .py(px(8.0))
             .pr(px(8.0))
             .flex()
