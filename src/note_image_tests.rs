@@ -103,12 +103,12 @@ fn an_image_line_takes_the_pictures_height() {
     let (_, _, intro_y, _) = row_at(&view, &cx, 0);
     assert_eq!(image_y, intro_y + text_h);
 
-    // Caret on the image line: its Markdown source, one text row high.
+    // Caret on the image line: the picture stays.
     place_caret(&view, &mut cx, image_start() + 3);
-    let (_, _, _, source_h) = row_at(&view, &cx, image_start());
-    assert_eq!(source_h, text_h);
+    let (_, _, _, on_line_h) = row_at(&view, &cx, image_start());
+    assert_eq!(on_line_h, SMALL_PICTURE_ROW);
 
-    // And the picture is back once the caret leaves.
+    // And it is unchanged once the caret leaves.
     place_caret(&view, &mut cx, 0);
     assert_eq!(row_at(&view, &cx, image_start()).3, SMALL_PICTURE_ROW);
     let _ = std::fs::remove_dir_all(&dir);
@@ -243,11 +243,10 @@ fn a_far_image_keeps_its_height_without_being_loaded() {
         f32::from(app.editor_paint.borrow().total_height)
     });
     place_caret(&view, &mut cx, start + 3);
-    // Revealing the source shrinks the block to one text row.
-    let text_h = text_row_height(&view, &cx);
     let total_with_source = view.read_with(&cx, |app, _| {
         f32::from(app.editor_paint.borrow().total_height)
     });
-    assert!((total - total_with_source - (SMALL_PICTURE_ROW - text_h)).abs() < 0.5);
+    // The caret on the line does not change the block's height.
+    assert!((total - total_with_source).abs() < 0.5);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -560,9 +560,15 @@ impl LiteMarkApp {
                     Arc::new({
                         let app_handle = app_handle.clone();
                         move |_text, _previous, app| {
-                            app_handle
-                                .update(app, |this, cx| this.quick_open_activate(None, cx))
-                                .ok();
+                            // Enter arrives while the field is being updated, and
+                            // activating clears that same field. Wait until the
+                            // update is over.
+                            let app_handle = app_handle.clone();
+                            app.defer(move |app| {
+                                app_handle
+                                    .update(app, |this, cx| this.quick_open_activate(None, cx))
+                                    .ok();
+                            });
                         }
                     }),
                     Arc::new({

@@ -2279,15 +2279,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 continue;
             }
 
-            // A line that is only an image becomes a picture block, unless the
-            // caret is on it (then the Markdown source is shown).
+            // A line that is only an image becomes a picture block, also while
+            // the caret is on it (the block is outlined then).
             if matches!(parsed_line.kind, LineKind::Paragraph) {
                 let src = parsed_line.source.clone();
                 let line_text = self.content.get(src.clone()).unwrap_or("");
                 let caret_on_line = self.selection.is_empty()
                     && self.selection.start >= src.start
                     && self.selection.start <= src.end;
-                let image = if !caret_on_line && line_text.trim_start().starts_with("![") {
+                let image = if line_text.trim_start().starts_with("![") {
                     parse_image_line(line_text)
                 } else {
                     None
@@ -2411,6 +2411,13 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                     ));
                                 }
                             }
+                        }
+                        if caret_on_line {
+                            let mut q = fill(block_bounds, gpui::transparent_black());
+                            q.corner_radii = Corners::all(IMAGE_RADIUS);
+                            q.border_widths = Edges::all(px(2.0));
+                            q.border_color = self.cursor_color;
+                            quads.push(q);
                         }
                         if !self.selection.is_empty()
                             && self.selection.start <= src.end
