@@ -201,3 +201,38 @@ fn delete_at_the_end_of_the_line_above_selects_the_picture() {
     assert_eq!(d.content, src);
     assert_eq!(d.selected_picture(), Some(start..start + PIC.len()));
 }
+
+#[test]
+fn backspace_below_a_picture_selects_it_instead_of_joining() {
+    let src = format!("{PIC}\nafter\n");
+    let mut d = doc(&src);
+    d.place(PIC.len() + 1, false);
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, src);
+    assert_eq!(d.selected_picture(), Some(0..PIC.len()));
+}
+
+#[test]
+fn delete_right_after_a_picture_steps_to_the_next_line() {
+    let src = format!("{PIC}\nafter\n");
+    let mut d = doc(&src);
+    d.place(PIC.len(), false);
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, src);
+    assert_eq!(d.cursor_offset(), PIC.len() + 1);
+}
+
+#[test]
+fn cancelled_input_method_text_takes_its_line_back() {
+    for (src, range) in [
+        (format!("{PIC}\nafter\n"), 0..PIC.len()),
+        (format!("{PIC}\n"), 0..0),
+    ] {
+        let mut d = doc(&src);
+        let at = d.picture_open_line(&range).expect("on a picture");
+        d.edit(at.clone(), "あ");
+        d.edit(at.start..at.start + "あ".len(), "");
+        d.cancel_picture_ime_line();
+        assert_eq!(d.content, src);
+    }
+}

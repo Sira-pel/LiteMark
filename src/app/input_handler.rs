@@ -59,6 +59,9 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.ime_opened_line = None;
+        }
         if self.table_drag.is_some() || self.table_drag_press_held {
             let (drag, insert) = clear_drag_for_key(self.table_drag.take(), "key", text);
             self.table_drag = drag;
@@ -257,6 +260,7 @@ impl EntityInputHandler for LiteMarkApp {
         if let Some(tab) = self.active_tab_mut() {
             tab.edit(range, new_text);
             if new_text.is_empty() {
+                tab.cancel_picture_ime_line();
                 tab.marked_range = None;
             } else {
                 let end = (start + new_text.len()).min(tab.content.len());

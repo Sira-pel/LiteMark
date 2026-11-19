@@ -378,19 +378,18 @@ impl LiteMarkApp {
             } else {
                 tab.picture_block_at(offset)
             };
-            if let Some(block) = block {
+            if let Some(block) = block.clone().filter(|_| hit_picture) {
                 // A picture is one block: a click selects it, a double-click
                 // shows its Markdown.
                 on_picture = true;
-                if hit_picture {
-                    tab.select_picture(block);
-                    if event.click_count == 2 {
-                        tab.show_picture_source();
-                    }
-                } else {
-                    // Empty space beside the picture: the caret goes after it.
-                    tab.place(block.end, false);
+                tab.select_picture(block);
+                if event.click_count == 2 {
+                    tab.show_picture_source();
                 }
+            } else if let Some(block) = block {
+                // Empty space beside the picture: the caret goes after it,
+                // and dragging from here selects text as usual.
+                tab.place(block.end, false);
             } else if event.click_count >= 3 {
                 tab.place(offset, false);
                 tab.select_line();

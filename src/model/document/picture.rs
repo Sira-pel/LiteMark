@@ -136,9 +136,54 @@ impl DocumentTab {
         } else {
             target.start + nl.len()
         };
+        let before = at == target.start;
+        self.ime_opened_line = Some((target.start..target.start + nl.len(), before));
         self.caret.move_to(floor_boundary(&self.content, at));
         self.refresh_cursor();
         Some(at..at)
+    }
+
+    /// Input-method text was cancelled: take back the line opened for it.
+    pub fn cancel_picture_ime_line(&mut self) {
+        let Some((range, before)) = self.ime_opened_line.take() else {
+            return;
+        };
+        let nl_ok = self
+            .content
+            .get(range.clone())
+            .is_some_and(|s| s == "\n" || s == "\r\n");
+        let empty = if before {
+            home_offset(&self.content, range.start) == range.start
+        } else {
+            line_end(&self.content, range.end) == range.end
+        };
+        if nl_ok && empty {
+            self.edit(range.clone(), "");
+            self.caret
+                .move_to(floor_boundary(&self.content, range.start));
+            self.refresh_cursor();
+        }
+    }
+
+    /// Backspace at the start of the text below a picture selects the
+    /// picture instead of joining the text onto its Markdown.
+    pub(super) fn picture_guard_join_back(&mut self) -> bool {
+        let sel = self.selection_range();
+        if !sel.is_empty() || sel.start == 0 {
+            return false;
+        }
+        let at = sel.start;
+        if home_offset(&self.content, at) != at || line_end(&self.content, at) == at {
+            return false;
+        }
+        let prev_end = at - line_ending_len_before(&self.content, at);
+        match self.picture_block_at(prev_end) {
+            Some(block) if block.end == prev_end => {
+                self.select_picture(block);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Delete at the end of the line above a picture selects the picture
@@ -189,6 +234,17 @@ impl DocumentTab {
             let prev_end = block.start - before;
             if home_offset(&self.content, prev_end) < prev_end {
                 self.place(prev_end, false);
+                return true;
+            }
+            return false;
+        }
+        // Delete just after a picture would join the next line's text onto
+        // its Markdown: step to that line instead.
+        if forward && sel.is_empty() && sel.start == block.end {
+            let ending = line_ending_len(&self.content, block.end);
+            let next = block.end + ending;
+            if ending > 0 && line_end(&self.content, next) > next {
+                self.place(next, false);
                 return true;
             }
             return false;
