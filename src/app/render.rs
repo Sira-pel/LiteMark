@@ -2,6 +2,24 @@
 
 use super::*;
 
+impl LiteMarkApp {
+    /// Words in the active tab's selection, or `None` when nothing is
+    /// selected. Cached until the tab, its text or the selection changes.
+    fn selection_word_count(&mut self) -> Option<usize> {
+        let tab = self.tabs.iter().find(|t| t.id == self.active_tab_id)?;
+        let range = tab.selection_range();
+        if let Some((id, revision, cached_range, words)) = &self.selection_words {
+            if *id == tab.id && *revision == tab.revision && *cached_range == range {
+                return *words;
+            }
+        }
+        let text = tab.content.get(range.clone()).unwrap_or("");
+        let words = (!text.is_empty()).then(|| text.split_whitespace().count());
+        self.selection_words = Some((tab.id.clone(), tab.revision, range, words));
+        words
+    }
+}
+
 impl Render for LiteMarkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::resolve(self.settings.theme, window.appearance());
@@ -10,6 +28,7 @@ impl Render for LiteMarkApp {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.ensure_stats();
         }
+        let stats_selection = self.selection_word_count();
         // Borrow the tab only for the few fields the chrome reads. Cloning it
         // here copied its whole text and undo history on every frame.
         let fallback_tab;
@@ -34,13 +53,6 @@ impl Render for LiteMarkApp {
         let stats_line = active_tab.cursor_line;
         let stats_words = active_tab.word_count;
         let stats_chars = active_tab.char_count;
-        let stats_selection = {
-            let text = active_tab
-                .content
-                .get(active_tab.selection_range())
-                .unwrap_or("");
-            (!text.is_empty()).then(|| text.split_whitespace().count())
-        };
         let active_tab_has_pdf = active_tab.file_type == FileType::Pdf;
         let pdf_page_count = active_tab.pdf_page_count;
         let is_max = window.is_maximized();

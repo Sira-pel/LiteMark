@@ -769,7 +769,8 @@ impl LiteMarkApp {
                     }
                     type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
                     tab.is_modified = false;
-                    tab.disk_version = disk_version(&path, &tab.file_text());
+                    let version = disk_version(&path, &tab.file_text_ref());
+                    tab.disk_version = version;
                     let title = tab.title.clone();
                     self.show_toast(format!("Saved {title}"), cx);
                 }
