@@ -930,7 +930,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_cut(&mut self, cx: &mut App) {
-        if self.block_table_drag_edit() {
+        // A prompt or the quick-open pop-up is in front of the note: the
+        // keys must not change the note behind it.
+        if self.input_blocked() || self.block_table_drag_edit() {
             return;
         }
         let Some(item) = self.selection_clipboard_item() else {
@@ -955,7 +957,9 @@ impl LiteMarkApp {
     }
 
     pub fn handle_paste(&mut self, cx: &mut Context<Self>) {
-        if self.block_table_drag_edit() {
+        // As for cut: nothing goes into the note behind a pop-up (a pasted
+        // image would also write a file).
+        if self.input_blocked() || self.block_table_drag_edit() {
             return;
         }
         if let Some(item) = cx.read_from_clipboard() {

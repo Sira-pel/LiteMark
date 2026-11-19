@@ -254,3 +254,21 @@ fn an_image_dropped_from_the_notes_own_assets_is_linked_not_copied() {
     assert_eq!(files.len(), 1, "no pic-2.png copy");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[std_test]
+fn nothing_is_pasted_into_the_note_behind_the_quick_open_pop_up() {
+    let dir = folder("paste-behind-popup");
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, cx| app.open_quick_open(QuickMode::Notes, cx));
+    for item in [
+        ClipboardItem::new_string(" plus".into()),
+        ClipboardItem::new_image(&clipboard_png()),
+    ] {
+        cx.write_to_clipboard(item);
+        view.update(&mut cx, |app, cx| app.handle_paste(cx));
+        cx.run_until_parked();
+        assert_eq!(content(&view, &cx), NOTE);
+    }
+    assert!(!dir.join("assets").exists(), "no image file was written");
+    let _ = std::fs::remove_dir_all(&dir);
+}
