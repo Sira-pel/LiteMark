@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// How long after a tab switch the tab list is written to settings.json.
+const TAB_SETTINGS_SAVE_DELAY_MS: u64 = 1000;
+
 impl LiteMarkApp {
     /// Save a tab. Refuses, with an error, when another program changed or
     /// deleted the file since the tab last read or wrote it; `handle_save`
@@ -267,9 +270,10 @@ impl LiteMarkApp {
     }
 
     /// Keep the saved tab list and the recent notes in step with the tabs.
-    /// Called every frame, but writes the settings file only when the open
-    /// files or the active one changed, never for an edit. Returns whether
-    /// it saved.
+    /// Called every frame. A change (open files, active one, recent notes;
+    /// never an edit) only marks the settings dirty: the file is written by
+    /// [`Self::schedule_tab_settings_save`] or [`Self::flush_tab_settings`].
+    /// Returns whether anything changed.
     pub(super) fn sync_tab_settings(&mut self) -> bool {
         let open: Vec<PathBuf> = self
             .tabs
@@ -298,9 +302,37 @@ impl LiteMarkApp {
             self.recent_seen = active_path;
         }
         if changed {
-            self.save_settings();
+            self.tab_settings_dirty = true;
         }
         changed
+    }
+
+    /// Write dirty tab settings about a second from now, once, however many
+    /// tab switches happen in between.
+    pub(super) fn schedule_tab_settings_save(&mut self, cx: &mut Context<Self>) {
+        if !self.tab_settings_dirty || self.tab_settings_save_pending {
+            return;
+        }
+        self.tab_settings_save_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(TAB_SETTINGS_SAVE_DELAY_MS))
+                .await;
+            this.update(cx, |this, _cx| {
+                this.tab_settings_save_pending = false;
+                this.flush_tab_settings();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Write dirty tab settings now (the window is closing).
+    pub(super) fn flush_tab_settings(&mut self) {
+        self.sync_tab_settings();
+        if self.tab_settings_dirty {
+            self.save_settings();
+        }
     }
 
     /// Reopen the notes that were open when the app last closed, skipping

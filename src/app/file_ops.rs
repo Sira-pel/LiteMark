@@ -109,8 +109,9 @@ impl LiteMarkApp {
             self.recent_seen = seen.pop();
         }
         self.recent_menu_cache = None;
-        if !self.sync_tab_settings() && recent_changed {
-            self.save_settings();
+        // Written with the next delayed tab-settings save.
+        if self.sync_tab_settings() || recent_changed {
+            self.tab_settings_dirty = true;
         }
     }
 
