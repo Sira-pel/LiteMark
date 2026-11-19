@@ -105,6 +105,16 @@ impl Render for LiteMarkApp {
             }
         };
 
+        let on_toggle_outline = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_toggle_outline();
+                    cx.notify();
+                });
+            }
+        };
+
         let on_toggle_sidebar = {
             let view = view.clone();
             move |cx: &mut App| {
@@ -994,6 +1004,10 @@ impl Render for LiteMarkApp {
         };
 
         let window_width = window.viewport_size().width;
+        let (outline, outline_inset) = match self.outline_element(window, cx, &theme) {
+            Some((element, inset)) => (Some((element, inset)), inset),
+            None => (None, px(0.0)),
+        };
         let sidebar_scroll_to_selected = std::mem::take(&mut self.sidebar_scroll_to_selected);
         let is_narrow = window_width < px(640.0);
 
@@ -1133,6 +1147,7 @@ impl Render for LiteMarkApp {
                             self.settings.word_wrap,
                             self.show_sidebar,
                             self.settings.show_code_files,
+                            self.settings.outline_pinned,
                             self.settings.content_alignment,
                             on_set_view_mode.clone(),
                             on_toggle_line_numbers.clone(),
@@ -1143,6 +1158,7 @@ impl Render for LiteMarkApp {
                             on_reset_zoom.clone(),
                             on_toggle_sidebar.clone(),
                             on_toggle_show_code_files.clone(),
+                            on_toggle_outline.clone(),
                             on_toggle_zen.clone(),
                         ),
                     ),
@@ -1203,6 +1219,7 @@ impl Render for LiteMarkApp {
                             self.settings.word_wrap,
                             self.show_sidebar,
                             self.settings.show_code_files,
+                            self.settings.outline_pinned,
                             self.settings.content_alignment,
                             on_set_view_mode.clone(),
                             on_toggle_line_numbers.clone(),
@@ -1213,6 +1230,7 @@ impl Render for LiteMarkApp {
                             on_reset_zoom.clone(),
                             on_toggle_sidebar.clone(),
                             on_toggle_show_code_files.clone(),
+                            on_toggle_outline.clone(),
                             on_toggle_zen.clone(),
                         );
                         let items = vec![
@@ -1572,6 +1590,8 @@ impl Render for LiteMarkApp {
                             })
                             .child(render_editor(
                                 EditorProps {
+                                    outline: outline.map(|(element, _)| element),
+                                    right_inset: outline_inset,
                                     zoom_level: self.settings.zoom_level,
                                     show_zoom_hud: self.show_zoom_hud,
                                     scroll: self.editor_scroll.clone(),
@@ -1709,6 +1729,8 @@ impl Render for LiteMarkApp {
                                 },
                             ))),
                             editor_element: self.editor_surface(cx, &theme, false),
+                            outline: None,
+                            right_inset: px(0.0),
                         },
                         &theme,
                     ))

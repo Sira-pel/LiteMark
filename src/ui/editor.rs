@@ -97,6 +97,10 @@ pub struct EditorProps {
     pub scroll: ScrollHandle,
     /// Called for every scroll-wheel / touchpad event over the editor.
     pub on_scroll: Option<ScrollHandler>,
+    /// The outline strip or card, drawn over the editor's right edge.
+    pub outline: Option<AnyElement>,
+    /// Right padding that keeps text clear of a pinned outline card.
+    pub right_inset: Pixels,
 }
 
 pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
@@ -140,8 +144,15 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
                 .overflow_x_hidden()
                 .overflow_y_scroll()
                 .when_some(props.on_scroll, |s, f| s.on_scroll_wheel(f))
-                .child(div().w_full().min_w_0().child(props.editor_element)),
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .pr(props.right_inset)
+                        .child(props.editor_element),
+                ),
         )
+        .children(props.outline)
 }
 
 /// Vertical scroll change needed to bring a row at `row_top` fully into the

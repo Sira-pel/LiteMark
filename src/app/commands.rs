@@ -887,6 +887,11 @@ impl LiteMarkApp {
         self.save_settings();
     }
 
+    pub fn handle_toggle_outline(&mut self) {
+        self.settings.outline_pinned = !self.settings.outline_pinned;
+        self.save_settings();
+    }
+
     pub fn handle_set_view_mode(&mut self, mode: ViewMode) {
         if self.view_locked_raw() {
             return;

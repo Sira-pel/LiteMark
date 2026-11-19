@@ -45,6 +45,7 @@ where
         ),
         (sec("Ctrl + Shift + M"), "Toggle WYSIWYG / Raw Mode"),
         (sec("Ctrl + Shift + L"), "Toggle Line Numbers (Raw Mode)"),
+        (sec("Ctrl + Shift + O"), "Pin / Unpin Outline"),
         (sec("Ctrl + + / ="), "Zoom In"),
         (sec("Ctrl + -"), "Zoom Out"),
         (sec("Ctrl + 0"), "Reset Zoom (100%)"),

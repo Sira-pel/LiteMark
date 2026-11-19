@@ -98,6 +98,33 @@ impl LiteMarkApp {
         Some(false)
     }
 
+    /// Scrolls so the row holding the caret sits near the top of the view
+    /// (as far as the end of the document allows).
+    pub(super) fn scroll_caret_to_top(&mut self) {
+        let Some(cursor) = self.active_tab().map(|tab| tab.cursor_offset()) else {
+            return;
+        };
+        let paint = self.editor_paint.borrow();
+        let Some(row) = paint
+            .rows
+            .iter()
+            .rev()
+            .find(|row| row.byte_start <= cursor)
+            .or_else(|| paint.rows.first())
+        else {
+            return;
+        };
+        let view = self.editor_scroll.bounds();
+        if view.size.height <= px(0.0) {
+            return;
+        }
+        let delta = row.origin.y - (view.top() + row.line_height * 1.5);
+        let offset = self.editor_scroll.offset();
+        let max = self.editor_scroll.max_offset().height;
+        let y = (offset.y - delta).clamp(-max, px(0.0));
+        self.editor_scroll.set_offset(point(offset.x, y));
+    }
+
     /// Scrolls the editor so the row holding the selection start is visible.
     /// Uses the geometry from the last paint, which is still valid after a
     /// find step because the content did not change.

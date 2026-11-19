@@ -168,6 +168,7 @@ fn main() {
                 ),
                 KeyBinding::new("secondary-shift-m", ToggleViewMode, None),
                 KeyBinding::new("secondary-shift-l", ToggleLineNumbers, None),
+                KeyBinding::new("secondary-shift-o", ToggleOutline, None),
                 KeyBinding::new("secondary-x", Cut, None),
                 KeyBinding::new("secondary-c", Copy, None),
                 KeyBinding::new("secondary-v", Paste, None),

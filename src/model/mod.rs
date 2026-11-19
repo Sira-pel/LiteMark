@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod document;
+pub mod outline;
 pub mod quick_open;
 pub mod recent_notes;
 pub mod session;

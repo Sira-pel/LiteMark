@@ -60,6 +60,9 @@ pub struct EditorSettings {
     pub show_sidebar: bool,
     #[serde(default)]
     pub zen_mode: bool,
+    /// Keep the outline card open at the editor's right edge.
+    #[serde(default)]
+    pub outline_pinned: bool,
     /// List code files (`.rs`, `.py`, `Makefile`, ...) in the sidebar.
     #[serde(default = "default_show_code_files")]
     pub show_code_files: bool,
@@ -113,6 +116,7 @@ impl Default for EditorSettings {
             show_line_numbers: false,
             show_sidebar: false,
             zen_mode: false,
+            outline_pinned: false,
             show_code_files: true,
             word_wrap: true,
             base_font_size: 17.0,
@@ -411,6 +415,20 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains("litemark-tmp"))
             .collect();
         assert!(leftovers.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_old_settings_file_loads_with_the_outline_unpinned() {
+        let dir = temp_settings_dir("outline-old");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"zoom_level": 120}"#).unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.zoom_level, 120);
+        assert!(!loaded.outline_pinned);
+        assert!(!path.with_extension("json.bak").exists());
+        fs::write(&path, r#"{"outline_pinned": true}"#).unwrap();
+        assert!(EditorSettings::load_from(&path).outline_pinned);
         let _ = fs::remove_dir_all(&dir);
     }
 

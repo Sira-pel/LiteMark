@@ -34,6 +34,7 @@ mod find;
 mod input_handler;
 mod key_bindings;
 mod menus;
+mod outline;
 mod quick_open;
 mod render;
 mod scroll;
@@ -128,6 +129,9 @@ pub struct EditorContextMenu {
     pub is_table: bool,
 }
 
+/// Headings of one tab revision: `((tab id, revision), headings)`.
+type OutlineCache = ((String, u64), Arc<Vec<crate::model::outline::OutlineItem>>);
+
 pub struct LiteMarkApp {
     pub tabs: Vec<DocumentTab>,
     pub active_tab_id: String,
@@ -170,6 +174,9 @@ pub struct LiteMarkApp {
     pub sidebar_scroll_to_selected: Option<ScrollStrategy>,
     pub zen_mode: bool,
     pub zen_notice: bool,
+    /// The pointer is over the outline strip or card.
+    pub outline_hover: bool,
+    pub outline_cache: Option<OutlineCache>,
     pub saved_toast: Option<String>,
     pub show_zoom_hud: bool,
     pub search_query: String,
@@ -598,6 +605,8 @@ impl LiteMarkApp {
             sidebar_scroll_to_selected: None,
             zen_mode: false,
             zen_notice: false,
+            outline_hover: false,
+            outline_cache: None,
             saved_toast: None,
             show_zoom_hud: false,
             search_query: String::new(),
@@ -745,6 +754,8 @@ impl LiteMarkApp {
             sidebar_scroll_to_selected: None,
             zen_mode: false,
             zen_notice: false,
+            outline_hover: false,
+            outline_cache: None,
             saved_toast: None,
             show_zoom_hud: false,
             search_query: String::new(),
@@ -940,6 +951,10 @@ mod table_drag_handler_tests;
 #[cfg(test)]
 #[path = "viewport_culling_tests.rs"]
 mod viewport_culling_tests;
+
+#[cfg(test)]
+#[path = "outline_tests.rs"]
+mod outline_tests;
 
 #[cfg(test)]
 #[path = "note_drop_tests.rs"]
