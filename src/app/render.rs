@@ -1292,6 +1292,51 @@ impl Render for LiteMarkApp {
             None
         };
 
+        let quick_open_overlay = self.quick_open.as_ref().map(|open| {
+            let on_close: Arc<dyn Fn(&mut App)> = Arc::new({
+                let view = view.clone();
+                move |cx: &mut App| {
+                    let _ = view.update(cx, |this, cx| {
+                        this.close_quick_open(cx);
+                        cx.notify();
+                    });
+                }
+            });
+            let on_pick: PickFn = Arc::new({
+                let view = view.clone();
+                move |ix: usize, cx: &mut App| {
+                    let _ = view.update(cx, |this, cx| this.quick_open_activate(Some(ix), cx));
+                }
+            });
+            let on_mode: ModeFn = Arc::new({
+                let view = view.clone();
+                move |mode: QuickMode, cx: &mut App| {
+                    let _ = view.update(cx, |this, cx| {
+                        this.quick_open_set_mode(mode, cx);
+                        cx.notify();
+                    });
+                }
+            });
+            render_quick_open(
+                QuickOpenProps {
+                    mode: open.mode,
+                    field: self.quick_open_field.clone(),
+                    notes: &open.notes,
+                    contents: &open.contents,
+                    query_empty: open.query.trim().is_empty(),
+                    searching: open.searching,
+                    selected: open.selected,
+                    scroll: open.scroll.clone(),
+                    list_max_h: (window.viewport_size().height - px(220.0))
+                        .clamp(px(120.0), px(420.0)),
+                    on_close,
+                    on_pick,
+                    on_mode,
+                },
+                &theme,
+            )
+        });
+
         let root = div()
             .id("litemark-root")
             .track_focus(&self.focus_handle)
@@ -1828,6 +1873,7 @@ impl Render for LiteMarkApp {
                     &theme,
                 ))
             })
+            .when_some(quick_open_overlay, |s, overlay| s.child(overlay))
             .when_some(menu_overlay, |s, overlay| s.child(overlay))
             .when_some(self.error_message.clone(), |s, message| {
                 let dismiss = on_dismiss_error.clone();
@@ -2038,6 +2084,11 @@ impl LiteMarkApp {
             self.field_owns_keys = false;
             self.applied_focus = None;
         }
+        if self.quick_open.is_none() && self.field_focus == TextInput::QuickOpen {
+            self.field_focus = TextInput::Editor;
+            self.field_owns_keys = false;
+            self.applied_focus = None;
+        }
         if self.create_draft.is_none() && self.field_focus == TextInput::Create {
             self.field_focus = TextInput::Editor;
             self.field_owns_keys = false;
@@ -2119,6 +2170,15 @@ impl LiteMarkApp {
             );
         });
         self.search_field.update(cx, |field, _cx| {
+            field.set_colors(
+                text_color,
+                placeholder_color,
+                rgba(0x00000000),
+                rgba(0x00000000),
+            );
+        });
+        // The pop-up draws its own box around the field.
+        self.quick_open_field.update(cx, |field, _cx| {
             field.set_colors(
                 text_color,
                 placeholder_color,

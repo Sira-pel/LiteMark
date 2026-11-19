@@ -134,6 +134,8 @@ fn main() {
                 KeyBinding::new("right", SidebarExpand, Some("Sidebar")),
                 KeyBinding::new("secondary-w", CloseActiveTab, None),
                 KeyBinding::new("secondary-f", FindReplace, None),
+                KeyBinding::new("secondary-p", QuickOpenNotes, None),
+                KeyBinding::new("secondary-shift-f", QuickOpenContents, None),
                 KeyBinding::new("secondary-\\", ToggleSidebar, None),
                 KeyBinding::new("f11", ToggleZenMode, None),
                 KeyBinding::new("escape", CloseModal, None),
@@ -192,6 +194,11 @@ fn main() {
                 KeyBinding::new("right", PromptDown, Some("PromptModal")),
                 KeyBinding::new("enter", PromptConfirm, Some("PromptModal")),
                 KeyBinding::new("space", PromptConfirm, Some("PromptModal")),
+                // Quick open (Ctrl+P) pop-up
+                KeyBinding::new("up", QuickOpenUp, Some("QuickOpen")),
+                KeyBinding::new("down", QuickOpenDown, Some("QuickOpen")),
+                KeyBinding::new("tab", QuickOpenSwitch, Some("QuickOpen")),
+                KeyBinding::new("shift-tab", QuickOpenSwitch, Some("QuickOpen")),
                 // Text editing. Menu arrows stay on the Menu context.
                 KeyBinding::new("left", EditorLeft, Some("Editor")),
                 KeyBinding::new("right", EditorRight, Some("Editor")),

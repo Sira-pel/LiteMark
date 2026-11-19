@@ -298,6 +298,7 @@ pub enum TextInput {
     Rename,
     Create,
     Search,
+    QuickOpen,
 }
 
 /// Printable keys and editing actions reach the document only while the editor owns input.
