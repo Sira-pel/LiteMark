@@ -133,11 +133,11 @@ fn random_edit(rng: &mut Lcg, text: &str) -> (std::ops::Range<usize>, String) {
 
 /// State before every line of a full parse of `text`.
 fn all_states(text: &str) -> Vec<ParseState> {
-    let raw = all_source_lines(text);
+    let mut raw = LineSource::all(text);
     let mut lines = Vec::new();
     let mut state = ParseState::default();
     let mut states = Vec::new();
-    parse_lines(&raw, 0, &mut state, &mut lines, |_, _, now| {
+    parse_lines(&mut raw, 0, &mut state, &mut lines, |_, _, now| {
         states.push(now.clone());
         Step::Parse
     });

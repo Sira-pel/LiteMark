@@ -37,6 +37,30 @@ impl LiteMarkApp {
         self.sidebar_keyboard = false;
     }
 
+    /// The sidebar's folder tree, rebuilt only when the workspace or the
+    /// pending create row changed since the last call.
+    pub(super) fn sidebar_tree(&self) -> std::rc::Rc<Vec<SidebarTreeItem>> {
+        let generation = self.workspace.generation();
+        let mut cache = self.sidebar_tree.borrow_mut();
+        if let Some(hit) = cache
+            .as_ref()
+            .filter(|c| c.generation == generation && c.creating == self.create_draft)
+        {
+            return hit.items.clone();
+        }
+        let items = std::rc::Rc::new(build_sidebar_tree(
+            &self.workspace.folders,
+            &self.workspace.files,
+            self.create_draft.as_ref(),
+        ));
+        *cache = Some(SidebarTreeCache {
+            generation,
+            creating: self.create_draft.clone(),
+            items: items.clone(),
+        });
+        items
+    }
+
     /// Flatten the visible sidebar tree into selection targets, in row order.
     pub(super) fn sidebar_visible_targets(&self) -> Vec<SidebarTarget> {
         if !self.search_query.trim().is_empty() {
@@ -49,20 +73,16 @@ impl LiteMarkApp {
                 .map(|file| SidebarTarget::File(file.id.clone()));
             return folders.chain(files).collect();
         }
-        build_sidebar_tree(
-            &self.workspace.folders,
-            &self.workspace.files,
-            self.create_draft.as_ref(),
-        )
-        .iter()
-        .filter_map(|item| match item {
-            SidebarTreeItem::Folder { folder, .. } => {
-                Some(SidebarTarget::Folder(folder.id.clone()))
-            }
-            SidebarTreeItem::File { file, .. } => Some(SidebarTarget::File(file.id.clone())),
-            SidebarTreeItem::CreateInput { .. } => None,
-        })
-        .collect()
+        self.sidebar_tree()
+            .iter()
+            .filter_map(|item| match item {
+                SidebarTreeItem::Folder { folder, .. } => {
+                    Some(SidebarTarget::Folder(folder.id.clone()))
+                }
+                SidebarTreeItem::File { file, .. } => Some(SidebarTarget::File(file.id.clone())),
+                SidebarTreeItem::CreateInput { .. } => None,
+            })
+            .collect()
     }
 
     /// The Shift-selected rows, if the selection still has several.
@@ -338,7 +358,7 @@ impl LiteMarkApp {
                 folder.is_open = open;
             }
         }
-        self.workspace = new_workspace;
+        self.workspace = new_workspace.into();
         self.refresh_workspace_ids();
     }
 

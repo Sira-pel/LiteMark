@@ -13,10 +13,10 @@ use crate::markdown::{
 use super::table_ops::{self, TableOp};
 use super::text_ops::{
     count_line_endings, find_matches, find_next, find_prev, format_replacement, home_offset,
-    line_col, line_end, line_ending_len, line_ending_len_before, line_start_flags,
-    move_vertical_collapsed, next_grapheme, previous_grapheme, replace_all,
-    snap_off_ending_interior, Caret, DiffEdit, HistoryRestore, SelectionSnap, UndoHistory,
-    TAB_DISPLAY_COLUMNS,
+    line_col, line_col_near, line_end, line_ending_len, line_ending_len_before, line_start_flags,
+    move_vertical_collapsed, next_grapheme, offset_from_utf16_near, offset_to_utf16_near,
+    previous_grapheme, replace_all, snap_off_ending_interior, Caret, CountAnchor, DiffEdit,
+    HistoryRestore, SelectionSnap, UndoHistory, TAB_DISPLAY_COLUMNS,
 };
 
 mod blocks;
@@ -310,6 +310,14 @@ struct StagedStats {
     line_endings: usize,
 }
 
+/// [`CountAnchor`]s for one revision of a tab's text.
+#[derive(Debug, Clone, Copy, Default)]
+struct CountAnchors {
+    revision: u64,
+    line: Option<CountAnchor>,
+    utf16: Option<CountAnchor>,
+}
+
 /// Count whitespace-delimited words across `prefix + mid + suffix`. Expanding
 /// an edited range by one char on each side captures every word-boundary
 /// transition affected by the edit.
@@ -367,6 +375,9 @@ pub struct DocumentTab {
     last_edit: Option<(u64, Range<usize>, usize)>,
     stats_revision: Option<u64>,
     staged_stats: Option<StagedStats>,
+    /// Where the last line and UTF-16 lookups landed, so the next lookup
+    /// near the caret counts from there instead of from byte 0.
+    count_anchors: std::cell::Cell<CountAnchors>,
     history: UndoHistory,
     /// Set right before the edit that wraps freshly typed text into a new
     /// formatted span, so that edit and the typing after it share one undo
@@ -444,6 +455,7 @@ impl DocumentTab {
                 chars: stats.chars,
                 line_endings,
             }),
+            count_anchors: Default::default(),
             history: UndoHistory::default(),
             next_edit_opens_span_group: false,
             next_undo_caret: None,
@@ -695,6 +707,7 @@ impl DocumentTab {
             // off; dropping them makes the next read recount from scratch.
             self.staged_stats = staged_next;
         }
+        self.carry_count_anchors_past(&range);
         self.content.replace_range(range, new_text);
         let cursor = snap_off_ending_interior(&self.content, cursor_at);
         self.revision = self.revision.wrapping_add(1);
@@ -851,6 +864,66 @@ impl DocumentTab {
         true
     }
 
+    /// Anchors still valid for the current text.
+    fn count_anchors(&self) -> CountAnchors {
+        let anchors = self.count_anchors.get();
+        if anchors.revision == self.revision {
+            anchors
+        } else {
+            CountAnchors {
+                revision: self.revision,
+                ..CountAnchors::default()
+            }
+        }
+    }
+
+    /// Keep the anchors that an edit of `range` leaves valid: text before
+    /// the edit doesn't change. A line anchor must sit strictly before it,
+    /// since inserting an LF right after a lone CR moves that line start.
+    fn carry_count_anchors_past(&mut self, range: &Range<usize>) {
+        let anchors = self.count_anchors();
+        self.count_anchors.set(CountAnchors {
+            revision: self.revision.wrapping_add(1),
+            line: anchors.line.filter(|a| a.byte < range.start),
+            utf16: anchors.utf16.filter(|a| a.byte <= range.start),
+        });
+    }
+
+    /// 1-based line and column of `offset`, as [`line_col`] counts them.
+    pub fn line_col_at(&self, offset: usize) -> (usize, usize) {
+        let mut anchors = self.count_anchors();
+        let (line_col, anchor) = line_col_near(&self.content, offset, anchors.line);
+        anchors.line = Some(anchor);
+        self.count_anchors.set(anchors);
+        line_col
+    }
+
+    /// UTF-16 offset of a byte offset (for the platform text input).
+    pub fn offset_to_utf16(&self, offset: usize) -> usize {
+        let mut anchors = self.count_anchors();
+        let (utf16, anchor) = offset_to_utf16_near(&self.content, offset, anchors.utf16);
+        anchors.utf16 = Some(anchor);
+        self.count_anchors.set(anchors);
+        utf16
+    }
+
+    /// Byte offset of a UTF-16 offset (for the platform text input).
+    pub fn offset_from_utf16(&self, utf16_offset: usize) -> usize {
+        let mut anchors = self.count_anchors();
+        let (byte, anchor) = offset_from_utf16_near(&self.content, utf16_offset, anchors.utf16);
+        anchors.utf16 = Some(anchor);
+        self.count_anchors.set(anchors);
+        byte
+    }
+
+    pub fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+    }
+
+    pub fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
+    }
+
     pub fn refresh_stats(&mut self) {
         let (stats, line_endings) = stats_and_line_endings(&self.content);
         self.word_count = stats.words;
@@ -887,7 +960,7 @@ impl DocumentTab {
         let cursor = self.cursor_offset();
         if !self.file_type.supports_markdown_features() {
             // Raw tabs have no Markdown structure: skip the parse.
-            let (line, col) = line_col(&self.content, cursor);
+            let (line, col) = self.line_col_at(cursor);
             self.cursor_line = line;
             self.cursor_col = col;
             self.active_formats = ActiveFormats::default();

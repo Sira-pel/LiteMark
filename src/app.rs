@@ -5,9 +5,7 @@ use crate::editor_input::{
 use crate::markdown::{empty_parsed_document, export_stem, render_export, TableColumnAlign};
 use crate::model::clipboard::{clipboard_item, paste_text};
 use crate::model::table_ops::TableOp;
-use crate::model::text_ops::{
-    home_offset, line_end, offset_to_utf16, range_from_utf16, range_to_utf16, TAB_DISPLAY_COLUMNS,
-};
+use crate::model::text_ops::{home_offset, line_end, range_from_utf16, TAB_DISPLAY_COLUMNS};
 use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};
@@ -128,7 +126,10 @@ pub struct EditorContextMenu {
 pub struct LiteMarkApp {
     pub tabs: Vec<DocumentTab>,
     pub active_tab_id: String,
-    pub workspace: WorkspaceDirectory,
+    pub workspace: Tracked<WorkspaceDirectory>,
+    /// The sidebar tree for a workspace generation and pending create row,
+    /// so a render (each keystroke, hover or scroll) doesn't rebuild it.
+    sidebar_tree: RefCell<Option<SidebarTreeCache>>,
     pub settings: EditorSettings,
     pub show_sidebar: bool,
     pub show_find_replace: bool,
@@ -509,7 +510,8 @@ impl LiteMarkApp {
             active_tab_id: first_id,
             selected_target: initial_selected.map(SidebarTarget::File),
             multi_selection: None,
-            workspace,
+            workspace: workspace.into(),
+            sidebar_tree: RefCell::new(None),
             settings,
             show_sidebar,
             show_find_replace: false,
@@ -635,7 +637,9 @@ impl LiteMarkApp {
                 folders: Vec::new(),
                 files: Vec::new(),
                 scan_truncated: false,
-            },
+            }
+            .into(),
+            sidebar_tree: RefCell::new(None),
             settings: EditorSettings {
                 check_for_updates: false,
                 ..EditorSettings::default()

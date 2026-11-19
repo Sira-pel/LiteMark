@@ -58,7 +58,7 @@ impl LiteMarkApp {
             }
         }
         let left = self.workspace.folder_path.clone();
-        self.workspace = scan_workspace_dir(&new_dir, self.settings.show_code_files);
+        self.workspace = scan_workspace_dir(&new_dir, self.settings.show_code_files).into();
         if let Some(message) = switch_error(copy_error, self.workspace.scan_truncated) {
             self.show_error(message);
         }

@@ -10,14 +10,15 @@ impl EntityInputHandler for LiteMarkApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let content = self.active_content();
-        let mut range = range_from_utf16(&content, &range_utf16);
+        let tab = self.active_tab()?;
+        let content = &tab.content;
+        let mut range = tab.range_from_utf16(&range_utf16);
         range.start = range.start.min(content.len());
         range.end = range.end.min(content.len());
         if !content.is_char_boundary(range.start) || !content.is_char_boundary(range.end) {
             return None;
         }
-        *adjusted_range = Some(range_to_utf16(&content, &range));
+        *adjusted_range = Some(tab.range_to_utf16(&range));
         Some(content[range].to_string())
     }
 
@@ -29,7 +30,7 @@ impl EntityInputHandler for LiteMarkApp {
     ) -> Option<UTF16Selection> {
         let tab = self.active_tab()?;
         Some(UTF16Selection {
-            range: range_to_utf16(&tab.content, &tab.selection_range()),
+            range: tab.range_to_utf16(&tab.selection_range()),
             reversed: tab.caret.reversed,
         })
     }
@@ -42,7 +43,7 @@ impl EntityInputHandler for LiteMarkApp {
         let tab = self.active_tab()?;
         tab.marked_range
             .as_ref()
-            .map(|range| range_to_utf16(&tab.content, range))
+            .map(|range| tab.range_to_utf16(range))
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
@@ -79,7 +80,7 @@ impl EntityInputHandler for LiteMarkApp {
         let content = self.active_content();
         let mut range = range_utf16
             .as_ref()
-            .map(|range| range_from_utf16(&content, range))
+            .and_then(|range| self.active_tab().map(|tab| tab.range_from_utf16(range)))
             .or_else(|| self.active_tab().and_then(|tab| tab.marked_range.clone()))
             .or_else(|| self.active_tab().map(|tab| tab.selection_range()))
             .unwrap_or(0..0);
@@ -232,10 +233,9 @@ impl EntityInputHandler for LiteMarkApp {
             window.refresh();
             return;
         }
-        let content = self.active_content();
         let range = range_utf16
             .as_ref()
-            .map(|range| range_from_utf16(&content, range))
+            .and_then(|range| self.active_tab().map(|tab| tab.range_from_utf16(range)))
             .or_else(|| self.active_tab().and_then(|tab| tab.marked_range.clone()))
             .or_else(|| self.active_tab().map(|tab| tab.selection_range()))
             .unwrap_or(0..0);
@@ -269,8 +269,7 @@ impl EntityInputHandler for LiteMarkApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let content = self.active_content();
-        let range = range_from_utf16(&content, &range_utf16);
+        let range = self.active_tab()?.range_from_utf16(&range_utf16);
         let paint = self.editor_paint.borrow();
         let row = paint
             .rows
@@ -337,6 +336,6 @@ impl EntityInputHandler for LiteMarkApp {
             let paint = self.editor_paint.borrow();
             index_for_position(&paint, point)?
         };
-        Some(offset_to_utf16(&self.active_content(), utf8))
+        Some(self.active_tab().map_or(0, |tab| tab.offset_to_utf16(utf8)))
     }
 }

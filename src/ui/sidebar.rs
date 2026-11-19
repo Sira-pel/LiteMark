@@ -149,6 +149,14 @@ pub enum SidebarTreeItem {
     CreateInput { depth: usize, is_folder: bool },
 }
 
+/// [`build_sidebar_tree`] for one workspace generation and pending create
+/// row. Sorting and cloning every row is too much for each render.
+pub struct SidebarTreeCache {
+    pub generation: u64,
+    pub creating: Option<SidebarCreate>,
+    pub items: std::rc::Rc<Vec<SidebarTreeItem>>,
+}
+
 pub fn build_sidebar_tree(
     folders: &[crate::model::WorkspaceFolder],
     files: &[crate::model::WorkspaceFile],
@@ -259,6 +267,8 @@ pub struct SidebarProps<
     FBlank: Fn(&mut App) + 'static + Clone,
 {
     pub workspace: &'a WorkspaceDirectory,
+    /// The folder tree (used when not searching), from the app's cache.
+    pub tree: std::rc::Rc<Vec<SidebarTreeItem>>,
     pub width: Pixels,
     pub selected_file_id: Option<String>,
     /// Note open in the editor; gets a quieter mark than the selection.
@@ -385,7 +395,7 @@ where
     let total_notes = props.workspace.files.len();
     let is_searching = !props.search_query.trim().is_empty();
 
-    let tree_items: Vec<SidebarTreeItem> = if is_searching {
+    let tree_items: std::rc::Rc<Vec<SidebarTreeItem>> = if is_searching {
         let folders = sidebar_folder_search_matches(&props.workspace.folders, &props.search_query)
             .into_iter()
             .cloned()
@@ -394,13 +404,9 @@ where
             .into_iter()
             .cloned()
             .map(|file| SidebarTreeItem::File { file, depth: 0 });
-        folders.chain(files).collect()
+        std::rc::Rc::new(folders.chain(files).collect())
     } else {
-        build_sidebar_tree(
-            &props.workspace.folders,
-            &props.workspace.files,
-            creating.as_ref(),
-        )
+        props.tree.clone()
     };
 
     let show_empty_notes = creating.is_none()
@@ -420,7 +426,6 @@ where
         }
     }
     let scroll_handle = props.scroll_handle.clone();
-    let tree_items = std::rc::Rc::new(tree_items);
     let row_theme = *theme;
     let workspace_title = props
         .workspace

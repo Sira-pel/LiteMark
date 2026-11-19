@@ -6804,3 +6804,63 @@ fn line_count_treats_a_lone_cr_as_a_line_ending() {
     doc.ensure_stats();
     assert_eq!(doc.line_count, compute_stats(&doc.content).lines);
 }
+
+#[test]
+fn anchored_line_and_utf16_lookups_stay_exact_through_edits() {
+    use crate::model::text_ops::{line_col, offset_from_utf16, offset_to_utf16};
+    let mut doc = DocumentTab::new(
+        "u".into(),
+        "u.txt".into(),
+        "ab\r\ncd😀\ré\n".into(),
+        None,
+        None,
+    );
+    let mut seed = 0x0dd_ba11_u64;
+    let mut next = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % n.max(1)
+    };
+    let tokens = ["a", "\n", "\r", "\r\n", "😀", "é", ""];
+    for step in 0..600 {
+        let bounds: Vec<usize> = doc
+            .content
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(doc.content.len()))
+            .collect();
+        let (i, j) = (next(bounds.len()), next(bounds.len()));
+        match step % 7 {
+            5 => {
+                doc.undo();
+            }
+            6 => {
+                doc.redo();
+            }
+            _ => doc.edit(
+                bounds[i.min(j)]..bounds[i.max(j)],
+                tokens[next(tokens.len())],
+            ),
+        }
+        for _ in 0..3 {
+            let at = next(doc.content.len() + 2);
+            assert_eq!(
+                doc.line_col_at(at),
+                line_col(&doc.content, at),
+                "step {step}"
+            );
+            assert_eq!(
+                doc.offset_to_utf16(at),
+                offset_to_utf16(&doc.content, at),
+                "step {step}"
+            );
+            let u = next(offset_to_utf16(&doc.content, doc.content.len()) + 2);
+            assert_eq!(
+                doc.offset_from_utf16(u),
+                offset_from_utf16(&doc.content, u),
+                "step {step}"
+            );
+        }
+    }
+}

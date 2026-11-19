@@ -1372,6 +1372,7 @@ impl Render for LiteMarkApp {
                                 let sidebar = render_sidebar(
                                     SidebarProps {
                                         workspace: &self.workspace,
+                                        tree: self.sidebar_tree(),
                                         width: crate::theme::sidebar_width(window_width),
                                         selected_file_id: match &self.selected_target {
                                             Some(SidebarTarget::File(id)) => Some(id.clone()),

@@ -237,32 +237,30 @@ pub(super) struct DetectedTable {
     pub(super) alignments: Arc<[TableColumnAlign]>,
 }
 
-pub(super) fn table_block(lines: &[SourceLine<'_>], start: usize) -> Option<TableBlock> {
+pub(super) fn table_block(lines: &mut LineSource<'_>, start: usize) -> Option<TableBlock> {
     // A header row needs a pipe; most lines have none, so check that first.
-    if start + 1 >= lines.len()
-        || memchr::memchr(b'|', lines[start].text.as_bytes()).is_none()
-        || line_breaks_table(lines[start].text)
-    {
+    let header = lines.get(start)?.text;
+    if memchr::memchr(b'|', header.as_bytes()).is_none() || line_breaks_table(header) {
         return None;
     }
-    let header = lines[start].text;
+    let delimiter = lines.get(start + 1)?.text;
     if leading_column(header) >= 4 || unescaped_pipe_offsets(header).is_empty() {
         return None;
     }
     let header_cells = table_cell_ranges(header);
-    if leading_column(lines[start + 1].text) >= 4 {
+    if leading_column(delimiter) >= 4 {
         return None;
     }
-    let alignments = delimiter_alignments(lines[start + 1].text)?;
+    let alignments = delimiter_alignments(delimiter)?;
     if header_cells.is_empty() || alignments.len() != header_cells.len() {
         return None;
     }
     let mut last = start + 1;
     let mut index = start + 2;
-    while index < lines.len()
-        && !line_breaks_table(lines[index].text)
-        && !is_empty_table_row(lines[index].text)
-    {
+    while let Some(row) = lines.get(index) {
+        if line_breaks_table(row.text) || is_empty_table_row(row.text) {
+            break;
+        }
         last = index;
         index += 1;
     }
