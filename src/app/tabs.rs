@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// How long after a tab switch the tab list is written to settings.json.
+const TAB_SETTINGS_SAVE_DELAY_MS: u64 = 1000;
+
 impl LiteMarkApp {
     /// Save a tab. Refuses, with an error, when another program changed or
     /// deleted the file since the tab last read or wrote it; `handle_save`
@@ -264,5 +267,181 @@ impl LiteMarkApp {
         if let ClosePlan::Close { next_active } = plan_close(&snaps, id) {
             self.remove_tab(id, next_active);
         }
+    }
+
+    /// Keep the saved tab list and the recent notes in step with the tabs.
+    /// Called every frame. A change (open files, active one, recent notes;
+    /// never an edit) only marks the settings dirty: the file is written by
+    /// [`Self::schedule_tab_settings_save`] or [`Self::flush_tab_settings`].
+    /// Returns whether anything changed.
+    pub(super) fn sync_tab_settings(&mut self) -> bool {
+        let open: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.file_type != FileType::Pdf)
+            .filter_map(|tab| tab.file_path.clone())
+            .collect();
+        let active_path = self.active_tab().and_then(|tab| tab.file_path.clone());
+        let active = active_path.clone().filter(|path| open.contains(path));
+        let mut changed = false;
+        if open != self.settings.open_tabs {
+            self.settings.open_tabs = open;
+            changed = true;
+        }
+        if active != self.settings.active_tab {
+            self.settings.active_tab = active;
+            changed = true;
+        }
+        if active_path != self.recent_seen {
+            if let Some(path) = &active_path {
+                if push_recent(&mut self.settings.recent_notes, path) {
+                    self.recent_menu_cache = None;
+                    changed = true;
+                }
+            }
+            self.recent_seen = active_path;
+        }
+        if changed {
+            self.tab_settings_dirty = true;
+        }
+        changed
+    }
+
+    /// Write dirty tab settings about a second from now, once, however many
+    /// tab switches happen in between.
+    pub(super) fn schedule_tab_settings_save(&mut self, cx: &mut Context<Self>) {
+        if !self.tab_settings_dirty || self.tab_settings_save_pending {
+            return;
+        }
+        self.tab_settings_save_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(TAB_SETTINGS_SAVE_DELAY_MS))
+                .await;
+            this.update(cx, |this, _cx| {
+                this.tab_settings_save_pending = false;
+                this.flush_tab_settings();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Write dirty tab settings now (the window is closing).
+    pub(super) fn flush_tab_settings(&mut self) {
+        self.sync_tab_settings();
+        if self.tab_settings_dirty {
+            self.save_settings();
+        }
+    }
+
+    /// Reopen the notes that were open when the app last closed, skipping
+    /// any that are gone or unreadable. With `keep_current` (a file passed on
+    /// the command line) the current tab stays last and active; otherwise the
+    /// welcome tab is replaced and the saved active note comes back active.
+    /// Returns how many notes were reopened; with none, nothing changes.
+    pub(super) fn restore_saved_tabs(&mut self, keep_current: bool) -> usize {
+        if !self.settings.reopen_tabs_on_startup {
+            return 0;
+        }
+        let mut restored: Vec<DocumentTab> = Vec::new();
+        for path in self.settings.open_tabs.clone() {
+            let already = |tabs: &[DocumentTab]| {
+                tabs.iter()
+                    .any(|tab| tab.file_path.as_deref() == Some(path.as_path()))
+            };
+            if is_pdf_path(&path) || already(&restored) || (keep_current && already(&self.tabs)) {
+                continue;
+            }
+            let Ok(content) = read_note(&path) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Untitled.md".into());
+            let mut tab = DocumentTab::new(self.tab_ids.alloc(), name, content, None, None);
+            tab.disk_version = disk_version(&path, &tab.file_text_ref());
+            tab.file_path = Some(path);
+            restored.push(tab);
+        }
+        let count = restored.len();
+        if count == 0 {
+            return 0;
+        }
+        if keep_current {
+            restored.append(&mut self.tabs);
+        } else {
+            let active = self.settings.active_tab.as_deref();
+            self.active_tab_id = restored
+                .iter()
+                .find(|tab| active.is_some() && tab.file_path.as_deref() == active)
+                .unwrap_or(&restored[0])
+                .id
+                .clone();
+        }
+        self.tabs = restored;
+        self.refresh_workspace_ids();
+        self.multi_selection = None;
+        self.sync_selection_to_active_tab();
+        self.refresh_find();
+        count
+    }
+
+    /// Open a note from the recent list. A note that is gone is dropped
+    /// from the list.
+    pub(super) fn open_recent(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !path.is_file() {
+            if retain_existing(&mut self.settings.recent_notes, |p| p != path) {
+                self.save_settings();
+            }
+            self.show_error(format!("{} no longer exists.", path.display()));
+            return;
+        }
+        if is_pdf_path(&path) {
+            self.open_path(path, cx);
+            return;
+        }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled.md".into());
+        match read_note(&path) {
+            Ok(content) => {
+                let file_id = self
+                    .workspace
+                    .files
+                    .iter()
+                    .find(|file| file.path == path)
+                    .map(|file| file.id.clone());
+                self.open_loaded_tab(name, content, Some(path), file_id);
+            }
+            Err(err) => self.show_error(err),
+        }
+    }
+
+    /// Recent notes that still exist, for the File menu. Missing ones are
+    /// dropped from the saved list too. Checked once per menu opening.
+    pub(super) fn recent_notes_for_menu(&mut self) -> Vec<PathBuf> {
+        if let Some(cached) = &self.recent_menu_cache {
+            return cached.clone();
+        }
+        if retain_existing(&mut self.settings.recent_notes, |p| p.is_file()) {
+            self.save_settings();
+        }
+        let list = self.settings.recent_notes.clone();
+        self.recent_menu_cache = Some(list.clone());
+        list
+    }
+
+    pub(super) fn clear_recent_notes(&mut self) {
+        self.settings.recent_notes.clear();
+        self.recent_menu_cache = None;
+        self.save_settings();
+    }
+
+    pub(super) fn handle_toggle_reopen_tabs(&mut self) {
+        self.settings.reopen_tabs_on_startup = !self.settings.reopen_tabs_on_startup;
+        self.save_settings();
     }
 }

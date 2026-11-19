@@ -30,6 +30,10 @@ fn default_show_sidebar() -> bool {
     false
 }
 
+fn default_reopen_tabs_on_startup() -> bool {
+    true
+}
+
 /// Zoom range the zoom in/out commands allow.
 pub const ZOOM_RANGE: std::ops::RangeInclusive<usize> = 50..=200;
 /// Font sizes the settings menu offers.
@@ -81,6 +85,18 @@ pub struct EditorSettings {
     /// Release version whose notice the user closed.
     #[serde(default)]
     pub dismissed_update: Option<String>,
+    /// Reopen the notes that were open when the app last closed.
+    #[serde(default = "default_reopen_tabs_on_startup")]
+    pub reopen_tabs_on_startup: bool,
+    /// Files open in tabs, in tab order (untitled tabs and PDFs left out).
+    #[serde(default)]
+    pub open_tabs: Vec<PathBuf>,
+    /// The active tab's file, when it is one of `open_tabs`.
+    #[serde(default)]
+    pub active_tab: Option<PathBuf>,
+    /// Notes opened or switched to, newest first, without duplicates.
+    #[serde(default)]
+    pub recent_notes: Vec<PathBuf>,
     /// Set when settings.json couldn't be read and couldn't be backed up
     /// either. Saving is refused for the session so the original file is
     /// never overwritten; the text says why.
@@ -106,6 +122,10 @@ impl Default for EditorSettings {
             check_for_updates: true,
             last_update_check: None,
             dismissed_update: None,
+            reopen_tabs_on_startup: true,
+            open_tabs: Vec::new(),
+            active_tab: None,
+            recent_notes: Vec::new(),
             save_blocked: None,
         }
     }
@@ -207,6 +227,7 @@ impl EditorSettings {
             default_base_font_size()
         };
         self.recent_folders.truncate(MAX_RECENT_FOLDERS);
+        super::recent_notes::dedupe_recent(&mut self.recent_notes);
         self
     }
 
@@ -480,6 +501,51 @@ mod tests {
         let err = loaded.save().unwrap_err();
         assert!(err.contains("won't be saved this session"), "{err}");
         assert_eq!(fs::read(&path).unwrap(), damaged, "original untouched");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_settings_files_load_with_tab_and_recent_defaults() {
+        let old = r#"{"theme": "YaruDark", "zoom_level": 120, "word_wrap": false}"#;
+        let parsed: EditorSettings = serde_json::from_str(old).expect("deserialize");
+        assert_eq!(parsed.zoom_level, 120);
+        assert!(parsed.reopen_tabs_on_startup);
+        assert!(parsed.open_tabs.is_empty());
+        assert_eq!(parsed.active_tab, None);
+        assert!(parsed.recent_notes.is_empty());
+    }
+
+    #[test]
+    fn open_tabs_and_recent_notes_round_trip() {
+        let s = EditorSettings {
+            reopen_tabs_on_startup: false,
+            open_tabs: vec![PathBuf::from("/w/a.md"), PathBuf::from("/w/b.md")],
+            active_tab: Some(PathBuf::from("/w/b.md")),
+            recent_notes: vec![PathBuf::from("/w/b.md")],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let parsed: EditorSettings = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.reopen_tabs_on_startup);
+        assert_eq!(parsed.open_tabs, s.open_tabs);
+        assert_eq!(parsed.active_tab, s.active_tab);
+        assert_eq!(parsed.recent_notes, s.recent_notes);
+    }
+
+    #[test]
+    fn a_hand_edited_recent_list_is_deduped_and_capped_on_load() {
+        let dir = temp_settings_dir("recentcap");
+        let path = dir.join("settings.json");
+        let mut list: Vec<String> = (0..30).map(|i| format!("/n{i}.md")).collect();
+        list.insert(1, "/n0.md".into());
+        fs::write(
+            &path,
+            serde_json::json!({ "recent_notes": list }).to_string(),
+        )
+        .unwrap();
+        let loaded = EditorSettings::load_from(&path);
+        assert_eq!(loaded.recent_notes.len(), super::super::MAX_RECENT_NOTES);
+        assert_eq!(loaded.recent_notes[1], PathBuf::from("/n1.md"));
         let _ = fs::remove_dir_all(&dir);
     }
 

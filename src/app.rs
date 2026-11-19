@@ -227,6 +227,18 @@ pub struct LiteMarkApp {
     /// Recent folders that still exist, checked when the workspace menu
     /// opens rather than on every frame it is open.
     workspace_menu_recents: Vec<PathBuf>,
+    /// The active tab's file last added to the recent notes, so it is added
+    /// once per switch (and "Clear recent" isn't undone by the next frame).
+    recent_seen: Option<PathBuf>,
+    /// Recent notes that still exist, checked when the File menu opens
+    /// rather than on every frame it is open.
+    recent_menu_cache: Option<Vec<PathBuf>>,
+    /// The open tabs or recent notes changed since settings.json was last
+    /// written. They are written a moment later, or when the window closes,
+    /// so switching tabs quickly doesn't write the file each time.
+    tab_settings_dirty: bool,
+    /// A delayed write of the tab settings is already scheduled.
+    tab_settings_save_pending: bool,
     pub rename_target: Option<SidebarTarget>,
     pub rename_value: String,
     pub rename_field: Entity<LineField>,
@@ -280,6 +292,7 @@ impl LiteMarkApp {
         let mut tab_ids = TabIds::new();
         let first_id = tab_ids.alloc();
         let mut error_message = settings_warning;
+        let mut opened_initial = false;
         let initial_tab = if let Some(path) = initial_file {
             let name = path
                 .file_name()
@@ -292,6 +305,7 @@ impl LiteMarkApp {
                     let version = disk_version(&path, &tab.file_text_ref());
                     tab.disk_version = version;
                     tab.file_path = Some(path);
+                    opened_initial = true;
                     tab
                 }
                 Err(err) => {
@@ -583,6 +597,10 @@ impl LiteMarkApp {
             sidebar_menu: None,
             workspace_menu_open: false,
             workspace_menu_recents: Vec::new(),
+            recent_seen: None,
+            recent_menu_cache: None,
+            tab_settings_dirty: false,
+            tab_settings_save_pending: false,
             rename_target: None,
             rename_value: String::new(),
             rename_field,
@@ -604,6 +622,11 @@ impl LiteMarkApp {
             table_action_anchor: None,
             title_drag_armed: Rc::new(Cell::new(false)),
         };
+        let reopened = app.restore_saved_tabs(opened_initial);
+        if reopened > 0 {
+            let notes = if reopened == 1 { "note" } else { "notes" };
+            app.show_toast(format!("Reopened {reopened} {notes} from last time"), cx);
+        }
         app.start_update_check(cx);
         app
     }
@@ -651,8 +674,10 @@ impl LiteMarkApp {
             }
             .into(),
             sidebar_tree: RefCell::new(None),
+            // Never touch the real settings file from a test.
             settings: EditorSettings {
                 check_for_updates: false,
+                save_blocked: Some("test".into()),
                 ..EditorSettings::default()
             },
             show_sidebar: true,
@@ -684,7 +709,7 @@ impl LiteMarkApp {
             prompt_focus_handle: cx.focus_handle(),
             tab_ids,
             error_message: None,
-            settings_save_failed: false,
+            settings_save_failed: true,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -716,6 +741,10 @@ impl LiteMarkApp {
             sidebar_menu: None,
             workspace_menu_open: false,
             workspace_menu_recents: Vec::new(),
+            recent_seen: None,
+            recent_menu_cache: None,
+            tab_settings_dirty: false,
+            tab_settings_save_pending: false,
             rename_target: None,
             rename_value: String::new(),
             rename_field: Self::dummy_line_field(cx, "rename-field"),
@@ -786,6 +815,8 @@ impl LiteMarkApp {
     /// Save settings, telling the user when it fails. A failure that keeps
     /// happening (full disk, read-only config folder) is shown only once.
     fn save_settings(&mut self) {
+        // Every write includes the tab settings, so none are pending after it.
+        self.tab_settings_dirty = false;
         match self.settings.save() {
             Ok(()) => self.settings_save_failed = false,
             Err(err) => {
@@ -885,3 +916,7 @@ mod sidebar_render_tests;
 #[cfg(test)]
 #[path = "sidebar_clipboard_tests.rs"]
 mod sidebar_clipboard_tests;
+
+#[cfg(test)]
+#[path = "tab_restore_tests.rs"]
+mod tab_restore_tests;

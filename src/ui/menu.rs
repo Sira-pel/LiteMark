@@ -16,24 +16,27 @@ pub enum MenuItemKind {
 
 #[allow(clippy::type_complexity)]
 pub struct MenuItem {
-    pub label: &'static str,
+    pub label: SharedString,
     pub icon: Option<&'static str>,
     pub shortcut: Option<&'static str>,
     pub kind: MenuItemKind,
     pub disabled: bool,
     pub hint: Option<SharedString>,
+    /// Dimmed text on the right, such as a recent note's folder.
+    pub detail: Option<SharedString>,
     pub action: Arc<dyn Fn(&mut Window, &mut App) + 'static>,
 }
 
 impl Clone for MenuItem {
     fn clone(&self) -> Self {
         Self {
-            label: self.label,
+            label: self.label.clone(),
             icon: self.icon,
             shortcut: self.shortcut,
             kind: self.kind.clone(),
             disabled: self.disabled,
             hint: self.hint.clone(),
+            detail: self.detail.clone(),
             action: self.action.clone(),
         }
     }
@@ -47,12 +50,13 @@ impl MenuItem {
         action: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
-            label,
+            label: label.into(),
             icon,
             shortcut,
             kind: MenuItemKind::Action,
             disabled: false,
             hint: None,
+            detail: None,
             action: Arc::new(action),
         }
     }
@@ -63,12 +67,13 @@ impl MenuItem {
         hint: Option<&'static str>,
     ) -> Self {
         Self {
-            label,
+            label: label.into(),
             icon: None,
             shortcut,
             kind: MenuItemKind::Action,
             disabled: true,
             hint: hint.map(SharedString::new_static),
+            detail: None,
             action: Arc::new(|_, _| {}),
         }
     }
@@ -80,12 +85,13 @@ impl MenuItem {
         action: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
-            label,
+            label: label.into(),
             icon: None,
             shortcut,
             kind: MenuItemKind::Check(checked),
             disabled: false,
             hint: None,
+            detail: None,
             action: Arc::new(action),
         }
     }
@@ -97,48 +103,71 @@ impl MenuItem {
         action: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
-            label,
+            label: label.into(),
             icon: None,
             shortcut,
             kind: MenuItemKind::Radio(selected),
             disabled: false,
             hint: None,
+            detail: None,
             action: Arc::new(action),
         }
     }
 
     pub fn submenu(label: &'static str, icon: Option<&'static str>, items: Vec<MenuItem>) -> Self {
         Self {
-            label,
+            label: label.into(),
             icon,
             shortcut: None,
             kind: MenuItemKind::Submenu(items),
             disabled: false,
             hint: None,
+            detail: None,
             action: Arc::new(|_, _| {}),
         }
     }
 
     pub fn heading(label: &'static str) -> Self {
         Self {
-            label,
+            label: label.into(),
             icon: None,
             shortcut: None,
             kind: MenuItemKind::Heading,
             disabled: false,
             hint: None,
+            detail: None,
             action: Arc::new(|_, _| {}),
+        }
+    }
+
+    /// An item whose text is only known at run time (a note name), with
+    /// dimmed `detail` on the right.
+    pub fn entry(
+        label: impl Into<SharedString>,
+        detail: Option<SharedString>,
+        action: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            icon: None,
+            shortcut: None,
+            kind: MenuItemKind::Action,
+            disabled: false,
+            hint: None,
+            detail,
+            action: Arc::new(action),
         }
     }
 
     pub fn divider() -> Self {
         Self {
-            label: "",
+            label: "".into(),
             icon: None,
             shortcut: None,
             kind: MenuItemKind::Divider,
             disabled: false,
             hint: None,
+            detail: None,
             action: Arc::new(|_, _| {}),
         }
     }
@@ -174,6 +203,9 @@ const POPUP_MARGIN: Edges<Pixels> = Edges {
     left: px(8.0),
 };
 
+/// Widest the dimmed detail text gets before it truncates.
+const DETAIL_MAX_W: f32 = 160.0;
+
 /// Upper bound for a content-sized menu; longer labels truncate.
 const MENU_MAX_W: f32 = 360.0;
 
@@ -194,6 +226,9 @@ pub fn content_width(items: &[MenuItem]) -> Pixels {
                 .as_ref()
                 .map_or(0.0, |h| h.chars().count() as f32 * 6.5 + 18.0);
             let shortcut = it.shortcut.map_or(0.0, |s| s.chars().count() as f32 * 7.0);
+            let detail = it.detail.as_ref().map_or(0.0, |d| {
+                (d.chars().count() as f32 * 6.5).min(DETAIL_MAX_W) + 12.0
+            });
             let chevron = if matches!(it.kind, MenuItemKind::Submenu(_)) {
                 20.0
             } else {
@@ -205,7 +240,7 @@ pub fn content_width(items: &[MenuItem]) -> Pixels {
                 0.0
             };
             // 24 = row px(12) * 2, 12 = gap between left and right sides
-            label + hint + shortcut + chevron + gaps + 24.0 + 12.0
+            label + hint + shortcut + detail + chevron + gaps + 24.0 + 12.0
         })
         .fold(0.0_f32, f32::max);
     px((icon_col + widest + 8.0).min(MENU_MAX_W))
@@ -379,6 +414,16 @@ where
                         .items_center()
                         .flex_shrink_0()
                         .gap(px(8.0))
+                        .when_some(item.detail, |s, detail| {
+                            s.child(
+                                div()
+                                    .max_w(px(DETAIL_MAX_W))
+                                    .truncate()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.text_faint)
+                                    .child(detail),
+                            )
+                        })
                         .when_some(item.hint, |s, hint| {
                             s.child(
                                 div()
@@ -1050,7 +1095,10 @@ mod tests {
 
         let items_without_sel =
             build_table_context_menu_items(false, |_| {}, |_| {}, |_| {}, |_, _| {});
-        let labels: Vec<&str> = items_without_sel.iter().map(|it| it.label).collect();
+        let labels: Vec<&str> = items_without_sel
+            .iter()
+            .map(|it| it.label.as_ref())
+            .collect();
         assert!(labels.contains(&"Add row above"));
         assert!(labels.contains(&"Add row below"));
         assert!(labels.contains(&"Add column left"));
@@ -1067,7 +1115,7 @@ mod tests {
 
         let items_with_sel =
             build_table_context_menu_items(true, |_| {}, |_| {}, |_| {}, |_, _| {});
-        let labels_sel: Vec<&str> = items_with_sel.iter().map(|it| it.label).collect();
+        let labels_sel: Vec<&str> = items_with_sel.iter().map(|it| it.label.as_ref()).collect();
         assert!(labels_sel.contains(&"Cut"));
         assert!(labels_sel.contains(&"Copy"));
         assert!(labels_sel.contains(&"Paste"));
@@ -1079,7 +1127,7 @@ mod tests {
         use super::build_editor_context_menu_items;
 
         let items = build_editor_context_menu_items(true, |_| {}, |_| {}, |_| {}, |_| {});
-        let labels: Vec<&str> = items.iter().map(|it| it.label).collect();
+        let labels: Vec<&str> = items.iter().map(|it| it.label.as_ref()).collect();
         assert!(labels.contains(&"Cut"));
         assert!(labels.contains(&"Copy"));
         assert!(labels.contains(&"Paste"));

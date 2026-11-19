@@ -102,6 +102,17 @@ impl LiteMarkApp {
         if type_changed {
             self.refresh_find();
         }
+        let recent_changed = rename_recent(&mut self.settings.recent_notes, old, new_path);
+        if let Some(seen) = self.recent_seen.take() {
+            let mut seen = vec![seen];
+            rename_recent(&mut seen, old, new_path);
+            self.recent_seen = seen.pop();
+        }
+        self.recent_menu_cache = None;
+        // Written with the next delayed tab-settings save.
+        if self.sync_tab_settings() || recent_changed {
+            self.tab_settings_dirty = true;
+        }
     }
 
     /// Trash the sidebar selection (or the active note), asking first.

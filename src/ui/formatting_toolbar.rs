@@ -705,7 +705,7 @@ mod tests {
     fn test_overflow_menu_contents_at_breakpoints() {
         // In big window mode (!is_narrow): no headings, no lists, no Find (Find is already on wide toolbar)
         let wide_items = build_overflow_menu_items(false, |_, _| {}, |_| {}, |_| {}, |_| {});
-        let labels_wide: Vec<&str> = wide_items.iter().map(|it| it.label).collect();
+        let labels_wide: Vec<&str> = wide_items.iter().map(|it| it.label.as_ref()).collect();
         assert!(!labels_wide.contains(&"Underline"));
         assert!(!labels_wide.contains(&"Heading 1"));
         assert!(!labels_wide.contains(&"Bullet list"));
@@ -718,7 +718,7 @@ mod tests {
 
         // In super small mode (is_narrow): headings, lists, and Find are prepended
         let narrow_items = build_overflow_menu_items(true, |_, _| {}, |_| {}, |_| {}, |_| {});
-        let labels_narrow: Vec<&str> = narrow_items.iter().map(|it| it.label).collect();
+        let labels_narrow: Vec<&str> = narrow_items.iter().map(|it| it.label.as_ref()).collect();
         assert!(labels_narrow.contains(&"Heading 1"));
         assert!(labels_narrow.contains(&"Heading 2"));
         assert!(labels_narrow.contains(&"Heading 3"));
