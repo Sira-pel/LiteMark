@@ -56,15 +56,17 @@ impl LiteMarkApp {
             })
             .collect();
         if self.sidebar_clipboard_cut {
-            self.sidebar_clipboard.clear();
-            self.sidebar_clipboard_cut = false;
-            self.run_sidebar_jobs(jobs, ("move", "Moved"), |this, src, dir| {
+            // A cut is pasted once, but rows that failed to move (and still
+            // exist) stay cut, so Ctrl+V can try them again elsewhere.
+            let failed = self.run_sidebar_jobs(jobs, ("move", "Moved"), |this, src, dir| {
                 let moved = move_entry(src, dir)?;
                 if moved != src {
                     this.retarget_open_tabs(src, &moved);
                 }
                 Ok(moved)
             });
+            self.sidebar_clipboard_cut = !failed.is_empty();
+            self.sidebar_clipboard = failed;
         } else {
             self.run_sidebar_jobs(jobs, ("paste", "Pasted"), |_, src, dir| {
                 paste_copy(src, dir)
@@ -127,15 +129,16 @@ impl LiteMarkApp {
 
     /// Run `op` on each `(source, destination folder)`, then rescan, select
     /// the resulting rows and report any failure. `verb` names the action in
-    /// errors.
+    /// errors. Returns the sources that failed and still exist.
     fn run_sidebar_jobs(
         &mut self,
         jobs: Vec<(PathBuf, PathBuf)>,
         verb: (&str, &str),
         mut op: impl FnMut(&mut Self, &Path, &Path) -> std::io::Result<PathBuf>,
-    ) {
+    ) -> Vec<PathBuf> {
+        let mut failed = Vec::new();
         if jobs.is_empty() {
-            return;
+            return failed;
         }
         self.error_message = None;
         let mut created = Vec::new();
@@ -148,7 +151,10 @@ impl LiteMarkApp {
             match op(self, src, dir) {
                 Ok(path) => created.push(path),
                 Err(_) if fs_entry_missing(src) => errors.push(format!("{name} no longer exists")),
-                Err(err) => errors.push(format!("{name}: {err}")),
+                Err(err) => {
+                    errors.push(format!("{name}: {err}"));
+                    failed.push(src.clone());
+                }
             }
         }
         if !created.is_empty() {
@@ -165,6 +171,7 @@ impl LiteMarkApp {
                 errors.last().map(String::as_str).unwrap_or_default()
             )),
         }
+        failed
     }
 
     /// Open the folders above `paths` and select their rows.

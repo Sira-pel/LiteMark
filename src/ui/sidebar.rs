@@ -300,6 +300,9 @@ pub struct SidebarProps<
     pub on_blank_click: FBlank,
     /// Ids of every row in a multi-selection (empty for a single selection).
     pub multi_targets: Vec<SidebarTarget>,
+    /// Notes and folders cut with Ctrl+X and not yet pasted. They and
+    /// everything inside them are drawn dimmed.
+    pub cut_paths: Vec<std::path::PathBuf>,
     /// Scroll position of the row list.
     pub scroll_handle: UniformListScrollHandle,
     /// Bring the selected row into view this frame (the keyboard moved it).
@@ -382,6 +385,7 @@ where
         })
         .collect();
     let multi_targets = props.multi_targets;
+    let cut_paths = std::rc::Rc::new(props.cut_paths);
     let creating = props.creating.clone();
     let create_field = props.create_field.clone();
     let search_field = props.search_field.clone();
@@ -692,6 +696,9 @@ where
                                             let folder_id = folder.id.clone();
                                             let is_open = folder.is_open;
                                             let in_multi = multi_ids.contains(&folder_id);
+                                            let is_cut = cut_paths
+                                                .iter()
+                                                .any(|cut| folder.path.starts_with(cut));
                                             let is_selected = !in_multi
                                                 && selected_folder_id.as_deref()
                                                     == Some(&folder_id);
@@ -718,6 +725,7 @@ where
                                                 .rounded(sz::R_MD)
                                                 .cursor_pointer()
                                                 .relative()
+                                                .when(is_cut, |s| s.opacity(0.5))
                                                 .bg(if in_multi {
                                                     theme.row_multi
                                                 } else if is_selected {
@@ -941,6 +949,9 @@ where
                                         }
                                         SidebarTreeItem::File { file, depth } => {
                                             let in_multi = multi_ids.contains(&file.id);
+                                            let is_cut = cut_paths
+                                                .iter()
+                                                .any(|cut| file.path.starts_with(cut));
                                             let is_active = !in_multi
                                                 && selected_file_id.as_deref() == Some(&file.id);
                                             let is_open = !in_multi
@@ -974,6 +985,7 @@ where
                                                 .id(SharedString::from(file.id.clone()))
                                                 .group("note-row")
                                                 .relative()
+                                                .when(is_cut, |s| s.opacity(0.5))
                                                 .flex()
                                                 .items_center()
                                                 .justify_between()

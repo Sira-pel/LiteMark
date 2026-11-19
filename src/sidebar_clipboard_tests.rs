@@ -278,6 +278,40 @@ fn a_cut_folder_pasted_onto_itself_stays_put() {
 }
 
 #[std_test]
+fn a_cut_that_fails_to_move_stays_cut() {
+    let root = workspace("cutfail");
+    std::fs::create_dir_all(root.join("dest").join("sub")).unwrap();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, _cx| {
+        load(app, &root);
+        let dest = root.join("dest");
+        select(app, folder_target(app, &dest));
+        app.sidebar_cut();
+        // A folder can't move into its own subfolder.
+        select(app, folder_target(app, &dest.join("sub")));
+        app.sidebar_paste();
+        assert!(app.error_message.is_some());
+        assert!(dest.join("inner.md").exists());
+        assert_eq!(app.sidebar_clipboard, vec![dest.clone()]);
+        assert!(app.sidebar_clipboard_cut, "it can still be pasted elsewhere");
+
+        // Pasted somewhere valid, it moves and the clipboard empties.
+        app.selected_target = None;
+        app.sidebar_keyboard = true;
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        load(app, &root);
+        select(app, folder_target(app, &elsewhere));
+        app.sidebar_paste();
+        assert!(elsewhere.join("dest").join("inner.md").exists());
+        assert!(app.sidebar_clipboard.is_empty());
+        assert!(!app.sidebar_clipboard_cut);
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
 fn copy_after_cut_pastes_a_copy() {
     let root = workspace("cutcopy");
     let mut cx = TestAppContext::single();
