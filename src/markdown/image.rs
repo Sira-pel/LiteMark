@@ -160,10 +160,14 @@ pub fn resolve_image_target(target: &str, base_dir: Option<&Path>) -> ImageTarge
     if has_url_scheme(target) {
         return ImageTarget::Unavailable;
     }
-    if target.starts_with("\\\\") || target.starts_with("//") {
+    // Checked again after decoding: `%5C%5Chost` is `\\host` once decoded.
+    let decoded = percent_decode(target);
+    if is_network_path(target)
+        || is_network_path(&decoded)
+        || decoded.chars().any(char::is_control)
+    {
         return ImageTarget::Unavailable;
     }
-    let decoded = percent_decode(target);
     // A name that really contains `%20` wins over its decoded form.
     let path = Path::new(&decoded);
     if path.is_absolute() || is_rooted(&decoded) {
@@ -184,10 +188,28 @@ pub fn resolve_image_target(target: &str, base_dir: Option<&Path>) -> ImageTarge
     }
 }
 
-/// `/x` and `\x` count as absolute on every platform; on Windows `Path`
-/// says they are relative to the current drive.
+/// `/x`, `\x` and `C:\x` count as absolute on every platform: on Windows
+/// `Path` says `/x` is relative to the current drive, and elsewhere it says
+/// `C:\x` is relative, which would join it onto the note's folder.
 fn is_rooted(path: &str) -> bool {
-    path.starts_with('/') || path.starts_with('\\')
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with('\\')
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'))
+}
+
+/// Two leading separators in any mix (`\\host`, `//host`, `/\host`, `\\?\UNC`)
+/// name a network share or a device path on Windows. Reading one makes
+/// Windows connect to that host and send the user's credentials.
+fn is_network_path(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('/' | '\\'), Some('/' | '\\'))
+    )
 }
 
 /// `scheme:` with two or more letters, so `C:\x.png` is a path, not a URL.
@@ -229,7 +251,7 @@ fn file_url_path(url: &str) -> Option<PathBuf> {
     } else {
         decoded.as_str()
     };
-    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("\\\\") {
+    if trimmed.is_empty() || is_network_path(trimmed) || trimmed.chars().any(char::is_control) {
         return None;
     }
     Some(PathBuf::from(trimmed))
@@ -392,6 +414,15 @@ mod tests {
             "//host/share/a.png",
             "file://host/share/a.png",
             "file:////host/share/a.png",
+            // Network paths hidden behind percent escapes or mixed slashes.
+            "%5C%5Chost%5Cshare%5Ca.png",
+            "%2F%2Fhost%2Fshare%2Fa.png",
+            "%5C%2Fhost/share/a.png",
+            "/\\host\\share\\a.png",
+            "\\/host/share/a.png",
+            "file:///%5C%5Chost/share/a.png",
+            "file:%2F%2Fhost/share/a.png",
+            "a%00.png",
             "ftp://example.com/a.png",
             "data:image/png;base64,AAAA",
             "https://",
