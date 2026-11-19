@@ -51,6 +51,12 @@ impl DocumentTab {
         if pos == 0 {
             return;
         }
+        if let Some(block) = self.picture_block_at(pos) {
+            if pos > block.start {
+                self.place(block.start, extend);
+                return;
+            }
+        }
         if let Some(pline) = parsed.line_at_offset(pos) {
             if extend && pos > visible_line_end(pline, self.view_mode) && pos <= pline.source.end {
                 return self.move_left(true);
@@ -141,6 +147,12 @@ impl DocumentTab {
         let mut pos = self.cursor_offset();
         if pos >= self.content.len() {
             return;
+        }
+        if let Some(block) = self.picture_block_at(pos) {
+            if pos < block.end {
+                self.place(block.end, extend);
+                return;
+            }
         }
         if let Some(pline) = parsed.line_at_offset(pos) {
             if let LineKind::TableRow { ref body, .. } = pline.kind {
@@ -477,6 +489,28 @@ impl DocumentTab {
                     if offset > vend && offset <= line.source.end {
                         offset = vend;
                     }
+                }
+            }
+        }
+        if self.file_type.supports_markdown_features() {
+            if let Some(block) = self.picture_block_at(offset) {
+                if offset > block.start && offset < block.end {
+                    let anchor = if self.caret.reversed {
+                        self.caret.range.end
+                    } else {
+                        self.caret.range.start
+                    };
+                    offset = if extend {
+                        if offset > anchor {
+                            block.end
+                        } else {
+                            block.start
+                        }
+                    } else if offset - block.start <= block.end - offset {
+                        block.start
+                    } else {
+                        block.end
+                    };
                 }
             }
         }

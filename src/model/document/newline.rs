@@ -154,6 +154,9 @@ impl DocumentTab {
             self.code_newline(range);
             return;
         }
+        if self.picture_newline() {
+            return;
+        }
         // The ending the line already uses, so a CRLF file stays CRLF.
         let nl = self.line_break(range.start);
         if is_shift {

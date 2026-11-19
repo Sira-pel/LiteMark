@@ -24,6 +24,7 @@ mod inline_format;
 mod inline_rewrite;
 mod navigation;
 mod newline;
+mod picture;
 mod table;
 mod typing;
 
@@ -367,6 +368,8 @@ pub struct DocumentTab {
     /// toggles to turn the format off instead of deciding from the selection.
     force_inline_toggle: Option<bool>,
     pub marked_range: Option<Range<usize>>,
+    /// Start of a picture line whose raw Markdown is being edited.
+    pub picture_raw_line: Option<usize>,
     pub revision: u64,
     cached_parse: Option<(u64, Arc<ParsedDocument>)>,
     /// The edit that made `revision` from the one before it: the revision
@@ -445,6 +448,7 @@ impl DocumentTab {
             indent_style,
             force_inline_toggle: None,
             marked_range: None,
+            picture_raw_line: None,
             revision: 1,
             cached_parse: None,
             last_edit: None,
@@ -957,6 +961,7 @@ impl DocumentTab {
     }
 
     pub fn refresh_cursor(&mut self) {
+        self.expire_picture_raw();
         let cursor = self.cursor_offset();
         if !self.file_type.supports_markdown_features() {
             // Raw tabs have no Markdown structure: skip the parse.
@@ -1055,3 +1060,5 @@ mod heading_paragraph_parity_tests;
 
 #[cfg(test)]
 mod clear_formatting_tests;
+#[cfg(test)]
+mod picture_tests;

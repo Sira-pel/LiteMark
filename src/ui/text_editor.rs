@@ -677,6 +677,56 @@ pub fn move_vertical_visual_in(
     extend: bool,
     mode: ViewMode,
 ) -> bool {
+    let from = caret.cursor();
+    let moved = move_vertical_rows(paint, parsed, content, caret, delta, extend, mode);
+    if moved && mode == ViewMode::Wysiwyg {
+        snap_off_picture(parsed, content, caret, from, extend);
+    }
+    moved
+}
+
+/// A picture line is one block: Up/Down never leave the caret inside its
+/// Markdown, they put it before the picture (coming from above) or after it.
+fn snap_off_picture(
+    parsed: &ParsedDocument,
+    content: &str,
+    caret: &mut Caret,
+    from: usize,
+    extend: bool,
+) {
+    let at = caret.cursor();
+    let Some(line) = parsed.line_at_offset(at) else {
+        return;
+    };
+    let src = line.source.clone();
+    if !matches!(line.kind, LineKind::Paragraph)
+        || at <= src.start
+        || at >= src.end
+        || (src.start..=src.end).contains(&from)
+        || content
+            .get(src.clone())
+            .and_then(parse_image_line)
+            .is_none()
+    {
+        return;
+    }
+    let target = if from < src.start { src.start } else { src.end };
+    if extend {
+        caret.select_to(target);
+    } else {
+        caret.move_to(target);
+    }
+}
+
+fn move_vertical_rows(
+    paint: &EditorPaint,
+    parsed: &ParsedDocument,
+    content: &str,
+    caret: &mut Caret,
+    delta: i32,
+    extend: bool,
+    mode: ViewMode,
+) -> bool {
     if paint.rows.is_empty() {
         return false;
     }
@@ -1110,6 +1160,8 @@ pub struct EditorElement<V: 'static> {
     pub table_active_fill: Hsla,
     /// Folder of the note, for relative image paths; `None` for an unsaved note.
     pub base_dir: Option<PathBuf>,
+    /// Start of the picture line shown as raw Markdown for editing.
+    pub raw_picture_line: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2284,10 +2336,16 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             if matches!(parsed_line.kind, LineKind::Paragraph) {
                 let src = parsed_line.source.clone();
                 let line_text = self.content.get(src.clone()).unwrap_or("");
-                let caret_on_line = self.selection.is_empty()
+                // The outline shows only while the whole picture is selected.
+                let caret_on_line = !self.selection.is_empty()
+                    && self.selection.start == src.start
+                    && self.selection.end == src.end;
+                // F2 or a double-click shows the raw Markdown until the caret
+                // leaves the line.
+                let editing_raw = self.raw_picture_line == Some(src.start)
                     && self.selection.start >= src.start
-                    && self.selection.start <= src.end;
-                let image = if line_text.trim_start().starts_with("![") {
+                    && self.selection.end <= src.end;
+                let image = if !editing_raw && line_text.trim_start().starts_with("![") {
                     parse_image_line(line_text)
                 } else {
                     None
@@ -2410,6 +2468,24 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                         shaped,
                                     ));
                                 }
+                            }
+                        }
+                        if focused && self.selection.is_empty() {
+                            let bar_x = if self.selection.start == src.start {
+                                Some(block_bounds.left() - px(4.0))
+                            } else if self.selection.start == src.end {
+                                Some(block_bounds.right() + px(2.0))
+                            } else {
+                                None
+                            };
+                            if let Some(x) = bar_x {
+                                cursor = Some(fill(
+                                    Bounds::new(
+                                        point(x, block_bounds.top()),
+                                        size(px(2.0), block_bounds.size.height),
+                                    ),
+                                    self.cursor_color,
+                                ));
                             }
                         }
                         if caret_on_line {

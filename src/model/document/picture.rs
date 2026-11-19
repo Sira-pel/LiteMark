@@ -1,0 +1,151 @@
+//! A line that holds only a picture (`![alt](path)`) is one block in the
+//! WYSIWYG view. The caret rests only before or after it, never inside its
+//! Markdown. Clicking selects the whole line; typing then goes on a new line,
+//! and Backspace or Delete removes the line. F2 or a double-click shows the
+//! raw Markdown until the caret leaves the line.
+
+use super::*;
+use crate::markdown::image::parse_image_line;
+
+impl DocumentTab {
+    /// The source range (without line ending) of the picture block at
+    /// `offset`, or `None` when the line is not a picture, the view is raw,
+    /// or its Markdown is being edited.
+    pub fn picture_block_at(&mut self, offset: usize) -> Option<Range<usize>> {
+        if self.view_mode != ViewMode::Wysiwyg || self.file_type != FileType::Markdown {
+            return None;
+        }
+        let offset = offset.min(self.content.len());
+        let parsed = self.parsed();
+        let line = parsed.line_at_offset(offset)?;
+        if !matches!(line.kind, LineKind::Paragraph) {
+            return None;
+        }
+        let src = line.source.clone();
+        if offset > src.end || parse_image_line(self.content.get(src.clone())?).is_none() {
+            return None;
+        }
+        if self.picture_raw_line == Some(src.start) && self.caret_within(&src) {
+            return None;
+        }
+        Some(src)
+    }
+
+    fn caret_within(&self, range: &Range<usize>) -> bool {
+        self.caret.range.start >= range.start && self.caret.range.end <= range.end
+    }
+
+    /// The picture block that is selected as a whole (outlined).
+    pub fn selected_picture(&mut self) -> Option<Range<usize>> {
+        let sel = self.selection_range();
+        if sel.is_empty() {
+            return None;
+        }
+        let block = self.picture_block_at(sel.start)?;
+        (block == sel).then_some(block)
+    }
+
+    /// Select a picture block as a whole.
+    pub fn select_picture(&mut self, block: Range<usize>) {
+        self.pending_formats = ActiveFormats::default();
+        self.caret.range = block;
+        self.caret.reversed = false;
+        self.caret.preferred_col = None;
+        self.refresh_cursor();
+    }
+
+    /// Show the raw Markdown of the picture the caret is on or has selected.
+    pub fn show_picture_source(&mut self) -> bool {
+        let at = self.selection_range().start;
+        let Some(block) = self.picture_block_at(at) else {
+            return false;
+        };
+        self.picture_raw_line = Some(block.start);
+        self.caret.move_to(block.end);
+        self.refresh_cursor();
+        true
+    }
+
+    /// Drop the raw-editing flag once the caret has left that line.
+    pub(super) fn expire_picture_raw(&mut self) {
+        if let Some(start) = self.picture_raw_line {
+            let end = line_end(&self.content, start.min(self.content.len()));
+            if !self.caret_within(&(start..end)) {
+                self.picture_raw_line = None;
+            }
+        }
+    }
+
+    /// Typing at a picture block goes on its own line: after the picture when
+    /// it is selected or the caret is at its end, before it at its start.
+    pub(super) fn picture_insert(&mut self, range: Range<usize>, text: &str) -> bool {
+        let Some(block) = self.picture_block_at(range.start) else {
+            return false;
+        };
+        if range.end > block.end || text.is_empty() {
+            return false;
+        }
+        let nl = self.line_break(block.start);
+        self.history.seal();
+        if range.is_empty() && range.start == block.start {
+            self.edit(block.start..block.start, &format!("{text}{nl}"));
+            self.caret
+                .move_to(floor_boundary(&self.content, block.start + text.len()));
+        } else {
+            self.edit(block.end..block.end, &format!("{nl}{text}"));
+            self.caret.move_to(floor_boundary(
+                &self.content,
+                block.end + nl.len() + text.len(),
+            ));
+        }
+        self.refresh_cursor();
+        true
+    }
+
+    /// Enter on a selected picture opens a new line after it.
+    pub(super) fn picture_newline(&mut self) -> bool {
+        let Some(block) = self.selected_picture() else {
+            return false;
+        };
+        let nl = self.line_break(block.start);
+        self.edit(block.end..block.end, nl);
+        self.caret
+            .move_to(floor_boundary(&self.content, block.end + nl.len()));
+        self.refresh_cursor();
+        true
+    }
+
+    /// Backspace/Delete: remove the whole picture line when it is selected,
+    /// or when the caret is just after it (Backspace) or before it (Delete).
+    pub(super) fn picture_remove(&mut self, forward: bool) -> bool {
+        let sel = self.selection_range();
+        let Some(block) = self.picture_block_at(sel.start) else {
+            return false;
+        };
+        let hit = if sel.is_empty() {
+            if forward {
+                sel.start == block.start
+            } else {
+                sel.start == block.end
+            }
+        } else {
+            sel == block
+        };
+        if !hit {
+            return false;
+        }
+        let ending = line_ending_len(&self.content, block.end);
+        let (start, end) = if ending > 0 {
+            (block.start, block.end + ending)
+        } else {
+            // Last line: take the line break before it instead.
+            let before = line_ending_len_before(&self.content, block.start);
+            (block.start - before, block.end)
+        };
+        self.history.seal();
+        self.edit(start..end, "");
+        self.caret.move_to(floor_boundary(&self.content, start));
+        self.refresh_cursor();
+        true
+    }
+}
