@@ -1463,6 +1463,12 @@ impl Render for LiteMarkApp {
                                         &theme,
                                         self.settings.show_line_numbers,
                                     ),
+                                    on_drop_paths: Some(Box::new(cx.listener(
+                                        |this, paths: &ExternalPaths, _window, cx| {
+                                            this.handle_dropped_paths(paths.paths(), cx);
+                                            cx.notify();
+                                        },
+                                    ))),
                                 },
                                 &theme,
                             ))
@@ -1587,6 +1593,12 @@ impl Render for LiteMarkApp {
                                 },
                             ))),
                             editor_element: self.editor_surface(cx, &theme, false),
+                            on_drop_paths: Some(Box::new(cx.listener(
+                                |this, paths: &ExternalPaths, _window, cx| {
+                                    this.handle_dropped_paths(paths.paths(), cx);
+                                    cx.notify();
+                                },
+                            ))),
                         },
                         &theme,
                     ))

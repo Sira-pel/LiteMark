@@ -97,7 +97,12 @@ pub struct EditorProps {
     pub scroll: ScrollHandle,
     /// Called for every scroll-wheel / touchpad event over the editor.
     pub on_scroll: Option<ScrollHandler>,
+    /// Called when files are dropped on the editor from the OS.
+    pub on_drop_paths: Option<DropPathsHandler>,
 }
+
+/// Handler for files dropped on the editor.
+pub type DropPathsHandler = Box<dyn Fn(&ExternalPaths, &mut Window, &mut App) + 'static>;
 
 pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
     div()
@@ -140,6 +145,7 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
                 .overflow_x_hidden()
                 .overflow_y_scroll()
                 .when_some(props.on_scroll, |s, f| s.on_scroll_wheel(f))
+                .when_some(props.on_drop_paths, |s, f| s.on_drop::<ExternalPaths>(f))
                 .child(div().w_full().min_w_0().child(props.editor_element)),
         )
 }

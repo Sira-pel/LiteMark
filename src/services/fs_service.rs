@@ -300,6 +300,11 @@ const TEMP_SUFFIX: &str = ".litemark-tmp";
 /// group; if the owner or group can't be given away the result is a
 /// `PermissionDenied` error, like a directory the user can't create files in.
 fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
+    write_temp_bytes(target, content.as_bytes())
+}
+
+/// [`write_temp`] for bytes that are not text, such as an image.
+fn write_temp_bytes(target: &Path, content: &[u8]) -> io::Result<PathBuf> {
     let parent = target.parent().unwrap_or(Path::new("."));
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
@@ -337,7 +342,7 @@ fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
             if let Some(meta) = &original {
                 match_owner(&file, meta)?;
             }
-            file.write_all(content.as_bytes())?;
+            file.write_all(content)?;
             file.sync_all()?;
             if let Some(meta) = &original {
                 fs::set_permissions(&temp_path, meta.permissions())?;
@@ -469,6 +474,110 @@ pub fn disk_change(path: &Path, seen: &DiskVersion) -> DiskChange {
         Ok(bytes) if content_hash(&bytes) == seen.content_hash => DiskChange::Unchanged,
         _ => DiskChange::Changed,
     }
+}
+
+/// Folder next to a note where pasted and dropped images are kept.
+pub const ASSETS_DIR: &str = "assets";
+
+/// `image-YYYYMMDD-HHMMSS.png` for a moment given as seconds since the Unix
+/// epoch. The time is UTC: the app has no time-zone database, and a name only
+/// has to be unique and sort by time.
+pub fn pasted_image_name(unix_secs: u64) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let rest = unix_secs % 86_400;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "image-{year:04}{month:02}{day:02}-{:02}{:02}{:02}.png",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+/// `name` with `-n` before its extension: `shot.png` becomes `shot-2.png`.
+/// `n` of 1 is the name itself.
+pub fn numbered_asset_name(name: &str, n: usize) -> String {
+    if n <= 1 {
+        return name.to_string();
+    }
+    match name.rfind('.').filter(|&dot| dot > 0) {
+        Some(dot) => format!("{}-{n}{}", &name[..dot], &name[dot..]),
+        None => format!("{name}-{n}"),
+    }
+}
+
+/// Save `bytes` as a new file in `note_dir/assets`, creating the folder.
+/// Never replaces a file: when `desired_name` is taken, or taken a moment
+/// later by someone else, the next numbered name is used. Returns the path
+/// written.
+pub fn save_note_asset(note_dir: &Path, desired_name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    let dir = note_dir.join(ASSETS_DIR);
+    fs::create_dir_all(&dir)?;
+    let mut name = sanitize_name(desired_name);
+    if name.is_empty() {
+        name = "image.png".to_string();
+    }
+    for n in 1..=1000 {
+        let path = dir.join(numbered_asset_name(&name, n));
+        if fs::symlink_metadata(&path).is_ok() {
+            continue;
+        }
+        let temp_path = write_temp_bytes(&path, bytes)?;
+        match rename_noreplace(&temp_path, &path) {
+            Ok(()) => {
+                fsync_parent(&path)?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = fs::remove_file(&temp_path);
+            }
+            Err(err) => {
+                let _ = fs::remove_file(&temp_path);
+                return Err(err);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free file name",
+    ))
+}
+
+/// Largest image file copied into a note's `assets` folder.
+pub const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Copy the file at `src` into `note_dir/assets` under its own name (numbered
+/// when taken). The original is left alone.
+pub fn copy_into_note_assets(note_dir: &Path, src: &Path) -> io::Result<PathBuf> {
+    let meta = fs::metadata(src)?;
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a file"));
+    }
+    if meta.len() > MAX_ASSET_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the image is larger than 64 MB",
+        ));
+    }
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid file name"))?;
+    save_note_asset(note_dir, name, &fs::read(src)?)
 }
 
 /// Create `dir/desired_name` without replacing an existing file.
@@ -2233,5 +2342,81 @@ mod tests {
     fn show_code_files_defaults_on_for_old_settings_files() {
         let settings: crate::model::EditorSettings = serde_json::from_str("{}").unwrap();
         assert!(settings.show_code_files);
+    }
+
+    #[test]
+    fn pasted_image_names_follow_the_time() {
+        assert_eq!(pasted_image_name(0), "image-19700101-000000.png");
+        // 2024-02-29 13:05:09 UTC, a leap day.
+        assert_eq!(
+            pasted_image_name(1_709_211_909),
+            "image-20240229-130509.png"
+        );
+        // 2026-12-31 23:59:59 UTC.
+        assert_eq!(
+            pasted_image_name(1_798_761_599),
+            "image-20261231-235959.png"
+        );
+    }
+
+    #[test]
+    fn numbered_asset_names_keep_the_extension() {
+        assert_eq!(numbered_asset_name("a.png", 1), "a.png");
+        assert_eq!(numbered_asset_name("a.png", 2), "a-2.png");
+        assert_eq!(numbered_asset_name("a.tar.gz", 3), "a.tar-3.gz");
+        assert_eq!(numbered_asset_name("noext", 2), "noext-2");
+        assert_eq!(numbered_asset_name(".hidden", 2), ".hidden-2");
+    }
+
+    #[test]
+    fn saving_an_asset_creates_the_folder_and_never_overwrites() {
+        let note_dir = std::env::temp_dir().join(format!("litemark-assets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&note_dir);
+        fs::create_dir_all(&note_dir).unwrap();
+
+        let first = save_note_asset(&note_dir, "image-1.png", b"one").unwrap();
+        assert_eq!(first, note_dir.join("assets").join("image-1.png"));
+        let second = save_note_asset(&note_dir, "image-1.png", b"two").unwrap();
+        assert_eq!(second, note_dir.join("assets").join("image-1-2.png"));
+        let third = save_note_asset(&note_dir, "image-1.png", b"three").unwrap();
+        assert_eq!(third, note_dir.join("assets").join("image-1-3.png"));
+        assert_eq!(fs::read(&first).unwrap(), b"one");
+        assert_eq!(fs::read(&second).unwrap(), b"two");
+        assert_eq!(fs::read(&third).unwrap(), b"three");
+        // No temporary files are left behind.
+        let leftovers = fs::read_dir(note_dir.join("assets"))
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(TEMP_SUFFIX)
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+        let _ = fs::remove_dir_all(&note_dir);
+    }
+
+    #[test]
+    fn copying_into_assets_keeps_the_original_and_its_name() {
+        let root =
+            std::env::temp_dir().join(format!("litemark-assets-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let note_dir = root.join("notes");
+        fs::create_dir_all(&note_dir).unwrap();
+        let src = root.join("My Photo.jpg");
+        fs::write(&src, b"pixels").unwrap();
+
+        let copy = copy_into_note_assets(&note_dir, &src).unwrap();
+        assert_eq!(copy, note_dir.join("assets").join("My Photo.jpg"));
+        assert_eq!(fs::read(&src).unwrap(), b"pixels");
+        let again = copy_into_note_assets(&note_dir, &src).unwrap();
+        assert_eq!(again, note_dir.join("assets").join("My Photo-2.jpg"));
+
+        let err = copy_into_note_assets(&note_dir, &root).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(copy_into_note_assets(&note_dir, &root.join("missing.png")).is_err());
+        let _ = fs::remove_dir_all(&root);
     }
 }
