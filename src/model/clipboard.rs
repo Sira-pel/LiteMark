@@ -1,4 +1,4 @@
-use gpui::ClipboardItem;
+use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CopiedMarkdown {
@@ -37,6 +37,36 @@ pub fn paste_text(item: &ClipboardItem, into_markdown: bool) -> Option<String> {
     text
 }
 
+/// The image on the clipboard, when the clipboard holds one and no text.
+/// Programs that copy a picture often add text too (a file name, an HTML
+/// fragment); that case pastes as text, as it always did.
+pub fn clipboard_image(item: &ClipboardItem) -> Option<&Image> {
+    if item.text().is_some() {
+        return None;
+    }
+    item.entries().iter().find_map(|entry| match entry {
+        ClipboardEntry::Image(image) => Some(image),
+        _ => None,
+    })
+}
+
+/// PNG bytes for a clipboard image: PNG as it is, JPEG, WebP, GIF and BMP
+/// re-encoded. Other formats (SVG, TIFF) are not supported.
+pub fn clipboard_image_png(image: &Image) -> Result<Vec<u8>, String> {
+    if image.format == ImageFormat::Png {
+        return Ok(image.bytes.clone());
+    }
+    if matches!(image.format, ImageFormat::Svg | ImageFormat::Tiff) {
+        return Err("This kind of image can't be pasted.".into());
+    }
+    let decoded = ::image::load_from_memory(&image.bytes).map_err(|err| err.to_string())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    decoded
+        .write_to(&mut out, ::image::ImageFormat::Png)
+        .map_err(|err| err.to_string())?;
+    Ok(out.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +93,50 @@ mod tests {
             // Non-Markdown targets get the visible text.
             assert_eq!(paste_text(&item, false), item.text());
         }
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        let pixels = ::image::RgbaImage::from_pixel(2, 3, ::image::Rgba([200, 30, 30, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        pixels
+            .write_to(&mut out, ::image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn an_image_only_clipboard_is_an_image_paste() {
+        let png = Image::from_bytes(ImageFormat::Png, png_bytes());
+        let item = ClipboardItem::new_image(&png);
+        assert_eq!(clipboard_image(&item), Some(&png));
+        assert_eq!(paste_text(&item, true), None);
+    }
+
+    #[test]
+    fn a_text_clipboard_is_not_an_image_paste() {
+        let item = ClipboardItem::new_string("photo.png".into());
+        assert_eq!(clipboard_image(&item), None);
+        assert_eq!(paste_text(&item, true).as_deref(), Some("photo.png"));
+    }
+
+    #[test]
+    fn clipboard_images_become_png() {
+        let png = png_bytes();
+        let as_png = Image::from_bytes(ImageFormat::Png, png.clone());
+        assert_eq!(clipboard_image_png(&as_png).unwrap(), png);
+
+        let mut bmp = std::io::Cursor::new(Vec::new());
+        ::image::RgbaImage::from_pixel(2, 3, ::image::Rgba([1, 2, 3, 255]))
+            .write_to(&mut bmp, ::image::ImageFormat::Bmp)
+            .unwrap();
+        let converted =
+            clipboard_image_png(&Image::from_bytes(ImageFormat::Bmp, bmp.into_inner())).unwrap();
+        assert_eq!(&converted[1..4], b"PNG");
+
+        let svg = Image::from_bytes(ImageFormat::Svg, b"<svg/>".to_vec());
+        assert!(clipboard_image_png(&svg).is_err());
+        let junk = Image::from_bytes(ImageFormat::Jpeg, b"not a jpeg".to_vec());
+        assert!(clipboard_image_png(&junk).is_err());
     }
 
     #[test]

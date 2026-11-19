@@ -954,11 +954,17 @@ impl LiteMarkApp {
         }
     }
 
-    pub fn handle_paste(&mut self, cx: &mut App) {
+    pub fn handle_paste(&mut self, cx: &mut Context<Self>) {
         if self.block_table_drag_edit() {
             return;
         }
         if let Some(item) = cx.read_from_clipboard() {
+            // A picture with no text goes into the note's assets folder.
+            if let Some(image) = clipboard_image(&item) {
+                if self.paste_clipboard_image(image, note_assets::unix_now(), cx) {
+                    return;
+                }
+            }
             // A copy from a Markdown tab carries its source as metadata.
             let into_markdown = self
                 .active_tab()

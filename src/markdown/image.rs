@@ -102,6 +102,17 @@ pub fn parse_image_line(line: &str) -> Option<ImageLine> {
     Some(ImageLine { alt, target, title })
 }
 
+/// Markdown for an image at `path`: `![alt](path)`. A path with spaces or
+/// parentheses goes in `<...>` so it still reads as one target.
+pub fn image_markdown(alt: &str, path: &str) -> String {
+    let alt = alt.replace(['[', ']'], "");
+    if path.contains(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>')) {
+        format!("![{alt}](<{}>)", path.replace(['<', '>'], ""))
+    } else {
+        format!("![{alt}]({path})")
+    }
+}
+
 /// Drops the backslash from escaped ASCII punctuation.
 fn unescape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -331,6 +342,27 @@ mod tests {
         assert_eq!(
             parse(r"![a \] b [x]](p.png)"),
             Some(("a ] b [x]".into(), "p.png".into(), None))
+        );
+    }
+
+    #[test]
+    fn image_markdown_round_trips_through_the_parser() {
+        for path in [
+            "assets/image-1.png",
+            "assets/my photo.png",
+            "assets/a (1).png",
+        ] {
+            let line = image_markdown("", path);
+            assert_eq!(
+                parse(&line),
+                Some((String::new(), path.into(), None)),
+                "{line}"
+            );
+        }
+        assert_eq!(image_markdown("", "assets/a.png"), "![](assets/a.png)");
+        assert_eq!(
+            image_markdown("a [b]", "assets/x y.png"),
+            "![a b](<assets/x y.png>)"
         );
     }
 

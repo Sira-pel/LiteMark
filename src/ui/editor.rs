@@ -99,9 +99,14 @@ pub struct EditorProps {
     pub on_scroll: Option<ScrollHandler>,
     /// The outline strip or card, drawn over the editor's right edge.
     pub outline: Option<AnyElement>,
-    /// Right padding that keeps text clear of a pinned outline card.
+    /// Right padding that keeps text clear of the outline strip or a pinned card.
     pub right_inset: Pixels,
+    /// Called when files are dropped on the editor from the OS.
+    pub on_drop_paths: Option<DropPathsHandler>,
 }
+
+/// Handler for files dropped on the editor.
+pub type DropPathsHandler = Box<dyn Fn(&ExternalPaths, &mut Window, &mut App) + 'static>;
 
 pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
     div()
@@ -144,6 +149,7 @@ pub fn render_editor(props: EditorProps, theme: &Theme) -> impl IntoElement {
                 .overflow_x_hidden()
                 .overflow_y_scroll()
                 .when_some(props.on_scroll, |s, f| s.on_scroll_wheel(f))
+                .when_some(props.on_drop_paths, |s, f| s.on_drop::<ExternalPaths>(f))
                 .child(
                     div()
                         .w_full()
