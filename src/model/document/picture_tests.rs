@@ -336,3 +336,16 @@ fn word_deletes_remove_the_picture_not_pieces_of_its_markdown() {
     d.delete_word_right();
     assert_eq!(d.content, "intro\nafter\n");
 }
+
+#[test]
+fn cutting_a_selected_picture_removes_its_line_and_indent_leaves_it_alone() {
+    let src = format!("intro\n{PIC}\nafter\n");
+    let start = start_of(&src);
+    let mut d = doc(&src);
+    d.select_picture(start..start + PIC.len());
+    d.indent();
+    d.outdent();
+    assert_eq!(d.content, src);
+    assert!(d.cut_selected_picture());
+    assert_eq!(d.content, "intro\nafter\n");
+}

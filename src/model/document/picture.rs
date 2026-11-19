@@ -210,6 +210,12 @@ impl DocumentTab {
         }
     }
 
+    /// Cut: a selected picture goes with its whole line. Returns false when
+    /// the selection is not a picture, so the caller cuts as usual.
+    pub fn cut_selected_picture(&mut self) -> bool {
+        self.selected_picture().is_some() && self.picture_remove(false)
+    }
+
     /// Enter on a selected picture opens a new line after it.
     pub(super) fn picture_newline(&mut self) -> bool {
         let Some(block) = self.selected_picture() else {
