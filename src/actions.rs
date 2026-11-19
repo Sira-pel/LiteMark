@@ -112,5 +112,10 @@ actions!(
         PromptUp,
         PromptDown,
         PromptConfirm,
+        QuickOpenNotes,
+        QuickOpenContents,
+        QuickOpenUp,
+        QuickOpenDown,
+        QuickOpenSwitch,
     ]
 );

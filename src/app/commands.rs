@@ -43,7 +43,9 @@ impl LiteMarkApp {
             cx.notify();
             return;
         }
-        if self.editor_context_menu.is_some() {
+        if self.quick_open.is_some() {
+            self.close_quick_open(cx);
+        } else if self.editor_context_menu.is_some() {
             self.dismiss_editor_context_menu();
         } else if self.workspace_menu_open {
             self.workspace_menu_open = false;
@@ -221,6 +223,9 @@ impl LiteMarkApp {
             }
             TextInput::Create if self.create_draft.is_some() => Some(self.create_field.clone()),
             TextInput::Search => Some(self.search_field.clone()),
+            TextInput::QuickOpen if self.quick_open.is_some() => {
+                Some(self.quick_open_field.clone())
+            }
             _ => None,
         }
     }
@@ -243,6 +248,8 @@ impl LiteMarkApp {
             Some(self.create_field.clone())
         } else if self.search_field.read(cx).is_focused(window) {
             Some(self.search_field.clone())
+        } else if self.quick_open_field.read(cx).is_focused(window) {
+            Some(self.quick_open_field.clone())
         } else {
             self.line_field_for_focus()
         };
@@ -261,6 +268,8 @@ impl LiteMarkApp {
         } else if field.entity_id() == self.search_field.entity_id() {
             self.search_query = written;
             self.multi_selection = None;
+        } else if field.entity_id() == self.quick_open_field.entity_id() {
+            self.quick_open_query_changed(written, cx);
         }
         window.refresh();
         cx.notify();

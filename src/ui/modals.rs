@@ -33,6 +33,8 @@ where
         (sec("Ctrl + T"), "New Tab"),
         (sec("Ctrl + W"), "Close Active Tab"),
         (sec("Ctrl + F"), "Find in Document"),
+        (sec("Ctrl + P"), "Quick Open: Find a Note by Name"),
+        (sec("Ctrl + Shift + F"), "Search Inside All Notes"),
         (
             if mac {
                 "Cmd + Alt + F".to_string()

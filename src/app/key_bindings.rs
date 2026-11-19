@@ -149,6 +149,26 @@ impl LiteMarkApp {
             this.toggle_find_panel();
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &QuickOpenNotes, _window, cx| {
+            this.open_quick_open(QuickMode::Notes, cx);
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &QuickOpenContents, _window, cx| {
+            this.open_quick_open(QuickMode::Contents, cx);
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &QuickOpenUp, _window, cx| {
+            this.quick_open_step(false);
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &QuickOpenDown, _window, cx| {
+            this.quick_open_step(true);
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &QuickOpenSwitch, _window, cx| {
+            this.quick_open_switch_mode(cx);
+            cx.notify();
+        }))
         .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
             this.handle_toggle_sidebar();
             cx.notify();

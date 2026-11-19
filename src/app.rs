@@ -22,6 +22,7 @@ use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,10 +34,13 @@ mod find;
 mod input_handler;
 mod key_bindings;
 mod menus;
+mod quick_open;
 mod render;
 mod scroll;
 mod sidebar;
 mod tabs;
+
+pub(crate) use quick_open::QuickOpen;
 
 /// An item action stored in a menu: run with the window and app.
 pub(crate) type MenuAction = Arc<dyn Fn(&mut Window, &mut App) + 'static>;
@@ -232,6 +236,11 @@ pub struct LiteMarkApp {
     pub create_draft: Option<SidebarCreate>,
     pub create_field: Entity<LineField>,
     pub search_field: Entity<LineField>,
+    /// The Ctrl+P pop-up, while it is open, and its text field.
+    pub(crate) quick_open: Option<QuickOpen>,
+    pub quick_open_field: Entity<LineField>,
+    /// Number of the content search that may still report back.
+    quick_open_epoch: Arc<AtomicU64>,
     pub pending_create_focus: bool,
     pub field_owns_keys: bool,
     pub field_focus: TextInput,
@@ -511,6 +520,42 @@ impl LiteMarkApp {
             }
         });
 
+        let quick_open_field = cx.new({
+            let app_handle = app_handle.clone();
+            move |cx| {
+                LineField::new(
+                    cx,
+                    "quick-open-field",
+                    "Search notes",
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |text, app| {
+                            let text = text.to_string();
+                            app_handle
+                                .update(app, |this, cx| this.quick_open_query_changed(text, cx))
+                                .ok();
+                        }
+                    }),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |_text, _previous, app| {
+                            app_handle
+                                .update(app, |this, cx| this.quick_open_activate(None, cx))
+                                .ok();
+                        }
+                    }),
+                    Arc::new({
+                        let app_handle = app_handle.clone();
+                        move |app| {
+                            app_handle
+                                .update(app, |this, cx| this.claim_field(TextInput::QuickOpen, cx))
+                                .ok();
+                        }
+                    }),
+                )
+            }
+        });
+
         let initial_selected = initial_tab.workspace_file_id.clone();
 
         let mut app = Self {
@@ -590,6 +635,9 @@ impl LiteMarkApp {
             create_draft: None,
             create_field,
             search_field,
+            quick_open: None,
+            quick_open_field,
+            quick_open_epoch: Arc::new(AtomicU64::new(0)),
             pending_create_focus: false,
             field_owns_keys: false,
             field_focus: TextInput::Editor,
@@ -730,6 +778,9 @@ impl LiteMarkApp {
             create_draft: None,
             create_field: Self::dummy_line_field(cx, "create-field"),
             search_field: Self::dummy_line_field(cx, "search-field"),
+            quick_open: None,
+            quick_open_field: Self::dummy_line_field(cx, "quick-open-field"),
+            quick_open_epoch: Arc::new(AtomicU64::new(0)),
             pending_create_focus: false,
             field_owns_keys: false,
             field_focus: TextInput::Editor,
@@ -776,7 +827,7 @@ impl LiteMarkApp {
     }
 
     fn input_blocked(&self) -> bool {
-        self.prompt.is_some()
+        self.prompt.is_some() || self.quick_open.is_some()
     }
 
     fn text_field_focused(&self, window: &Window, cx: &App) -> bool {
@@ -785,6 +836,7 @@ impl LiteMarkApp {
             || self.rename_field.read(cx).is_focused(window)
             || self.create_field.read(cx).is_focused(window)
             || self.search_field.read(cx).is_focused(window)
+            || self.quick_open_field.read(cx).is_focused(window)
     }
 
     fn show_error(&mut self, message: impl Into<String>) {
@@ -893,3 +945,7 @@ mod sidebar_render_tests;
 #[cfg(test)]
 #[path = "tab_restore_tests.rs"]
 mod tab_restore_tests;
+
+#[cfg(test)]
+#[path = "quick_open_tests.rs"]
+mod quick_open_tests;

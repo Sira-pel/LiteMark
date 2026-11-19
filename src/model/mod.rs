@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod document;
+pub mod quick_open;
 pub mod recent_notes;
 pub mod session;
 pub mod settings;
@@ -9,6 +10,7 @@ pub mod text_ops;
 pub mod workspace;
 
 pub use document::*;
+pub use quick_open::*;
 pub use recent_notes::*;
 pub use session::*;
 pub use settings::*;
