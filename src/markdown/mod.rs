@@ -1,4 +1,5 @@
 pub mod exporter;
+pub mod image;
 pub mod parser;
 
 pub use exporter::*;

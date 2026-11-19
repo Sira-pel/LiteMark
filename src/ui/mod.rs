@@ -6,6 +6,7 @@ pub mod line_field;
 pub mod menu;
 pub mod menu_bar;
 pub mod modals;
+pub mod note_images;
 pub mod primitives;
 pub mod settings_menu;
 pub mod sidebar;

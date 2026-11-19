@@ -852,6 +852,10 @@ mod viewport_culling_tests;
 mod note_drop_tests;
 
 #[cfg(test)]
+#[path = "note_image_tests.rs"]
+mod note_image_tests;
+
+#[cfg(test)]
 #[path = "disk_change_tests.rs"]
 mod disk_change_tests;
 
