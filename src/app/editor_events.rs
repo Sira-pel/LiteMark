@@ -309,6 +309,7 @@ impl LiteMarkApp {
                         tab.edit(range, replacement);
                     }
                 }
+                self.refresh_find();
                 window.refresh();
                 cx.notify();
                 return;

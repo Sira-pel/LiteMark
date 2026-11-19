@@ -136,7 +136,14 @@ pub fn parsed_table_source(content: &str, pos: usize) -> Option<Range<usize>> {
 
 /// [`parsed_table_source`] against an existing parse of the content.
 pub fn parsed_table_source_in(parsed: &ParsedDocument, pos: usize) -> Option<Range<usize>> {
-    for line in &parsed.lines {
+    let lines = &parsed.lines;
+    let idx = lines.partition_point(|l| l.source.end < pos);
+    // A table has at most one non-TableRow line (the delimiter row immediately
+    // after the header), so any `pos` within `table_source` is within two lines
+    // of `idx`.
+    let start = idx.saturating_sub(2);
+    let end = (idx + 2).min(lines.len());
+    for line in &lines[start..end] {
         if let LineKind::TableRow { ref body, .. } = &line.kind {
             let TableRowBody { table_source, .. } = &**body;
             if pos >= table_source.start && pos <= table_source.end {
@@ -1524,5 +1531,29 @@ mod tests {
         assert_eq!(table_row_count(&out), 2);
         assert_eq!(table_col_count(&out), 3);
         assert_exported_table(&out);
+    }
+
+    #[test]
+    fn parsed_table_source_in_matches_linear_scan_at_every_offset() {
+        let doc = "intro\n\n| H1 | H2 |\n|---|---|\n\nmiddle\r\n\r\n| A | B |\r\n|---|---|\r\n| 1 | 2 |\r\n\r\ntail";
+        let parsed = crate::markdown::parse_document(doc);
+        let linear = |pos: usize| -> Option<Range<usize>> {
+            for line in &parsed.lines {
+                if let LineKind::TableRow { ref body, .. } = &line.kind {
+                    let TableRowBody { table_source, .. } = &**body;
+                    if pos >= table_source.start && pos <= table_source.end {
+                        return Some(table_source.clone());
+                    }
+                }
+            }
+            None
+        };
+        for pos in 0..=doc.len() {
+            assert_eq!(
+                parsed_table_source_in(&parsed, pos),
+                linear(pos),
+                "mismatch at byte offset {pos}"
+            );
+        }
     }
 }

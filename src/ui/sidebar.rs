@@ -179,12 +179,6 @@ pub fn build_sidebar_tree(
             .or_default()
             .push(file);
     }
-    for level in child_folders.values_mut() {
-        level.sort_by_cached_key(|f| f.name.to_lowercase());
-    }
-    for level in child_files.values_mut() {
-        level.sort_by_cached_key(|f| f.name.to_lowercase());
-    }
 
     struct Levels<'a> {
         folders: HashMap<Option<&'a str>, Vec<&'a WorkspaceFolder>>,
@@ -205,20 +199,23 @@ pub fn build_sidebar_tree(
                 out.push(SidebarTreeItem::CreateInput { depth, is_folder });
             }
         }
-        let level_folders = levels.folders.get(&parent_id).cloned().unwrap_or_default();
-        for folder in level_folders {
-            out.push(SidebarTreeItem::Folder {
-                folder: folder.clone(),
-                depth,
-            });
-            // `visited` guards against a parent cycle in hand-built data.
-            if folder.is_open && levels.visited.insert(folder.id.as_str()) {
-                collect_level(Some(folder.id.as_str()), depth + 1, levels, out);
+        if let Some(mut level_folders) = levels.folders.remove(&parent_id) {
+            level_folders.sort_by_cached_key(|f| f.name.to_lowercase());
+            for folder in level_folders {
+                out.push(SidebarTreeItem::Folder {
+                    folder: folder.clone(),
+                    depth,
+                });
+                // `visited` guards against a parent cycle in hand-built data.
+                if folder.is_open && levels.visited.insert(folder.id.as_str()) {
+                    collect_level(Some(folder.id.as_str()), depth + 1, levels, out);
+                }
             }
         }
-        if let Some(level_files) = levels.files.get(&parent_id) {
-            out.extend(level_files.iter().map(|file| SidebarTreeItem::File {
-                file: (*file).clone(),
+        if let Some(mut level_files) = levels.files.remove(&parent_id) {
+            level_files.sort_by_cached_key(|f| f.name.to_lowercase());
+            out.extend(level_files.into_iter().map(|file| SidebarTreeItem::File {
+                file: file.clone(),
                 depth,
             }));
         }

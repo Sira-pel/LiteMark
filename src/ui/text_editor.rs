@@ -15,7 +15,9 @@ use crate::markdown::{
     TableRowBody,
 };
 use crate::model::document::visible_line_end;
-use crate::model::text_ops::{visual_row_count_tabbed, visual_rows_tabbed, Caret};
+use crate::model::text_ops::{
+    count_line_endings_bytes, visual_row_count_tabbed, visual_rows_tabbed, Caret,
+};
 use crate::model::ViewMode;
 use crate::theme::sz;
 
@@ -196,12 +198,12 @@ pub struct LayoutCache {
     /// the wrap columns and font size in `estimate_key`.
     estimate: Vec<Option<Pixels>>,
     estimate_key: (usize, u32),
-    /// Raw mode: content snapshot, wrap columns, tab width, and every row with its offset map.
+    /// Raw mode: content snapshot, wrap columns, tab width, and every row's byte range.
     raw_rows: Option<(SharedString, usize, usize, Rc<RawRows>)>,
 }
 
-/// Raw mode rows: byte range and offset map of each.
-type RawRows = Vec<(usize, usize, Arc<RowOffsetMap>)>;
+/// Raw mode rows: `(byte_start, byte_end)` of each visual row.
+type RawRows = Vec<(usize, usize)>;
 
 impl LayoutCache {
     /// Line up the cache with `doc`: keep it for the same parse, follow an
@@ -1195,7 +1197,16 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
             h.max(paint_borrow.total_height)
         } else {
-            let rows = visual_row_count_tabbed(&self.content, wrap_cols, self.tab_width);
+            let rows = match &paint_borrow.layout_cache.raw_rows {
+                Some((text, cols, tab, cached))
+                    if *cols == wrap_cols
+                        && *tab == self.tab_width
+                        && same_text(text, &self.content) =>
+                {
+                    cached.len()
+                }
+                _ => visual_row_count_tabbed(&self.content, wrap_cols, self.tab_width),
+            };
             let line_height = self.font_size * 1.65;
             line_height * rows as f32 + px(32.0)
         };
@@ -1290,21 +1301,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         if self.view_mode == ViewMode::Raw {
             let raw_rows = match &layout_cache.raw_rows {
                 Some((text, cols, tab, rows))
-                    if same_text(text, &self.content)
-                        && *cols == wrap_cols
-                        && *tab == self.tab_width =>
+                    if *cols == wrap_cols
+                        && *tab == self.tab_width
+                        && same_text(text, &self.content) =>
                 {
                     rows.clone()
                 }
                 _ => {
-                    let rows: RawRows =
-                        visual_rows_tabbed(&self.content, wrap_cols, self.tab_width)
-                            .into_iter()
-                            .map(|(start, end)| {
-                                (start, end, Arc::new(RowOffsetMap::identity(start, end)))
-                            })
-                            .collect();
-                    let rows = Rc::new(rows);
+                    let rows =
+                        Rc::new(visual_rows_tabbed(&self.content, wrap_cols, self.tab_width));
                     layout_cache.raw_rows = Some((
                         self.content.clone(),
                         wrap_cols,
@@ -1314,16 +1319,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     rows
                 }
             };
-            let rows_src: Vec<(usize, usize)> = raw_rows.iter().map(|&(s, e, _)| (s, e)).collect();
             let anchor_rows: Vec<usize> = anchors
                 .iter()
                 .map(|&offset| {
-                    rows_src
+                    raw_rows
                         .partition_point(|&(start, _)| start <= offset)
                         .saturating_sub(1)
                 })
                 .collect();
-            let mut rows = Vec::with_capacity(rows_src.len());
+            let mut rows = Vec::with_capacity(raw_rows.len());
             let mut numbers = Vec::new();
             let mut bg_quads = Vec::new();
             let mut quads = Vec::new();
@@ -1336,9 +1340,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 ..self.selection_color
             };
 
-            for (index, (start, end)) in rows_src.iter().copied().enumerate() {
+            for (index, (start, end)) in raw_rows.iter().copied().enumerate() {
                 let at_line_start = index == 0
-                    || self.content.as_bytes().get(start.wrapping_sub(1)) == Some(&b'\n');
+                    || matches!(
+                        self.content.as_bytes().get(start.wrapping_sub(1)),
+                        Some(b'\n' | b'\r')
+                    );
                 if at_line_start {
                     line_number += 1;
                 }
@@ -1355,9 +1362,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         origin,
                         line_height: base_line_height,
                         shaped: unshaped.clone(),
-                        offset_map: raw_rows[index].2.clone(),
+                        offset_map: empty_map.clone(),
                         checkbox_hit: None,
-                        link_hits: Arc::default(),
+                        link_hits: empty_links.clone(),
                         cells: Vec::new(),
                     });
                     continue;
@@ -1423,8 +1430,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         color,
                     );
                 }
-                let is_last_row = index + 1 == rows_src.len();
-                let next_is_newline = self.content.as_bytes().get(end) == Some(&b'\n');
+                let is_last_row = index + 1 == raw_rows.len();
+                let next_is_newline =
+                    matches!(self.content.as_bytes().get(end), Some(b'\n' | b'\r'));
                 let caret_matches = if is_last_row || next_is_newline {
                     self.selection.start >= start && self.selection.start <= end
                 } else {
@@ -1498,7 +1506,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     shaped: Rc::new(shaped),
                     offset_map: Arc::new(offset_map),
                     checkbox_hit: None,
-                    link_hits: Arc::default(),
+                    link_hits: empty_links.clone(),
                     cells: Vec::new(),
                 });
             }
@@ -1929,32 +1937,33 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
 
                     for (d_start, d_end) in wrapped_slices {
                         let sub_len = d_end.saturating_sub(d_start);
-                        let sub_map = if d_start == 0 && d_end == disp_len {
-                            cell_map.clone()
+                        let (sub_map, shaped_sub) = if d_start == 0 && d_end == disp_len {
+                            (cell_map.clone(), full_shaped.clone())
                         } else {
-                            cell_map.slice_display(d_start..d_end)
+                            let sub_map = cell_map.slice_display(d_start..d_end);
+                            let sub_slice: SharedString = if sub_len == 0 {
+                                SharedString::from(" ")
+                            } else {
+                                SharedString::from(cell_display[d_start..d_end].to_string())
+                            };
+                            let sub_runs = wysiwyg_cell_runs(
+                                parsed_line,
+                                sub_len,
+                                sub_slice.len(),
+                                &sub_map,
+                                self.marked.as_ref(),
+                                &base_font,
+                                &mono_font,
+                                &colors,
+                            );
+                            let shaped_sub = window.text_system().shape_line(
+                                sub_slice,
+                                row_font_size,
+                                &sub_runs,
+                                None,
+                            );
+                            (sub_map, shaped_sub)
                         };
-                        let sub_slice: SharedString = if sub_len == 0 {
-                            SharedString::from(" ")
-                        } else {
-                            SharedString::from(cell_display[d_start..d_end].to_string())
-                        };
-                        let sub_runs = wysiwyg_cell_runs(
-                            parsed_line,
-                            sub_len,
-                            sub_slice.len(),
-                            &sub_map,
-                            self.marked.as_ref(),
-                            &base_font,
-                            &mono_font,
-                            &colors,
-                        );
-                        let shaped_sub = window.text_system().shape_line(
-                            sub_slice,
-                            row_font_size,
-                            &sub_runs,
-                            None,
-                        );
 
                         let text_w = if sub_len == 0 {
                             px(0.0)
@@ -3271,11 +3280,13 @@ fn apply_table_pipe_style(
 }
 
 fn logical_line_number(content: &str, offset: usize) -> usize {
-    content[..offset.min(content.len())]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        + 1
+    let bytes = content.as_bytes();
+    let mut end = offset.min(bytes.len());
+    // If `offset` lands between `\r` and `\n`, stay on the line owning the CRLF.
+    if end > 0 && bytes[end - 1] == b'\r' && bytes.get(end) == Some(&b'\n') {
+        end -= 1;
+    }
+    count_line_endings_bytes(&bytes[..end]) + 1
 }
 
 fn raw_line_runs(

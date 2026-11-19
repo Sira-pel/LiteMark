@@ -111,14 +111,10 @@ impl LineField {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        let head = self.cursor_offset();
-        if offset < head {
-            self.selected_range = offset..head;
-            self.selection_reversed = true;
-        } else {
-            self.selected_range = head..offset;
-            self.selection_reversed = false;
-        }
+        let (range, reversed) =
+            extend_selection(self.selected_range.clone(), self.selection_reversed, offset);
+        self.selected_range = range;
+        self.selection_reversed = reversed;
         cx.notify();
     }
 
@@ -839,5 +835,62 @@ impl IntoElement for FieldElement {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+/// Extend an existing selection to `offset` while keeping the stationary anchor
+/// fixed (matching `Caret::select_to`).
+fn extend_selection(
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+    offset: usize,
+) -> (Range<usize>, bool) {
+    let anchor = if selected_range.is_empty() {
+        if selection_reversed {
+            selected_range.start
+        } else {
+            selected_range.end
+        }
+    } else if selection_reversed {
+        selected_range.end
+    } else {
+        selected_range.start
+    };
+    if offset < anchor {
+        (offset..anchor, true)
+    } else {
+        (anchor..offset, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extend_selection;
+
+    #[test]
+    fn select_to_extends_from_stationary_anchor() {
+        // Multi-step Shift+Right from offset 0
+        let (range, rev) = extend_selection(0..0, false, 1);
+        assert_eq!((range.clone(), rev), (0..1, false));
+        let (range, rev) = extend_selection(range, rev, 2);
+        assert_eq!((range.clone(), rev), (0..2, false));
+        let (range, rev) = extend_selection(range, rev, 3);
+        assert_eq!((range.clone(), rev), (0..3, false));
+
+        // Repeated mouse-move at the same offset keeps the selection intact
+        let (range, rev) = extend_selection(range, rev, 3);
+        assert_eq!((range.clone(), rev), (0..3, false));
+
+        // Multi-step Shift+Left from offset 5
+        let (range, rev) = extend_selection(5..5, false, 4);
+        assert_eq!((range.clone(), rev), (4..5, true));
+        let (range, rev) = extend_selection(range, rev, 3);
+        assert_eq!((range.clone(), rev), (3..5, true));
+        let (range, rev) = extend_selection(range, rev, 2);
+        assert_eq!((range.clone(), rev), (2..5, true));
+
+        // Crossing back over the anchor flips direction cleanly
+        let (range, rev) = extend_selection(range, rev, 7);
+        assert_eq!((range, rev), (5..7, false));
     }
 }
