@@ -171,6 +171,9 @@ fn dropped_images_are_copied_to_assets_and_each_gets_a_link() {
     view.update(&mut cx, |app, cx| {
         assert!(app.drop_image_files(&[a.clone(), b.clone(), c.clone()], cx));
     });
+    // The copy runs in the background; nothing is linked until it is done.
+    assert_eq!(content(&view, &cx), NOTE);
+    cx.run_until_parked();
     assert_eq!(
         content(&view, &cx),
         "before![](assets/a-2.png)\n![](<assets/My Photo.JPG>)\nafter\n"

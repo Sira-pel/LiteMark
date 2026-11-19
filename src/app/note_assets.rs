@@ -108,10 +108,16 @@ impl LiteMarkApp {
     }
 
     /// Copy dropped image files into the active note's `assets` folder and
-    /// link each one at the caret. Returns `false` when nothing dropped is an
-    /// image, or the tab is not a Markdown note.
+    /// link each one at the caret. The files are copied in the background
+    /// (an image can be large), and the links go into the tab the files were
+    /// dropped on once copying is done. Returns `false` when nothing dropped
+    /// is an image, or the tab is not a Markdown note.
     pub(super) fn drop_image_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
-        let images: Vec<&PathBuf> = paths.iter().filter(|p| is_droppable_image(p)).collect();
+        let images: Vec<PathBuf> = paths
+            .iter()
+            .filter(|p| is_droppable_image(p))
+            .cloned()
+            .collect();
         if images.is_empty() {
             return false;
         }
@@ -123,11 +129,46 @@ impl LiteMarkApp {
             }
             AssetTarget::Folder(dir) => dir,
         };
+        let tab_id = self.active_tab_id.clone();
+        let task = cx.background_executor().spawn({
+            let note_dir = note_dir.clone();
+            async move {
+                images
+                    .iter()
+                    .map(|src| {
+                        copy_into_note_assets(&note_dir, src).map_err(|err| {
+                            let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("image");
+                            format!("Couldn't add {name}: {err}")
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let copied = task.await;
+            this.update(cx, |this, cx| {
+                this.finish_image_drop(&tab_id, &note_dir, copied, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        true
+    }
+
+    /// Link the copied images in tab `tab_id`, at its caret, and report.
+    fn finish_image_drop(
+        &mut self,
+        tab_id: &str,
+        note_dir: &Path,
+        copied: Vec<Result<PathBuf, String>>,
+        cx: &mut Context<Self>,
+    ) {
         let mut links = Vec::new();
         let mut last_relative = String::new();
         let mut first_error = None;
-        for src in images {
-            match copy_into_note_assets(&note_dir, src) {
+        for result in copied {
+            match result {
                 Ok(saved) => {
                     if let Some((markdown, relative)) = asset_link(&saved) {
                         links.push(markdown);
@@ -135,25 +176,28 @@ impl LiteMarkApp {
                     }
                 }
                 Err(err) => {
-                    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-                    first_error.get_or_insert(format!("Couldn't add {name}: {err}"));
+                    first_error.get_or_insert(err);
                 }
             }
         }
         if !links.is_empty() {
-            self.insert_at_caret(&links.join("\n"));
+            // The tab may have been closed meanwhile: the files stay saved.
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                let range = tab.selection_range();
+                tab.edit(range, &links.join("\n"));
+                self.refresh_find();
+            }
             let message = if links.len() == 1 {
                 format!("Image saved to {last_relative}")
             } else {
                 format!("{} images saved to {ASSETS_DIR}/", links.len())
             };
             self.show_toast(message, cx);
-            self.refresh_after_asset_write(&note_dir);
+            self.refresh_after_asset_write(note_dir);
         }
         if let Some(err) = first_error {
             self.show_file_error(err);
         }
-        true
     }
 
     /// Files dropped on the editor. Only images are handled for now.
