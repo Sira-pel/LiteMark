@@ -177,6 +177,8 @@ pub struct LiteMarkApp {
     pub zen_notice: bool,
     /// The pointer is over the outline strip or card.
     pub outline_hover: bool,
+    /// The card was opened by clicking the strip; it stays until closed.
+    pub outline_open: bool,
     pub outline_cache: Option<OutlineCache>,
     pub saved_toast: Option<String>,
     pub show_zoom_hud: bool,
@@ -560,9 +562,15 @@ impl LiteMarkApp {
                     Arc::new({
                         let app_handle = app_handle.clone();
                         move |_text, _previous, app| {
-                            app_handle
-                                .update(app, |this, cx| this.quick_open_activate(None, cx))
-                                .ok();
+                            // Enter arrives while the field is being updated, and
+                            // activating clears that same field. Wait until the
+                            // update is over.
+                            let app_handle = app_handle.clone();
+                            app.defer(move |app| {
+                                app_handle
+                                    .update(app, |this, cx| this.quick_open_activate(None, cx))
+                                    .ok();
+                            });
                         }
                     }),
                     Arc::new({
@@ -607,6 +615,7 @@ impl LiteMarkApp {
             zen_mode: false,
             zen_notice: false,
             outline_hover: false,
+            outline_open: false,
             outline_cache: None,
             saved_toast: None,
             show_zoom_hud: false,
@@ -756,6 +765,7 @@ impl LiteMarkApp {
             zen_mode: false,
             zen_notice: false,
             outline_hover: false,
+            outline_open: false,
             outline_cache: None,
             saved_toast: None,
             show_zoom_hud: false,

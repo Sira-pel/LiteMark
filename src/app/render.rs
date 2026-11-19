@@ -1004,10 +1004,7 @@ impl Render for LiteMarkApp {
         };
 
         let window_width = window.viewport_size().width;
-        let (outline, outline_inset) = match self.outline_element(window, cx, &theme) {
-            Some((element, inset)) => (Some((element, inset)), inset),
-            None => (None, px(0.0)),
-        };
+        let outline = self.outline_element(window, cx, &theme);
         let sidebar_scroll_to_selected = std::mem::take(&mut self.sidebar_scroll_to_selected);
         let is_narrow = window_width < px(640.0);
 
@@ -1345,8 +1342,11 @@ impl Render for LiteMarkApp {
                     searching: open.searching,
                     selected: open.selected,
                     scroll: open.scroll.clone(),
-                    list_max_h: (window.viewport_size().height - px(220.0))
-                        .clamp(px(120.0), px(420.0)),
+                    top_offset: (window.viewport_size().height * 0.16).clamp(px(48.0), px(180.0)),
+                    list_max_h: (window.viewport_size().height
+                        - (window.viewport_size().height * 0.16).clamp(px(48.0), px(180.0))
+                        - px(150.0))
+                    .clamp(px(120.0), px(420.0)),
                     on_close,
                     on_pick,
                     on_mode,
@@ -1590,8 +1590,7 @@ impl Render for LiteMarkApp {
                             })
                             .child(render_editor(
                                 EditorProps {
-                                    outline: outline.map(|(element, _)| element),
-                                    right_inset: outline_inset,
+                                    outline,
                                     zoom_level: self.settings.zoom_level,
                                     show_zoom_hud: self.show_zoom_hud,
                                     scroll: self.editor_scroll.clone(),
@@ -1736,7 +1735,6 @@ impl Render for LiteMarkApp {
                             ))),
                             editor_element: self.editor_surface(cx, &theme, false),
                             outline: None,
-                            right_inset: px(0.0),
                             on_drop_paths: Some(Box::new(cx.listener(
                                 |this, paths: &ExternalPaths, _window, cx| {
                                     this.handle_dropped_paths(paths.paths(), cx);

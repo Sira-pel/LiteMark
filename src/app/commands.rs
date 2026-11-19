@@ -888,6 +888,13 @@ impl LiteMarkApp {
     }
 
     pub fn handle_toggle_outline(&mut self) {
+        // A card opened by clicking is closed by the shortcut first; the
+        // pinned setting only changes when no click-opened card is showing.
+        if self.outline_open {
+            self.outline_open = false;
+            self.outline_hover = false;
+            return;
+        }
         self.settings.outline_pinned = !self.settings.outline_pinned;
         self.save_settings();
     }

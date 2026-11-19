@@ -23,6 +23,7 @@ pub struct QuickOpenProps<'a> {
     pub selected: usize,
     pub scroll: ScrollHandle,
     pub list_max_h: Pixels,
+    pub top_offset: Pixels,
     pub on_close: Arc<dyn Fn(&mut App)>,
     pub on_pick: PickFn,
     pub on_mode: ModeFn,
@@ -224,6 +225,7 @@ pub fn render_quick_open(props: QuickOpenProps<'_>, theme: &Theme) -> impl IntoE
         selected,
         scroll,
         list_max_h,
+        top_offset,
         on_close,
         on_pick,
         on_mode,
@@ -264,7 +266,7 @@ pub fn render_quick_open(props: QuickOpenProps<'_>, theme: &Theme) -> impl IntoE
         .flex()
         .flex_col()
         .items_center()
-        .pt(px(72.0))
+        .pt(top_offset)
         .px(px(16.0))
         .occlude()
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())

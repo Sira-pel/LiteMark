@@ -101,6 +101,8 @@ pub struct Theme {
     pub text_faint: Rgba,
     pub row_text: Rgba,
     pub row_active: Rgba,
+    /// Current-heading highlight in the outline card (stronger than a row).
+    pub outline_current: Rgba,
     pub row_hover: Rgba,
     /// Rows in a Shift/Ctrl+A multi-selection: a cool tint that reads apart
     /// from the neutral open-note highlight in both themes.
@@ -162,6 +164,7 @@ impl Theme {
                 text_faint: rgb(0x7c7c7c),
                 row_text: rgb(0xa8a8a8),
                 row_active: rgb(0x2c2c2c),
+                outline_current: rgb(0x454545),
                 row_hover: rgb(0x242424),
                 row_multi: rgb(0x1f2a36),
                 row_multi_border: rgb(0x34506b),
@@ -210,6 +213,7 @@ impl Theme {
                 text_faint: rgb(0x666666),
                 row_text: rgb(0x3d3d3d),
                 row_active: rgb(0xd3d3d0),
+                outline_current: rgb(0xd3d3d0),
                 row_hover: rgb(0xdedddb),
                 row_multi: rgb(0xe1edf8),
                 row_multi_border: rgb(0xa9c6e4),
