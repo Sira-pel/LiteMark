@@ -188,8 +188,8 @@ fn up_and_down_step_through_an_image_line() {
     // Down from "intro" lands on the image line (its source appears) ...
     let on_image = step(&view, &mut cx, 1);
     assert!(
-        (image_start()..=image_start() + "![cat](pics/small.svg)".len()).contains(&on_image),
-        "caret {on_image} on the image line"
+        on_image == image_start() || on_image == image_start() + "![cat](pics/small.svg)".len(),
+        "caret {on_image} stopped inside the image line"
     );
     // ... and the next Down moves on to "after", not back or nowhere.
     let next = step(&view, &mut cx, 1);
@@ -197,8 +197,9 @@ fn up_and_down_step_through_an_image_line() {
     // Back up through it.
     let up_to_image = step(&view, &mut cx, -1);
     assert!(
-        (image_start()..=image_start() + "![cat](pics/small.svg)".len()).contains(&up_to_image),
-        "caret {up_to_image} on the image line going up"
+        up_to_image == image_start()
+            || up_to_image == image_start() + "![cat](pics/small.svg)".len(),
+        "caret {up_to_image} stopped inside the image line going up"
     );
     let up = step(&view, &mut cx, -1);
     assert!(up < image_start(), "caret {up} is on the first line");

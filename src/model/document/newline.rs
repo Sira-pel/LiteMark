@@ -154,6 +154,9 @@ impl DocumentTab {
             self.code_newline(range);
             return;
         }
+        if self.picture_newline() {
+            return;
+        }
         // The ending the line already uses, so a CRLF file stays CRLF.
         let nl = self.line_break(range.start);
         if is_shift {
@@ -539,7 +542,7 @@ impl DocumentTab {
 
     /// The line break to insert at `offset`: the ending of the line being split, else
     /// the one before it, else the file's first ending, so mixed files stay local.
-    pub(super) fn line_break(&self, offset: usize) -> &'static str {
+    pub fn line_break(&self, offset: usize) -> &'static str {
         let ending = |at: usize| match line_ending_len(&self.content, at) {
             2 => Some("\r\n"),
             1 if self.content.as_bytes()[at] == b'\n' => Some("\n"),

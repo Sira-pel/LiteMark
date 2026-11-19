@@ -27,6 +27,16 @@ impl LiteMarkApp {
         self.dispatch_editor_input(EditorInput::DeleteLineEnd);
     }
 
+    /// F2: show the Markdown of the selected picture for editing.
+    pub(super) fn editor_edit_picture(&mut self, _cx: &mut App) {
+        if self.input_blocked() || !document_accepts_keystrokes(self.field_focus) {
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.show_picture_source();
+        }
+    }
+
     pub(super) fn editor_newline(&mut self, _cx: &mut App) {
         self.dispatch_editor_input(EditorInput::Newline);
     }
@@ -352,8 +362,35 @@ impl LiteMarkApp {
         self.applied_focus = Some(FocusSlot::Editor);
         self.field_focus = TextInput::Editor;
         self.field_owns_keys = false;
+        let mut on_picture = false;
+        // Only a click on the picture itself selects it.
+        let hit_picture = self
+            .editor_paint
+            .borrow()
+            .pictures
+            .iter()
+            .any(|(range, bounds)| {
+                range.start <= offset && offset <= range.end && bounds.contains(&event.position)
+            });
         if let Some(tab) = self.active_tab_mut() {
-            if event.click_count >= 3 {
+            let block = if event.modifiers.shift {
+                None
+            } else {
+                tab.picture_block_at(offset)
+            };
+            if let Some(block) = block.clone().filter(|_| hit_picture) {
+                // A picture is one block: a click selects it, a double-click
+                // shows its Markdown.
+                on_picture = true;
+                tab.select_picture(block);
+                if event.click_count == 2 {
+                    tab.show_picture_source();
+                }
+            } else if let Some(block) = block {
+                // Empty space beside the picture: the caret goes after it,
+                // and dragging from here selects text as usual.
+                tab.place(block.end, false);
+            } else if event.click_count >= 3 {
                 tab.place(offset, false);
                 tab.select_line();
             } else if event.click_count == 2 {
@@ -363,7 +400,7 @@ impl LiteMarkApp {
                 tab.place(offset, event.modifiers.shift);
             }
         }
-        self.selecting = event.click_count <= 1;
+        self.selecting = event.click_count <= 1 && !on_picture;
         window.refresh();
         cx.notify();
     }
@@ -566,6 +603,7 @@ impl LiteMarkApp {
                 .and_then(|tab| tab.file_path.as_ref())
                 .and_then(|path| path.parent())
                 .map(|dir| dir.to_path_buf()),
+            raw_picture_line: self.active_tab().and_then(|tab| tab.picture_raw_line),
         }
         .into_any_element()
     }

@@ -167,6 +167,16 @@ impl UndoHistory {
                 None => false,
             };
             if absorbed {
+                // A group that ended up empty (everything it inserted was
+                // taken back) is no undo step at all.
+                if self
+                    .undo
+                    .last()
+                    .is_some_and(|p| p.deleted.is_empty() && p.inserted.is_empty())
+                {
+                    self.undo.pop();
+                    self.span_group_open = false;
+                }
                 self.undo_bytes += edit.cost();
                 self.redo.clear();
                 self.redo_bytes = 0;

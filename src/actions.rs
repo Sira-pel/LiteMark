@@ -100,6 +100,7 @@ actions!(
         EditorDelete,
         EditorNewline,
         EditorPlainNewline,
+        EditorEditPicture,
         EditorTableRowBelow,
         EditorMoveLineUp,
         EditorMoveLineDown,

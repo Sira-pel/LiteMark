@@ -14,6 +14,12 @@ impl DocumentTab {
         }
         if mode == ViewMode::Wysiwyg
             && self.file_type.supports_markdown_features()
+            && self.picture_insert(range.clone(), text)
+        {
+            return;
+        }
+        if mode == ViewMode::Wysiwyg
+            && self.file_type.supports_markdown_features()
             && !range.is_empty()
             && !text.is_empty()
             && text != "\n"
@@ -367,6 +373,9 @@ impl DocumentTab {
         if self.is_read_only() {
             return false;
         }
+        if self.picture_remove(false) || self.picture_guard_join_back() {
+            return true;
+        }
         if !self.selection_range().is_empty() {
             let range = self.selection_range();
             self.edit(range, "");
@@ -468,6 +477,9 @@ impl DocumentTab {
 
     pub fn delete_forward_in_mode(&mut self, mode: ViewMode) {
         if self.is_read_only() {
+            return;
+        }
+        if mode == ViewMode::Wysiwyg && (self.picture_remove(true) || self.picture_guard_join()) {
             return;
         }
         if !self.selection_range().is_empty() {
@@ -638,6 +650,9 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
+        if self.picture_remove(false) {
+            return;
+        }
         if !self.caret.range.is_empty() {
             self.edit(self.selection_range(), "");
         } else {
@@ -651,6 +666,9 @@ impl DocumentTab {
 
     pub fn delete_word_right(&mut self) {
         if self.is_read_only() {
+            return;
+        }
+        if self.picture_remove(true) || self.picture_guard_join() {
             return;
         }
         if !self.caret.range.is_empty() {

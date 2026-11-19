@@ -49,6 +49,7 @@ impl EntityInputHandler for LiteMarkApp {
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
         if let Some(tab) = self.active_tab_mut() {
             tab.marked_range = None;
+            tab.ime_opened_line = None;
         }
     }
 
@@ -59,6 +60,9 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.ime_opened_line = None;
+        }
         if self.table_drag.is_some() || self.table_drag_press_held {
             let (drag, insert) = clear_drag_for_key(self.table_drag.take(), "key", text);
             self.table_drag = drag;
@@ -128,7 +132,13 @@ impl EntityInputHandler for LiteMarkApp {
         let markdown_tab = self
             .active_tab()
             .is_none_or(|tab| tab.file_type.supports_markdown_features());
-        if text.chars().count() == 1 {
+        // Typing at a picture never wraps or pairs its Markdown: it goes
+        // straight to `insert_text_in_mode`, which opens a line for it.
+        let on_picture = self.effective_view_mode() == ViewMode::Wysiwyg
+            && self
+                .active_tab_mut()
+                .is_some_and(|tab| tab.range_on_picture(&range));
+        if text.chars().count() == 1 && !on_picture {
             let ch = text.chars().next().unwrap();
             if !range.is_empty() {
                 let closing = match ch {
@@ -239,10 +249,19 @@ impl EntityInputHandler for LiteMarkApp {
             .or_else(|| self.active_tab().and_then(|tab| tab.marked_range.clone()))
             .or_else(|| self.active_tab().map(|tab| tab.selection_range()))
             .unwrap_or(0..0);
+        // Composing at a picture starts on a line of its own.
+        let range = if self.effective_view_mode() == ViewMode::Wysiwyg && !new_text.is_empty() {
+            self.active_tab_mut()
+                .and_then(|tab| tab.picture_open_line(&range))
+                .unwrap_or(range)
+        } else {
+            range
+        };
         let start = range.start;
         if let Some(tab) = self.active_tab_mut() {
             tab.edit(range, new_text);
             if new_text.is_empty() {
+                tab.cancel_picture_ime_line();
                 tab.marked_range = None;
             } else {
                 let end = (start + new_text.len()).min(tab.content.len());

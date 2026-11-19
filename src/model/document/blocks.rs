@@ -18,7 +18,7 @@ impl DocumentTab {
     }
 
     pub fn indent(&mut self) {
-        if self.is_read_only() {
+        if self.is_read_only() || self.range_on_picture(&self.selection_range()) {
             return;
         }
         let range = self.selection_range();
@@ -80,7 +80,7 @@ impl DocumentTab {
     }
 
     pub fn outdent(&mut self) {
-        if self.is_read_only() {
+        if self.is_read_only() || self.range_on_picture(&self.selection_range()) {
             return;
         }
         let range = self.selection_range();
