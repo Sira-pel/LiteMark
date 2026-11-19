@@ -272,3 +272,12 @@ fn nothing_is_pasted_into_the_note_behind_the_quick_open_pop_up() {
     assert!(!dir.join("assets").exists(), "no image file was written");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[std_test]
+fn own_lines_use_the_notes_line_break() {
+    use super::note_assets::own_lines_with;
+    assert_eq!(
+        own_lines_with("abcd", 2..2, "L", "\r\n"),
+        "\r\nL\r\n".to_string()
+    );
+}

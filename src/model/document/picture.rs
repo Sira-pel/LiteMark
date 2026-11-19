@@ -129,6 +129,9 @@ impl DocumentTab {
         let target = self.picture_target(range)?;
         let nl = self.line_break(target.start);
         self.history.seal();
+        // The line break and the text written into it are one undo step; if
+        // the input is cancelled the step vanishes.
+        self.next_edit_opens_span_group = true;
         self.edit(target.clone(), nl);
         let at = if target.start == 0 || self.content[..target.start].ends_with(['\n', '\r']) {
             // Before the picture: the new empty line is where the picture was.

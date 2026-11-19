@@ -990,8 +990,16 @@ impl LiteMarkApp {
                     // At a picture the text goes on its own line.
                     match tab.picture_target(&range) {
                         Some(target) => {
-                            let own = note_assets::own_lines(&tab.content, target.clone(), &text);
-                            let before = !own.starts_with('\n');
+                            let nl = tab.line_break(target.start);
+                            let before = tab
+                                .picture_block_at(target.start)
+                                .is_some_and(|block| block.start == target.start);
+                            let own = note_assets::own_lines_with(
+                                &tab.content,
+                                target.clone(),
+                                &text,
+                                nl,
+                            );
                             tab.edit(target.clone(), &own);
                             if before {
                                 // Pasted above the picture: the caret ends the text.

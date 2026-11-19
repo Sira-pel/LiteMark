@@ -234,5 +234,69 @@ fn cancelled_input_method_text_takes_its_line_back() {
         d.edit(at.start..at.start + "あ".len(), "");
         d.cancel_picture_ime_line();
         assert_eq!(d.content, src);
+        assert!(!d.undo(), "a cancelled input leaves no undo step");
+        assert_eq!(d.content, src);
     }
+}
+
+#[test]
+fn input_method_line_and_text_undo_in_one_step() {
+    for (src, range, expect) in [
+        (
+            format!(
+                "{PIC}
+after
+"
+            ),
+            0..PIC.len(),
+            format!(
+                "{PIC}
+你
+after
+"
+            ),
+        ),
+        (
+            format!(
+                "{PIC}
+"
+            ),
+            0..0,
+            format!(
+                "你
+{PIC}
+"
+            ),
+        ),
+    ] {
+        let mut d = doc(&src);
+        let at = d.picture_open_line(&range).expect("on a picture");
+        d.edit(at.clone(), "你");
+        assert_eq!(d.content, expect);
+        assert!(d.undo());
+        assert_eq!(d.content, src, "one undo undoes line and text");
+        assert!(!d.undo());
+    }
+}
+
+#[test]
+fn picture_text_follows_the_notes_crlf_line_endings() {
+    let src = format!(
+        "{PIC}
+after
+"
+    );
+    let mut d = doc(&src);
+    d.select_picture(0..PIC.len());
+    let sel = d.selection_range();
+    d.insert_text_in_mode(sel, "x", MODE);
+    assert_eq!(
+        d.content,
+        format!(
+            "{PIC}
+x
+after
+"
+        )
+    );
 }

@@ -63,7 +63,8 @@ impl LiteMarkApp {
             return;
         };
         let range = tab.selection_range();
-        let text = own_lines(&tab.content, range.clone(), &links.join("\n"));
+        let nl = tab.line_break(range.start);
+        let text = own_lines_with(&tab.content, range.clone(), &links.join(nl), nl);
         tab.edit(range, &text);
         self.refresh_find();
     }
@@ -242,15 +243,25 @@ impl LiteMarkApp {
 /// of its own: a line break is added before it unless the range starts a
 /// line, and after it unless the range ends one.
 pub(super) fn own_lines(content: &str, range: std::ops::Range<usize>, text: &str) -> String {
+    own_lines_with(content, range, text, "\n")
+}
+
+/// [`own_lines`] with the note's own line break, so a CRLF note stays CRLF.
+pub(super) fn own_lines_with(
+    content: &str,
+    range: std::ops::Range<usize>,
+    text: &str,
+    nl: &str,
+) -> String {
     let starts_line = range.start == 0 || content[..range.start].ends_with('\n');
     let ends_line = range.end >= content.len() || content[range.end..].starts_with(['\n', '\r']);
     let mut out = String::with_capacity(text.len() + 2);
     if !starts_line {
-        out.push('\n');
+        out.push_str(nl);
     }
     out.push_str(text);
     if !ends_line {
-        out.push('\n');
+        out.push_str(nl);
     }
     out
 }

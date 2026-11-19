@@ -49,6 +49,7 @@ impl EntityInputHandler for LiteMarkApp {
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
         if let Some(tab) = self.active_tab_mut() {
             tab.marked_range = None;
+            tab.ime_opened_line = None;
         }
     }
 

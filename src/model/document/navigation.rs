@@ -480,6 +480,7 @@ impl DocumentTab {
 
     pub fn place(&mut self, offset: usize, extend: bool) {
         self.pending_formats = ActiveFormats::default();
+        self.ime_opened_line = None;
         let mut offset = floor_boundary(&self.content, offset);
         if !extend {
             offset = snap_off_ending_interior(&self.content, offset);
