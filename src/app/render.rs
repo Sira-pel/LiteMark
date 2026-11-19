@@ -1342,8 +1342,11 @@ impl Render for LiteMarkApp {
                     searching: open.searching,
                     selected: open.selected,
                     scroll: open.scroll.clone(),
-                    list_max_h: (window.viewport_size().height - px(220.0))
-                        .clamp(px(120.0), px(420.0)),
+                    top_offset: (window.viewport_size().height * 0.16).clamp(px(48.0), px(180.0)),
+                    list_max_h: (window.viewport_size().height
+                        - (window.viewport_size().height * 0.16).clamp(px(48.0), px(180.0))
+                        - px(150.0))
+                    .clamp(px(120.0), px(420.0)),
                     on_close,
                     on_pick,
                     on_mode,
