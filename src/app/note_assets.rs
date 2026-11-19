@@ -54,12 +54,17 @@ impl LiteMarkApp {
         }
     }
 
-    /// Put `text` in at the caret, replacing the selection.
-    fn insert_at_caret(&mut self, text: &str) {
-        if let Some(tab) = self.active_tab_mut() {
-            let range = tab.selection_range();
-            tab.edit(range, text);
-        }
+    /// Put image `links` in at the caret of tab `tab_id`, replacing the
+    /// selection, one per line. A picture only shows when its link is alone
+    /// on its line, so a line break is added before and after when the
+    /// caret is mid-line. Nothing happens if the tab was closed meanwhile.
+    fn insert_image_links(&mut self, tab_id: &str, links: &[String]) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let range = tab.selection_range();
+        let text = own_lines(&tab.content, range.clone(), &links.join("\n"));
+        tab.edit(range, &text);
         self.refresh_find();
     }
 
@@ -70,7 +75,9 @@ impl LiteMarkApp {
         }
     }
 
-    /// Paste an image from the clipboard into the active note. Returns
+    /// Paste an image from the clipboard into the active note. The image is
+    /// converted and saved in the background (a large screenshot takes a
+    /// moment to encode), then linked in the tab it was pasted into. Returns
     /// `false` when the active tab is not a Markdown note, so the caller can
     /// carry on with an ordinary paste.
     pub(super) fn paste_clipboard_image(
@@ -87,24 +94,46 @@ impl LiteMarkApp {
             }
             AssetTarget::Folder(dir) => dir,
         };
-        let png = match clipboard_image_png(image) {
-            Ok(png) => png,
-            Err(err) => {
-                self.show_error(format!("Couldn't paste the image: {err}"));
-                return true;
+        let tab_id = self.active_tab_id.clone();
+        let task = cx.background_executor().spawn({
+            let image = image.clone();
+            let note_dir = note_dir.clone();
+            async move {
+                let png = clipboard_image_png(&image)
+                    .map_err(|err| format!("Couldn't paste the image: {err}"))?;
+                save_note_asset(&note_dir, &pasted_image_name(unix_secs), &png)
+                    .map_err(|err| format!("Couldn't save the pasted image: {err}"))
             }
-        };
-        match save_note_asset(&note_dir, &pasted_image_name(unix_secs), &png) {
+        });
+        cx.spawn(async move |this, cx| {
+            let saved = task.await;
+            this.update(cx, |this, cx| {
+                this.finish_image_paste(&tab_id, &note_dir, saved, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        true
+    }
+
+    fn finish_image_paste(
+        &mut self,
+        tab_id: &str,
+        note_dir: &Path,
+        saved: Result<PathBuf, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match saved {
             Ok(saved) => {
                 if let Some((markdown, relative)) = asset_link(&saved) {
-                    self.insert_at_caret(&markdown);
+                    self.insert_image_links(tab_id, &[markdown]);
                     self.show_toast(format!("Pasted image saved to {relative}"), cx);
                 }
-                self.refresh_after_asset_write(&note_dir);
+                self.refresh_after_asset_write(note_dir);
             }
-            Err(err) => self.show_file_error(format!("Couldn't save the pasted image: {err}")),
+            Err(err) => self.show_file_error(err),
         }
-        true
     }
 
     /// Copy dropped image files into the active note's `assets` folder and
@@ -133,9 +162,16 @@ impl LiteMarkApp {
         let task = cx.background_executor().spawn({
             let note_dir = note_dir.clone();
             async move {
+                let assets = note_dir.join(ASSETS_DIR).canonicalize().ok();
                 images
                     .iter()
                     .map(|src| {
+                        // A picture already in this note's assets folder is
+                        // linked as it is, not copied a second time.
+                        let parent = src.parent().and_then(|p| p.canonicalize().ok());
+                        if assets.is_some() && parent == assets && src.is_file() {
+                            return Ok(src.clone());
+                        }
                         copy_into_note_assets(&note_dir, src).map_err(|err| {
                             let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("image");
                             format!("Couldn't add {name}: {err}")
@@ -182,11 +218,7 @@ impl LiteMarkApp {
         }
         if !links.is_empty() {
             // The tab may have been closed meanwhile: the files stay saved.
-            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                let range = tab.selection_range();
-                tab.edit(range, &links.join("\n"));
-                self.refresh_find();
-            }
+            self.insert_image_links(tab_id, &links);
             let message = if links.len() == 1 {
                 format!("Image saved to {last_relative}")
             } else {
@@ -204,6 +236,23 @@ impl LiteMarkApp {
     pub(super) fn handle_dropped_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         self.drop_image_files(paths, cx);
     }
+}
+
+/// `text` as it should replace `range` of `content` so that it sits on lines
+/// of its own: a line break is added before it unless the range starts a
+/// line, and after it unless the range ends one.
+pub(super) fn own_lines(content: &str, range: std::ops::Range<usize>, text: &str) -> String {
+    let starts_line = range.start == 0 || content[..range.start].ends_with('\n');
+    let ends_line = range.end >= content.len() || content[range.end..].starts_with(['\n', '\r']);
+    let mut out = String::with_capacity(text.len() + 2);
+    if !starts_line {
+        out.push('\n');
+    }
+    out.push_str(text);
+    if !ends_line {
+        out.push('\n');
+    }
+    out
 }
 
 /// Seconds since the Unix epoch, for naming a pasted image.

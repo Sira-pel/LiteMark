@@ -72,9 +72,13 @@ fn pasting_an_image_saves_it_in_assets_and_links_it() {
     view.update(&mut cx, |app, cx| {
         assert!(app.paste_clipboard_image(&image, NOW, cx));
     });
+    // Converted and saved in the background, then linked.
+    assert_eq!(content(&view, &cx), NOTE);
+    cx.run_until_parked();
+    // The caret was mid-line: the link gets a line of its own.
     assert_eq!(
         content(&view, &cx),
-        format!("before![](assets/{NAME})\nafter\n")
+        format!("before\n![](assets/{NAME})\nafter\n")
     );
     assert_eq!(
         toast(&view, &cx).as_deref(),
@@ -90,6 +94,7 @@ fn pasting_an_image_saves_it_in_assets_and_links_it() {
     view.update(&mut cx, |app, cx| {
         assert!(app.paste_clipboard_image(&image, NOW, cx));
     });
+    cx.run_until_parked();
     assert!(dir
         .join("assets")
         .join("image-20240229-130509-2.png")
@@ -104,8 +109,9 @@ fn handle_paste_takes_an_image_only_clipboard() {
     let (view, mut cx) = harness(Some(&dir));
     cx.write_to_clipboard(ClipboardItem::new_image(&clipboard_png()));
     view.update(&mut cx, |app, cx| app.handle_paste(cx));
+    cx.run_until_parked();
     let pasted = content(&view, &cx);
-    assert!(pasted.starts_with("before![](assets/image-"), "{pasted}");
+    assert!(pasted.starts_with("before\n![](assets/image-"), "{pasted}");
     let saved: Vec<_> = std::fs::read_dir(dir.join("assets")).unwrap().collect();
     assert_eq!(saved.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
@@ -176,7 +182,7 @@ fn dropped_images_are_copied_to_assets_and_each_gets_a_link() {
     cx.run_until_parked();
     assert_eq!(
         content(&view, &cx),
-        "before![](assets/a-2.png)\n![](<assets/My Photo.JPG>)\nafter\n"
+        "before\n![](assets/a-2.png)\n![](<assets/My Photo.JPG>)\nafter\n"
     );
     assert_eq!(
         std::fs::read(dir.join("assets").join("a.png")).unwrap(),
@@ -214,4 +220,37 @@ fn image_extensions_are_matched_case_insensitively() {
     for name in ["a.txt", "a.md", "png", "a.bmp", "a"] {
         assert!(!is_droppable_image(Path::new(name)), "{name}");
     }
+}
+
+#[std_test]
+fn links_get_lines_of_their_own() {
+    use super::note_assets::own_lines;
+    let link = "![](assets/a.png)";
+    // Mid-line: broken before and after.
+    assert_eq!(own_lines("abcd", 2..2, link), format!("\n{link}\n"));
+    // At the start or end of a line: no extra break on that side.
+    assert_eq!(own_lines("ab\ncd", 3..3, link), format!("{link}\n"));
+    assert_eq!(own_lines("ab\ncd", 2..2, link), format!("\n{link}"));
+    // A whole line selected, or an empty note: just the link.
+    assert_eq!(own_lines("ab\ncd\n", 3..5, link), link);
+    assert_eq!(own_lines("", 0..0, link), link);
+}
+
+#[std_test]
+fn an_image_dropped_from_the_notes_own_assets_is_linked_not_copied() {
+    let dir = folder("drop-own-asset");
+    let assets = dir.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    let existing = assets.join("pic.png");
+    std::fs::write(&existing, b"pic").unwrap();
+
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(std::slice::from_ref(&existing), cx));
+    });
+    cx.run_until_parked();
+    assert!(content(&view, &cx).contains("![](assets/pic.png)"));
+    let files: Vec<_> = std::fs::read_dir(&assets).unwrap().collect();
+    assert_eq!(files.len(), 1, "no pic-2.png copy");
+    let _ = std::fs::remove_dir_all(&dir);
 }
