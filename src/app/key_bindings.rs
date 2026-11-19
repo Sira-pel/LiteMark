@@ -210,6 +210,10 @@ impl LiteMarkApp {
             this.handle_toggle_line_numbers();
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &ToggleOutline, _window, cx| {
+            this.handle_toggle_outline();
+            cx.notify();
+        }))
         .on_action(cx.listener(|this, _: &Cut, window, cx| {
             this.handle_cut(cx);
             window.refresh();

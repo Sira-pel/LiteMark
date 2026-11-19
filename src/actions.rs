@@ -58,6 +58,7 @@ actions!(
         SaveFileAs,
         OpenReplace,
         ToggleLineNumbers,
+        ToggleOutline,
         Cut,
         Copy,
         Paste,

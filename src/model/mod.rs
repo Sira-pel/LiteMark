@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod document;
+pub mod outline;
 pub mod session;
 pub mod settings;
 pub mod sidebar_selection;
