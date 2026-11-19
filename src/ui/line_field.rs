@@ -845,13 +845,8 @@ fn extend_selection(
     selection_reversed: bool,
     offset: usize,
 ) -> (Range<usize>, bool) {
-    let anchor = if selected_range.is_empty() {
-        if selection_reversed {
-            selected_range.start
-        } else {
-            selected_range.end
-        }
-    } else if selection_reversed {
+    // The end the caret isn't on. For an empty selection both ends match.
+    let anchor = if selection_reversed {
         selected_range.end
     } else {
         selected_range.start

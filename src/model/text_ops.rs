@@ -472,7 +472,7 @@ pub fn line_col(content: &str, offset: usize) -> (usize, usize) {
 /// Line endings in `bytes`: each LF, and each CR not followed by an LF (a
 /// CRLF counts once). Runs on every caret move in raw tabs, so it uses
 /// memchr rather than a byte-by-byte walk.
-fn count_line_endings(bytes: &[u8]) -> usize {
+pub fn count_line_endings(bytes: &[u8]) -> usize {
     memchr::memchr2_iter(b'\n', b'\r', bytes)
         .filter(|&at| bytes[at] == b'\n' || bytes.get(at + 1) != Some(&b'\n'))
         .count()
@@ -1046,22 +1046,6 @@ pub fn range_from_utf16(content: &str, range: &Range<usize>) -> Range<usize> {
     start_byte..content.len()
 }
 
-/// Count logical line endings (`\r\n`, `\n`, or lone `\r`) in `bytes` using SIMD `memchr2`.
-pub fn count_line_endings_bytes(bytes: &[u8]) -> usize {
-    let mut count = 0usize;
-    let mut i = 0usize;
-    while let Some(rel) = memchr::memchr2(b'\n', b'\r', &bytes[i..]) {
-        let pos = i + rel;
-        count += 1;
-        i = if bytes[pos] == b'\r' && bytes.get(pos + 1) == Some(&b'\n') {
-            pos + 2
-        } else {
-            pos + 1
-        };
-    }
-    count
-}
-
 /// Visual rows as `(byte_start, byte_end)` exclusive of the line ending (`\r\n`, `\n`, or `\r`).
 /// `wrap_cols == usize::MAX` keeps one row per logical line.
 #[cfg(test)]
@@ -1108,7 +1092,7 @@ pub fn visual_rows_tabbed(
 /// content that fits on one row (the common case).
 pub fn visual_row_count_tabbed(content: &str, wrap_cols: usize, tab_width: usize) -> usize {
     if wrap_cols == 0 || wrap_cols == usize::MAX {
-        return count_line_endings_bytes(content.as_bytes()) + 1;
+        return count_line_endings(content.as_bytes()) + 1;
     }
     let mut count = 0usize;
     let bytes = content.as_bytes();

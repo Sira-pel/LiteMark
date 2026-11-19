@@ -16,7 +16,7 @@ use crate::markdown::{
 };
 use crate::model::document::visible_line_end;
 use crate::model::text_ops::{
-    count_line_endings_bytes, visual_row_count_tabbed, visual_rows_tabbed, Caret,
+    count_line_endings, visual_row_count_tabbed, visual_rows_tabbed, Caret,
 };
 use crate::model::ViewMode;
 use crate::theme::sz;
@@ -3286,7 +3286,7 @@ fn logical_line_number(content: &str, offset: usize) -> usize {
     if end > 0 && bytes[end - 1] == b'\r' && bytes.get(end) == Some(&b'\n') {
         end -= 1;
     }
-    count_line_endings_bytes(&bytes[..end]) + 1
+    count_line_endings(&bytes[..end]) + 1
 }
 
 fn raw_line_runs(

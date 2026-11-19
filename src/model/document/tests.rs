@@ -6775,3 +6775,32 @@ fn enter_on_blockquote_inside_list_item_continues_quote() {
     t.smart_newline(false);
     assert_eq!(t.content, "10. item\n    > quote\n    > ");
 }
+
+#[test]
+fn line_count_treats_a_lone_cr_as_a_line_ending() {
+    for (text, lines) in [
+        ("", 1),
+        ("a", 1),
+        ("a\n", 1),
+        ("a\r\n", 1),
+        ("\r", 1),
+        ("a\rb", 2),
+        ("a\r\rb", 3),
+        ("a\r\nb\rc\n", 3),
+    ] {
+        assert_eq!(compute_stats(text).lines, lines, "{text:?}");
+    }
+    // Typing "\n" after a lone CR joins them into one CRLF ending.
+    let mut doc = DocumentTab::new("c".into(), "c.md".into(), "a\rb".into(), None, None);
+    doc.ensure_stats();
+    assert_eq!(doc.line_count, 2);
+    doc.edit(2..2, "\n");
+    doc.ensure_stats();
+    assert_eq!(doc.line_count, 2);
+    doc.edit(1..2, "");
+    doc.ensure_stats();
+    assert_eq!(doc.line_count, 2);
+    doc.edit(0..0, "x\r");
+    doc.ensure_stats();
+    assert_eq!(doc.line_count, compute_stats(&doc.content).lines);
+}
