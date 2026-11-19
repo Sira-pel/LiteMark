@@ -5,11 +5,13 @@
 
 use std::cell::RefCell;
 use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::*;
 
+use crate::markdown::image::{parse_image_line, resolve_image_target, ImageTarget};
 use crate::markdown::{
     LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
     TableRowBody,
@@ -20,6 +22,11 @@ use crate::model::text_ops::{
 };
 use crate::model::ViewMode;
 use crate::theme::sz;
+
+use super::note_images::{
+    ellipsize, fit_image, placeholder_height, ImageSizeCache, IMAGE_MARGIN_Y, IMAGE_RADIUS,
+    MAX_IMAGE_HEIGHT,
+};
 
 #[derive(Clone)]
 pub struct CellLine {
@@ -198,6 +205,12 @@ pub struct LayoutCache {
     /// the wrap columns and font size in `estimate_key`.
     estimate: Vec<Option<Pixels>>,
     estimate_key: (usize, u32),
+    /// The last WYSIWYG height estimate, before it is raised to the painted
+    /// total: what the layout height should be once the total is known.
+    estimated_height: Pixels,
+    /// The height an extra redraw was last asked for, so each new height
+    /// gets one redraw and never a loop.
+    redrawn_for: Option<Pixels>,
     /// Raw mode: content snapshot, wrap columns, tab width, and every row's byte range.
     raw_rows: Option<(SharedString, usize, usize, Rc<RawRows>)>,
     /// WYSIWYG: each table's width-cache key, for a parse generation and a
@@ -273,6 +286,8 @@ pub struct EditorPaint {
     pub bounds: Option<Bounds<Pixels>>,
     pub table_width_cache: TableWidthCache,
     pub tables: Vec<TableGeom>,
+    /// Sizes of the pictures in the note, kept between frames.
+    pub images: ImageSizeCache,
     /// Length and selection of the content the rows were laid out for, so a
     /// caller can tell whether the geometry matches the current document.
     pub painted_len: usize,
@@ -290,6 +305,7 @@ impl Default for EditorPaint {
             bounds: None,
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            images: ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
         }
@@ -1092,6 +1108,8 @@ pub struct EditorElement<V: 'static> {
     pub table_pressed: bool,
     pub table_hover_fill: Hsla,
     pub table_active_fill: Hsla,
+    /// Folder of the note, for relative image paths; `None` for an unsaved note.
+    pub base_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1159,6 +1177,9 @@ pub struct Prepaint {
     table_width_cache: TableWidthCache,
     tables: Vec<TableGeom>,
     layout_cache: LayoutCache,
+    /// Pictures to draw, already laid out.
+    images: Vec<AnyElement>,
+    image_cache: ImageSizeCache,
 }
 
 /// Space on each side of a line number inside the gutter, and between the
@@ -1219,6 +1240,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     top_gap + line_h * wrapped as f32
                 });
             }
+            cache.estimated_height = h;
             h.max(paint_borrow.total_height)
         } else {
             // Build the rows here, not just count them: prepaint reuses them
@@ -1248,7 +1270,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Self::PrepaintState {
         let base_font = font(self.font_family.clone());
         let mono_font = font(self.mono_font_family.clone());
@@ -1533,6 +1555,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 table_width_cache,
                 tables: Vec::new(),
                 layout_cache,
+                images: Vec::new(),
+                image_cache: std::mem::take(&mut self.paint.borrow_mut().images),
             };
         }
 
@@ -1544,6 +1568,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut quads = Vec::new();
         let mut strike_quads = Vec::new();
         let mut tables: Vec<TableGeom> = Vec::new();
+        let mut images: Vec<AnyElement> = Vec::new();
+        let mut image_cache = std::mem::take(&mut self.paint.borrow_mut().images);
+        let mut image_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         let mut cursor = None;
         let base_x = bounds.left() + gutter + x_offset;
         let mut cur_y = bounds.top() + px(16.0);
@@ -2252,6 +2279,165 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 continue;
             }
 
+            // A line that is only an image becomes a picture block, unless the
+            // caret is on it (then the Markdown source is shown).
+            if matches!(parsed_line.kind, LineKind::Paragraph) {
+                let src = parsed_line.source.clone();
+                let line_text = self.content.get(src.clone()).unwrap_or("");
+                let caret_on_line = self.selection.is_empty()
+                    && self.selection.start >= src.start
+                    && self.selection.start <= src.end;
+                let image = if !caret_on_line && line_text.trim_start().starts_with("![") {
+                    parse_image_line(line_text)
+                } else {
+                    None
+                };
+                if let Some(image) = image {
+                    let target = resolve_image_target(&image.target, self.base_dir.as_deref());
+                    let near_anchor = anchor_lines
+                        .iter()
+                        .any(|&a| a + 2 >= line_idx && a <= line_idx + 2);
+                    let placeholder_h = placeholder_height(self.font_size);
+                    // Local pictures: the cached size first (no file access),
+                    // then a re-check once the block is known to be on screen.
+                    let mut picture: Option<(PathBuf, Size<Pixels>)> = None;
+                    if let ImageTarget::Local(path) = &target {
+                        image_paths.insert(path.clone());
+                        let mut natural = image_cache.size(path, false);
+                        let guess = natural.map_or(placeholder_h, |n| {
+                            fit_image(n, content_width, MAX_IMAGE_HEIGHT).1
+                        });
+                        if band.contains(cur_y, guess + IMAGE_MARGIN_Y * 2.0) || near_anchor {
+                            let (checked, changed) = image_cache.size_checked(path, true);
+                            natural = checked;
+                            // gpui keeps decoded pictures by path: a file
+                            // replaced on disk would keep showing the old one.
+                            if changed {
+                                ImageSource::from(path.clone()).remove_asset(cx);
+                            }
+                        }
+                        picture = natural.map(|n| {
+                            let (w, h) = fit_image(n, content_width, MAX_IMAGE_HEIGHT);
+                            (path.clone(), size(w, h))
+                        });
+                    }
+                    let block_size = match &picture {
+                        Some((_, picture_size)) => *picture_size,
+                        None => size(content_width, placeholder_h),
+                    };
+                    let row_h = block_size.height + IMAGE_MARGIN_Y * 2.0;
+                    let block_bounds =
+                        Bounds::new(point(base_x, cur_y + IMAGE_MARGIN_Y), block_size);
+                    if band.contains(cur_y, row_h) || near_anchor {
+                        match &picture {
+                            Some((path, picture_size)) => {
+                                let muted = self.muted_color;
+                                let surface = self.surface_bg;
+                                let font_size = self.font_size;
+                                let mut element = img(path.clone())
+                                    .id(("note-image", line_idx))
+                                    .w(picture_size.width)
+                                    .h(picture_size.height)
+                                    .rounded(IMAGE_RADIUS)
+                                    .object_fit(ObjectFit::Contain)
+                                    .with_fallback(move || {
+                                        div()
+                                            .size_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .bg(surface)
+                                            .text_color(muted)
+                                            .text_size(font_size)
+                                            .child("Image not found")
+                                            .into_any_element()
+                                    })
+                                    .into_any_element();
+                                element.prepaint_as_root(
+                                    block_bounds.origin,
+                                    size(
+                                        AvailableSpace::Definite(picture_size.width),
+                                        AvailableSpace::Definite(picture_size.height),
+                                    ),
+                                    window,
+                                    cx,
+                                );
+                                images.push(element);
+                            }
+                            None => {
+                                let mut q = fill(block_bounds, self.surface_bg);
+                                q.corner_radii = Corners::all(IMAGE_RADIUS);
+                                q.border_widths = Edges::all(px(1.0));
+                                q.border_color = self.border_color;
+                                bg_quads.push(q);
+                                let alt = if image.alt.trim().is_empty() {
+                                    "Image".to_string()
+                                } else {
+                                    image.alt.clone()
+                                };
+                                let detail = match &target {
+                                    ImageTarget::Remote(url) => url.clone(),
+                                    _ => "Image not found".to_string(),
+                                };
+                                let max_chars =
+                                    ((content_width - px(24.0)) / char_width).floor().max(4.0)
+                                        as usize;
+                                let text_line_h = self.font_size * 1.65;
+                                for (i, (text, color, fs)) in [
+                                    (alt, self.text_color, self.font_size),
+                                    (detail, self.muted_color, self.font_size * 0.9),
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                {
+                                    let text: SharedString = ellipsize(&text, max_chars).into();
+                                    let run = TextRun {
+                                        len: text.len(),
+                                        font: base_font.clone(),
+                                        color,
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    };
+                                    let shaped =
+                                        window.text_system().shape_line(text, fs, &[run], None);
+                                    decor_lines.push((
+                                        point(
+                                            block_bounds.left() + px(12.0),
+                                            block_bounds.top() + px(12.0) + text_line_h * i as f32,
+                                        ),
+                                        text_line_h,
+                                        shaped,
+                                    ));
+                                }
+                            }
+                        }
+                        if !self.selection.is_empty()
+                            && self.selection.start <= src.end
+                            && self.selection.end > src.start
+                        {
+                            let mut q = fill(block_bounds, self.selection_color);
+                            q.corner_radii = Corners::all(IMAGE_RADIUS);
+                            quads.push(q);
+                        }
+                    }
+                    rows.push(PaintRow {
+                        line_index: line_idx,
+                        byte_start: src.start,
+                        byte_end: src.end,
+                        origin: point(base_x, cur_y),
+                        line_height: row_h,
+                        shaped: unshaped.clone(),
+                        offset_map: empty_map.clone(),
+                        checkbox_hit: None,
+                        link_hits: empty_links.clone(),
+                        cells: Vec::new(),
+                    });
+                    cur_y += row_h;
+                    continue;
+                }
+            }
+
             let row_char_width = char_width * (row_font_size / self.font_size);
             let row_avail_width = (content_width - indent_x).max(px(32.0));
             let row_wrap_cols = if self.word_wrap {
@@ -2648,6 +2834,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
         }
 
+        image_cache.retain_paths(&image_paths);
         let total_height = (cur_y - bounds.top() + px(32.0)).max(px(64.0));
         Prepaint {
             rows,
@@ -2666,6 +2853,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             table_width_cache,
             tables,
             layout_cache,
+            images,
+            image_cache,
         }
     }
 
@@ -2709,6 +2898,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
         for quad in prepaint.bg_quads.drain(..) {
             window.paint_quad(quad);
+        }
+        for image in prepaint.images.iter_mut() {
+            image.paint(window, cx);
         }
         for quad in prepaint.quads.drain(..) {
             window.paint_quad(quad);
@@ -2781,6 +2973,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
             paint.table_width_cache = std::mem::take(&mut prepaint.table_width_cache);
             paint.layout_cache = std::mem::take(&mut prepaint.layout_cache);
+            paint.images = std::mem::take(&mut prepaint.image_cache);
             paint.tables = std::mem::take(&mut prepaint.tables);
             for table in &mut paint.tables {
                 table.viewport = Some(bounds);
@@ -2804,7 +2997,29 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             },
             &occupied,
         );
-        if wrap_changed && self.word_wrap {
+        // Pictures change a line's height after the estimate the layout used;
+        // draw once more with the real total so the scroll range is right,
+        // whether pictures made the note taller or (one removed) shorter.
+        // The layout height is max(estimate, last total), so compare with
+        // that, not the total alone, or a note shorter than its estimate
+        // would redraw forever.
+        // One extra draw per height at most, so a parent that sizes the
+        // editor differently can never cause a redraw loop.
+        let height_changed = self.view_mode == ViewMode::Wysiwyg && {
+            let mut paint = self.paint.borrow_mut();
+            let expected = paint
+                .layout_cache
+                .estimated_height
+                .max(prepaint.total_height);
+            let redraw = paint.images.has_entries()
+                && (expected - bounds.size.height).abs() > px(1.0)
+                && paint.layout_cache.redrawn_for != Some(expected);
+            if redraw {
+                paint.layout_cache.redrawn_for = Some(expected);
+            }
+            redraw
+        };
+        if (wrap_changed && self.word_wrap) || height_changed {
             let entity = self.entity.clone();
             window.defer(cx, move |_, cx| {
                 entity.update(cx, |_, cx| cx.notify());
@@ -3586,6 +3801,7 @@ mod tests {
             )),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
         };
@@ -3683,6 +3899,7 @@ mod tests {
             )),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
         };
@@ -3755,6 +3972,7 @@ mod tests {
             )),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
         };
@@ -3852,6 +4070,7 @@ mod tests {
             )),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
         };
@@ -4054,6 +4273,7 @@ mod tests {
             )),
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
+            images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
         };

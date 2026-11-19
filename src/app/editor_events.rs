@@ -561,6 +561,11 @@ impl LiteMarkApp {
             table_pressed: self.table_pressed,
             table_hover_fill: theme.bg_hover.into(),
             table_active_fill: theme.bg_active.into(),
+            base_dir: self
+                .active_tab()
+                .and_then(|tab| tab.file_path.as_ref())
+                .and_then(|path| path.parent())
+                .map(|dir| dir.to_path_buf()),
         }
         .into_any_element()
     }

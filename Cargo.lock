@@ -3174,6 +3174,7 @@ version = "0.12.0"
 dependencies = [
  "dirs 5.0.1",
  "gpui",
+ "image",
  "lopdf",
  "memchr",
  "pulldown-cmark",
