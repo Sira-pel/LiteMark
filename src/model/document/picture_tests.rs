@@ -135,3 +135,69 @@ fn f2_shows_the_raw_line_until_the_caret_leaves() {
     assert_eq!(d.picture_raw_line, None);
     assert!(d.picture_block_at(start).is_some());
 }
+
+#[test]
+fn ranges_on_a_picture_are_recognised_so_wrapping_can_be_skipped() {
+    let src = format!("intro\n{PIC}\nafter\n");
+    let start = start_of(&src);
+    let mut d = doc(&src);
+    assert!(d.range_on_picture(&(start..start + PIC.len())));
+    assert!(d.range_on_picture(&(start..start)));
+    assert!(!d.range_on_picture(&(0..3)));
+}
+
+#[test]
+fn input_method_text_gets_its_own_line_after_a_selected_picture() {
+    let src = format!("{PIC}\nafter\n");
+    let mut d = doc(&src);
+    let range = 0..PIC.len();
+    let at = d.picture_open_line(&range).expect("on a picture");
+    d.edit(at, "你");
+    assert_eq!(d.content, format!("{PIC}\n你\nafter\n"));
+}
+
+#[test]
+fn input_method_text_at_the_start_goes_above_the_picture() {
+    let src = format!("{PIC}\n");
+    let mut d = doc(&src);
+    let at = d.picture_open_line(&(0..0)).expect("on a picture");
+    d.edit(at, "あ");
+    assert_eq!(d.content, format!("あ\n{PIC}\n"));
+}
+
+#[test]
+fn paste_target_is_after_the_picture_or_before_at_its_start() {
+    let src = format!("{PIC}\n");
+    let mut d = doc(&src);
+    assert_eq!(
+        d.picture_target(&(0..PIC.len())),
+        Some(PIC.len()..PIC.len())
+    );
+    assert_eq!(
+        d.picture_target(&(PIC.len()..PIC.len())),
+        Some(PIC.len()..PIC.len())
+    );
+    assert_eq!(d.picture_target(&(0..0)), Some(0..0));
+}
+
+#[test]
+fn backspace_at_a_picture_start_moves_up_instead_of_joining() {
+    let src = format!("intro\n{PIC}\n");
+    let start = start_of(&src);
+    let mut d = doc(&src);
+    d.place(start, false);
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, src);
+    assert_eq!(d.cursor_offset(), 5);
+}
+
+#[test]
+fn delete_at_the_end_of_the_line_above_selects_the_picture() {
+    let src = format!("intro\n{PIC}\n");
+    let start = start_of(&src);
+    let mut d = doc(&src);
+    d.place(5, false);
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, src);
+    assert_eq!(d.selected_picture(), Some(start..start + PIC.len()));
+}

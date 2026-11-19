@@ -479,7 +479,7 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if mode == ViewMode::Wysiwyg && self.picture_remove(true) {
+        if mode == ViewMode::Wysiwyg && (self.picture_remove(true) || self.picture_guard_join()) {
             return;
         }
         if !self.selection_range().is_empty() {

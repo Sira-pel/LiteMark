@@ -987,7 +987,14 @@ impl LiteMarkApp {
                 }
                 if let Some(tab) = self.active_tab_mut() {
                     let range = tab.selection_range();
-                    tab.edit(range, &text);
+                    // At a picture the text goes on its own line.
+                    match tab.picture_target(&range) {
+                        Some(target) => {
+                            let text = note_assets::own_lines(&tab.content, target.clone(), &text);
+                            tab.edit(target, &text);
+                        }
+                        None => tab.edit(range, &text),
+                    }
                 }
                 self.refresh_find();
             }

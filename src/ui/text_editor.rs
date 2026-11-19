@@ -288,6 +288,8 @@ pub struct EditorPaint {
     pub tables: Vec<TableGeom>,
     /// Sizes of the pictures in the note, kept between frames.
     pub images: ImageSizeCache,
+    /// Where each picture block (by source range) was drawn.
+    pub pictures: Vec<(Range<usize>, Bounds<Pixels>)>,
     /// Length and selection of the content the rows were laid out for, so a
     /// caller can tell whether the geometry matches the current document.
     pub painted_len: usize,
@@ -308,6 +310,7 @@ impl Default for EditorPaint {
             images: ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            pictures: Vec::new(),
         }
     }
 }
@@ -1231,6 +1234,7 @@ pub struct Prepaint {
     layout_cache: LayoutCache,
     /// Pictures to draw, already laid out.
     images: Vec<AnyElement>,
+    pictures: Vec<(Range<usize>, Bounds<Pixels>)>,
     image_cache: ImageSizeCache,
 }
 
@@ -1608,6 +1612,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 tables: Vec::new(),
                 layout_cache,
                 images: Vec::new(),
+                pictures: Vec::new(),
                 image_cache: std::mem::take(&mut self.paint.borrow_mut().images),
             };
         }
@@ -1621,6 +1626,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut strike_quads = Vec::new();
         let mut tables: Vec<TableGeom> = Vec::new();
         let mut images: Vec<AnyElement> = Vec::new();
+        let mut pictures: Vec<(Range<usize>, Bounds<Pixels>)> = Vec::new();
         let mut image_cache = std::mem::take(&mut self.paint.borrow_mut().images);
         let mut image_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         let mut cursor = None;
@@ -2386,6 +2392,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let row_h = block_size.height + IMAGE_MARGIN_Y * 2.0;
                     let block_bounds =
                         Bounds::new(point(base_x, cur_y + IMAGE_MARGIN_Y), block_size);
+                    pictures.push((src.clone(), block_bounds));
                     if band.contains(cur_y, row_h) || near_anchor {
                         match &picture {
                             Some((path, picture_size)) => {
@@ -2937,6 +2944,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             tables,
             layout_cache,
             images,
+            pictures,
             image_cache,
         }
     }
@@ -3049,6 +3057,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             // Painting is done with the rows, so hand them over instead of
             // deep-copying every shaped line each frame.
             paint.rows = std::mem::take(&mut prepaint.rows);
+            paint.pictures = std::mem::take(&mut prepaint.pictures);
             if self.word_wrap {
                 paint.wrap_cols = prepaint.wrap_cols;
             } else {
@@ -3887,6 +3896,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            pictures: Vec::new(),
         };
 
         let mut caret = Caret::default();
@@ -3985,6 +3995,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            pictures: Vec::new(),
         };
 
         // Click on Line 0 (y = 10px)
@@ -4058,6 +4069,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            pictures: Vec::new(),
         };
 
         let mut caret = Caret::default();
@@ -4156,6 +4168,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            pictures: Vec::new(),
         };
 
         // Click in Cell 1 on Line 1 at y = 35px (Line 0 is 0..28px, Line 1 is 28..56px)
@@ -4359,6 +4372,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            pictures: Vec::new(),
         };
 
         let mut caret = Caret::default();

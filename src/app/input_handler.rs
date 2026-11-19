@@ -128,7 +128,13 @@ impl EntityInputHandler for LiteMarkApp {
         let markdown_tab = self
             .active_tab()
             .is_none_or(|tab| tab.file_type.supports_markdown_features());
-        if text.chars().count() == 1 {
+        // Typing at a picture never wraps or pairs its Markdown: it goes
+        // straight to `insert_text_in_mode`, which opens a line for it.
+        let on_picture = self.effective_view_mode() == ViewMode::Wysiwyg
+            && self
+                .active_tab_mut()
+                .is_some_and(|tab| tab.range_on_picture(&range));
+        if text.chars().count() == 1 && !on_picture {
             let ch = text.chars().next().unwrap();
             if !range.is_empty() {
                 let closing = match ch {
@@ -239,6 +245,14 @@ impl EntityInputHandler for LiteMarkApp {
             .or_else(|| self.active_tab().and_then(|tab| tab.marked_range.clone()))
             .or_else(|| self.active_tab().map(|tab| tab.selection_range()))
             .unwrap_or(0..0);
+        // Composing at a picture starts on a line of its own.
+        let range = if self.effective_view_mode() == ViewMode::Wysiwyg && !new_text.is_empty() {
+            self.active_tab_mut()
+                .and_then(|tab| tab.picture_open_line(&range))
+                .unwrap_or(range)
+        } else {
+            range
+        };
         let start = range.start;
         if let Some(tab) = self.active_tab_mut() {
             tab.edit(range, new_text);

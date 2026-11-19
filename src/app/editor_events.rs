@@ -363,6 +363,15 @@ impl LiteMarkApp {
         self.field_focus = TextInput::Editor;
         self.field_owns_keys = false;
         let mut on_picture = false;
+        // Only a click on the picture itself selects it.
+        let hit_picture = self
+            .editor_paint
+            .borrow()
+            .pictures
+            .iter()
+            .any(|(range, bounds)| {
+                range.start <= offset && offset <= range.end && bounds.contains(&event.position)
+            });
         if let Some(tab) = self.active_tab_mut() {
             let block = if event.modifiers.shift {
                 None
@@ -373,9 +382,14 @@ impl LiteMarkApp {
                 // A picture is one block: a click selects it, a double-click
                 // shows its Markdown.
                 on_picture = true;
-                tab.select_picture(block);
-                if event.click_count == 2 {
-                    tab.show_picture_source();
+                if hit_picture {
+                    tab.select_picture(block);
+                    if event.click_count == 2 {
+                        tab.show_picture_source();
+                    }
+                } else {
+                    // Empty space beside the picture: the caret goes after it.
+                    tab.place(block.end, false);
                 }
             } else if event.click_count >= 3 {
                 tab.place(offset, false);

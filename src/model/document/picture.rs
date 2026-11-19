@@ -102,6 +102,66 @@ impl DocumentTab {
         true
     }
 
+    /// True when `range` lies on a picture block shown as a picture.
+    pub fn range_on_picture(&mut self, range: &Range<usize>) -> bool {
+        self.picture_block_at(range.start)
+            .is_some_and(|block| range.end <= block.end)
+    }
+
+    /// Where text meant for a picture block goes instead: before the picture
+    /// when the caret is at its start, otherwise right after it.
+    pub fn picture_target(&mut self, range: &Range<usize>) -> Option<Range<usize>> {
+        let block = self.picture_block_at(range.start)?;
+        if range.end > block.end {
+            return None;
+        }
+        Some(if range.is_empty() && range.start == block.start {
+            block.start..block.start
+        } else {
+            block.end..block.end
+        })
+    }
+
+    /// Open an empty line next to the picture for text that is about to be
+    /// written (input methods edit the text directly). Returns the empty
+    /// range to write into.
+    pub fn picture_open_line(&mut self, range: &Range<usize>) -> Option<Range<usize>> {
+        let target = self.picture_target(range)?;
+        let nl = self.line_break(target.start);
+        self.history.seal();
+        self.edit(target.clone(), nl);
+        let at = if target.start == 0 || self.content[..target.start].ends_with(['\n', '\r']) {
+            // Before the picture: the new empty line is where the picture was.
+            target.start
+        } else {
+            target.start + nl.len()
+        };
+        self.caret.move_to(floor_boundary(&self.content, at));
+        self.refresh_cursor();
+        Some(at..at)
+    }
+
+    /// Delete at the end of the line above a picture selects the picture
+    /// instead of joining the picture's Markdown onto that line.
+    pub(super) fn picture_guard_join(&mut self) -> bool {
+        let sel = self.selection_range();
+        if !sel.is_empty() {
+            return false;
+        }
+        let ending = line_ending_len(&self.content, sel.start);
+        if ending == 0 || home_offset(&self.content, sel.start) == sel.start {
+            return false;
+        }
+        let next = sel.start + ending;
+        match self.picture_block_at(next) {
+            Some(block) if block.start == next => {
+                self.select_picture(block);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Enter on a selected picture opens a new line after it.
     pub(super) fn picture_newline(&mut self) -> bool {
         let Some(block) = self.selected_picture() else {
@@ -122,6 +182,17 @@ impl DocumentTab {
         let Some(block) = self.picture_block_at(sel.start) else {
             return false;
         };
+        // Backspace at the start of a picture would join its Markdown onto
+        // the line above: move the caret up there instead.
+        if !forward && sel.is_empty() && sel.start == block.start && block.start > 0 {
+            let before = line_ending_len_before(&self.content, block.start);
+            let prev_end = block.start - before;
+            if home_offset(&self.content, prev_end) < prev_end {
+                self.place(prev_end, false);
+                return true;
+            }
+            return false;
+        }
         let hit = if sel.is_empty() {
             if forward {
                 sel.start == block.start
