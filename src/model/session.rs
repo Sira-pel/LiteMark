@@ -223,6 +223,51 @@ fn split_stem_ext(name: &str) -> (String, String) {
     (name.to_string(), String::new())
 }
 
+/// Name for a pasted or duplicated note or folder: `desired` while it is
+/// free, otherwise `Note copy.md`, then `Note copy 2.md`, `Note copy 3.md`, ...
+/// Copying `Note copy.md` again continues that series instead of stacking
+/// another "copy". Folder names keep any dot (`v1.2` → `v1.2 copy`).
+pub fn copy_name(desired: &str, is_dir: bool, taken: &impl Fn(&str) -> bool) -> String {
+    let desired = if desired.trim().is_empty() {
+        "Untitled.md"
+    } else {
+        desired
+    };
+    if !taken(desired) {
+        return desired.to_string();
+    }
+    let (stem, ext) = if is_dir {
+        (desired.to_string(), String::new())
+    } else {
+        split_stem_ext(desired)
+    };
+    let base = strip_copy_suffix(&stem);
+    let first = format!("{base} copy{ext}");
+    if !taken(&first) {
+        return first;
+    }
+    let mut number = 2u32;
+    loop {
+        let candidate = format!("{base} copy {number}{ext}");
+        if !taken(&candidate) || number >= 10_000 {
+            return candidate;
+        }
+        number += 1;
+    }
+}
+
+/// `Note copy` and `Note copy 3` → `Note`; anything else is returned as is.
+fn strip_copy_suffix(stem: &str) -> &str {
+    let without_number = match stem.rsplit_once(' ') {
+        Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => stem,
+    };
+    match without_number.strip_suffix(" copy") {
+        Some(base) if !base.trim().is_empty() => base,
+        _ => stem,
+    }
+}
+
 pub fn child_directory(
     root: &Path,
     folders: &[(String, PathBuf)],
@@ -546,5 +591,26 @@ mod tests {
     fn prompt_selection_with_zero_count_does_not_panic() {
         assert_eq!(step_prompt_selection(0, 0, true), 0);
         assert_eq!(step_prompt_selection(0, 0, false), 0);
+    }
+
+    #[test]
+    fn copy_name_keeps_a_free_name_and_adds_copy_on_collision() {
+        let used = ["Note.md", "Note copy.md", "Folder", "v1.2"];
+        let taken = |name: &str| used.contains(&name);
+        assert_eq!(copy_name("Other.md", false, &taken), "Other.md");
+        assert_eq!(copy_name("Note.md", false, &taken), "Note copy 2.md");
+        assert_eq!(copy_name("Folder", true, &taken), "Folder copy");
+        assert_eq!(copy_name("v1.2", true, &taken), "v1.2 copy");
+    }
+
+    #[test]
+    fn copy_name_of_a_copy_continues_the_series() {
+        let used = ["Note.md", "Note copy.md", "Note copy 2.md"];
+        let taken = |name: &str| used.contains(&name);
+        assert_eq!(copy_name("Note copy.md", false, &taken), "Note copy 3.md");
+        assert_eq!(copy_name("Note copy 2.md", false, &taken), "Note copy 3.md");
+        // "copy" alone is a name, not a suffix to strip.
+        let taken = |name: &str| name == "copy.md";
+        assert_eq!(copy_name("copy.md", false, &taken), "copy copy.md");
     }
 }

@@ -132,6 +132,12 @@ impl LiteMarkApp {
         .on_action(cx.listener(|this, _: &DeleteNote, _window, cx| {
             this.delete_selected(cx);
         }))
+        .on_action(cx.listener(|this, _: &DuplicateNote, _window, cx| {
+            if this.sidebar_owns_file_keys() {
+                this.sidebar_duplicate();
+                cx.notify();
+            }
+        }))
         .on_action(cx.listener(|this, _: &NextTab, _window, cx| {
             this.cycle_tab(1);
             cx.notify();
@@ -216,11 +222,21 @@ impl LiteMarkApp {
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &Copy, window, cx| {
+            if this.sidebar_owns_file_keys() {
+                this.sidebar_copy();
+                cx.notify();
+                return;
+            }
             this.handle_copy(cx);
             window.refresh();
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &Paste, window, cx| {
+            if this.sidebar_owns_file_keys() {
+                this.sidebar_paste();
+                cx.notify();
+                return;
+            }
             this.handle_paste(cx);
             window.refresh();
             cx.notify();

@@ -36,6 +36,7 @@ mod menus;
 mod render;
 mod scroll;
 mod sidebar;
+mod sidebar_clipboard;
 mod tabs;
 
 /// An item action stored in a menu: run with the window and app.
@@ -149,6 +150,10 @@ pub struct LiteMarkApp {
     /// `selected_target` is still its cursor, so any other selection change
     /// drops it.
     pub multi_selection: Option<MultiSelection>,
+    /// Notes and folders copied with Ctrl+C in the sidebar, by path, for
+    /// Ctrl+V to paste. Kept apart from the system clipboard, like the
+    /// file trees of other editors.
+    pub sidebar_clipboard: Vec<PathBuf>,
     /// True while the sidebar tree owns arrow-key navigation.
     pub sidebar_keyboard: bool,
     pub sidebar_focus_handle: FocusHandle,
@@ -510,6 +515,7 @@ impl LiteMarkApp {
             active_tab_id: first_id,
             selected_target: initial_selected.map(SidebarTarget::File),
             multi_selection: None,
+            sidebar_clipboard: Vec::new(),
             workspace: workspace.into(),
             sidebar_tree: RefCell::new(None),
             settings,
@@ -630,6 +636,7 @@ impl LiteMarkApp {
             active_tab_id: first_id,
             selected_target: None,
             multi_selection: None,
+            sidebar_clipboard: Vec::new(),
             workspace: WorkspaceDirectory {
                 folder_name: "test".into(),
                 folder_path: PathBuf::from("/tmp/litemark-table-drag-test"),
@@ -870,3 +877,7 @@ mod pdf_open_tests;
 #[cfg(test)]
 #[path = "sidebar_render_tests.rs"]
 mod sidebar_render_tests;
+
+#[cfg(test)]
+#[path = "sidebar_clipboard_tests.rs"]
+mod sidebar_clipboard_tests;

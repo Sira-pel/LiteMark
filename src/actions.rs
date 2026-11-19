@@ -17,6 +17,7 @@ actions!(
         NewNote,
         NewFolder,
         DeleteNote,
+        DuplicateNote,
         SidebarCollapse,
         SidebarExpand,
         CloseActiveTab,

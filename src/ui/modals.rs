@@ -99,6 +99,14 @@ where
             "Delete".to_string(),
             "Move Selected Note or Folder to Trash (sidebar)",
         ),
+        (
+            sec("Ctrl + C / V"),
+            "Copy / Paste Selected Notes or Folders (sidebar)",
+        ),
+        (
+            sec("Ctrl + D"),
+            "Duplicate Selected Note or Folder (sidebar)",
+        ),
         ("F1".to_string(), "Help & Shortcuts"),
         (
             "Alt + F / E / V".to_string(),
