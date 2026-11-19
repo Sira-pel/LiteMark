@@ -42,19 +42,28 @@ impl ImageSizeCache {
     /// created file is read again; without it a cached answer is trusted, so
     /// images far off screen cost no file access after the first read.
     pub fn size(&mut self, path: &Path, recheck: bool) -> Option<(u32, u32)> {
-        if let Some(entry) = self.entries.get(path) {
-            if !recheck {
-                return entry.size;
+        self.size_checked(path, recheck).0
+    }
+
+    /// [`Self::size`], and whether the file changed since it was last read,
+    /// so the caller can drop the stale picture from gpui's image cache.
+    pub fn size_checked(&mut self, path: &Path, recheck: bool) -> (Option<(u32, u32)>, bool) {
+        let stamp = match self.entries.get(path) {
+            Some(entry) if !recheck => return (entry.size, false),
+            Some(entry) => {
+                let stamp = stamp_of(path);
+                if entry.stamp == stamp {
+                    return (entry.size, false);
+                }
+                stamp
             }
-            if entry.stamp == stamp_of(path) {
-                return entry.size;
-            }
-        }
-        let stamp = stamp_of(path);
+            None => stamp_of(path),
+        };
+        let changed = self.entries.contains_key(path);
         let size = stamp.and_then(|_| read_image_size(path));
         self.entries
             .insert(path.to_path_buf(), Entry { stamp, size });
-        size
+        (size, changed)
     }
 
     /// Drops entries for paths that no longer appear in the note.
@@ -235,6 +244,22 @@ mod tests {
     fn ellipsize_limits_length() {
         assert_eq!(ellipsize("short", 10), "short");
         assert_eq!(ellipsize("abcdefghij", 5), "abcd…");
+    }
+
+    #[test]
+    fn a_replaced_picture_is_reported_as_changed_once() {
+        let dir = std::env::temp_dir().join(format!("litemark-img-change-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let svg = dir.join("a.svg");
+        std::fs::write(&svg, r#"<svg width="10" height="20">"#).unwrap();
+        let mut cache = ImageSizeCache::default();
+        assert_eq!(cache.size_checked(&svg, true), (Some((10, 20)), false), "first read");
+        assert_eq!(cache.size_checked(&svg, true), (Some((10, 20)), false), "unchanged");
+        // Replaced with a different size (and so a different length).
+        std::fs::write(&svg, r#"<svg width="300" height="40">"#).unwrap();
+        assert_eq!(cache.size_checked(&svg, true), (Some((300, 40)), true));
+        assert_eq!(cache.size_checked(&svg, true), (Some((300, 40)), false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

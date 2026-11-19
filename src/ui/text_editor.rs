@@ -205,6 +205,12 @@ pub struct LayoutCache {
     /// the wrap columns and font size in `estimate_key`.
     estimate: Vec<Option<Pixels>>,
     estimate_key: (usize, u32),
+    /// The last WYSIWYG height estimate, before it is raised to the painted
+    /// total: what the layout height should be once the total is known.
+    estimated_height: Pixels,
+    /// The height an extra redraw was last asked for, so each new height
+    /// gets one redraw and never a loop.
+    redrawn_for: Option<Pixels>,
     /// Raw mode: content snapshot, wrap columns, tab width, and every row's byte range.
     raw_rows: Option<(SharedString, usize, usize, Rc<RawRows>)>,
     /// WYSIWYG: each table's width-cache key, for a parse generation and a
@@ -1234,6 +1240,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     top_gap + line_h * wrapped as f32
                 });
             }
+            cache.estimated_height = h;
             h.max(paint_borrow.total_height)
         } else {
             // Build the rows here, not just count them: prepaint reuses them
@@ -2301,7 +2308,13 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             fit_image(n, content_width, MAX_IMAGE_HEIGHT).1
                         });
                         if band.contains(cur_y, guess + IMAGE_MARGIN_Y * 2.0) || near_anchor {
-                            natural = image_cache.size(path, true);
+                            let (checked, changed) = image_cache.size_checked(path, true);
+                            natural = checked;
+                            // gpui keeps decoded pictures by path: a file
+                            // replaced on disk would keep showing the old one.
+                            if changed {
+                                ImageSource::from(path.clone()).remove_asset(cx);
+                            }
                         }
                         picture = natural.map(|n| {
                             let (w, h) = fit_image(n, content_width, MAX_IMAGE_HEIGHT);
@@ -2985,10 +2998,27 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             &occupied,
         );
         // Pictures change a line's height after the estimate the layout used;
-        // draw once more with the real total so the scroll range is right.
-        let height_changed = prepaint.total_height - bounds.size.height > px(1.0)
-            && self.view_mode == ViewMode::Wysiwyg
-            && self.paint.borrow().images.has_entries();
+        // draw once more with the real total so the scroll range is right,
+        // whether pictures made the note taller or (one removed) shorter.
+        // The layout height is max(estimate, last total), so compare with
+        // that, not the total alone, or a note shorter than its estimate
+        // would redraw forever.
+        // One extra draw per height at most, so a parent that sizes the
+        // editor differently can never cause a redraw loop.
+        let height_changed = self.view_mode == ViewMode::Wysiwyg && {
+            let mut paint = self.paint.borrow_mut();
+            let expected = paint
+                .layout_cache
+                .estimated_height
+                .max(prepaint.total_height);
+            let redraw = paint.images.has_entries()
+                && (expected - bounds.size.height).abs() > px(1.0)
+                && paint.layout_cache.redrawn_for != Some(expected);
+            if redraw {
+                paint.layout_cache.redrawn_for = Some(expected);
+            }
+            redraw
+        };
         if (wrap_changed && self.word_wrap) || height_changed {
             let entity = self.entity.clone();
             window.defer(cx, move |_, cx| {
