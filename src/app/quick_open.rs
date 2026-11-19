@@ -264,6 +264,9 @@ impl LiteMarkApp {
             return;
         }
         self.find_term = query.clone();
+        // The content search ignores case, so the find bar must too, or the
+        // hit it found may not be among the find bar's matches.
+        self.match_case = false;
         self.find_field
             .update(cx, |field, _cx| field.set_text(query));
         self.show_find_replace = true;
@@ -277,12 +280,18 @@ impl LiteMarkApp {
         };
         let line_start = line_start_offset(&tab.content, hit.line);
         let start = (line_start + hit.col).min(tab.content.len());
+        let line_end = tab.content[line_start..]
+            .find('\n')
+            .map_or(tab.content.len(), |i| line_start + i);
         let index = hits
             .iter()
             .position(|range| range.start == start)
             // The tab text can differ from the file (line endings); fall
-            // back to the first match on that line.
-            .or_else(|| hits.iter().position(|range| range.start >= line_start));
+            // back to the first match on that line, never a later one.
+            .or_else(|| {
+                hits.iter()
+                    .position(|range| range.start >= line_start && range.start < line_end)
+            });
         if let Some(index) = index {
             tab.caret.range = hits[index].clone();
             tab.caret.reversed = false;

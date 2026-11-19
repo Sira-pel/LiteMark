@@ -178,11 +178,13 @@ fn match_name(name: &str, folder: &str, query: &[char]) -> Option<NameMatch> {
     let name_start = folder.len() + sep.len();
     let mut name_hits = Vec::new();
     let mut folder_hits = Vec::new();
+    // A range can run across the separator into the name: split it there.
     for r in ranges {
-        if r.start >= name_start {
-            name_hits.push(r.start - name_start..r.end - name_start);
-        } else {
+        if r.start < folder.len() {
             folder_hits.push(r.start..r.end.min(folder.len()));
+        }
+        if r.end > name_start {
+            name_hits.push(r.start.max(name_start) - name_start..r.end - name_start);
         }
     }
     Some(NameMatch {
@@ -465,6 +467,15 @@ mod tests {
         assert_eq!(hits[0].folder, "projects");
         assert_eq!(hits[0].folder_hits, vec![0..4]);
         assert_eq!(hits[0].name_hits, vec![0..1]);
+    }
+
+    #[test]
+    fn a_path_match_across_the_separator_highlights_both_sides() {
+        let list = vec![root().join("projects").join("alpha.md")];
+        let hits = match_notes(&list, &[], &root(), "ts/al", 10);
+        assert_eq!(names(&hits), vec!["alpha.md"]);
+        assert_eq!(hits[0].folder_hits, vec![6..8]);
+        assert_eq!(hits[0].name_hits, vec![0..2]);
     }
 
     #[test]
