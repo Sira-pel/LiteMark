@@ -294,7 +294,10 @@ fn a_cut_that_fails_to_move_stays_cut() {
         assert!(app.error_message.is_some());
         assert!(dest.join("inner.md").exists());
         assert_eq!(app.sidebar_clipboard, vec![dest.clone()]);
-        assert!(app.sidebar_clipboard_cut, "it can still be pasted elsewhere");
+        assert!(
+            app.sidebar_clipboard_cut,
+            "it can still be pasted elsewhere"
+        );
 
         // Pasted somewhere valid, it moves and the clipboard empties.
         app.selected_target = None;

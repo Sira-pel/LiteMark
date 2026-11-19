@@ -253,8 +253,16 @@ mod tests {
         let svg = dir.join("a.svg");
         std::fs::write(&svg, r#"<svg width="10" height="20">"#).unwrap();
         let mut cache = ImageSizeCache::default();
-        assert_eq!(cache.size_checked(&svg, true), (Some((10, 20)), false), "first read");
-        assert_eq!(cache.size_checked(&svg, true), (Some((10, 20)), false), "unchanged");
+        assert_eq!(
+            cache.size_checked(&svg, true),
+            (Some((10, 20)), false),
+            "first read"
+        );
+        assert_eq!(
+            cache.size_checked(&svg, true),
+            (Some((10, 20)), false),
+            "unchanged"
+        );
         // Replaced with a different size (and so a different length).
         std::fs::write(&svg, r#"<svg width="300" height="40">"#).unwrap();
         assert_eq!(cache.size_checked(&svg, true), (Some((300, 40)), true));

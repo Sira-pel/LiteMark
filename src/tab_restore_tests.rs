@@ -214,7 +214,8 @@ fn tab_switches_are_written_once_after_a_pause_or_on_close() {
         app.schedule_tab_settings_save(cx);
         assert!(app.tab_settings_dirty);
     });
-    cx.executor().advance_clock(std::time::Duration::from_secs(2));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
     cx.run_until_parked();
     view.update(cx, |app, _cx| {
         assert!(!app.tab_settings_dirty, "written after the pause");

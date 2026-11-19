@@ -173,9 +173,7 @@ pub fn resolve_image_target(target: &str, base_dir: Option<&Path>) -> ImageTarge
     }
     // Checked again after decoding: `%5C%5Chost` is `\\host` once decoded.
     let decoded = percent_decode(target);
-    if is_network_path(target)
-        || is_network_path(&decoded)
-        || decoded.chars().any(char::is_control)
+    if is_network_path(target) || is_network_path(&decoded) || decoded.chars().any(char::is_control)
     {
         return ImageTarget::Unavailable;
     }
