@@ -1413,6 +1413,11 @@ impl Render for LiteMarkApp {
                                             .active_multi()
                                             .map(|m| m.items.clone())
                                             .unwrap_or_default(),
+                                        cut_paths: if self.sidebar_clipboard_cut {
+                                            self.sidebar_clipboard.clone()
+                                        } else {
+                                            Vec::new()
+                                        },
                                         scroll_handle: self.sidebar_scroll.clone(),
                                         scroll_to_selected: sidebar_scroll_to_selected,
                                     },

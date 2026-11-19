@@ -129,6 +129,7 @@ fn main() {
                 KeyBinding::new("enter", Confirm, Some("Sidebar")),
                 KeyBinding::new("space", Confirm, Some("Sidebar")),
                 KeyBinding::new("delete", DeleteNote, Some("Sidebar")),
+                KeyBinding::new("secondary-d", DuplicateNote, Some("Sidebar")),
                 KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
                 KeyBinding::new("right", SidebarExpand, Some("Sidebar")),
                 KeyBinding::new("secondary-w", CloseActiveTab, None),

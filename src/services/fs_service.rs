@@ -1,7 +1,7 @@
 use crate::model::{
-    content_hash, file_dialog_block_reason, looks_binary, unique_name, DiskChange, DiskVersion,
-    FileType, PortalProbe, WorkspaceDirectory, WorkspaceFile, WorkspaceFolder, CODE_EXTENSIONS,
-    TEXT_EXTENSIONS,
+    content_hash, copy_name, file_dialog_block_reason, looks_binary, unique_name, DiskChange,
+    DiskVersion, FileType, PortalProbe, WorkspaceDirectory, WorkspaceFile, WorkspaceFolder,
+    CODE_EXTENSIONS, TEXT_EXTENSIONS,
 };
 #[cfg(target_os = "linux")]
 use std::ffi::{c_char, CString};
@@ -752,6 +752,66 @@ pub fn copy_folder(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
     Ok(target)
 }
 
+/// Copy a note or folder into `dest_dir` for sidebar Paste and Duplicate.
+/// The name is kept while it is free there, otherwise it becomes
+/// `Note copy.md`, `Note copy 2.md`, ... Nothing existing is ever replaced.
+/// Returns the new path.
+pub fn paste_copy(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
+    let is_dir = fs::metadata(src)?.is_dir();
+    if is_dir && dest_dir.starts_with(src) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a folder can't be pasted inside itself",
+        ));
+    }
+    // Something else may take the chosen name between the check and the
+    // create; pick the next free one a few times before giving up.
+    let mut attempts = 0;
+    loop {
+        let target = dest_dir.join(copy_name(name, is_dir, &|candidate| {
+            fs::symlink_metadata(dest_dir.join(candidate)).is_ok()
+        }));
+        let copied = if is_dir {
+            copy_dir_recursive(src, &target)
+        } else {
+            copy_noreplace(src, &target)
+        };
+        match copied {
+            Ok(()) => {
+                fsync_parent(&target)?;
+                return Ok(target);
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists && attempts < 3 => {
+                attempts += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Move a note or folder into `dest_dir` for sidebar Cut and Paste, keeping
+/// its name (auto-uniquified on collision, as when dragging). Moving into its
+/// own folder, or a folder onto itself, is a no-op that returns `src`.
+pub fn move_entry(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
+    if !fs::metadata(src)?.is_dir() {
+        return move_note(src, dest_dir);
+    }
+    if dest_dir == src {
+        return Ok(src.to_path_buf());
+    }
+    if dest_dir.starts_with(src) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a folder can't be moved inside itself",
+        ));
+    }
+    move_folder(src, dest_dir)
+}
+
 fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
     // Create the destination first, outside the cleanup's reach: if
     // create_dir fails because something else took the name in between the
@@ -1477,6 +1537,72 @@ mod tests {
             !copied.join("broken-link").exists(),
             "symlinks are not copied"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn paste_copy_adds_copy_suffix_only_on_collision() {
+        let root = std::env::temp_dir().join(format!("litemark-pastecopy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let note = safe_create_file(&root, "Note.md", "body").unwrap();
+        let other = safe_create_folder(&root, "Other").unwrap();
+
+        // Into another folder: the name is free, so it stays.
+        let pasted = paste_copy(&note, &other).unwrap();
+        assert_eq!(pasted, other.join("Note.md"));
+        // Beside the original: "copy", then "copy 2".
+        let first = paste_copy(&note, &root).unwrap();
+        assert_eq!(first, root.join("Note copy.md"));
+        let second = paste_copy(&note, &root).unwrap();
+        assert_eq!(second, root.join("Note copy 2.md"));
+        assert_eq!(fs::read_to_string(&second).unwrap(), "body");
+        assert_eq!(fs::read_to_string(&note).unwrap(), "body");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn paste_copy_copies_folders_but_never_into_themselves() {
+        let root = std::env::temp_dir().join(format!("litemark-pastedir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let folder = safe_create_folder(&root, "Folder").unwrap();
+        let inner = safe_create_folder(&folder, "Inner").unwrap();
+        safe_create_file(&inner, "Deep.md", "deep").unwrap();
+
+        let copied = paste_copy(&folder, &root).unwrap();
+        assert_eq!(copied, root.join("Folder copy"));
+        assert_eq!(
+            fs::read_to_string(copied.join("Inner").join("Deep.md")).unwrap(),
+            "deep"
+        );
+        for dest in [&folder, &inner] {
+            let err = paste_copy(&folder, dest).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+        assert!(!inner.join("Folder").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_entry_moves_but_never_into_itself() {
+        let root = std::env::temp_dir().join(format!("litemark-moveentry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let note = safe_create_file(&root, "Note.md", "body").unwrap();
+        let folder = safe_create_folder(&root, "Folder").unwrap();
+        let inner = safe_create_folder(&folder, "Inner").unwrap();
+
+        let moved = move_entry(&note, &folder).unwrap();
+        assert_eq!(moved, folder.join("Note.md"));
+        assert!(!note.exists());
+        assert_eq!(move_entry(&folder, &folder).unwrap(), folder);
+        let err = move_entry(&folder, &inner).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(folder.join("Note.md").exists());
 
         let _ = fs::remove_dir_all(&root);
     }
