@@ -17,6 +17,9 @@ pub(crate) struct QuickOpen {
     /// A content search is waiting or running for the current query.
     pub searching: bool,
     pub scroll: ScrollHandle,
+    /// Recent notes that still exist, checked on disk once per opening
+    /// rather than on every keystroke.
+    pub recents: Option<Vec<PathBuf>>,
 }
 
 impl QuickOpen {
@@ -59,6 +62,7 @@ impl LiteMarkApp {
             contents: Vec::new(),
             searching: false,
             scroll: ScrollHandle::new(),
+            recents: None,
         });
         self.field_focus = TextInput::QuickOpen;
         self.field_owns_keys = true;
@@ -129,10 +133,16 @@ impl LiteMarkApp {
         match mode {
             QuickMode::Notes => {
                 self.quick_open_epoch.fetch_add(1, Ordering::SeqCst);
-                let recents = if query.trim().is_empty() {
-                    self.recent_notes_for_menu()
-                } else {
+                let recents = if !query.trim().is_empty() {
                     Vec::new()
+                } else if let Some(cached) = open.recents.clone() {
+                    cached
+                } else {
+                    let list = self.recent_notes_for_menu();
+                    if let Some(open) = self.quick_open.as_mut() {
+                        open.recents = Some(list.clone());
+                    }
+                    list
                 };
                 let files: Vec<PathBuf> = self
                     .workspace

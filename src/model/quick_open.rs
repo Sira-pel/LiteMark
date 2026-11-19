@@ -58,7 +58,12 @@ enum Tier {
     Path,
 }
 
+/// Case-folded `c`, with `\` read as `/` so a query typed with `/` matches
+/// the folder paths Windows shows with `\`.
 fn fold(c: char) -> char {
+    if c == '\\' {
+        return '/';
+    }
     c.to_lowercase().next().unwrap_or(c)
 }
 
@@ -467,6 +472,17 @@ mod tests {
         assert_eq!(hits[0].folder, "projects");
         assert_eq!(hits[0].folder_hits, vec![0..4]);
         assert_eq!(hits[0].name_hits, vec![0..1]);
+    }
+
+    #[test]
+    fn a_slash_in_the_query_matches_a_backslash_in_the_folder() {
+        // Folders read `a\b` on Windows; typing `a/b` must still find them.
+        let mut hits = Vec::new();
+        let folded: Vec<char> = "work/q/plan".chars().map(fold).collect();
+        if let Some(m) = match_name("plan.md", "work\\q", &folded) {
+            hits.push(m.tier);
+        }
+        assert_eq!(hits, vec![Tier::Path]);
     }
 
     #[test]
