@@ -217,6 +217,11 @@ impl LiteMarkApp {
             cx.notify();
         }))
         .on_action(cx.listener(|this, _: &Cut, window, cx| {
+            if this.sidebar_owns_file_keys() {
+                this.sidebar_cut();
+                cx.notify();
+                return;
+            }
             this.handle_cut(cx);
             window.refresh();
             cx.notify();

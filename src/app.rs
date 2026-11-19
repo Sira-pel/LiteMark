@@ -150,10 +150,12 @@ pub struct LiteMarkApp {
     /// `selected_target` is still its cursor, so any other selection change
     /// drops it.
     pub multi_selection: Option<MultiSelection>,
-    /// Notes and folders copied with Ctrl+C in the sidebar, by path, for
-    /// Ctrl+V to paste. Kept apart from the system clipboard, like the
-    /// file trees of other editors.
+    /// Notes and folders cut or copied with Ctrl+X / Ctrl+C in the sidebar,
+    /// by path, for Ctrl+V to paste. Kept apart from the system clipboard,
+    /// like the file trees of other editors.
     pub sidebar_clipboard: Vec<PathBuf>,
+    /// The sidebar clipboard came from Ctrl+X: pasting moves instead of copies.
+    pub sidebar_clipboard_cut: bool,
     /// True while the sidebar tree owns arrow-key navigation.
     pub sidebar_keyboard: bool,
     pub sidebar_focus_handle: FocusHandle,
@@ -516,6 +518,7 @@ impl LiteMarkApp {
             selected_target: initial_selected.map(SidebarTarget::File),
             multi_selection: None,
             sidebar_clipboard: Vec::new(),
+            sidebar_clipboard_cut: false,
             workspace: workspace.into(),
             sidebar_tree: RefCell::new(None),
             settings,
@@ -637,6 +640,7 @@ impl LiteMarkApp {
             selected_target: None,
             multi_selection: None,
             sidebar_clipboard: Vec::new(),
+            sidebar_clipboard_cut: false,
             workspace: WorkspaceDirectory {
                 folder_name: "test".into(),
                 folder_path: PathBuf::from("/tmp/litemark-table-drag-test"),

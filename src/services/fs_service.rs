@@ -793,6 +793,25 @@ pub fn paste_copy(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
     }
 }
 
+/// Move a note or folder into `dest_dir` for sidebar Cut and Paste, keeping
+/// its name (auto-uniquified on collision, as when dragging). Moving into its
+/// own folder, or a folder onto itself, is a no-op that returns `src`.
+pub fn move_entry(src: &Path, dest_dir: &Path) -> io::Result<PathBuf> {
+    if !fs::metadata(src)?.is_dir() {
+        return move_note(src, dest_dir);
+    }
+    if dest_dir == src {
+        return Ok(src.to_path_buf());
+    }
+    if dest_dir.starts_with(src) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a folder can't be moved inside itself",
+        ));
+    }
+    move_folder(src, dest_dir)
+}
+
 fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
     // Create the destination first, outside the cleanup's reach: if
     // create_dir fails because something else took the name in between the
@@ -1564,6 +1583,26 @@ mod tests {
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         }
         assert!(!inner.join("Folder").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_entry_moves_but_never_into_itself() {
+        let root = std::env::temp_dir().join(format!("litemark-moveentry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let note = safe_create_file(&root, "Note.md", "body").unwrap();
+        let folder = safe_create_folder(&root, "Folder").unwrap();
+        let inner = safe_create_folder(&folder, "Inner").unwrap();
+
+        let moved = move_entry(&note, &folder).unwrap();
+        assert_eq!(moved, folder.join("Note.md"));
+        assert!(!note.exists());
+        assert_eq!(move_entry(&folder, &folder).unwrap(), folder);
+        let err = move_entry(&folder, &inner).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(folder.join("Note.md").exists());
 
         let _ = fs::remove_dir_all(&root);
     }

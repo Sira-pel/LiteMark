@@ -1,11 +1,11 @@
-//! Sidebar Copy, Paste and Duplicate (Ctrl+C / Ctrl+V / Ctrl+D), like the
-//! file trees of other editors. Copied rows are kept by path in
+//! Sidebar Cut, Copy, Paste and Duplicate (Ctrl+X / C / V / D), like the
+//! file trees of other editors. Cut or copied rows are kept by path in
 //! `sidebar_clipboard`, apart from the system clipboard.
 
 use super::*;
 
 impl LiteMarkApp {
-    /// The sidebar tree has the keyboard, so Ctrl+C / V / D act on its rows.
+    /// The sidebar tree has the keyboard, so Ctrl+X / C / V / D act on its rows.
     /// Never while the editor, a text field, a menu or a dialog has it: there
     /// the keys keep their text meaning.
     pub(super) fn sidebar_owns_file_keys(&self) -> bool {
@@ -16,17 +16,29 @@ impl LiteMarkApp {
             && self.create_draft.is_none()
     }
 
-    /// Ctrl+C: remember the selected notes and folders for Ctrl+V.
+    /// Ctrl+C: remember the selected notes and folders for Ctrl+V to copy.
     pub(super) fn sidebar_copy(&mut self) {
+        self.remember_sidebar_selection(false);
+    }
+
+    /// Ctrl+X: remember the selected notes and folders for Ctrl+V to move.
+    /// Nothing changes on disk until the paste.
+    pub(super) fn sidebar_cut(&mut self) {
+        self.remember_sidebar_selection(true);
+    }
+
+    fn remember_sidebar_selection(&mut self, cut: bool) {
         let paths = self.selected_sidebar_paths();
         if !paths.is_empty() {
             self.sidebar_clipboard = paths;
+            self.sidebar_clipboard_cut = cut;
         }
     }
 
-    /// Ctrl+V: copy the remembered rows into the selected folder, the folder
-    /// of the selected note, or the workspace root. A folder pasted onto
-    /// itself lands beside it.
+    /// Ctrl+V: copy (or, after Ctrl+X, move) the remembered rows into the
+    /// selected folder, the folder of the selected note, or the workspace
+    /// root. A folder pasted onto itself lands beside it. A cut is pasted
+    /// once; the clipboard is empty afterwards.
     pub(super) fn sidebar_paste(&mut self) {
         if self.sidebar_clipboard.is_empty() {
             return;
@@ -43,7 +55,21 @@ impl LiteMarkApp {
                 (src.clone(), dir)
             })
             .collect();
-        self.copy_sidebar_rows(jobs, ("paste", "Pasted"));
+        if self.sidebar_clipboard_cut {
+            self.sidebar_clipboard.clear();
+            self.sidebar_clipboard_cut = false;
+            self.run_sidebar_jobs(jobs, ("move", "Moved"), |this, src, dir| {
+                let moved = move_entry(src, dir)?;
+                if moved != src {
+                    this.retarget_open_tabs(src, &moved);
+                }
+                Ok(moved)
+            });
+        } else {
+            self.run_sidebar_jobs(jobs, ("paste", "Pasted"), |_, src, dir| {
+                paste_copy(src, dir)
+            });
+        }
     }
 
     /// Ctrl+D: copy each selected row next to the original.
@@ -56,7 +82,9 @@ impl LiteMarkApp {
                 Some((src, dir))
             })
             .collect();
-        self.copy_sidebar_rows(jobs, ("duplicate", "Duplicated"));
+        self.run_sidebar_jobs(jobs, ("duplicate", "Duplicated"), |_, src, dir| {
+            paste_copy(src, dir)
+        });
     }
 
     /// Paths of the selected rows. Rows inside a selected folder are left
@@ -97,9 +125,15 @@ impl LiteMarkApp {
         }
     }
 
-    /// Copy each `(source, destination folder)`, then rescan, select the new
-    /// rows and report any failure. `verb` is the action's name for errors.
-    fn copy_sidebar_rows(&mut self, jobs: Vec<(PathBuf, PathBuf)>, verb: (&str, &str)) {
+    /// Run `op` on each `(source, destination folder)`, then rescan, select
+    /// the resulting rows and report any failure. `verb` names the action in
+    /// errors.
+    fn run_sidebar_jobs(
+        &mut self,
+        jobs: Vec<(PathBuf, PathBuf)>,
+        verb: (&str, &str),
+        mut op: impl FnMut(&mut Self, &Path, &Path) -> std::io::Result<PathBuf>,
+    ) {
         if jobs.is_empty() {
             return;
         }
@@ -111,7 +145,7 @@ impl LiteMarkApp {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| src.display().to_string());
-            match paste_copy(src, dir) {
+            match op(self, src, dir) {
                 Ok(path) => created.push(path),
                 Err(_) if fs_entry_missing(src) => errors.push(format!("{name} no longer exists")),
                 Err(err) => errors.push(format!("{name}: {err}")),

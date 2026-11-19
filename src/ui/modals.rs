@@ -100,8 +100,8 @@ where
             "Move Selected Note or Folder to Trash (sidebar)",
         ),
         (
-            sec("Ctrl + C / V"),
-            "Copy / Paste Selected Notes or Folders (sidebar)",
+            sec("Ctrl + X / C / V"),
+            "Cut / Copy / Paste Selected Notes or Folders (sidebar)",
         ),
         (
             sec("Ctrl + D"),

@@ -218,3 +218,81 @@ fn the_keys_belong_to_the_editor_and_fields_unless_the_sidebar_has_focus() {
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[std_test]
+fn cut_then_paste_moves_the_note_and_its_open_tab() {
+    let root = workspace("cut");
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, _cx| {
+        load(app, &root);
+        let original = root.join("note.md");
+        let note = file_target(app, &original);
+        let SidebarTarget::File(note_id) = note.clone() else {
+            unreachable!()
+        };
+        app.open_loaded_tab(
+            "note.md".into(),
+            "# Note\n".into(),
+            Some(original.clone()),
+            Some(note_id),
+        );
+        select(app, note);
+        app.sidebar_cut();
+        assert!(original.exists(), "nothing moves before the paste");
+
+        let dest = folder_target(app, &root.join("dest"));
+        select(app, dest);
+        app.sidebar_paste();
+
+        let moved = root.join("dest").join("note.md");
+        assert!(!original.exists());
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "# Note\n");
+        assert_eq!(
+            app.active_tab().unwrap().file_path.as_deref(),
+            Some(moved.as_path())
+        );
+        assert_eq!(app.selected_target, Some(file_target(app, &moved)));
+        assert!(app.sidebar_clipboard.is_empty(), "a cut pastes once");
+        assert!(app.error_message.is_none());
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
+fn a_cut_folder_pasted_onto_itself_stays_put() {
+    let root = workspace("cutself");
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, _cx| {
+        load(app, &root);
+        let dest = folder_target(app, &root.join("dest"));
+        select(app, dest);
+        app.sidebar_cut();
+        app.sidebar_paste();
+        assert!(root.join("dest").join("inner.md").exists());
+        assert!(!root.join("dest copy").exists());
+        assert!(app.error_message.is_none());
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
+fn copy_after_cut_pastes_a_copy() {
+    let root = workspace("cutcopy");
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, _cx| {
+        load(app, &root);
+        let note = file_target(app, &root.join("note.md"));
+        select(app, note);
+        app.sidebar_cut();
+        app.sidebar_copy();
+        let dest = folder_target(app, &root.join("dest"));
+        select(app, dest);
+        app.sidebar_paste();
+        assert!(root.join("note.md").exists(), "Ctrl+C replaced the cut");
+        assert!(root.join("dest").join("note.md").exists());
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
