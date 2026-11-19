@@ -242,6 +242,7 @@ impl LiteMarkApp {
 /// `text` as it should replace `range` of `content` so that it sits on lines
 /// of its own: a line break is added before it unless the range starts a
 /// line, and after it unless the range ends one.
+#[cfg(test)]
 pub(super) fn own_lines(content: &str, range: std::ops::Range<usize>, text: &str) -> String {
     own_lines_with(content, range, text, "\n")
 }
