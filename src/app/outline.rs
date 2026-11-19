@@ -42,7 +42,7 @@ impl LiteMarkApp {
 
     /// Whether the open card (not just the strip) is showing.
     pub(super) fn outline_expanded(&self) -> bool {
-        self.outline_pinned_open() || self.outline_hover
+        self.outline_pinned_open() || self.outline_hover || self.outline_open
     }
 
     /// The outline element and the right padding the editor text needs for
@@ -52,7 +52,7 @@ impl LiteMarkApp {
         window: &Window,
         cx: &mut Context<Self>,
         theme: &Theme,
-    ) -> Option<(AnyElement, Pixels)> {
+    ) -> Option<AnyElement> {
         if !self.outline_visible() {
             return None;
         }
@@ -72,6 +72,7 @@ impl LiteMarkApp {
                 items: items.to_vec(),
                 expanded,
                 area_height,
+                area_width: self.editor_scroll.bounds().size.width,
                 on_hover: {
                     let view = view.clone();
                     Box::new(move |hovered, _window, cx| {
@@ -87,13 +88,29 @@ impl LiteMarkApp {
                     let view = view.clone();
                     Box::new(move |_window, cx| {
                         let _ = view.update(cx, |this, cx| {
-                            this.outline_hover = true;
+                            this.outline_open = true;
+                            cx.notify();
+                        });
+                    })
+                },
+                on_close: {
+                    let view = view.clone();
+                    Box::new(move |_window, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            // The card is already showing under the pointer
+                            // (hover), so a click on its title pins it open,
+                            // and a click on an open card closes it.
+                            this.outline_open = !this.outline_open;
+                            if !this.outline_open {
+                                this.outline_hover = false;
+                            }
                             cx.notify();
                         });
                     })
                 },
                 on_jump: Rc::new(move |offset, _window, cx| {
                     let _ = view.update(cx, |this, cx| {
+                        this.outline_open = false;
                         this.jump_to_heading(offset);
                         cx.notify();
                     });
@@ -102,14 +119,10 @@ impl LiteMarkApp {
             theme,
         )
         .into_any_element();
-        // Keep the text clear of whichever part is always there: the pinned
-        // card, or the strip. A card opened by hovering floats over the text.
-        let inset = if self.outline_pinned_open() {
-            px(OUTLINE_PINNED_INSET)
-        } else {
-            px(OUTLINE_STRIP_INSET)
-        };
-        Some((element, inset))
+        // The strip and the card (pinned or hovered) float over the editor's
+        // right edge; the text never moves aside for them, in either
+        // alignment.
+        Some(element)
     }
 
     /// Puts the caret at the start of the heading line at `offset`, scrolls

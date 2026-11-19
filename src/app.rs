@@ -177,6 +177,8 @@ pub struct LiteMarkApp {
     pub zen_notice: bool,
     /// The pointer is over the outline strip or card.
     pub outline_hover: bool,
+    /// The card was opened by clicking the strip; it stays until closed.
+    pub outline_open: bool,
     pub outline_cache: Option<OutlineCache>,
     pub saved_toast: Option<String>,
     pub show_zoom_hud: bool,
@@ -613,6 +615,7 @@ impl LiteMarkApp {
             zen_mode: false,
             zen_notice: false,
             outline_hover: false,
+            outline_open: false,
             outline_cache: None,
             saved_toast: None,
             show_zoom_hud: false,
@@ -762,6 +765,7 @@ impl LiteMarkApp {
             zen_mode: false,
             zen_notice: false,
             outline_hover: false,
+            outline_open: false,
             outline_cache: None,
             saved_toast: None,
             show_zoom_hud: false,
