@@ -469,6 +469,104 @@ pub fn line_col(content: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// A byte offset and what a count reached there: the 1-based line for
+/// [`line_col_near`] (always at a line start), the UTF-16 offset for the
+/// `*_utf16_near` functions. Lookups near the caret pass the last anchor
+/// back in and count only the bytes in between, not the whole prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CountAnchor {
+    pub byte: usize,
+    pub count: usize,
+}
+
+/// [`line_col`], counting lines from `anchor` when given. Returns the anchor
+/// for the next lookup: the start of the offset's line.
+pub fn line_col_near(
+    content: &str,
+    offset: usize,
+    anchor: Option<CountAnchor>,
+) -> ((usize, usize), CountAnchor) {
+    let offset = floor_char_boundary(content, offset.min(content.len()));
+    let span = line_span_at(content, offset);
+    let bytes = content.as_bytes();
+    // Both ends are line starts, never between a CR and its LF, so the
+    // endings counted between them are exactly the lines between them.
+    let line = match anchor.filter(|a| a.byte <= bytes.len()) {
+        Some(a) if a.byte <= span.start => a.count + count_line_endings(&bytes[a.byte..span.start]),
+        Some(a) => a.count - count_line_endings(&bytes[span.start..a.byte]),
+        None => 1 + count_line_endings(&bytes[..span.start]),
+    };
+    let end = offset.min(span.content_end);
+    let col = content[span.start..end].chars().count() + 1;
+    (
+        (line, col),
+        CountAnchor {
+            byte: span.start,
+            count: line,
+        },
+    )
+}
+
+fn utf16_len(text: &str) -> usize {
+    if text.is_ascii() {
+        text.len()
+    } else {
+        text.chars().map(char::len_utf16).sum()
+    }
+}
+
+/// [`offset_to_utf16`], counting from `anchor` when given.
+pub fn offset_to_utf16_near(
+    content: &str,
+    offset: usize,
+    anchor: Option<CountAnchor>,
+) -> (usize, CountAnchor) {
+    let offset = floor_char_boundary(content, offset.min(content.len()));
+    let utf16 = match anchor.filter(|a| a.byte <= content.len()) {
+        Some(a) if a.byte <= offset => a.count + utf16_len(&content[a.byte..offset]),
+        Some(a) => a.count - utf16_len(&content[offset..a.byte]),
+        None => utf16_len(&content[..offset]),
+    };
+    let next = CountAnchor {
+        byte: offset,
+        count: utf16,
+    };
+    (utf16, next)
+}
+
+/// [`offset_from_utf16`], counting from `anchor` when given: the first char
+/// boundary whose UTF-16 offset is at least `utf16_offset`.
+pub fn offset_from_utf16_near(
+    content: &str,
+    utf16_offset: usize,
+    anchor: Option<CountAnchor>,
+) -> (usize, CountAnchor) {
+    let a = anchor
+        .filter(|a| a.byte <= content.len())
+        .unwrap_or(CountAnchor { byte: 0, count: 0 });
+    let (mut byte, mut count) = (a.byte, a.count);
+    if count < utf16_offset {
+        for ch in content[byte..].chars() {
+            if count >= utf16_offset {
+                break;
+            }
+            count += ch.len_utf16();
+            byte += ch.len_utf8();
+        }
+    } else {
+        // Step back while the previous boundary still reaches the target.
+        while let Some(ch) = content[..byte].chars().next_back() {
+            let before = count - ch.len_utf16();
+            if before < utf16_offset {
+                break;
+            }
+            byte -= ch.len_utf8();
+            count = before;
+        }
+    }
+    (byte, CountAnchor { byte, count })
+}
+
 /// Line endings in `bytes`: each LF, and each CR not followed by an LF (a
 /// CRLF counts once). Runs on every caret move in raw tabs, so it uses
 /// memchr rather than a byte-by-byte walk.
@@ -993,6 +1091,7 @@ pub fn replace_all(
     }
 }
 
+#[cfg(test)]
 pub fn offset_to_utf16(content: &str, offset: usize) -> usize {
     let offset = floor_char_boundary(content, offset.min(content.len()));
     content[..offset].chars().map(|ch| ch.len_utf16()).sum()
@@ -1009,6 +1108,7 @@ pub fn offset_from_utf16(content: &str, utf16_offset: usize) -> usize {
     content.len()
 }
 
+#[cfg(test)]
 pub fn range_to_utf16(content: &str, range: &Range<usize>) -> Range<usize> {
     let start = floor_char_boundary(content, range.start.min(content.len()));
     let end = floor_char_boundary(content, range.end.min(content.len()));
@@ -1238,6 +1338,38 @@ mod tests {
             start,
             content_end: bytes.len(),
             next: bytes.len(),
+        }
+    }
+
+    #[test]
+    fn near_lookups_match_full_counts_from_any_anchor() {
+        let samples = ["", "a", "a\r\nb\rc\n\nd", "é😀\r\nカ\n😀z\r", "x\r\n\r\n🔥"];
+        for text in samples {
+            let ends: Vec<usize> = (0..=text.len() + 1).collect();
+            let u16_max = offset_to_utf16(text, text.len());
+            for &from in &ends {
+                let (_, line_anchor) = line_col_near(text, from, None);
+                let (_, u16_anchor) = offset_to_utf16_near(text, from, None);
+                for &to in &ends {
+                    assert_eq!(
+                        line_col_near(text, to, Some(line_anchor)).0,
+                        line_col(text, to),
+                        "{text:?} line_col {from} -> {to}"
+                    );
+                    assert_eq!(
+                        offset_to_utf16_near(text, to, Some(u16_anchor)).0,
+                        offset_to_utf16(text, to),
+                        "{text:?} to_utf16 {from} -> {to}"
+                    );
+                }
+                for target in 0..=u16_max + 1 {
+                    assert_eq!(
+                        offset_from_utf16_near(text, target, Some(u16_anchor)).0,
+                        offset_from_utf16(text, target),
+                        "{text:?} from_utf16 {from} -> {target}"
+                    );
+                }
+            }
         }
     }
 

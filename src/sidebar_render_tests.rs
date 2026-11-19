@@ -52,7 +52,7 @@ fn a_frame_with_thousands_of_notes_stays_fast() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| {
         let mut app = LiteMarkApp::test_new("", cx);
-        app.workspace = big_workspace(50, 100);
+        app.workspace = big_workspace(50, 100).into();
         app.show_sidebar = true;
         app
     });
@@ -88,4 +88,33 @@ fn keyboard_selection_finds_its_row_to_scroll_to() {
         crate::ui::sidebar::selected_row_index(&items, Some("gone"), None),
         None
     );
+}
+
+#[std_test]
+fn the_sidebar_tree_is_cached_until_the_workspace_changes() {
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| {
+        let mut app = LiteMarkApp::test_new("", cx);
+        app.workspace = big_workspace(3, 4).into();
+        app
+    });
+    let mut cx = cx.clone();
+    view.update(&mut cx, |app, _| {
+        let first = app.sidebar_tree();
+        assert!(std::rc::Rc::ptr_eq(&first, &app.sidebar_tree()));
+        assert_eq!(first.len(), 3 + 3 * 4);
+
+        // Any mutable access counts as a change: collapse a folder.
+        app.workspace.folders[0].is_open = false;
+        let collapsed = app.sidebar_tree();
+        assert!(!std::rc::Rc::ptr_eq(&first, &collapsed));
+        assert_eq!(collapsed.len(), 3 + 2 * 4);
+
+        // The pending create row is part of the key too.
+        app.create_draft = Some(crate::ui::sidebar::SidebarCreate {
+            parent: None,
+            is_folder: false,
+        });
+        assert_eq!(app.sidebar_tree().len(), collapsed.len() + 1);
+    });
 }

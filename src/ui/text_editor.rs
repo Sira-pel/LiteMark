@@ -200,7 +200,13 @@ pub struct LayoutCache {
     estimate_key: (usize, u32),
     /// Raw mode: content snapshot, wrap columns, tab width, and every row's byte range.
     raw_rows: Option<(SharedString, usize, usize, Rc<RawRows>)>,
+    /// WYSIWYG: each table's width-cache key, for a parse generation and a
+    /// font key (the same hash of an empty table).
+    table_keys: Option<(u64, u64, Rc<TableKeys>)>,
 }
+
+/// Each table's width-cache key, by the table's source range.
+type TableKeys = std::collections::HashMap<Range<usize>, u64>;
 
 /// Raw mode rows: `(byte_start, byte_end)` of each visual row.
 type RawRows = Vec<(usize, usize)>;
@@ -236,6 +242,24 @@ impl LayoutCache {
         }
         self.generation = meta.generation;
         self.raw_rows = None;
+    }
+
+    /// Raw mode rows of `content`, from the cache when it was built for the
+    /// same text, wrap columns and tab width.
+    fn raw_rows_for(
+        &mut self,
+        content: &SharedString,
+        wrap_cols: usize,
+        tab_width: usize,
+    ) -> Rc<RawRows> {
+        if let Some((text, cols, tab, rows)) = &self.raw_rows {
+            if *cols == wrap_cols && *tab == tab_width && same_text(text, content) {
+                return rows.clone();
+            }
+        }
+        let rows = Rc::new(visual_rows_tabbed(content, wrap_cols, tab_width));
+        self.raw_rows = Some((content.clone(), wrap_cols, tab_width, rows.clone()));
+        rows
     }
 }
 
@@ -1197,16 +1221,13 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
             h.max(paint_borrow.total_height)
         } else {
-            let rows = match &paint_borrow.layout_cache.raw_rows {
-                Some((text, cols, tab, cached))
-                    if *cols == wrap_cols
-                        && *tab == self.tab_width
-                        && same_text(text, &self.content) =>
-                {
-                    cached.len()
-                }
-                _ => visual_row_count_tabbed(&self.content, wrap_cols, self.tab_width),
-            };
+            // Build the rows here, not just count them: prepaint reuses them
+            // when the wrap width is unchanged, so an edit splits the
+            // document into rows once instead of twice.
+            let rows = paint_borrow
+                .layout_cache
+                .raw_rows_for(&self.content, wrap_cols, self.tab_width)
+                .len();
             let line_height = self.font_size * 1.65;
             line_height * rows as f32 + px(32.0)
         };
@@ -1299,26 +1320,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let empty_links: Arc<Vec<(Range<usize>, String)>> = Arc::default();
 
         if self.view_mode == ViewMode::Raw {
-            let raw_rows = match &layout_cache.raw_rows {
-                Some((text, cols, tab, rows))
-                    if *cols == wrap_cols
-                        && *tab == self.tab_width
-                        && same_text(text, &self.content) =>
-                {
-                    rows.clone()
-                }
-                _ => {
-                    let rows =
-                        Rc::new(visual_rows_tabbed(&self.content, wrap_cols, self.tab_width));
-                    layout_cache.raw_rows = Some((
-                        self.content.clone(),
-                        wrap_cols,
-                        self.tab_width,
-                        rows.clone(),
-                    ));
-                    rows
-                }
-            };
+            let raw_rows = layout_cache.raw_rows_for(&self.content, wrap_cols, self.tab_width);
             let anchor_rows: Vec<usize> = anchors
                 .iter()
                 .map(|&offset| {
@@ -1557,19 +1559,40 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
         }
 
-        // Each table's cache key, hashed once per frame.
-        let table_keys: std::collections::HashMap<Range<usize>, u64> = table_rows
-            .keys()
-            .map(|source| {
-                let key = table_width_key(
-                    self.content.get(source.clone()).unwrap_or(""),
-                    &self.font_family,
-                    &self.mono_font_family,
-                    self.font_size,
+        // Each table's cache key: a hash of its text and the fonts. Hashed
+        // once per parse and font, not on every frame (scroll, hover).
+        let font_key = table_width_key(
+            "",
+            &self.font_family,
+            &self.mono_font_family,
+            self.font_size,
+        );
+        let table_keys = match &layout_cache.table_keys {
+            Some((generation, fonts, keys))
+                if *generation == self.parsed.meta.generation && *fonts == font_key =>
+            {
+                keys.clone()
+            }
+            _ => {
+                let keys: Rc<TableKeys> = Rc::new(
+                    table_rows
+                        .keys()
+                        .map(|source| {
+                            let key = table_width_key(
+                                self.content.get(source.clone()).unwrap_or(""),
+                                &self.font_family,
+                                &self.mono_font_family,
+                                self.font_size,
+                            );
+                            (source.clone(), key)
+                        })
+                        .collect(),
                 );
-                (source.clone(), key)
-            })
-            .collect();
+                layout_cache.table_keys =
+                    Some((self.parsed.meta.generation, font_key, keys.clone()));
+                keys
+            }
+        };
         let mut table_width_cache = std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
         let live_keys: std::collections::HashSet<u64> = table_keys.values().copied().collect();
         table_width_cache

@@ -48,6 +48,50 @@ pub struct WorkspaceFolder {
     pub is_open: bool,
 }
 
+/// A value that knows when it may have changed: every mutable access (and
+/// every new value) takes a fresh generation, so a cache keyed by
+/// [`Tracked::generation`] can't miss a change made anywhere.
+#[derive(Debug)]
+pub struct Tracked<T> {
+    value: T,
+    generation: u64,
+}
+
+fn next_tracked_generation() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+impl<T> Tracked<T> {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl<T> From<T> for Tracked<T> {
+    fn from(value: T) -> Self {
+        Self {
+            value,
+            generation: next_tracked_generation(),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Tracked<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Tracked<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.generation = next_tracked_generation();
+        &mut self.value
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceDirectory {
     pub folder_name: String,

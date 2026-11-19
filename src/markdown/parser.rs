@@ -8,10 +8,92 @@ pub(crate) use blocks::*;
 pub use lists::*;
 pub use tables::*;
 
+#[derive(Clone, Copy)]
 struct SourceLine<'a> {
     start: usize,
     end: usize,
     text: &'a str,
+}
+
+/// Source lines of a text from a line start to the end (plus the empty last
+/// line after a final line ending), split only as far as the parser reads.
+/// An incremental parse usually catches up with the old parse a line or two
+/// after the edit, so it shouldn't split the rest of the file first.
+struct LineSource<'a> {
+    text: &'a str,
+    lines: Vec<SourceLine<'a>>,
+    /// Byte where the next unsplit line starts.
+    next: usize,
+    /// Every line, including any final empty one, has been split.
+    done: bool,
+}
+
+impl<'a> LineSource<'a> {
+    fn from(text: &'a str, from: usize) -> Self {
+        Self {
+            text,
+            lines: Vec::new(),
+            next: from,
+            done: false,
+        }
+    }
+
+    /// All lines of `text`, split up front (a full parse reads them all).
+    fn all(text: &'a str) -> Self {
+        Self {
+            text,
+            lines: all_source_lines(text),
+            next: text.len(),
+            done: true,
+        }
+    }
+
+    fn get(&mut self, index: usize) -> Option<SourceLine<'a>> {
+        while self.lines.len() <= index && !self.done {
+            self.split_next();
+        }
+        self.lines.get(index).copied()
+    }
+
+    fn len_hint(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn split_next(&mut self) {
+        let bytes = self.text.as_bytes();
+        let start = self.next;
+        let ends_with_break = self.text.ends_with(['\n', '\r']);
+        if start >= bytes.len() {
+            // Empty text is one empty line, and so is the end of a text
+            // whose last line has an ending.
+            if self.text.is_empty() || ends_with_break {
+                self.lines.push(SourceLine {
+                    start: bytes.len(),
+                    end: bytes.len(),
+                    text: "",
+                });
+            }
+            self.done = true;
+            return;
+        }
+        let (text_end, end) = match memchr::memchr2(b'\n', b'\r', &bytes[start..]) {
+            None => (bytes.len(), bytes.len()),
+            Some(skip) => {
+                let at = start + skip;
+                let crlf = bytes[at] == b'\r' && bytes.get(at + 1) == Some(&b'\n');
+                (at, at + 1 + usize::from(crlf))
+            }
+        };
+        self.lines.push(SourceLine {
+            start,
+            end,
+            text: &self.text[start..text_end],
+        });
+        self.next = end;
+        if end >= bytes.len() && !ends_with_break {
+            self.done = true;
+        }
+    }
 }
 
 fn source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
@@ -1550,11 +1632,11 @@ fn normalize_shared_run_pairs(inline_pairs: &mut [InlinePair]) {
 }
 
 pub fn parse_document(markdown: &str) -> ParsedDocument {
-    let raw_lines = all_source_lines(markdown);
-    let mut lines = Vec::with_capacity(raw_lines.len());
+    let mut raw_lines = LineSource::all(markdown);
+    let mut lines = Vec::with_capacity(raw_lines.len_hint());
     let mut state = ParseState::default();
-    let mut checkpoints = Vec::with_capacity(raw_lines.len() / CHECKPOINT_EVERY + 1);
-    parse_lines(&raw_lines, 0, &mut state, &mut lines, |i, _, state| {
+    let mut checkpoints = Vec::with_capacity(raw_lines.len_hint() / CHECKPOINT_EVERY + 1);
+    parse_lines(&mut raw_lines, 0, &mut state, &mut lines, |i, _, state| {
         if i % CHECKPOINT_EVERY == 0 {
             checkpoints.push((i, state.clone()));
         }
@@ -1578,30 +1660,6 @@ pub fn empty_parsed_document() -> Arc<ParsedDocument> {
     EMPTY
         .get_or_init(|| Arc::new(ParsedDocument::default()))
         .clone()
-}
-
-/// Source lines of `text` from byte `from` (a line start) to the end, with
-/// the same final empty line as `all_source_lines`.
-fn source_lines_from(text: &str, from: usize) -> Vec<SourceLine<'_>> {
-    if text.is_empty() {
-        return all_source_lines(text);
-    }
-    let mut v: Vec<SourceLine<'_>> = source_lines(&text[from..])
-        .into_iter()
-        .map(|line| SourceLine {
-            start: line.start + from,
-            end: line.end + from,
-            text: line.text,
-        })
-        .collect();
-    if text.ends_with('\n') || text.ends_with('\r') {
-        v.push(SourceLine {
-            start: text.len(),
-            end: text.len(),
-            text: "",
-        });
-    }
-    v
 }
 
 /// Where an edit sits and how far it moves what follows it: old positions at
@@ -1639,6 +1697,11 @@ impl Shift {
 
     fn state(self, state: &ParseState) -> ParseState {
         let mut state = state.clone();
+        self.state_in_place(&mut state);
+        state
+    }
+
+    fn state_in_place(self, state: &mut ParseState) {
         if let Some(fence) = &mut state.open_fence {
             self.range(&mut fence.open_range);
         }
@@ -1648,7 +1711,6 @@ impl Shift {
             table.delimiter = self.line(table.delimiter);
             self.range(&mut table.source);
         }
-        state
     }
 
     /// Move a line that comes after the edit. Its text is unchanged, so
@@ -1734,7 +1796,7 @@ impl ParsedDocument {
             .cloned()
             .unwrap_or_else(|| (0, ParseState::default()));
         let restart_byte = self.lines[restart].source.start;
-        let raw = source_lines_from(text, restart_byte);
+        let mut raw = LineSource::from(text, restart_byte);
 
         let old_lines = &self.lines;
         let mut new_lines = Vec::new();
@@ -1742,7 +1804,7 @@ impl ParsedDocument {
         let mut resync = None;
         let mut state = restart_state;
         parse_lines(
-            &raw,
+            &mut raw,
             restart,
             &mut state,
             &mut new_lines,
@@ -1777,35 +1839,54 @@ impl ParsedDocument {
 
         let inserted = new_lines.len();
         let old_generation = self.meta.generation;
-        let mut checkpoints: Vec<(usize, ParseState)> = self
-            .meta
-            .checkpoints
-            .iter()
-            .take_while(|(l, _)| *l < restart)
-            .cloned()
-            .collect();
+        // Checkpoints before the restart stay as they are: split them off
+        // instead of cloning every parser state up to the edit.
+        let mut checkpoints = std::mem::take(&mut self.meta.checkpoints);
+        let cut = checkpoints.partition_point(|(l, _)| *l < restart);
+        let mut later_checkpoints = checkpoints.split_off(cut);
         checkpoints.extend(new_checkpoints);
-        let removed = match resync {
+        let is_fence = |line: &ParsedLine| matches!(line.kind, LineKind::CodeFence { .. });
+        let new_fences = new_lines.iter().any(is_fence);
+        let (removed, old_fences, shift) = match resync {
             Some((_, k, ix, shift)) => {
+                let old_fences = self.lines[restart..k].iter().any(is_fence);
                 self.lines.splice(restart..k, new_lines);
                 for line in &mut self.lines[restart + inserted..] {
                     shift.parsed_line(line);
                 }
-                checkpoints.extend(
-                    self.meta.checkpoints[ix..]
-                        .iter()
-                        .map(|(l, state)| (shift.line(*l), shift.state(state))),
-                );
-                k - restart
+                let mut kept = later_checkpoints.split_off(ix - cut);
+                for (line, state) in &mut kept {
+                    *line = shift.line(*line);
+                    shift.state_in_place(state);
+                }
+                checkpoints.extend(kept);
+                (k - restart, old_fences, shift)
             }
             None => {
                 let removed = self.lines.len() - restart;
+                let old_fences = self.lines[restart..].iter().any(is_fence);
                 self.lines.truncate(restart);
                 self.lines.extend(new_lines);
-                removed
+                let shift = Shift {
+                    old_end: old.end,
+                    delta,
+                    old_line: 0,
+                    line_delta: 0,
+                };
+                (removed, old_fences, shift)
             }
         };
-        self.code_blocks = code_blocks_of(&self.lines, text.len());
+        if old_fences || new_fences {
+            self.code_blocks = code_blocks_of(&self.lines, text.len());
+        } else {
+            // No fence line was replaced, so the blocks are the same ones and
+            // only their byte positions move (an unclosed block ends at the
+            // end of the text, which moves too).
+            for (open, close) in &mut self.code_blocks {
+                shift.range(open);
+                shift.range(close);
+            }
+        }
         self.meta = ParseMeta {
             checkpoints,
             generation: next_generation(),
@@ -1930,13 +2011,16 @@ fn code_blocks_of(
 // The line loop moved here from parse_document, with its allow.
 #[allow(clippy::single_range_in_vec_init)]
 fn parse_lines(
-    raw_lines: &[SourceLine<'_>],
+    raw_lines: &mut LineSource<'_>,
     base: usize,
     state: &mut ParseState,
     lines: &mut Vec<ParsedLine>,
     mut on_line: impl FnMut(usize, usize, &ParseState) -> Step,
 ) -> Option<usize> {
-    for (local, sline) in raw_lines.iter().enumerate() {
+    let mut next_local = 0usize;
+    while let Some(sline) = raw_lines.get(next_local) {
+        let local = next_local;
+        next_local += 1;
         let i = base + local;
         // A table that ended above this line is gone: the next table check
         // runs either way, and dropping it keeps states comparable.
@@ -2173,8 +2257,8 @@ fn parse_lines(
         // consume, and the block follows the delimiter row's column shape.
         if table.as_ref().is_none_or(|t| i > t.last) {
             *table = table_block(raw_lines, local).map(|block| {
-                let byte_start = raw_lines[local].start;
-                let last_line = &raw_lines[block.last];
+                let byte_start = sline.start;
+                let last_line = raw_lines.get(block.last).expect("table line");
                 DetectedTable {
                     first: i,
                     last: base + block.last,

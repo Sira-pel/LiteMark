@@ -42,7 +42,7 @@ fn reclicking_an_unedited_note_shows_the_newer_file() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, _cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         click_open(app, &path);
         let tabs = app.tabs.len();
 
@@ -78,7 +78,7 @@ fn save_refuses_to_overwrite_a_file_changed_elsewhere() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         click_open(app, &path);
         let id = app.active_tab_id.clone();
         let tab = app.active_tab_mut().unwrap();
@@ -128,7 +128,7 @@ fn reload_takes_the_file_from_disk() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         click_open(app, &path);
         let tab = app.active_tab_mut().unwrap();
         tab.edit(0..0, "edited ");
@@ -168,7 +168,7 @@ fn a_note_deleted_elsewhere_is_not_silently_recreated() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         click_open(app, &path);
         let id = app.active_tab_id.clone();
         std::fs::remove_file(&path).unwrap();
@@ -198,7 +198,7 @@ fn touching_a_file_without_changing_it_is_not_a_conflict() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, _cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         click_open(app, &path);
         let id = app.active_tab_id.clone();
         let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
@@ -230,7 +230,7 @@ fn save_name_box_keeps_the_note_inside_the_workspace() {
         let mut cx = TestAppContext::single();
         let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("text", cx));
         view.update(cx, |app, cx| {
-            app.workspace = scan_workspace_dir(&ws, true);
+            app.workspace = scan_workspace_dir(&ws, true).into();
             let id = app.active_tab_id.clone();
             app.begin_save_naming(&id, cx);
             app.commit_save_naming(Some(typed.to_string()), cx);
@@ -246,7 +246,7 @@ fn save_name_box_keeps_the_note_inside_the_workspace() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("text", cx));
     view.update(cx, |app, cx| {
-        app.workspace = scan_workspace_dir(&ws, true);
+        app.workspace = scan_workspace_dir(&ws, true).into();
         let id = app.active_tab_id.clone();
         app.begin_save_naming(&id, cx);
         app.commit_save_naming(Some("..".to_string()), cx);
@@ -266,7 +266,7 @@ fn closing_the_window_asks_about_a_note_changed_on_disk() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         click_open(app, &path);
         let tab = app.active_tab_mut().unwrap();
         tab.edit(0..0, "edited ");
@@ -310,7 +310,7 @@ fn naming_an_untitled_note_on_close_still_asks_about_changed_files() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("untitled", cx));
     view.update(cx, |app, cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         app.active_tab_mut().unwrap().is_modified = true;
         click_open(app, &path);
         let tab = app.active_tab_mut().unwrap();
@@ -337,7 +337,7 @@ fn a_bom_note_is_neither_reloaded_nor_reported_changed() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, _cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         click_open(app, &path);
         let revision = app.active_tab().unwrap().revision;
         click_open(app, &path);

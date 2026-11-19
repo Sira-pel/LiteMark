@@ -410,10 +410,15 @@ impl LiteMarkApp {
         let Some(offset) = offset else {
             return;
         };
-        if let Some(tab) = self.active_tab_mut() {
+        // A move within the same character changes nothing: skip the frame.
+        let changed = self.active_tab_mut().is_some_and(|tab| {
+            let before = (tab.caret.clone(), tab.pending_formats);
             tab.place(offset, true);
+            (tab.caret.clone(), tab.pending_formats) != before
+        });
+        if changed {
+            cx.notify();
         }
-        cx.notify();
     }
 
     pub(super) fn editor_right_mouse_down(

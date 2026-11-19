@@ -18,7 +18,7 @@ fn opening_a_copied_note_shows_its_content() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, _cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         app.refresh_workspace_ids();
         let file_id = app.workspace.files[0].id.clone();
         let folder_id = app.workspace.folders[0].id.clone();
@@ -51,7 +51,7 @@ fn resaving_a_listed_note_does_not_rescan_the_workspace() {
     let mut cx = TestAppContext::single();
     let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
     view.update(cx, |app, _cx| {
-        app.workspace = scan_workspace_dir(&root, true);
+        app.workspace = scan_workspace_dir(&root, true).into();
         app.refresh_workspace_ids();
         let file_id = app.workspace.files[0].id.clone();
         app.open_loaded_tab(
@@ -98,7 +98,7 @@ fn not_now_switches_folder_without_copying_the_note() {
     view.update(cx, |app, cx| {
         // Never touch the real settings file from a test.
         app.settings.save_blocked = Some("test".into());
-        app.workspace = scan_workspace_dir(&old, true);
+        app.workspace = scan_workspace_dir(&old, true).into();
         app.refresh_workspace_ids();
         let id = app.workspace.files[0].id.clone();
         app.open_loaded_tab(
