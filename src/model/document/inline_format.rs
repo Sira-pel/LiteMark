@@ -20,6 +20,7 @@ impl DocumentTab {
         // wrap its Markdown and turn it into raw text.
         let sel = self.selection_range();
         if mode == ViewMode::Wysiwyg
+            && !sel.is_empty()
             && self
                 .picture_block_at(sel.start)
                 .is_some_and(|block| sel.end <= block.end)

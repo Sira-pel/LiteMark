@@ -281,3 +281,41 @@ fn own_lines_use_the_notes_line_break() {
         "\r\nL\r\n".to_string()
     );
 }
+
+#[std_test]
+fn an_image_pasted_in_a_list_item_goes_after_the_item() {
+    let dir = folder("list-paste");
+    let photo = dir.join("p.png");
+    std::fs::write(&photo, png_bytes()).unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, _| {
+        let tab = app.active_tab_mut().unwrap();
+        tab.content = "- one two\n- three\n".into();
+        tab.place("- one".len(), false);
+    });
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(std::slice::from_ref(&photo), cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        content(&view, &cx),
+        "- one two\n\n![](assets/p.png)\n- three\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn an_image_lands_where_the_caret_was_when_it_was_dropped() {
+    let dir = folder("anchor");
+    let photo = dir.join("p.png");
+    std::fs::write(&photo, png_bytes()).unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(std::slice::from_ref(&photo), cx));
+        // The caret moves while the copy runs.
+        app.active_tab_mut().unwrap().place(NOTE.len(), false);
+    });
+    cx.run_until_parked();
+    assert_eq!(content(&view, &cx), "before\n![](assets/p.png)\nafter\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

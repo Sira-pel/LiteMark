@@ -22,6 +22,13 @@ enum AssetTarget {
     Folder(PathBuf),
 }
 
+/// Where an image goes: the selection when it was pasted or dropped, and the
+/// text revision that selection belongs to.
+struct InsertAnchor {
+    range: std::ops::Range<usize>,
+    revision: u64,
+}
+
 /// Whether `path` names an image type the editor can show.
 pub(super) fn is_droppable_image(path: &Path) -> bool {
     path.extension()
@@ -58,15 +65,56 @@ impl LiteMarkApp {
     /// selection, one per line. A picture only shows when its link is alone
     /// on its line, so a line break is added before and after when the
     /// caret is mid-line. Nothing happens if the tab was closed meanwhile.
-    fn insert_image_links(&mut self, tab_id: &str, links: &[String]) {
+    fn insert_image_links(
+        &mut self,
+        tab_id: &str,
+        note_dir: &Path,
+        anchor: &InsertAnchor,
+        links: &[String],
+    ) -> bool {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
-            return;
+            return false;
         };
-        let range = tab.selection_range();
+        // Saved elsewhere meanwhile: `assets/..` would point at the wrong folder.
+        if tab.file_path.as_ref().and_then(|p| p.parent()) != Some(note_dir) {
+            return false;
+        }
+        // Where it was pasted, if the text has not changed since. Otherwise at
+        // the caret now, never over a selection the user made meanwhile.
+        let range = if tab.revision == anchor.revision {
+            anchor.range.clone()
+        } else {
+            let at = tab.cursor_offset();
+            at..at
+        };
         let nl = tab.line_break(range.start);
-        let text = own_lines_with(&tab.content, range.clone(), &links.join(nl), nl);
+        // Inside a list item or quote the link goes after the whole item, set
+        // off by a blank line: split in two, the rest would lose its marker.
+        let mut range = range;
+        let mut gap = "";
+        if range.is_empty() {
+            let line_start = crate::model::text_ops::home_offset(&tab.content, range.start);
+            if crate::model::document::block_prefix_in(&tab.content, line_start) > 0 {
+                let end = crate::model::text_ops::line_end(&tab.content, range.start);
+                range = end..end;
+                gap = nl;
+            }
+        }
+        let text = format!(
+            "{gap}{}",
+            own_lines_with(&tab.content, range.clone(), &links.join(nl), nl)
+        );
         tab.edit(range, &text);
         self.refresh_find();
+        true
+    }
+
+    fn insert_anchor(&self) -> Option<InsertAnchor> {
+        let tab = self.active_tab()?;
+        Some(InsertAnchor {
+            range: tab.selection_range(),
+            revision: tab.revision,
+        })
     }
 
     /// The assets folder appears in the sidebar once it holds files.
@@ -96,6 +144,7 @@ impl LiteMarkApp {
             AssetTarget::Folder(dir) => dir,
         };
         let tab_id = self.active_tab_id.clone();
+        let anchor = self.insert_anchor();
         let task = cx.background_executor().spawn({
             let image = image.clone();
             let note_dir = note_dir.clone();
@@ -109,7 +158,7 @@ impl LiteMarkApp {
         cx.spawn(async move |this, cx| {
             let saved = task.await;
             this.update(cx, |this, cx| {
-                this.finish_image_paste(&tab_id, &note_dir, saved, cx);
+                this.finish_image_paste(&tab_id, &note_dir, anchor, saved, cx);
                 cx.notify();
             })
             .ok();
@@ -122,14 +171,21 @@ impl LiteMarkApp {
         &mut self,
         tab_id: &str,
         note_dir: &Path,
+        anchor: Option<InsertAnchor>,
         saved: Result<PathBuf, String>,
         cx: &mut Context<Self>,
     ) {
         match saved {
             Ok(saved) => {
                 if let Some((markdown, relative)) = asset_link(&saved) {
-                    self.insert_image_links(tab_id, &[markdown]);
-                    self.show_toast(format!("Pasted image saved to {relative}"), cx);
+                    let placed = anchor.is_some_and(|a| {
+                        self.insert_image_links(tab_id, note_dir, &a, &[markdown])
+                    });
+                    if placed {
+                        self.show_toast(format!("Pasted image saved to {relative}"), cx);
+                    } else {
+                        self.show_toast(format!("Image saved to {relative}, not linked"), cx);
+                    }
                 }
                 self.refresh_after_asset_write(note_dir);
             }
@@ -160,6 +216,7 @@ impl LiteMarkApp {
             AssetTarget::Folder(dir) => dir,
         };
         let tab_id = self.active_tab_id.clone();
+        let anchor = self.insert_anchor();
         let task = cx.background_executor().spawn({
             let note_dir = note_dir.clone();
             async move {
@@ -184,7 +241,7 @@ impl LiteMarkApp {
         cx.spawn(async move |this, cx| {
             let copied = task.await;
             this.update(cx, |this, cx| {
-                this.finish_image_drop(&tab_id, &note_dir, copied, cx);
+                this.finish_image_drop(&tab_id, &note_dir, anchor, copied, cx);
                 cx.notify();
             })
             .ok();
@@ -198,6 +255,7 @@ impl LiteMarkApp {
         &mut self,
         tab_id: &str,
         note_dir: &Path,
+        anchor: Option<InsertAnchor>,
         copied: Vec<Result<PathBuf, String>>,
         cx: &mut Context<Self>,
     ) {
@@ -219,8 +277,11 @@ impl LiteMarkApp {
         }
         if !links.is_empty() {
             // The tab may have been closed meanwhile: the files stay saved.
-            self.insert_image_links(tab_id, &links);
-            let message = if links.len() == 1 {
+            let placed =
+                anchor.is_some_and(|a| self.insert_image_links(tab_id, note_dir, &a, &links));
+            let message = if !placed {
+                format!("Saved to {ASSETS_DIR}/, not linked: the note was closed or moved")
+            } else if links.len() == 1 {
                 format!("Image saved to {last_relative}")
             } else {
                 format!("{} images saved to {ASSETS_DIR}/", links.len())

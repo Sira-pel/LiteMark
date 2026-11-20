@@ -496,7 +496,12 @@ impl LiteMarkApp {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let body = match render_export(format, &tab.title, &tab.content) {
+        let body = match render_export(
+            format,
+            &tab.title,
+            &tab.content,
+            tab.file_path.as_deref().and_then(|p| p.parent()),
+        ) {
             Ok(body) => body,
             Err(err) => {
                 self.show_error(err);

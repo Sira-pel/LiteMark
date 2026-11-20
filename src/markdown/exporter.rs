@@ -1,13 +1,89 @@
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
+use std::path::Path;
+
+/// Largest local image embedded in an HTML export.
+const MAX_EMBED_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn markdown_to_html_body(markdown: &str) -> String {
+    markdown_to_html_body_in(markdown, None)
+}
+
+fn image_mime(path: &Path) -> Option<&'static str> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        "svg" => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// `data:` URI for a local image of the note, so an exported page keeps its
+/// pictures wherever it is opened. None leaves the link as written.
+fn embedded_image(target: &str, base: &Path) -> Option<String> {
+    use crate::markdown::image::{resolve_image_target, ImageTarget};
+    let ImageTarget::Local(path) = resolve_image_target(target, Some(base)) else {
+        return None;
+    };
+    let mime = image_mime(&path)?;
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_EMBED_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    Some(format!("data:{mime};base64,{}", base64(&bytes)))
+}
+
+/// HTML for `markdown`; with `base_dir` (the note's folder), local images are
+/// embedded in the page.
+pub fn markdown_to_html_body_in(markdown: &str, base_dir: Option<&Path>) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_FOOTNOTES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
 
-    let parser = Parser::new_ext(markdown, options);
+    let parser = Parser::new_ext(markdown, options).map(|event| match (event, base_dir) {
+        (
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }),
+            Some(base),
+        ) => {
+            let dest_url = embedded_image(&dest_url, base).map_or(dest_url, CowStr::from);
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                title,
+                id,
+            })
+        }
+        (event, _) => event,
+    });
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
     html_output
@@ -36,7 +112,11 @@ pub fn escape_html_text(text: &str) -> String {
 }
 
 pub fn export_to_html(title: &str, markdown: &str) -> String {
-    let body_html = markdown_to_html_body(markdown);
+    export_to_html_in(title, markdown, None)
+}
+
+pub fn export_to_html_in(title: &str, markdown: &str, base_dir: Option<&Path>) -> String {
+    let body_html = markdown_to_html_body_in(markdown, base_dir);
     let title = escape_html_text(title);
     format!(
         r#"<!DOCTYPE html>
@@ -73,9 +153,14 @@ pub fn export_to_html(title: &str, markdown: &str) -> String {
 }
 
 /// Build an export body. `title` is the document title and `markdown` is the source.
-pub fn render_export(kind: &str, title: &str, markdown: &str) -> Result<String, String> {
+pub fn render_export(
+    kind: &str,
+    title: &str,
+    markdown: &str,
+    base_dir: Option<&Path>,
+) -> Result<String, String> {
     match kind {
-        "html" => Ok(export_to_html(title, markdown)),
+        "html" => Ok(export_to_html_in(title, markdown, base_dir)),
         "md" | "markdown" => Ok(markdown.to_string()),
         "txt" | "text" => Ok(export_to_plaintext(markdown)),
         other => Err(format!("Unsupported export format: {other}")),
@@ -215,7 +300,7 @@ mod tests {
 
     #[test]
     fn export_html_uses_title_then_markdown() {
-        let html = render_export("html", "Page Title", "# Body Heading").unwrap();
+        let html = render_export("html", "Page Title", "# Body Heading", None).unwrap();
         assert!(html.contains("<title>Page Title</title>"));
         assert!(html.contains("<h1>Body Heading</h1>"));
         assert!(!html.contains("<title># Body Heading</title>"));
@@ -228,9 +313,9 @@ mod tests {
         assert_eq!(export_stem("notes.md"), "notes");
         assert_eq!(export_stem("README"), "README");
 
-        let markdown = render_export("md", "Page Title", "# Body Heading").unwrap();
+        let markdown = render_export("md", "Page Title", "# Body Heading", None).unwrap();
         assert_eq!(markdown, "# Body Heading");
-        let text = render_export("txt", "Page Title", "# Body Heading").unwrap();
+        let text = render_export("txt", "Page Title", "# Body Heading", None).unwrap();
         assert!(text.contains("Body Heading"));
         assert!(!text.contains('#'));
     }
@@ -272,5 +357,22 @@ mod tests {
         let rows = vec![vec!["1".to_string(), "2".to_string()]];
         let out = format_markdown_table(&headers, &rows);
         assert_eq!(out, "| A | B |\n| :--- | :--- |\n| 1 | 2 |\n");
+    }
+
+    #[test]
+    fn html_export_embeds_local_images() {
+        let dir = std::env::temp_dir().join(format!("litemark-export-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets/a b.png"), b"abcd").unwrap();
+        let md = "![x](<assets/a b.png>)\n\n![y](missing.png)\n\n![z](https://e.x/a.png)";
+        let html = markdown_to_html_body_in(md, Some(&dir));
+        assert!(
+            html.contains("src=\"data:image/png;base64,YWJjZA==\""),
+            "{html}"
+        );
+        assert!(html.contains("src=\"missing.png\""));
+        assert!(html.contains("src=\"https://e.x/a.png\""));
+        assert!(markdown_to_html_body("![x](a.png)").contains("src=\"a.png\""));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

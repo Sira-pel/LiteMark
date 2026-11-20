@@ -162,11 +162,20 @@ impl UndoHistory {
             return;
         }
         if self.span_group_open {
+            let mut resized = None;
             let absorbed = match self.undo.last_mut() {
-                Some(previous) => absorb_into_span_group(previous, &edit),
+                Some(previous) => {
+                    let before = previous.cost();
+                    let ok = absorb_into_span_group(previous, &edit);
+                    resized = Some((before, previous.cost()));
+                    ok
+                }
                 None => false,
             };
             if absorbed {
+                if let Some((before, after)) = resized {
+                    self.undo_bytes = (self.undo_bytes + after).saturating_sub(before);
+                }
                 // A group that ended up empty (everything it inserted was
                 // taken back) is no undo step at all.
                 if self
@@ -177,7 +186,6 @@ impl UndoHistory {
                     self.undo.pop();
                     self.span_group_open = false;
                 }
-                self.undo_bytes += edit.cost();
                 self.redo.clear();
                 self.redo_bytes = 0;
                 self.last_edit = Some(now);

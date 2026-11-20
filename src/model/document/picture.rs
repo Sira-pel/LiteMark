@@ -66,6 +66,11 @@ impl DocumentTab {
         true
     }
 
+    /// End the current undo group (input-method text has been committed).
+    pub fn seal_history(&mut self) {
+        self.history.seal();
+    }
+
     /// Drop the raw-editing flag once the caret has left that line.
     pub(super) fn expire_picture_raw(&mut self) {
         if let Some(start) = self.picture_raw_line {
