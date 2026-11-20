@@ -395,5 +395,10 @@ fn an_image_pasted_over_selected_text_in_a_list_item_goes_after_the_item() {
         content(&view, &cx),
         "-  two\n\n![](assets/p.png)\n- three\n"
     );
+    view.update(&mut cx, |app, _| {
+        let tab = app.active_tab_mut().unwrap();
+        assert!(tab.undo());
+        assert_eq!(tab.content, "- one two\n- three\n", "one undo");
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }

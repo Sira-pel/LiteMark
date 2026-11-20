@@ -507,6 +507,12 @@ impl LiteMarkApp {
             .as_deref()
             .and_then(|p| p.parent())
             .map(Path::to_path_buf);
+        // Images anywhere in the open workspace are embedded; outside it,
+        // only those in the note's own folder.
+        let scope = base_dir
+            .as_ref()
+            .filter(|dir| dir.starts_with(&self.workspace.folder_path))
+            .map(|_| self.workspace.folder_path.clone());
         let stem = export_stem(&tab.title);
         let ext = match format {
             "markdown" => "md",
@@ -521,7 +527,13 @@ impl LiteMarkApp {
         let task = cx.background_executor().spawn({
             let dest = dest.clone();
             async move {
-                let body = render_export(format, &title, &content, base_dir.as_deref())?;
+                let body = render_export(
+                    format,
+                    &title,
+                    &content,
+                    base_dir.as_deref(),
+                    scope.as_deref(),
+                )?;
                 atomic_save(&dest, &body).map_err(|err| format!("Couldn't export: {err}"))
             }
         });

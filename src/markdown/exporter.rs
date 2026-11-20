@@ -8,7 +8,7 @@ const MAX_EMBED_TOTAL: u64 = 25 * 1024 * 1024;
 
 #[cfg(test)]
 pub fn markdown_to_html_body(markdown: &str) -> String {
-    markdown_to_html_body_in(markdown, None)
+    markdown_to_html_body_in(markdown, None, None)
 }
 
 fn image_mime(path: &Path) -> Option<&'static str> {
@@ -45,17 +45,18 @@ fn base64(bytes: &[u8]) -> String {
 /// `data:` URI for a local image of the note, so an exported page keeps its
 /// pictures wherever it is opened. None leaves the link as written.
 ///
-/// Only files inside the note's folder are embedded (a link to
+/// Only files inside `scope` (the workspace folder, or the note's own folder
+/// outside a workspace) are embedded (a link to
 /// `/home/me/.ssh/key.png` is not copied into a page that gets shared), and
 /// `budget` is what is left of the export's size allowance.
-fn embedded_image(target: &str, base: &Path, budget: &mut u64) -> Option<String> {
+fn embedded_image(target: &str, base: &Path, scope: &Path, budget: &mut u64) -> Option<String> {
     use crate::markdown::image::{resolve_image_target, ImageTarget};
     let ImageTarget::Local(path) = resolve_image_target(target, Some(base)) else {
         return None;
     };
     let mime = image_mime(&path)?;
     let path = path.canonicalize().ok()?;
-    if !path.starts_with(base.canonicalize().ok()?) {
+    if !path.starts_with(scope.canonicalize().ok()?) {
         return None;
     }
     let meta = std::fs::metadata(&path).ok()?;
@@ -63,13 +64,21 @@ fn embedded_image(target: &str, base: &Path, budget: &mut u64) -> Option<String>
         return None;
     }
     let bytes = std::fs::read(&path).ok()?;
+    // The file may have grown since its size was read.
+    if bytes.len() as u64 > *budget {
+        return None;
+    }
     *budget -= bytes.len() as u64;
     Some(format!("data:{mime};base64,{}", base64(&bytes)))
 }
 
 /// HTML for `markdown`; with `base_dir` (the note's folder), local images are
 /// embedded in the page.
-pub fn markdown_to_html_body_in(markdown: &str, base_dir: Option<&Path>) -> String {
+pub fn markdown_to_html_body_in(
+    markdown: &str,
+    base_dir: Option<&Path>,
+    scope: Option<&Path>,
+) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_FOOTNOTES);
@@ -87,8 +96,9 @@ pub fn markdown_to_html_body_in(markdown: &str, base_dir: Option<&Path>) -> Stri
             }),
             Some(base),
         ) => {
+            let scope = scope.unwrap_or(base);
             let dest_url =
-                embedded_image(&dest_url, base, &mut budget).map_or(dest_url, CowStr::from);
+                embedded_image(&dest_url, base, scope, &mut budget).map_or(dest_url, CowStr::from);
             Event::Start(Tag::Image {
                 link_type,
                 dest_url,
@@ -127,11 +137,16 @@ pub fn escape_html_text(text: &str) -> String {
 
 #[cfg(test)]
 pub fn export_to_html(title: &str, markdown: &str) -> String {
-    export_to_html_in(title, markdown, None)
+    export_to_html_in(title, markdown, None, None)
 }
 
-pub fn export_to_html_in(title: &str, markdown: &str, base_dir: Option<&Path>) -> String {
-    let body_html = markdown_to_html_body_in(markdown, base_dir);
+pub fn export_to_html_in(
+    title: &str,
+    markdown: &str,
+    base_dir: Option<&Path>,
+    scope: Option<&Path>,
+) -> String {
+    let body_html = markdown_to_html_body_in(markdown, base_dir, scope);
     let title = escape_html_text(title);
     format!(
         r#"<!DOCTYPE html>
@@ -173,9 +188,10 @@ pub fn render_export(
     title: &str,
     markdown: &str,
     base_dir: Option<&Path>,
+    scope: Option<&Path>,
 ) -> Result<String, String> {
     match kind {
-        "html" => Ok(export_to_html_in(title, markdown, base_dir)),
+        "html" => Ok(export_to_html_in(title, markdown, base_dir, scope)),
         "md" | "markdown" => Ok(markdown.to_string()),
         "txt" | "text" => Ok(export_to_plaintext(markdown)),
         other => Err(format!("Unsupported export format: {other}")),
@@ -315,7 +331,7 @@ mod tests {
 
     #[test]
     fn export_html_uses_title_then_markdown() {
-        let html = render_export("html", "Page Title", "# Body Heading", None).unwrap();
+        let html = render_export("html", "Page Title", "# Body Heading", None, None).unwrap();
         assert!(html.contains("<title>Page Title</title>"));
         assert!(html.contains("<h1>Body Heading</h1>"));
         assert!(!html.contains("<title># Body Heading</title>"));
@@ -328,9 +344,9 @@ mod tests {
         assert_eq!(export_stem("notes.md"), "notes");
         assert_eq!(export_stem("README"), "README");
 
-        let markdown = render_export("md", "Page Title", "# Body Heading", None).unwrap();
+        let markdown = render_export("md", "Page Title", "# Body Heading", None, None).unwrap();
         assert_eq!(markdown, "# Body Heading");
-        let text = render_export("txt", "Page Title", "# Body Heading", None).unwrap();
+        let text = render_export("txt", "Page Title", "# Body Heading", None, None).unwrap();
         assert!(text.contains("Body Heading"));
         assert!(!text.contains('#'));
     }
@@ -380,7 +396,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("assets")).unwrap();
         std::fs::write(dir.join("assets/a b.png"), b"abcd").unwrap();
         let md = "![x](<assets/a b.png>)\n\n![y](missing.png)\n\n![z](https://e.x/a.png)";
-        let html = markdown_to_html_body_in(md, Some(&dir));
+        let html = markdown_to_html_body_in(md, Some(&dir), None);
         assert!(
             html.contains("src=\"data:image/png;base64,YWJjZA==\""),
             "{html}"
@@ -404,8 +420,21 @@ mod tests {
             "![a](assets/a.png)\n\n![b](../secret.png)\n\n![c](<{}>)",
             outside.display()
         );
-        let html = markdown_to_html_body_in(&md, Some(&note));
+        let html = markdown_to_html_body_in(&md, Some(&note), None);
         assert_eq!(html.matches("data:image/png").count(), 1, "{html}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn html_export_embeds_images_from_a_sibling_folder_inside_the_workspace() {
+        let root = std::env::temp_dir().join(format!("litemark-export-ws-{}", std::process::id()));
+        let note = root.join("note");
+        std::fs::create_dir_all(&note).unwrap();
+        std::fs::create_dir_all(root.join("shared")).unwrap();
+        std::fs::write(root.join("shared/a.png"), b"a").unwrap();
+        let md = "![a](../shared/a.png)";
+        assert!(!markdown_to_html_body_in(md, Some(&note), None).contains("data:"));
+        assert!(markdown_to_html_body_in(md, Some(&note), Some(&root)).contains("data:image/png"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

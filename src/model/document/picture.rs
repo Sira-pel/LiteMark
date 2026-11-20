@@ -97,6 +97,8 @@ impl DocumentTab {
         if self.has_pending_inline_formats() {
             let before = range.is_empty() && range.start == block.start;
             let at = if before { block.start } else { block.end };
+            // The line break and the text typed into it are one undo step.
+            self.next_edit_opens_span_group = true;
             self.edit(at..at, nl);
             let line = if before { at } else { at + nl.len() };
             self.caret.move_to(floor_boundary(&self.content, line));

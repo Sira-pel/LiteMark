@@ -101,8 +101,15 @@ impl LiteMarkApp {
         // Pasting over selected text there: the selection goes first, then the
         // link follows the item as it would from a bare caret.
         if in_block && !range.is_empty() {
-            tab.edit(range.clone(), "");
-            range = range.start..range.start;
+            let content = tab.content.clone();
+            let kept_end = crate::model::text_ops::line_end(&content, range.end);
+            let after = format!("{}{}", &content[..range.start], &content[range.end..]);
+            let end = range.start + (kept_end - range.end);
+            let text = own_lines_with(&after, end..end, &links.join(nl), nl);
+            let replacement = format!("{}{nl}{text}", &after[range.start..end]);
+            tab.edit(range.start..kept_end, &replacement);
+            self.refresh_find();
+            return true;
         }
         if range.is_empty() {
             let line_start = crate::model::text_ops::home_offset(&tab.content, range.start);

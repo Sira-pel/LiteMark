@@ -399,3 +399,37 @@ fn bold_beside_a_picture_applies_to_the_text_typed_next() {
     d.insert_text_in_mode(at..at, "hi", MODE);
     assert_eq!(d.content, format!("{PIC}\n**hi**\nafter\n"));
 }
+
+#[test]
+fn link_beside_a_picture_goes_on_its_own_line() {
+    let src = format!("{PIC}\nafter\n");
+    let mut d = doc(&src);
+    d.place(PIC.len(), false);
+    d.apply_format_in_mode("link", MODE);
+    assert_eq!(d.content, format!("{PIC}\n[link](https://)\nafter\n"));
+    assert_eq!(&d.content[d.selection_range()], "link");
+
+    let mut d = doc(&src);
+    d.place(0, false);
+    d.apply_format_in_mode("link", MODE);
+    assert_eq!(d.content, format!("[link](https://)\n{PIC}\nafter\n"));
+}
+
+#[test]
+fn bold_text_beside_a_picture_is_one_undo_step() {
+    for (caret, expect) in [
+        (PIC.len(), format!("{PIC}\n**hi**\nafter\n")),
+        (0, format!("**hi**\n{PIC}\nafter\n")),
+    ] {
+        let src = format!("{PIC}\nafter\n");
+        let mut d = doc(&src);
+        d.place(caret, false);
+        d.apply_format_in_mode("bold", MODE);
+        let at = d.cursor_offset();
+        d.insert_text_in_mode(at..at, "hi", MODE);
+        assert_eq!(d.content, expect);
+        assert!(d.undo());
+        assert_eq!(d.content, src, "one undo takes back line and text");
+        assert!(!d.undo());
+    }
+}

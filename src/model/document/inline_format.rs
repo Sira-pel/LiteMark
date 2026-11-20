@@ -247,10 +247,27 @@ impl DocumentTab {
                 }
 
                 // In Raw mode (or for Link), insert placeholder and select inner placeholder so a second press unwraps/removes it
-                self.edit(
-                    range.clone(),
-                    &format!("{}{}{}", prefix, placeholder, suffix),
-                );
+                let snippet = format!("{}{}{}", prefix, placeholder, suffix);
+                // Beside a picture the placeholder goes on a line of its own, or
+                // it would join the picture's Markdown and break the picture.
+                let mut at = range.start;
+                let beside = if mode == ViewMode::Wysiwyg && range.is_empty() {
+                    self.picture_block_at(range.start)
+                } else {
+                    None
+                };
+                if let Some(block) = beside {
+                    let nl = self.line_break(block.start);
+                    if range.start == block.start {
+                        self.edit(block.start..block.start, &format!("{snippet}{nl}"));
+                    } else {
+                        self.edit(block.end..block.end, &format!("{nl}{snippet}"));
+                        at = block.end + nl.len();
+                    }
+                } else {
+                    self.edit(range.clone(), &snippet);
+                }
+                let range = at..at;
                 let start = floor_boundary(&self.content, range.start + prefix.len());
                 let end = floor_boundary(&self.content, start + placeholder.len());
                 self.caret.range = start..end;
