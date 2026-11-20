@@ -92,6 +92,18 @@ impl DocumentTab {
         }
         let nl = self.line_break(block.start);
         self.history.seal();
+        // Bold, italic and the like armed beside the picture apply to the text:
+        // open the empty line first, then type into it as usual.
+        if self.has_pending_inline_formats() {
+            let before = range.is_empty() && range.start == block.start;
+            let at = if before { block.start } else { block.end };
+            self.edit(at..at, nl);
+            let line = if before { at } else { at + nl.len() };
+            self.caret.move_to(floor_boundary(&self.content, line));
+            self.refresh_cursor();
+            self.insert_text_in_mode(line..line, text, ViewMode::Wysiwyg);
+            return true;
+        }
         if range.is_empty() && range.start == block.start {
             self.edit(block.start..block.start, &format!("{text}{nl}"));
             self.caret

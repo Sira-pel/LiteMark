@@ -3,7 +3,10 @@ use std::path::Path;
 
 /// Largest local image embedded in an HTML export.
 const MAX_EMBED_BYTES: u64 = 8 * 1024 * 1024;
+/// Most image data embedded in one export.
+const MAX_EMBED_TOTAL: u64 = 25 * 1024 * 1024;
 
+#[cfg(test)]
 pub fn markdown_to_html_body(markdown: &str) -> String {
     markdown_to_html_body_in(markdown, None)
 }
@@ -41,17 +44,26 @@ fn base64(bytes: &[u8]) -> String {
 
 /// `data:` URI for a local image of the note, so an exported page keeps its
 /// pictures wherever it is opened. None leaves the link as written.
-fn embedded_image(target: &str, base: &Path) -> Option<String> {
+///
+/// Only files inside the note's folder are embedded (a link to
+/// `/home/me/.ssh/key.png` is not copied into a page that gets shared), and
+/// `budget` is what is left of the export's size allowance.
+fn embedded_image(target: &str, base: &Path, budget: &mut u64) -> Option<String> {
     use crate::markdown::image::{resolve_image_target, ImageTarget};
     let ImageTarget::Local(path) = resolve_image_target(target, Some(base)) else {
         return None;
     };
     let mime = image_mime(&path)?;
+    let path = path.canonicalize().ok()?;
+    if !path.starts_with(base.canonicalize().ok()?) {
+        return None;
+    }
     let meta = std::fs::metadata(&path).ok()?;
-    if !meta.is_file() || meta.len() > MAX_EMBED_BYTES {
+    if !meta.is_file() || meta.len() > MAX_EMBED_BYTES || meta.len() > *budget {
         return None;
     }
     let bytes = std::fs::read(&path).ok()?;
+    *budget -= bytes.len() as u64;
     Some(format!("data:{mime};base64,{}", base64(&bytes)))
 }
 
@@ -64,6 +76,7 @@ pub fn markdown_to_html_body_in(markdown: &str, base_dir: Option<&Path>) -> Stri
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
 
+    let mut budget = MAX_EMBED_TOTAL;
     let parser = Parser::new_ext(markdown, options).map(|event| match (event, base_dir) {
         (
             Event::Start(Tag::Image {
@@ -74,7 +87,8 @@ pub fn markdown_to_html_body_in(markdown: &str, base_dir: Option<&Path>) -> Stri
             }),
             Some(base),
         ) => {
-            let dest_url = embedded_image(&dest_url, base).map_or(dest_url, CowStr::from);
+            let dest_url =
+                embedded_image(&dest_url, base, &mut budget).map_or(dest_url, CowStr::from);
             Event::Start(Tag::Image {
                 link_type,
                 dest_url,
@@ -111,6 +125,7 @@ pub fn escape_html_text(text: &str) -> String {
     out
 }
 
+#[cfg(test)]
 pub fn export_to_html(title: &str, markdown: &str) -> String {
     export_to_html_in(title, markdown, None)
 }
@@ -374,5 +389,23 @@ mod tests {
         assert!(html.contains("src=\"https://e.x/a.png\""));
         assert!(markdown_to_html_body("![x](a.png)").contains("src=\"a.png\""));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn html_export_embeds_only_images_in_the_notes_folder() {
+        let root =
+            std::env::temp_dir().join(format!("litemark-export-scope-{}", std::process::id()));
+        let note = root.join("note");
+        std::fs::create_dir_all(note.join("assets")).unwrap();
+        std::fs::write(root.join("secret.png"), b"s").unwrap();
+        std::fs::write(note.join("assets/a.png"), b"a").unwrap();
+        let outside = root.join("secret.png");
+        let md = format!(
+            "![a](assets/a.png)\n\n![b](../secret.png)\n\n![c](<{}>)",
+            outside.display()
+        );
+        let html = markdown_to_html_body_in(&md, Some(&note));
+        assert_eq!(html.matches("data:image/png").count(), 1, "{html}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

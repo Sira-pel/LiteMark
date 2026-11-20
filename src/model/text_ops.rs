@@ -1975,3 +1975,16 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod emptied_group_tests {
+    use super::*;
+
+    #[test]
+    fn an_emptied_span_group_gives_back_its_undo_bytes() {
+        let mut h = UndoHistory::default();
+        h.push_span_opening(DiffEdit::new(0, String::new(), "ab".into()));
+        h.push(DiffEdit::new(0, "ab".into(), String::new()));
+        assert_eq!(h.stored_bytes(), 0);
+    }
+}

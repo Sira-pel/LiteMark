@@ -349,3 +349,53 @@ fn cutting_a_selected_picture_removes_its_line_and_indent_leaves_it_alone() {
     assert!(d.cut_selected_picture());
     assert_eq!(d.content, "intro\nafter\n");
 }
+
+#[test]
+fn ctrl_backspace_below_a_picture_selects_it_instead_of_joining() {
+    let src = format!("{PIC}\nafter\n");
+    let mut d = doc(&src);
+    d.place(PIC.len() + 1, false);
+    d.delete_word_left();
+    assert_eq!(d.content, src, "the picture's Markdown is untouched");
+    assert_eq!(d.selection_range(), 0..PIC.len());
+}
+
+#[test]
+fn text_typed_after_committed_input_method_text_is_its_own_undo_step() {
+    let src = format!("{PIC}\nafter\n");
+    let mut d = doc(&src);
+    let at = d.picture_open_line(&(0..PIC.len())).expect("on a picture");
+    d.edit(at.clone(), "你");
+    // What the input handler does once the text is committed.
+    d.seal_history();
+    let end = at.start + "你".len();
+    d.edit(end..end, "x");
+    assert!(d.undo());
+    assert_eq!(d.content, format!("{PIC}\n你\nafter\n"));
+}
+
+#[test]
+fn line_formats_never_touch_a_picture_line() {
+    let src = format!("intro\n{PIC}\nafter\n");
+    let end = start_of(&src) + PIC.len();
+    for caret in [start_of(&src), end] {
+        for cmd in ["h1", "ul", "ol", "checklist", "quote", "codeblock"] {
+            let mut d = doc(&src);
+            d.place(caret, false);
+            d.apply_format_in_mode(cmd, MODE);
+            assert_eq!(d.content, src, "{cmd} at {caret}");
+        }
+    }
+}
+
+#[test]
+fn bold_beside_a_picture_applies_to_the_text_typed_next() {
+    let src = format!("{PIC}\nafter\n");
+    let mut d = doc(&src);
+    d.place(PIC.len(), false);
+    d.apply_format_in_mode("bold", MODE);
+    assert!(d.pending_formats.bold);
+    let at = d.cursor_offset();
+    d.insert_text_in_mode(at..at, "hi", MODE);
+    assert_eq!(d.content, format!("{PIC}\n**hi**\nafter\n"));
+}

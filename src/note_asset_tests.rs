@@ -375,3 +375,25 @@ fn a_percent_in_a_file_name_is_escaped_in_the_link() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[std_test]
+fn an_image_pasted_over_selected_text_in_a_list_item_goes_after_the_item() {
+    let dir = folder("list-selection");
+    let photo = dir.join("p.png");
+    std::fs::write(&photo, png_bytes()).unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, _| {
+        let tab = app.active_tab_mut().unwrap();
+        tab.content = "- one two\n- three\n".into();
+        tab.caret.range = 2..5; // "one"
+    });
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(std::slice::from_ref(&photo), cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        content(&view, &cx),
+        "-  two\n\n![](assets/p.png)\n- three\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -18,14 +18,31 @@ impl DocumentTab {
 
         // A picture is not text: bold, links, headings and the like would
         // wrap its Markdown and turn it into raw text.
+        // Line formats (headings, lists, quotes, code blocks) rewrite the whole
+        // line, so they never apply to a picture line. Inline formats only
+        // stop when the picture itself is selected: with the caret beside it
+        // they set up the text typed next.
         let sel = self.selection_range();
-        if mode == ViewMode::Wysiwyg
-            && !sel.is_empty()
-            && self
+        if mode == ViewMode::Wysiwyg {
+            let on_picture = self
                 .picture_block_at(sel.start)
-                .is_some_and(|block| sel.end <= block.end)
-        {
-            return;
+                .is_some_and(|block| sel.end <= block.end);
+            let line_format = matches!(
+                cmd,
+                "h1" | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "ul"
+                    | "ol"
+                    | "checklist"
+                    | "quote"
+                    | "codeblock"
+            );
+            if on_picture && (line_format || !sel.is_empty()) {
+                return;
+            }
         }
 
         // 1. Block-level formats: h1, h2, h3, ul, ol, checklist, quote

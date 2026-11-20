@@ -94,6 +94,16 @@ impl LiteMarkApp {
         // off by a blank line: split in two, the rest would lose its marker.
         let mut range = range;
         let mut gap = "";
+        let in_block = {
+            let line_start = crate::model::text_ops::home_offset(&tab.content, range.start);
+            crate::model::document::block_prefix_in(&tab.content, line_start) > 0
+        };
+        // Pasting over selected text there: the selection goes first, then the
+        // link follows the item as it would from a bare caret.
+        if in_block && !range.is_empty() {
+            tab.edit(range.clone(), "");
+            range = range.start..range.start;
+        }
         if range.is_empty() {
             let line_start = crate::model::text_ops::home_offset(&tab.content, range.start);
             if crate::model::document::block_prefix_in(&tab.content, line_start) > 0 {
