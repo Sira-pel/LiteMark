@@ -509,10 +509,14 @@ impl LiteMarkApp {
             .map(Path::to_path_buf);
         // Images anywhere in the open workspace are embedded; outside it,
         // only those in the note's own folder.
-        let scope = base_dir
-            .as_ref()
-            .filter(|dir| dir.starts_with(&self.workspace.folder_path))
-            .map(|_| self.workspace.folder_path.clone());
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from);
+        let scope = export_scope(
+            base_dir.as_deref(),
+            &self.workspace.folder_path,
+            home.as_deref(),
+        );
         let stem = export_stem(&tab.title);
         let ext = match format {
             "markdown" => "md",
@@ -1062,4 +1066,41 @@ impl LiteMarkApp {
 pub(super) struct PdfOpenStart {
     pub(super) tab_id: String,
     pub(super) toast_epoch: u64,
+}
+
+/// The folder whose images an HTML export may embed: the workspace when the
+/// note is inside it, but never a workspace as broad as the home folder or a
+/// drive root, where it would reach unrelated pictures.
+fn export_scope(note_dir: Option<&Path>, workspace: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let broad = workspace.parent().is_none() || home.is_some_and(|h| h == workspace);
+    (!broad && note_dir.is_some_and(|dir| dir.starts_with(workspace)))
+        .then(|| workspace.to_path_buf())
+}
+
+#[cfg(test)]
+mod export_scope_tests {
+    use super::*;
+    // `use super::*` brings in gpui's `test` attribute; pin the std one.
+    use ::core::prelude::v1::test as std_test;
+
+    #[std_test]
+    fn the_workspace_widens_the_scope_unless_it_is_home_or_a_root() {
+        let note = Path::new("/home/me/proj/notes");
+        let ws = Path::new("/home/me/proj");
+        assert_eq!(
+            export_scope(Some(note), ws, Some(Path::new("/home/me"))),
+            Some(ws.to_path_buf())
+        );
+        assert_eq!(
+            export_scope(
+                Some(note),
+                Path::new("/home/me"),
+                Some(Path::new("/home/me"))
+            ),
+            None
+        );
+        assert_eq!(export_scope(Some(note), Path::new("/"), None), None);
+        assert_eq!(export_scope(Some(Path::new("/elsewhere")), ws, None), None);
+        assert_eq!(export_scope(None, ws, None), None);
+    }
 }
