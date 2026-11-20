@@ -216,10 +216,6 @@ impl LiteMarkApp {
             }
             AssetTarget::Folder(dir) => dir,
         };
-        if skipped > 0 {
-            let noun = if skipped == 1 { "file" } else { "files" };
-            self.show_toast(format!("Skipped {skipped} non-image {noun}"), cx);
-        }
         let tab_id = self.active_tab_id.clone();
         let anchor = self.insert_anchor();
         let task = cx.background_executor().spawn({
@@ -246,7 +242,7 @@ impl LiteMarkApp {
         cx.spawn(async move |this, cx| {
             let copied = task.await;
             this.update(cx, |this, cx| {
-                this.finish_image_drop(&tab_id, &note_dir, anchor, copied, cx);
+                this.finish_image_drop(&tab_id, &note_dir, anchor, skipped, copied, cx);
                 cx.notify();
             })
             .ok();
@@ -261,6 +257,7 @@ impl LiteMarkApp {
         tab_id: &str,
         note_dir: &Path,
         anchor: Option<InsertAnchor>,
+        skipped: usize,
         copied: Vec<Result<PathBuf, String>>,
         cx: &mut Context<Self>,
     ) {
@@ -290,6 +287,11 @@ impl LiteMarkApp {
                 format!("Image saved to {last_relative}")
             } else {
                 format!("{} images saved to {ASSETS_DIR}/", links.len())
+            };
+            let message = match skipped {
+                0 => message,
+                1 => format!("{message} (skipped 1 non-image file)"),
+                n => format!("{message} (skipped {n} non-image files)"),
             };
             self.show_toast(message, cx);
             self.refresh_after_asset_write(note_dir);

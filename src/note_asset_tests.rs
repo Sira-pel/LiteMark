@@ -200,7 +200,7 @@ fn dropped_images_are_copied_to_assets_and_each_gets_a_link() {
     assert_eq!(std::fs::read(&a).unwrap(), b"aaa", "originals stay put");
     assert_eq!(
         toast(&view, &cx).as_deref(),
-        Some("2 images saved to assets/")
+        Some("2 images saved to assets/ (skipped 1 non-image file)")
     );
 
     // Files that are not images are not handled at all.
@@ -352,9 +352,8 @@ fn dropping_other_files_with_images_says_they_were_skipped() {
     view.update(&mut cx, |app, cx| {
         assert!(app.drop_image_files(&[photo.clone(), text.clone()], cx));
     });
-    assert_eq!(
-        toast(&view, &cx).as_deref(),
-        Some("Skipped 1 non-image file")
-    );
+    cx.run_until_parked();
+    let message = toast(&view, &cx).expect("a toast");
+    assert!(message.contains("skipped 1 non-image file"), "{message}");
     let _ = std::fs::remove_dir_all(&dir);
 }
