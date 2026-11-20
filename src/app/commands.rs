@@ -496,18 +496,17 @@ impl LiteMarkApp {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let body = match render_export(
-            format,
-            &tab.title,
-            &tab.content,
-            tab.file_path.as_deref().and_then(|p| p.parent()),
-        ) {
-            Ok(body) => body,
-            Err(err) => {
-                self.show_error(err);
-                return;
-            }
-        };
+        // Unsupported formats fail before the file dialog opens.
+        if !matches!(format, "html" | "md" | "markdown" | "txt" | "text") {
+            self.show_error(format!("Unsupported export format: {format}"));
+            return;
+        }
+        let (title, content) = (tab.title.clone(), tab.content.clone());
+        let base_dir = tab
+            .file_path
+            .as_deref()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf);
         let stem = export_stem(&tab.title);
         let ext = match format {
             "markdown" => "md",
@@ -518,16 +517,32 @@ impl LiteMarkApp {
         let Some(dest) = pick_save_file(&default_name, ext) else {
             return;
         };
-        match atomic_save(&dest, &body) {
-            Ok(()) => self.show_toast(
-                format!(
-                    "Exported to {}",
-                    dest.file_name().unwrap_or_default().to_string_lossy()
-                ),
-                cx,
-            ),
-            Err(err) => self.show_file_error(format!("Couldn't export: {err}")),
-        }
+        // Embedding images reads and encodes files: keep that off the UI thread.
+        let task = cx.background_executor().spawn({
+            let dest = dest.clone();
+            async move {
+                let body = render_export(format, &title, &content, base_dir.as_deref())?;
+                atomic_save(&dest, &body).map_err(|err| format!("Couldn't export: {err}"))
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.show_toast(
+                        format!(
+                            "Exported to {}",
+                            dest.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                        cx,
+                    ),
+                    Err(err) => this.show_file_error(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn handle_format_cmd(&mut self, cmd: &'static str, _cx: &mut App) {

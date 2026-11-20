@@ -207,6 +207,7 @@ impl LiteMarkApp {
         if images.is_empty() {
             return false;
         }
+        let skipped = paths.len() - images.len();
         let note_dir = match self.asset_target() {
             AssetTarget::NotMarkdown => return false,
             AssetTarget::Unsaved => {
@@ -215,6 +216,10 @@ impl LiteMarkApp {
             }
             AssetTarget::Folder(dir) => dir,
         };
+        if skipped > 0 {
+            let noun = if skipped == 1 { "file" } else { "files" };
+            self.show_toast(format!("Skipped {skipped} non-image {noun}"), cx);
+        }
         let tab_id = self.active_tab_id.clone();
         let anchor = self.insert_anchor();
         let task = cx.background_executor().spawn({

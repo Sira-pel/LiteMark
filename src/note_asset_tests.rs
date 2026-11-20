@@ -319,3 +319,42 @@ fn an_image_lands_where_the_caret_was_when_it_was_dropped() {
     assert_eq!(content(&view, &cx), "before\n![](assets/p.png)\nafter\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[std_test]
+fn an_image_pasted_in_a_quote_goes_after_the_quote_line() {
+    let dir = folder("quote-paste");
+    let photo = dir.join("p.png");
+    std::fs::write(&photo, png_bytes()).unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, _| {
+        let tab = app.active_tab_mut().unwrap();
+        tab.content = "> quoted\nafter\n".into();
+        tab.place("> quo".len(), false);
+    });
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(std::slice::from_ref(&photo), cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        content(&view, &cx),
+        "> quoted\n\n![](assets/p.png)\nafter\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn dropping_other_files_with_images_says_they_were_skipped() {
+    let dir = folder("skip");
+    let (photo, text) = (dir.join("p.png"), dir.join("t.txt"));
+    std::fs::write(&photo, png_bytes()).unwrap();
+    std::fs::write(&text, b"x").unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(&[photo.clone(), text.clone()], cx));
+    });
+    assert_eq!(
+        toast(&view, &cx).as_deref(),
+        Some("Skipped 1 non-image file")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
