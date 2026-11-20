@@ -357,3 +357,21 @@ fn dropping_other_files_with_images_says_they_were_skipped() {
     assert!(message.contains("skipped 1 non-image file"), "{message}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[std_test]
+fn a_percent_in_a_file_name_is_escaped_in_the_link() {
+    use super::note_assets::asset_link;
+    use crate::markdown::image::{resolve_image_target, ImageTarget};
+    let dir = folder("percent");
+    let (markdown, _) = asset_link(&dir.join("assets").join("a%41.png")).unwrap();
+    assert_eq!(markdown, "![](assets/a%2541.png)");
+    // Even when `aA.png` exists, the link finds the file it names.
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("assets/aA.png"), b"x").unwrap();
+    std::fs::write(dir.join("assets/a%41.png"), b"y").unwrap();
+    assert_eq!(
+        resolve_image_target("assets/a%2541.png", Some(&dir)),
+        ImageTarget::Local(dir.join("assets/a%41.png"))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

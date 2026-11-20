@@ -44,7 +44,9 @@ pub(super) fn is_droppable_image(path: &Path) -> bool {
 pub(super) fn asset_link(saved: &Path) -> Option<(String, String)> {
     let name = saved.file_name()?.to_str()?;
     let relative = format!("{ASSETS_DIR}/{name}");
-    Some((image_markdown("", &relative), relative))
+    // A literal `%` is written `%25`, or `a%41.png` would be read as `aA.png`.
+    let link = format!("{ASSETS_DIR}/{}", name.replace('%', "%25"));
+    Some((image_markdown("", &link), relative))
 }
 
 impl LiteMarkApp {
