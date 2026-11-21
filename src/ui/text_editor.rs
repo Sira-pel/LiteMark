@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use gpui::*;
 
-use crate::markdown::image::{is_image_block, parse_image_line, resolve_image_target, ImageTarget};
+use crate::markdown::image::{
+    is_image_block, parse_image_line, parse_image_row, resolve_image_target, ImageLine, ImageTarget,
+};
 use crate::markdown::{
     LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
     TableRowBody,
@@ -24,8 +26,8 @@ use crate::model::ViewMode;
 use crate::theme::sz;
 
 use super::note_images::{
-    ellipsize, fit_image, fit_image_width, placeholder_height, ImageSizeCache, IMAGE_MARGIN_Y,
-    IMAGE_RADIUS, MAX_IMAGE_HEIGHT,
+    ellipsize, fit_image, fit_image_width, flow_thumbnails, placeholder_height, thumbnail_size,
+    ImageSizeCache, IMAGE_MARGIN_Y, IMAGE_RADIUS, MAX_IMAGE_HEIGHT, THUMB_GAP, THUMB_HEIGHT,
 };
 
 #[derive(Clone)]
@@ -2515,6 +2517,181 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             let mut q = fill(block_bounds, self.selection_color);
                             q.corner_radii = Corners::all(IMAGE_RADIUS);
                             quads.push(q);
+                        }
+                    }
+                    rows.push(PaintRow {
+                        line_index: line_idx,
+                        byte_start: src.start,
+                        byte_end: src.end,
+                        origin: point(base_x, cur_y),
+                        line_height: row_h,
+                        shaped: unshaped.clone(),
+                        offset_map: empty_map.clone(),
+                        checkbox_hit: None,
+                        link_hits: empty_links.clone(),
+                        cells: Vec::new(),
+                    });
+                    cur_y += row_h;
+                    continue;
+                }
+                // Two or more images on one line are a row of thumbnails: one
+                // block for the caret and the line, but each image can be
+                // selected, resized and deleted by itself.
+                let row = if !editing_raw && line_text.trim_start().starts_with("![") {
+                    parse_image_row(line_text)
+                } else {
+                    None
+                };
+                if let Some(row) = row {
+                    let near_anchor = anchor_lines
+                        .iter()
+                        .any(|&a| a + 2 >= line_idx && a <= line_idx + 2);
+                    let on_screen = |h: Pixels| band.contains(cur_y, h) || near_anchor;
+                    let mut thumbs: Vec<(Range<usize>, ImageLine, ImageTarget, Option<PathBuf>)> =
+                        Vec::new();
+                    let mut sizes: Vec<(Pixels, Pixels)> = Vec::new();
+                    for (range, image) in row {
+                        let target = resolve_image_target(&image.target, self.base_dir.as_deref());
+                        let mut natural = None;
+                        let mut path = None;
+                        if let ImageTarget::Local(p) = &target {
+                            image_paths.insert(p.clone());
+                            natural = image_cache.size(p, false);
+                            if on_screen(THUMB_HEIGHT + IMAGE_MARGIN_Y * 2.0) {
+                                let (checked, changed) = image_cache.size_checked(p, true);
+                                natural = checked;
+                                if changed {
+                                    ImageSource::from(p.clone()).remove_asset(cx);
+                                }
+                            }
+                            path = natural.map(|_| p.clone());
+                        }
+                        sizes.push(thumbnail_size(natural, image.width, content_width));
+                        let abs = range.start + src.start..range.end + src.start;
+                        thumbs.push((abs, image, target, path));
+                    }
+                    let (spots, flow_h) = flow_thumbnails(&sizes, content_width, THUMB_GAP);
+                    let row_h = flow_h + IMAGE_MARGIN_Y * 2.0;
+                    let top = cur_y + IMAGE_MARGIN_Y;
+                    let whole_selected = caret_on_line;
+                    let selected_one = thumbs
+                        .iter()
+                        .position(|(r, ..)| !self.selection.is_empty() && self.selection == *r);
+                    let mut all_bounds = Vec::with_capacity(thumbs.len());
+                    for (k, ((abs, image, target, path), (&(w, h), &(dx, dy)))) in thumbs
+                        .iter()
+                        .zip(sizes.iter().zip(spots.iter()))
+                        .enumerate()
+                    {
+                        let bounds = Bounds::new(point(base_x + dx, top + dy), size(w, h));
+                        all_bounds.push(bounds);
+                        pictures.push((abs.clone(), bounds));
+                        if !on_screen(row_h) {
+                            continue;
+                        }
+                        match path {
+                            Some(path) => {
+                                let muted = self.muted_color;
+                                let surface = self.surface_bg;
+                                let font_size = self.font_size;
+                                let mut element = img(path.clone())
+                                    .id(("note-thumb", line_idx * 4096 + k.min(4095)))
+                                    .w(w)
+                                    .h(h)
+                                    .rounded(IMAGE_RADIUS)
+                                    .object_fit(ObjectFit::Contain)
+                                    .with_fallback(move || {
+                                        div()
+                                            .size_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .bg(surface)
+                                            .text_color(muted)
+                                            .text_size(font_size)
+                                            .child("Image not found")
+                                            .into_any_element()
+                                    })
+                                    .into_any_element();
+                                element.prepaint_as_root(
+                                    bounds.origin,
+                                    size(AvailableSpace::Definite(w), AvailableSpace::Definite(h)),
+                                    window,
+                                    cx,
+                                );
+                                images.push(element);
+                            }
+                            None => {
+                                let mut q = fill(bounds, self.surface_bg);
+                                q.corner_radii = Corners::all(IMAGE_RADIUS);
+                                q.border_widths = Edges::all(px(1.0));
+                                q.border_color = self.border_color;
+                                bg_quads.push(q);
+                                let label = if image.alt.trim().is_empty() {
+                                    match target {
+                                        ImageTarget::Remote(url) => url.clone(),
+                                        _ => "Image".to_string(),
+                                    }
+                                } else {
+                                    image.alt.clone()
+                                };
+                                let max_chars =
+                                    ((w - px(16.0)) / char_width).floor().max(1.0) as usize;
+                                let text: SharedString = ellipsize(&label, max_chars).into();
+                                let run = TextRun {
+                                    len: text.len(),
+                                    font: base_font.clone(),
+                                    color: self.muted_color,
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                };
+                                let shaped = window.text_system().shape_line(
+                                    text,
+                                    self.font_size * 0.9,
+                                    &[run],
+                                    None,
+                                );
+                                decor_lines.push((
+                                    point(bounds.left() + px(8.0), bounds.top() + px(8.0)),
+                                    self.font_size * 1.65,
+                                    shaped,
+                                ));
+                            }
+                        }
+                        if whole_selected || selected_one == Some(k) {
+                            let mut q = fill(bounds, gpui::transparent_black());
+                            q.corner_radii = Corners::all(IMAGE_RADIUS);
+                            q.border_widths = Edges::all(px(2.0));
+                            q.border_color = self.cursor_color;
+                            quads.push(q);
+                        }
+                        if !self.selection.is_empty()
+                            && self.selection.start < abs.end
+                            && self.selection.end > abs.start
+                        {
+                            let mut q = fill(bounds, self.selection_color);
+                            q.corner_radii = Corners::all(IMAGE_RADIUS);
+                            quads.push(q);
+                        }
+                    }
+                    if on_screen(row_h) && focused && self.selection.is_empty() {
+                        let bar = if self.selection.start == src.start {
+                            all_bounds
+                                .first()
+                                .map(|b| (b.left() - px(4.0), b.top(), b.size.height))
+                        } else if self.selection.start == src.end {
+                            all_bounds
+                                .last()
+                                .map(|b| (b.right() + px(2.0), b.top(), b.size.height))
+                        } else {
+                            None
+                        };
+                        if let Some((x, y, h)) = bar {
+                            cursor = Some(fill(
+                                Bounds::new(point(x, y), size(px(2.0), h)),
+                                self.cursor_color,
+                            ));
                         }
                     }
                     rows.push(PaintRow {

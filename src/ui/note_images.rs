@@ -195,6 +195,53 @@ pub fn fit_image_width(natural: (u32, u32), width: u32, content_width: Pixels) -
     (px(w), px((nh * w / nw).max(1.0)))
 }
 
+/// Height of a thumbnail in a row of images, before zoom.
+pub const THUMB_HEIGHT: Pixels = px(160.0);
+/// Space between thumbnails.
+pub const THUMB_GAP: Pixels = px(8.0);
+
+/// The size of one thumbnail: its own `width` when it has one (as for a lone
+/// picture), otherwise `THUMB_HEIGHT` tall with the picture's aspect ratio.
+/// Never wider than the column. A picture of unknown size is a square.
+pub fn thumbnail_size(
+    natural: Option<(u32, u32)>,
+    width: Option<u32>,
+    content_width: Pixels,
+) -> (Pixels, Pixels) {
+    let column = f32::from(content_width).max(1.0);
+    let (nw, nh) = natural.map_or((1.0, 1.0), |(w, h)| (w.max(1) as f32, h.max(1) as f32));
+    let w = match width {
+        Some(w) => w as f32,
+        None => f32::from(THUMB_HEIGHT) * nw / nh,
+    }
+    .clamp(1.0, column);
+    (px(w), px((nh * w / nw).max(1.0)))
+}
+
+/// Where each thumbnail goes when they flow left to right and wrap to a new
+/// line when the next one would pass `max_width`: each one's top-left corner
+/// (relative to the block) and the block's total height. A line is as tall as
+/// its tallest thumbnail.
+pub fn flow_thumbnails(
+    sizes: &[(Pixels, Pixels)],
+    max_width: Pixels,
+    gap: Pixels,
+) -> (Vec<(Pixels, Pixels)>, Pixels) {
+    let mut spots = Vec::with_capacity(sizes.len());
+    let (mut x, mut y, mut line_h) = (px(0.0), px(0.0), px(0.0));
+    for &(w, h) in sizes {
+        if x > px(0.0) && x + w > max_width {
+            y += line_h + gap;
+            x = px(0.0);
+            line_h = px(0.0);
+        }
+        spots.push((x, y));
+        x += w + gap;
+        line_h = line_h.max(h);
+    }
+    (spots, y + line_h)
+}
+
 /// Height of the box shown instead of a picture that can't be drawn:
 /// two text lines and padding.
 pub fn placeholder_height(font_size: Pixels) -> Pixels {
@@ -227,6 +274,39 @@ mod tests {
         let (w, h) = fit_image((1000, 4000), px(700.0), MAX_IMAGE_HEIGHT);
         assert_eq!(f32::from(h), 480.0);
         assert_eq!(f32::from(w), 120.0);
+    }
+
+    #[test]
+    fn thumbnails_are_a_fixed_height_unless_they_have_a_width() {
+        let (w, h) = thumbnail_size(Some((400, 200)), None, px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (320.0, 160.0));
+        let (w, h) = thumbnail_size(Some((400, 200)), Some(100), px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (100.0, 50.0));
+        // Never past the column.
+        let (w, h) = thumbnail_size(Some((4000, 200)), None, px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (700.0, 35.0));
+        // Unknown size: a square.
+        let (w, h) = thumbnail_size(None, None, px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (160.0, 160.0));
+    }
+
+    #[test]
+    fn thumbnails_wrap_to_a_new_line_and_lines_take_the_tallest() {
+        let sizes = [
+            (px(300.0), px(100.0)),
+            (px(300.0), px(160.0)),
+            (px(300.0), px(50.0)),
+        ];
+        let (spots, total) = flow_thumbnails(&sizes, px(700.0), px(8.0));
+        let spots: Vec<_> = spots
+            .iter()
+            .map(|&(x, y)| (f32::from(x), f32::from(y)))
+            .collect();
+        assert_eq!(spots, vec![(0.0, 0.0), (308.0, 0.0), (0.0, 168.0)]);
+        assert_eq!(f32::from(total), 218.0);
+        // One wider than the column still gets a line to itself.
+        let (spots, total) = flow_thumbnails(&[(px(900.0), px(40.0))], px(700.0), px(8.0));
+        assert_eq!((f32::from(spots[0].0), f32::from(total)), (0.0, 40.0));
     }
 
     #[test]
