@@ -18,7 +18,7 @@ use crate::markdown::{
 };
 use crate::model::document::visible_line_end;
 use crate::model::text_ops::{
-    count_line_endings, visual_row_count_tabbed, visual_rows_tabbed, Caret,
+    count_line_endings, visual_row_count_measured, visual_rows_measured, Caret, CharWidths,
 };
 use crate::model::ViewMode;
 use crate::theme::sz;
@@ -184,6 +184,9 @@ fn near_any(anchors: &[usize], index: usize) -> bool {
     anchors.iter().any(|&a| a + 2 >= index && a <= index + 2)
 }
 
+/// Wrap budgets are counted in 1/8 px, so char widths stay whole numbers.
+const WIDTH_UNITS_PER_PX: f32 = 8.0;
+
 /// One parsed line split into visual rows: the display range of each row,
 /// for the wrap width it was split at. Relative to the line's display text,
 /// so it stays right when an edit above moves the line.
@@ -213,6 +216,13 @@ pub struct LayoutCache {
     redrawn_for: Option<Pixels>,
     /// Raw mode: content snapshot, wrap columns, tab width, and every row's byte range.
     raw_rows: Option<(SharedString, usize, usize, Rc<RawRows>)>,
+    /// How wide each char is, so wrapping packs rows by real text width. The
+    /// wrap budget is in these units (`WIDTH_UNITS_PER_PX` to a pixel).
+    widths: Rc<CharWidths>,
+    /// The same for code lines, which are drawn in the monospace font.
+    mono_widths: Rc<CharWidths>,
+    /// The fonts and size the widths were measured for.
+    widths_key: Option<(SharedString, SharedString, u32)>,
     /// WYSIWYG: each table's width-cache key, for a parse generation and a
     /// font key (the same hash of an empty table).
     table_keys: Option<(u64, u64, Rc<TableKeys>)>,
@@ -257,6 +267,25 @@ impl LayoutCache {
         self.raw_rows = None;
     }
 
+    /// Use `widths` (measured for `key`), dropping every row split with other
+    /// widths.
+    fn set_widths(
+        &mut self,
+        key: (SharedString, SharedString, u32),
+        widths: impl FnOnce() -> (CharWidths, CharWidths),
+    ) {
+        if self.widths_key.as_ref() == Some(&key) {
+            return;
+        }
+        let (text, mono) = widths();
+        self.widths = Rc::new(text);
+        self.mono_widths = Rc::new(mono);
+        self.widths_key = Some(key);
+        self.lines.iter_mut().for_each(|line| *line = None);
+        self.estimate.iter_mut().for_each(|slot| *slot = None);
+        self.raw_rows = None;
+    }
+
     /// Raw mode rows of `content`, from the cache when it was built for the
     /// same text, wrap columns and tab width.
     fn raw_rows_for(
@@ -270,7 +299,12 @@ impl LayoutCache {
                 return rows.clone();
             }
         }
-        let rows = Rc::new(visual_rows_tabbed(content, wrap_cols, tab_width));
+        let rows = Rc::new(visual_rows_measured(
+            content,
+            wrap_cols,
+            tab_width,
+            &self.widths,
+        ));
         self.raw_rows = Some((content.clone(), wrap_cols, tab_width, rows.clone()));
         rows
     }
@@ -1291,7 +1325,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let wrapped = if line.display_text.is_empty() {
                         1
                     } else {
-                        visual_row_count_tabbed(&line.display_text, wrap_cols, 0).max(1)
+                        let widths = if matches!(line.kind, LineKind::CodeLine) {
+                            &cache.mono_widths
+                        } else {
+                            &cache.widths
+                        };
+                        visual_row_count_measured(&line.display_text, wrap_cols, 0, widths).max(1)
                     };
                     top_gap + line_h * wrapped as f32
                 });
@@ -1344,6 +1383,56 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             None,
         );
         let char_width = sample.width.max(px(1.0));
+        let font_size = self.font_size;
+        let measure = |window: &mut Window| {
+            // Widths round up, so a long row never comes out wider than the
+            // budget it was packed to.
+            let width_of = |window: &mut Window, font: &Font, text: &str| {
+                let shaped = window.text_system().shape_line(
+                    text.to_string().into(),
+                    font_size,
+                    &[TextRun {
+                        len: text.len(),
+                        font: font.clone(),
+                        color: self.text_color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                );
+                (f32::from(shaped.width) * WIDTH_UNITS_PER_PX).ceil() as u16
+            };
+            let table = |window: &mut Window, fonts: &[Font]| {
+                // The widest of the given fonts for each char.
+                let widest = |window: &mut Window, text: &str| {
+                    fonts
+                        .iter()
+                        .map(|f| width_of(window, f, text))
+                        .max()
+                        .unwrap_or(1)
+                };
+                let mut ascii = [0u16; 128];
+                for c in 32u8..127 {
+                    ascii[c as usize] = widest(window, &(c as char).to_string());
+                }
+                let zero = ascii[b'0' as usize];
+                ascii[9] = zero;
+                // Khmer letters are wider than Latin ones.
+                let samples = ["ក", "ញ", "ម", "ស", "ខ", "ឆ", "ឃ", "ត"];
+                let total: u32 = samples.iter().map(|c| u32::from(widest(window, c))).sum();
+                let khmer = total.div_ceil(samples.len() as u32) as u16;
+                CharWidths::from_ascii(ascii, widest(window, "n"), zero).with_khmer(khmer)
+            };
+            let mut bold = base_font.clone();
+            bold.weight = FontWeight::BOLD;
+            let mut italic = base_font.clone();
+            italic.style = FontStyle::Italic;
+            (
+                table(window, &[base_font.clone(), bold, italic]),
+                table(window, std::slice::from_ref(&mono_font)),
+            )
+        };
         // The parse is cached per revision, so this is O(1) per redraw.
         let line_count = if self.parsed.lines.is_empty() {
             logical_line_number(&self.content, self.content.len())
@@ -1372,7 +1461,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             (available_width, px(0.0))
         };
         let wrap_cols = if self.word_wrap {
-            (content_width / char_width).floor() as usize
+            (f32::from(content_width) * WIDTH_UNITS_PER_PX).floor() as usize
         } else {
             usize::MAX
         };
@@ -1390,6 +1479,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
 
         let mut layout_cache = std::mem::take(&mut self.paint.borrow_mut().layout_cache);
         layout_cache.keep_for(&self.parsed);
+        layout_cache.set_widths(
+            (
+                self.font_family.clone(),
+                self.mono_font_family.clone(),
+                f32::from(self.font_size).to_bits(),
+            ),
+            || measure(window),
+        );
         // Rows outside the shaping band share these instead of their line's
         // map and links: the parse can then move lines after an edit in
         // place, without copying maps that last frame's rows still hold.
@@ -2531,7 +2628,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             let row_char_width = char_width * (row_font_size / self.font_size);
             let row_avail_width = (content_width - indent_x).max(px(32.0));
             let row_wrap_cols = if self.word_wrap {
-                ((row_avail_width / row_char_width).floor() as usize).max(1)
+                ((f32::from(row_avail_width)
+                    * WIDTH_UNITS_PER_PX
+                    * (f32::from(char_width) / f32::from(row_char_width)))
+                .floor() as usize)
+                    .max(1)
             } else {
                 usize::MAX
             };
@@ -2541,7 +2642,16 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 _ => {
                     let built = Rc::new(LineRows {
                         wrap_cols: row_wrap_cols,
-                        rows: visual_rows_tabbed(&parsed_line.display_text, row_wrap_cols, 0),
+                        rows: visual_rows_measured(
+                            &parsed_line.display_text,
+                            row_wrap_cols,
+                            0,
+                            if matches!(parsed_line.kind, LineKind::CodeLine) {
+                                &layout_cache.mono_widths
+                            } else {
+                                &layout_cache.widths
+                            },
+                        ),
                     });
                     if let Some(slot) = layout_cache.lines.get_mut(line_idx) {
                         *slot = Some(built.clone());
