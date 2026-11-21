@@ -522,6 +522,7 @@ fn mode_and_tab_switches_clear_transient_state_and_invalidate_follow_caret() {
         assert!(!tab.pending_formats.bold);
         assert!(tab.marked_range.is_none());
         assert!(tab.picture_raw_line.is_none());
+        assert_eq!(tab.cursor_offset(), 1, "IME composition committed at range.end");
     });
 
     // Place caret on the table delimiter line in Raw mode, then toggle back to

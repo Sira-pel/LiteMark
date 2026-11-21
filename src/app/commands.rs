@@ -21,8 +21,7 @@ impl LiteMarkApp {
         self.dismiss_editor_context_menu();
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.pending_formats = ActiveFormats::default();
-            tab.marked_range = None;
-            tab.cancel_picture_ime_line();
+            tab.finish_ime_composition();
             tab.picture_raw_line = None;
         }
         self.editor_paint.borrow_mut().reset_for_switch();

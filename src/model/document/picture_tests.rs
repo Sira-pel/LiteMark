@@ -801,15 +801,21 @@ fn ctrl_left_and_right_jump_cleanly_over_picture_blocks() {
     let world_start = text.find("world").unwrap();
     let mut d = doc(text);
 
-    // Forward walk: 0 -> end of "hello" -> end of picture -> end of "world".
+    // Forward walk: 0 -> end of "hello" -> start of picture -> end of picture -> end of "world".
     d.place(0, false);
     d.move_word_right(false);
     assert_eq!(d.cursor_offset(), 5);
     d.move_word_right(false);
     assert_eq!(
         d.cursor_offset(),
+        pic_start,
+        "Ctrl+Right from before a picture stops at its start"
+    );
+    d.move_word_right(false);
+    assert_eq!(
+        d.cursor_offset(),
         pic_end,
-        "Ctrl+Right must jump past picture"
+        "Ctrl+Right from picture start jumps to its end"
     );
     d.move_word_right(false);
     assert_eq!(d.cursor_offset(), text.len());
@@ -836,18 +842,27 @@ fn ctrl_left_and_right_jump_cleanly_over_picture_blocks() {
     // Shift+Ctrl+Right / Left extends selection cleanly over the block.
     d.place(5, false);
     d.move_word_right(true);
+    assert_eq!(d.selection_range(), 5..pic_start);
+    d.move_word_right(true);
     assert_eq!(d.selection_range(), 5..pic_end);
     d.place(world_start, false);
     d.move_word_left(true);
     assert_eq!(d.selection_range(), pic_start..world_start);
 
-    // Consecutive pictures do not trap word movement.
+    // Consecutive pictures: Ctrl+Right from end of A stops at start of B, then jumps to end of B.
     let two = "![a](a.png)\n![b](b.png)";
+    let a_end = "![a](a.png)".len();
     let b_start = two.find("![b").unwrap();
     let mut d2 = doc(two);
     d2.place(0, false);
     d2.move_word_right(false);
-    assert_eq!(d2.cursor_offset(), "![a](a.png)".len());
+    assert_eq!(d2.cursor_offset(), a_end);
+    d2.move_word_right(false);
+    assert_eq!(
+        d2.cursor_offset(),
+        b_start,
+        "Ctrl+Right from end of first picture must stop at start of next picture"
+    );
     d2.move_word_right(false);
     assert_eq!(d2.cursor_offset(), two.len());
     d2.move_word_left(false);
@@ -959,4 +974,83 @@ fn find_match_inside_wysiwyg_picture_opens_raw_picture_line() {
     assert_eq!(second, Some(1));
     assert_eq!(d.picture_raw_line, None);
     assert!(d.picture_block_at(pic_start).is_some());
+}
+
+#[test]
+fn undo_and_redo_of_whole_picture_removal_restores_selection_and_caret() {
+    let text = "intro\n![cat](cat.png)\noutro\n";
+    let pic_start = text.find("![").unwrap();
+    let pic_end = text.find("\noutro").unwrap();
+    let mut d = doc(text);
+    d.select_picture(pic_start..pic_end);
+    assert!(d.smart_backspace_in_mode(MODE));
+    assert_eq!(d.content, "intro\noutro\n");
+    assert_eq!(d.selection_range(), pic_start..pic_start);
+
+    assert!(d.undo());
+    assert_eq!(d.content, text);
+    assert_eq!(d.selection_range(), pic_start..pic_end);
+
+    assert!(d.redo());
+    assert_eq!(d.content, "intro\noutro\n");
+    assert_eq!(d.selection_range(), pic_start..pic_start);
+}
+
+#[test]
+fn finish_ime_composition_preserves_khmer_preedit_and_cancels_empty_line() {
+    // Active Khmer preedit on an IME-opened line after a picture: kept and sealed.
+    let mut d = doc("![cat](cat.png)\n");
+    let end = "![cat](cat.png)".len();
+    let opened = d.picture_open_line(&(end..end)).expect("opened line");
+    let khmer = "សួស្តី";
+    d.edit(opened.clone(), khmer);
+    d.marked_range = Some(opened.start..opened.start + khmer.len());
+    d.finish_ime_composition();
+    assert!(d.marked_range.is_none());
+    assert!(d.ime_opened_line.is_none());
+    assert!(
+        d.content.contains(khmer),
+        "composed Khmer text must be preserved, got {:?}",
+        d.content
+    );
+    assert_eq!(d.cursor_offset(), opened.start + khmer.len());
+
+    // Empty IME-opened line with no marked text: cancelled cleanly.
+    let mut d2 = doc("![cat](cat.png)\n");
+    let _ = d2.picture_open_line(&(end..end)).expect("opened line");
+    d2.finish_ime_composition();
+    assert_eq!(d2.content, "![cat](cat.png)\n");
+    assert!(d2.ime_opened_line.is_none());
+}
+
+#[test]
+fn snap_wysiwyg_table_delimiter_handles_crlf_and_header_only_eof() {
+    // CRLF table: must land on start of body row, never between \r and \n.
+    let crlf = "| a | b |\r\n| --- | --- |\r\n| 1 | 2 |\r\n";
+    let delim = crlf.find("| ---").unwrap() + 2;
+    let body_start = crlf.find("| 1").unwrap();
+    let mut d = doc(crlf);
+    d.set_view_mode(ViewMode::Raw);
+    d.place(delim, false);
+    d.set_view_mode(ViewMode::Wysiwyg);
+    d.snap_wysiwyg_table_delimiter();
+    assert_eq!(
+        d.cursor_offset(),
+        body_start,
+        "CRLF table delimiter snap must skip full \\r\\n"
+    );
+
+    // Header-only table at EOF (no trailing newline): must snap into header row.
+    let header_only = "| a | b |\r\n| --- | --- |";
+    let delim_eof = header_only.find("| ---").unwrap() + 2;
+    let mut d2 = doc(header_only);
+    d2.set_view_mode(ViewMode::Raw);
+    d2.place(delim_eof, false);
+    d2.set_view_mode(ViewMode::Wysiwyg);
+    d2.snap_wysiwyg_table_delimiter();
+    assert!(
+        d2.cursor_offset() < header_only.find("\r\n").unwrap(),
+        "header-only table at EOF must snap to header row, got {}",
+        d2.cursor_offset()
+    );
 }

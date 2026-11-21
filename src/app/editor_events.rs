@@ -365,10 +365,13 @@ impl LiteMarkApp {
         {
             return false;
         }
-        let Some((range, bounds, column)) = self.editor_paint.borrow().picture_handle.clone()
-        else {
+        let Some(handle) = self.editor_paint.borrow().picture_handle.clone() else {
             return false;
         };
+        if !handle.clip.contains(&event.position) {
+            return false;
+        }
+        let (range, bounds, column) = (handle.range, handle.bounds, handle.column);
         let Some(axis) = handle_at(bounds, &event.position) else {
             return false;
         };

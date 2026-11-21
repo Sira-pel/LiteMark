@@ -482,7 +482,11 @@ impl DocumentTab {
         if self.file_type.supports_markdown_features() {
             if let Some(block) = self.picture_block_at(target) {
                 if target > block.start && target < block.end {
-                    target = block.end;
+                    target = if origin < block.start {
+                        block.start
+                    } else {
+                        block.end
+                    };
                 }
             } else if let Some(line) = self.parsed().line_at_offset(origin) {
                 let vend = visible_line_end(line, self.view_mode);

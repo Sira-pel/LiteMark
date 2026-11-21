@@ -313,6 +313,18 @@ impl LayoutCache {
     }
 }
 
+/// Hit-test geometry for the selected picture's resize handle.
+/// `bounds` is the full picture box (used for edge positions and drag start
+/// size); `clip` is the viewport content mask so hits outside the visible area
+/// are rejected.
+#[derive(Clone, Debug)]
+pub struct PictureHandleGeom {
+    pub range: Range<usize>,
+    pub bounds: Bounds<Pixels>,
+    pub clip: Bounds<Pixels>,
+    pub column: Pixels,
+}
+
 #[derive(Clone)]
 pub struct EditorPaint {
     pub layout_cache: LayoutCache,
@@ -325,11 +337,10 @@ pub struct EditorPaint {
     pub tables: Vec<TableGeom>,
     /// Sizes of the pictures in the note, kept between frames.
     pub images: ImageSizeCache,
-    /// Where each picture block (by source range) was drawn.
+    /// Where each picture block (by source range) was drawn, clipped to the viewport.
     pub pictures: Vec<(Range<usize>, Bounds<Pixels>)>,
-    /// The handle of the selected picture: its source range, where it is
-    /// drawn and the column width, for the app to hit-test a press.
-    pub picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)>,
+    /// The handle of the selected picture, clipped to the viewport content mask.
+    pub picture_handle: Option<PictureHandleGeom>,
     /// Length, selection, and view mode of the content the rows were laid out for,
     /// so a caller can tell whether the geometry matches the current document.
     pub painted_len: usize,
@@ -1290,7 +1301,7 @@ pub struct Prepaint {
     /// Pictures to draw, already laid out.
     images: Vec<AnyElement>,
     pictures: Vec<(Range<usize>, Bounds<Pixels>)>,
-    picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)>,
+    picture_handle: Option<PictureHandleGeom>,
     /// Mouse-cursor regions, least specific first so a later one wins.
     cursor_hitboxes: Vec<(CursorStyle, Hitbox)>,
     image_cache: ImageSizeCache,
@@ -1758,7 +1769,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut tables: Vec<TableGeom> = Vec::new();
         let mut images: Vec<AnyElement> = Vec::new();
         let mut pictures: Vec<(Range<usize>, Bounds<Pixels>)> = Vec::new();
-        let mut picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)> = None;
+        let mut picture_handle: Option<PictureHandleGeom> = None;
         // Squares drawn on the corner of the selected picture.
         let handle_quad = |bounds: Bounds<Pixels>| {
             let side = HANDLE_SIZE;
@@ -2700,7 +2711,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             if visible_bounds.size.width > px(0.0)
                                 && visible_bounds.size.height > px(0.0)
                             {
-                                picture_handle = Some((src.clone(), block_bounds, content_width));
+                                picture_handle = Some(PictureHandleGeom {
+                                    range: src.clone(),
+                                    bounds: block_bounds,
+                                    clip,
+                                    column: content_width,
+                                });
                             }
                         }
                         if !self.selection.is_empty()
@@ -2898,7 +2914,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             if visible_thumb.size.width > px(0.0)
                                 && visible_thumb.size.height > px(0.0)
                             {
-                                picture_handle = Some((abs.clone(), bounds, content_width));
+                                picture_handle = Some(PictureHandleGeom {
+                                    range: abs.clone(),
+                                    bounds,
+                                    clip,
+                                    column: content_width,
+                                });
                             }
                         }
                         if !self.selection.is_empty()
@@ -3374,14 +3395,17 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 window.insert_hitbox(*b, HitboxBehavior::Normal),
             ));
         }
-        if let Some((_, b, _)) = &picture_handle {
+        if let Some(handle) = &picture_handle {
             use super::note_images::{bottom_edge_area, handle_grab_area, right_edge_area};
             for (style, area) in [
-                (CursorStyle::ResizeLeftRight, right_edge_area(*b)),
-                (CursorStyle::ResizeUpDown, bottom_edge_area(*b)),
-                (CursorStyle::ResizeUpLeftDownRight, handle_grab_area(*b)),
+                (CursorStyle::ResizeLeftRight, right_edge_area(handle.bounds)),
+                (CursorStyle::ResizeUpDown, bottom_edge_area(handle.bounds)),
+                (
+                    CursorStyle::ResizeUpLeftDownRight,
+                    handle_grab_area(handle.bounds),
+                ),
             ] {
-                let clipped = area.intersect(&clip);
+                let clipped = area.intersect(&handle.clip);
                 if clipped.size.width > px(0.0) && clipped.size.height > px(0.0) {
                     cursor_hitboxes
                         .push((style, window.insert_hitbox(clipped, HitboxBehavior::Normal)));

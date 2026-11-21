@@ -328,6 +328,20 @@ impl DocumentTab {
         }
     }
 
+    /// Commits any active IME composition (preserving composed text and sealing
+    /// its undo group) or cancels an empty IME-opened picture line.
+    pub fn finish_ime_composition(&mut self) {
+        if let Some(range) = self.marked_range.take() {
+            self.ime_opened_line = None;
+            let end = floor_boundary(&self.content, range.end.min(self.content.len()));
+            self.caret.move_to(end);
+            self.history.seal();
+            self.refresh_cursor();
+        } else {
+            self.cancel_picture_ime_line();
+        }
+    }
+
     /// Backspace at the start of the text below a picture selects the
     /// picture instead of joining the text onto its Markdown.
     pub(super) fn picture_guard_join_back(&mut self) -> bool {
@@ -538,6 +552,11 @@ impl DocumentTab {
         self.next_undo_caret = Some(undo_caret);
         self.next_undo_sel = undo_sel;
         self.next_redo_caret = Some(start);
+        self.next_redo_sel = Some(SelectionSnap {
+            start,
+            end: start,
+            reversed: false,
+        });
         self.edit(start..end, "");
         self.caret.move_to(floor_boundary(&self.content, start));
         self.refresh_cursor();
