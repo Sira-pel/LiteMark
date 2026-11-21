@@ -26,7 +26,7 @@ use crate::model::ViewMode;
 use crate::theme::sz;
 
 use super::note_images::{
-    ellipsize, fit_image, fit_image_width, flow_thumbnails, placeholder_height, thumbnail_size,
+    ellipsize, fit_image, fit_image_size, flow_thumbnails, placeholder_height, thumbnail_size,
     ImageSizeCache, HANDLE_SIZE, IMAGE_MARGIN_Y, IMAGE_RADIUS, MAX_IMAGE_HEIGHT, THUMB_GAP,
     THUMB_HEIGHT,
 };
@@ -2399,10 +2399,21 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         .image_drag
                         .as_ref()
                         .filter(|d| d.range == src)
-                        .map(|d| f32::from(d.width).round() as u32);
-                    let wanted_width = dragged.or(image.width);
-                    let fit = |natural: (u32, u32)| match wanted_width {
-                        Some(w) => fit_image_width(natural, w, content_width),
+                        .map(|d| {
+                            (
+                                f32::from(d.width).round() as u32,
+                                Some(f32::from(d.height).round() as u32),
+                            )
+                        });
+                    let wanted = dragged.or(image.width.map(|w| (w, image.height)));
+                    // A set height stretches the picture to the box.
+                    let object_fit = if wanted.is_some_and(|(_, h)| h.is_some()) {
+                        ObjectFit::Fill
+                    } else {
+                        ObjectFit::Contain
+                    };
+                    let fit = |natural: (u32, u32)| match wanted {
+                        Some((w, h)) => fit_image_size(natural, w, h, content_width),
                         None => fit_image(natural, content_width, MAX_IMAGE_HEIGHT),
                     };
                     // Local pictures: the cached size first (no file access),
@@ -2429,7 +2440,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let block_size = match &picture {
                         Some((_, picture_size)) => *picture_size,
                         None => size(
-                            wanted_width.map_or(content_width, |w| px(w as f32).min(content_width)),
+                            wanted.map_or(content_width, |(w, _)| px(w as f32).min(content_width)),
                             placeholder_h,
                         ),
                     };
@@ -2448,7 +2459,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                     .w(picture_size.width)
                                     .h(picture_size.height)
                                     .rounded(IMAGE_RADIUS)
-                                    .object_fit(ObjectFit::Contain)
+                                    .object_fit(object_fit)
                                     .with_fallback(move || {
                                         div()
                                             .size_full()
@@ -2590,6 +2601,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let mut thumbs: Vec<(Range<usize>, ImageLine, ImageTarget, Option<PathBuf>)> =
                         Vec::new();
                     let mut sizes: Vec<(Pixels, Pixels)> = Vec::new();
+                    // Per image: a set height stretches it to its box.
+                    let mut stretched: Vec<bool> = Vec::new();
                     for (range, image) in row {
                         let target = resolve_image_target(&image.target, self.base_dir.as_deref());
                         let mut natural = None;
@@ -2607,16 +2620,24 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             path = natural.map(|_| p.clone());
                         }
                         let abs = range.start + src.start..range.end + src.start;
-                        let dragged = self
-                            .image_drag
-                            .as_ref()
-                            .filter(|d| d.range == abs)
-                            .map(|d| f32::from(d.width).round() as u32);
+                        let dragged =
+                            self.image_drag
+                                .as_ref()
+                                .filter(|d| d.range == abs)
+                                .map(|d| {
+                                    (
+                                        f32::from(d.width).round() as u32,
+                                        Some(f32::from(d.height).round() as u32),
+                                    )
+                                });
+                        let wanted = dragged.or(image.width.map(|w| (w, image.height)));
                         sizes.push(thumbnail_size(
                             natural,
-                            dragged.or(image.width),
+                            wanted.map(|(w, _)| w),
+                            wanted.and_then(|(_, h)| h),
                             content_width,
                         ));
+                        stretched.push(wanted.is_some_and(|(_, h)| h.is_some()));
                         thumbs.push((abs, image, target, path));
                     }
                     let (spots, flow_h) = flow_thumbnails(&sizes, content_width, THUMB_GAP);
@@ -2648,7 +2669,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                     .w(w)
                                     .h(h)
                                     .rounded(IMAGE_RADIUS)
-                                    .object_fit(ObjectFit::Contain)
+                                    .object_fit(if stretched.get(k).copied().unwrap_or(false) {
+                                        ObjectFit::Fill
+                                    } else {
+                                        ObjectFit::Contain
+                                    })
                                     .with_fallback(move || {
                                         div()
                                             .size_full()
@@ -3181,13 +3206,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             ));
         }
         if let Some((_, b, _)) = &picture_handle {
-            cursor_hitboxes.push((
-                CursorStyle::ResizeUpLeftDownRight,
-                window.insert_hitbox(
-                    super::note_images::handle_grab_area(*b),
-                    HitboxBehavior::Normal,
-                ),
-            ));
+            use super::note_images::{bottom_edge_area, handle_grab_area, right_edge_area};
+            for (style, area) in [
+                (CursorStyle::ResizeLeftRight, right_edge_area(*b)),
+                (CursorStyle::ResizeUpDown, bottom_edge_area(*b)),
+                (CursorStyle::ResizeUpLeftDownRight, handle_grab_area(*b)),
+            ] {
+                cursor_hitboxes.push((style, window.insert_hitbox(area, HitboxBehavior::Normal)));
+            }
         }
         Prepaint {
             rows,
@@ -3314,8 +3340,13 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         for (style, hitbox) in &prepaint.cursor_hitboxes {
             window.set_cursor_style(*style, hitbox);
         }
-        if self.image_drag.is_some() {
-            window.set_window_cursor_style(CursorStyle::ResizeUpLeftDownRight);
+        if let Some(drag) = &self.image_drag {
+            use super::note_images::DragAxis;
+            window.set_window_cursor_style(match drag.axis {
+                DragAxis::Corner => CursorStyle::ResizeUpLeftDownRight,
+                DragAxis::Right => CursorStyle::ResizeLeftRight,
+                DragAxis::Bottom => CursorStyle::ResizeUpDown,
+            });
         }
 
         let wrap_changed = self.paint.borrow().wrap_cols != prepaint.wrap_cols;
