@@ -240,7 +240,10 @@ pub fn thumbnail_size(
     }
     .clamp(1.0, column);
     match (width, height) {
-        (Some(wanted), Some(h)) => (px(w), px((h.max(1) as f32 * w / wanted as f32).max(1.0))),
+        (Some(wanted), Some(h)) => (
+            px(w),
+            px((h.max(1) as f32 * w / wanted.max(1) as f32).max(1.0)),
+        ),
         _ => (px(w), px((nh * w / nw).max(1.0))),
     }
 }
@@ -289,8 +292,8 @@ impl ImageDrag {
     /// a picture that only had a width stays width-only (its natural ratio),
     /// everything else writes both numbers.
     pub fn result(&self) -> (u32, Option<u32>) {
-        let w = f32::from(self.width).round() as u32;
-        let h = f32::from(self.height).round().max(1.0) as u32;
+        let w = f32::from(self.width).round().clamp(1.0, MAX_WIDTH) as u32;
+        let h = f32::from(self.height).round().clamp(1.0, MAX_WIDTH) as u32;
         if self.axis == DragAxis::Corner && !self.had_height {
             (w, None)
         } else {
@@ -331,8 +334,14 @@ pub fn drag_size(
     let (dx, dy) = (f32::from(dx), f32::from(dy));
     let min_h = MIN_DRAG_WIDTH;
     match axis {
-        DragAxis::Right => (px((sw + dx).clamp(MIN_DRAG_WIDTH, most_w).round()), px(sh)),
-        DragAxis::Bottom => (px(sw), px((sh + dy).clamp(min_h, MAX_WIDTH).round())),
+        DragAxis::Right => (
+            px((sw + dx).clamp(MIN_DRAG_WIDTH, most_w).round()),
+            px(sh.clamp(1.0, MAX_WIDTH)),
+        ),
+        DragAxis::Bottom => (
+            px(sw.clamp(1.0, MAX_WIDTH)),
+            px((sh + dy).clamp(min_h, MAX_WIDTH).round()),
+        ),
         DragAxis::Corner => {
             let ratio = sh / sw;
             // The scale that follows the pointer along its larger move.
@@ -343,10 +352,13 @@ pub fn drag_size(
             } else {
                 by_y
             };
-            let lowest = (MIN_DRAG_WIDTH / sw).max(min_h / sh);
+            let lowest = (MIN_DRAG_WIDTH.min(sw) / sw).max(min_h.min(sh) / sh);
             let highest = (most_w / sw).min(MAX_WIDTH / sh);
-            let scale = scale.clamp(lowest, highest.max(lowest));
-            (px((sw * scale).round()), px((sh * scale).round()))
+            let scale = scale.clamp(lowest.min(highest), highest);
+            (
+                px((sw * scale).round().clamp(1.0, most_w)),
+                px((sh * scale).round().clamp(1.0, MAX_WIDTH)),
+            )
         }
     }
 }
@@ -532,6 +544,36 @@ mod tests {
         assert_eq!((f32::from(w), f32::from(h)), (100.0, 50.0));
         let (w, h) = thumbnail_size(Some((400, 200)), Some(100), Some(80), px(700.0));
         assert_eq!((f32::from(w), f32::from(h)), (100.0, 80.0));
+        // A zero wanted width does not divide by zero.
+        let (w, h) = thumbnail_size(Some((400, 200)), Some(0), Some(80), px(700.0));
+        assert!(f32::from(w).is_finite() && f32::from(h).is_finite());
+    }
+
+    #[test]
+    fn extreme_aspect_ratios_never_drag_past_the_column_or_four_digits() {
+        // Wide thin banner: corner drag stays within the column and 4-digit cap.
+        let (w, h) = drag_size(
+            DragAxis::Corner,
+            (px(700.0), px(14.0)),
+            (px(10.0), px(10.0)),
+            px(700.0),
+        );
+        assert!(f32::from(w) <= 700.0 && f32::from(h) <= MAX_WIDTH);
+        let (w, h) = drag_size(
+            DragAxis::Corner,
+            (px(700.0), px(1.0)),
+            (px(1.0), px(0.0)),
+            px(700.0),
+        );
+        assert!(f32::from(w) <= 700.0 && f32::from(h) <= MAX_WIDTH);
+        // Very tall image: right-edge drag clamps height to 4 digits too.
+        let (w, h) = drag_size(
+            DragAxis::Right,
+            (px(200.0), px(20000.0)),
+            (px(50.0), px(0.0)),
+            px(700.0),
+        );
+        assert_eq!((f32::from(w), f32::from(h)), (250.0, MAX_WIDTH));
     }
 
     #[test]

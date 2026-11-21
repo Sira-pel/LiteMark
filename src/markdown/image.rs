@@ -19,10 +19,13 @@ pub struct ImageLine {
 }
 
 /// `|200` for a width, `|200x100` for both, nothing without a width.
+/// Values are clamped to the 1..=9999 syntax range so the written suffix
+/// always parses back as a size.
 pub fn size_suffix(width: Option<u32>, height: Option<u32>) -> String {
+    const MAX_SIZE: u32 = 9999;
     match (width, height) {
-        (Some(w), Some(h)) => format!("|{w}x{h}"),
-        (Some(w), None) => format!("|{w}"),
+        (Some(w), Some(h)) => format!("|{}x{}", w.clamp(1, MAX_SIZE), h.clamp(1, MAX_SIZE)),
+        (Some(w), None) => format!("|{}", w.clamp(1, MAX_SIZE)),
         _ => String::new(),
     }
 }
@@ -494,6 +497,14 @@ mod tests {
         assert_eq!(
             set_image_size("![](a.png)", Some(64), Some(32)).unwrap(),
             "![|64x32](a.png)"
+        );
+        // Out-of-range values clamp to 1..=9999 so they round-trip as a size.
+        let clamped = set_image_size("![cat](a.png)", Some(20000), Some(0)).unwrap();
+        assert_eq!(clamped, "![cat|9999x1](a.png)");
+        let parsed = parse_image_line(&clamped).unwrap();
+        assert_eq!(
+            (parsed.alt.as_str(), parsed.width, parsed.height),
+            ("cat", Some(9999), Some(1))
         );
     }
 
