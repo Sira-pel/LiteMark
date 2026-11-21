@@ -566,3 +566,126 @@ fn cutting_one_image_leaves_the_rest() {
     assert!(d.cut_selected_picture());
     assert_eq!(d.content, "![b](b.png) ![c](c.png)\nafter\n");
 }
+
+#[test]
+fn formatting_never_touches_one_selected_image_of_a_row() {
+    for cmd in [
+        "bold",
+        "italic",
+        "underline",
+        "strike",
+        "code",
+        "h1",
+        "ul",
+        "ol",
+        "checklist",
+        "quote",
+        "codeblock",
+        "link",
+    ] {
+        let mut d = row_doc();
+        d.select_picture(B);
+        d.apply_format_in_mode(cmd, MODE);
+        assert_eq!(d.content, format!("{ROW}\nafter\n"), "{cmd}");
+    }
+    let mut d = row_doc();
+    d.select_picture(B);
+    d.indent();
+    d.outdent();
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+}
+
+#[test]
+fn row_edits_follow_crlf_and_work_on_the_last_line() {
+    let mut d = doc(&format!("x\r\n{ROW}"));
+    let b = 3 + B.start..3 + B.end;
+    d.select_picture(b);
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, "x\r\n![a](a.png) ![c](c.png)");
+    // Last image of the last line, no trailing line break.
+    let last = 3 + 12..3 + 23;
+    d.select_picture(last);
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, "x\r\n![a](a.png)");
+    assert!(d.undo());
+    assert_eq!(d.content, "x\r\n![a](a.png) ![c](c.png)");
+}
+
+#[test]
+fn a_row_with_trailing_blanks_or_tabs_still_edits_cleanly() {
+    let mut d = doc("![a](a.png)\t![b](b.png)  \n");
+    assert_eq!(d.picture_block_at(3), Some(0..25));
+    d.select_picture(12..23);
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, "![a](a.png)  \n");
+    // Remaining single image still behaves as a picture.
+    assert!(d.picture_block_at(3).is_some());
+}
+
+#[test]
+fn size_changes_and_deletes_redo_after_undo() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert!(d.cycle_picture_size());
+    let sized = d.content.clone();
+    assert!(d.undo());
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+    assert!(d.redo());
+    assert_eq!(d.content, sized);
+    // Two steps back and forward with a delete in between.
+    d.select_picture(12..27);
+    d.smart_backspace_in_mode(MODE);
+    let deleted = d.content.clone();
+    assert!(d.undo());
+    assert_eq!(d.content, sized);
+    assert!(d.redo());
+    assert_eq!(d.content, deleted);
+}
+
+#[test]
+fn a_single_picture_cycles_sizes_and_keeps_its_title() {
+    let line = "![cat|600](<my cat.png> \"A cat\")";
+    let mut d = doc(&format!("{line}\n"));
+    d.select_picture(0..line.len());
+    assert!(d.cycle_picture_size());
+    assert_eq!(d.content, "![cat](<my cat.png> \"A cat\")\n");
+    assert!(d.cycle_picture_size());
+    assert_eq!(d.content, "![cat|200](<my cat.png> \"A cat\")\n");
+    // A width that is not a preset starts again at the first one.
+    assert!(d.set_picture_width(Some(333)));
+    assert!(d.cycle_picture_size());
+    assert!(d.content.starts_with("![cat|200]"));
+}
+
+#[test]
+fn sizing_a_picture_with_the_caret_beside_it_resizes_the_whole_picture() {
+    let mut d = doc("![a](a.png)\n");
+    d.place(11, false);
+    assert!(d.cycle_picture_size());
+    assert_eq!(d.content, "![a|200](a.png)\n");
+}
+
+#[test]
+fn in_raw_view_pictures_are_plain_text_and_sizing_does_nothing() {
+    let mut d = row_doc();
+    d.view_mode = ViewMode::Raw;
+    d.place(14, false);
+    assert!(!d.cycle_picture_size());
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+}
+
+#[test]
+fn f2_shows_a_rows_markdown_for_editing_until_the_caret_leaves() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert!(d.show_picture_source());
+    // Raw while editing: no picture block, so text goes into the Markdown.
+    assert_eq!(d.picture_block_at(5), None);
+    let at = d.cursor_offset();
+    d.insert_text_in_mode(at..at, " ", MODE);
+    assert!(d.content.starts_with("![a](a.png) ![b](b.png) "));
+    // Moving off the line makes it a row of pictures again.
+    d.place(d.content.len(), false);
+    d.expire_picture_raw();
+    assert!(d.picture_block_at(5).is_some());
+}

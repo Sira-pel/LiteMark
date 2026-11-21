@@ -201,18 +201,23 @@ pub const THUMB_HEIGHT: Pixels = px(160.0);
 pub const THUMB_GAP: Pixels = px(8.0);
 
 /// The size of one thumbnail: its own `width` when it has one (as for a lone
-/// picture), otherwise `THUMB_HEIGHT` tall with the picture's aspect ratio.
-/// Never wider than the column. A picture of unknown size is a square.
+/// picture), otherwise `THUMB_HEIGHT` tall with the picture's aspect ratio,
+/// or its natural height when that is smaller (a small picture is not
+/// enlarged). Never wider than the column. A picture of unknown size is a
+/// square.
 pub fn thumbnail_size(
     natural: Option<(u32, u32)>,
     width: Option<u32>,
     content_width: Pixels,
 ) -> (Pixels, Pixels) {
     let column = f32::from(content_width).max(1.0);
-    let (nw, nh) = natural.map_or((1.0, 1.0), |(w, h)| (w.max(1) as f32, h.max(1) as f32));
+    let unknown = f32::from(THUMB_HEIGHT);
+    let (nw, nh) = natural.map_or((unknown, unknown), |(w, h)| {
+        (w.max(1) as f32, h.max(1) as f32)
+    });
     let w = match width {
         Some(w) => w as f32,
-        None => f32::from(THUMB_HEIGHT) * nw / nh,
+        None => f32::from(THUMB_HEIGHT).min(nh) * nw / nh,
     }
     .clamp(1.0, column);
     (px(w), px((nh * w / nw).max(1.0)))
@@ -285,6 +290,9 @@ mod tests {
         // Never past the column.
         let (w, h) = thumbnail_size(Some((4000, 200)), None, px(700.0));
         assert_eq!((f32::from(w), f32::from(h)), (700.0, 35.0));
+        // A small picture is not enlarged.
+        let (w, h) = thumbnail_size(Some((40, 30)), None, px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (40.0, 30.0));
         // Unknown size: a square.
         let (w, h) = thumbnail_size(None, None, px(700.0));
         assert_eq!((f32::from(w), f32::from(h)), (160.0, 160.0));
