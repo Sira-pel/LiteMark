@@ -200,7 +200,7 @@ fn dropped_images_are_copied_to_assets_and_each_gets_a_link() {
     assert_eq!(std::fs::read(&a).unwrap(), b"aaa", "originals stay put");
     assert_eq!(
         toast(&view, &cx).as_deref(),
-        Some("2 images saved to assets/")
+        Some("2 images saved to assets/ (skipped 1 non-image file)")
     );
 
     // Files that are not images are not handled at all.
@@ -280,4 +280,125 @@ fn own_lines_use_the_notes_line_break() {
         own_lines_with("abcd", 2..2, "L", "\r\n"),
         "\r\nL\r\n".to_string()
     );
+}
+
+#[std_test]
+fn an_image_pasted_in_a_list_item_goes_after_the_item() {
+    let dir = folder("list-paste");
+    let photo = dir.join("p.png");
+    std::fs::write(&photo, png_bytes()).unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, _| {
+        let tab = app.active_tab_mut().unwrap();
+        tab.content = "- one two\n- three\n".into();
+        tab.place("- one".len(), false);
+    });
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(std::slice::from_ref(&photo), cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        content(&view, &cx),
+        "- one two\n\n![](assets/p.png)\n- three\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn an_image_lands_where_the_caret_was_when_it_was_dropped() {
+    let dir = folder("anchor");
+    let photo = dir.join("p.png");
+    std::fs::write(&photo, png_bytes()).unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(std::slice::from_ref(&photo), cx));
+        // The caret moves while the copy runs.
+        app.active_tab_mut().unwrap().place(NOTE.len(), false);
+    });
+    cx.run_until_parked();
+    assert_eq!(content(&view, &cx), "before\n![](assets/p.png)\nafter\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn an_image_pasted_in_a_quote_goes_after_the_quote_line() {
+    let dir = folder("quote-paste");
+    let photo = dir.join("p.png");
+    std::fs::write(&photo, png_bytes()).unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, _| {
+        let tab = app.active_tab_mut().unwrap();
+        tab.content = "> quoted\nafter\n".into();
+        tab.place("> quo".len(), false);
+    });
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(std::slice::from_ref(&photo), cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        content(&view, &cx),
+        "> quoted\n\n![](assets/p.png)\nafter\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn dropping_other_files_with_images_says_they_were_skipped() {
+    let dir = folder("skip");
+    let (photo, text) = (dir.join("p.png"), dir.join("t.txt"));
+    std::fs::write(&photo, png_bytes()).unwrap();
+    std::fs::write(&text, b"x").unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(&[photo.clone(), text.clone()], cx));
+    });
+    cx.run_until_parked();
+    let message = toast(&view, &cx).expect("a toast");
+    assert!(message.contains("skipped 1 non-image file"), "{message}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn a_percent_in_a_file_name_is_escaped_in_the_link() {
+    use super::note_assets::asset_link;
+    use crate::markdown::image::{resolve_image_target, ImageTarget};
+    let dir = folder("percent");
+    let (markdown, _) = asset_link(&dir.join("assets").join("a%41.png")).unwrap();
+    assert_eq!(markdown, "![](assets/a%2541.png)");
+    // Even when `aA.png` exists, the link finds the file it names.
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("assets/aA.png"), b"x").unwrap();
+    std::fs::write(dir.join("assets/a%41.png"), b"y").unwrap();
+    assert_eq!(
+        resolve_image_target("assets/a%2541.png", Some(&dir)),
+        ImageTarget::Local(dir.join("assets/a%41.png"))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn an_image_pasted_over_selected_text_in_a_list_item_goes_after_the_item() {
+    let dir = folder("list-selection");
+    let photo = dir.join("p.png");
+    std::fs::write(&photo, png_bytes()).unwrap();
+    let (view, mut cx) = harness(Some(&dir));
+    view.update(&mut cx, |app, _| {
+        let tab = app.active_tab_mut().unwrap();
+        tab.content = "- one two\n- three\n".into();
+        tab.caret.range = 2..5; // "one"
+    });
+    view.update(&mut cx, |app, cx| {
+        assert!(app.drop_image_files(std::slice::from_ref(&photo), cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        content(&view, &cx),
+        "-  two\n\n![](assets/p.png)\n- three\n"
+    );
+    view.update(&mut cx, |app, _| {
+        let tab = app.active_tab_mut().unwrap();
+        assert!(tab.undo());
+        assert_eq!(tab.content, "- one two\n- three\n", "one undo");
+    });
+    let _ = std::fs::remove_dir_all(&dir);
 }

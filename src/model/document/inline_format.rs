@@ -18,13 +18,31 @@ impl DocumentTab {
 
         // A picture is not text: bold, links, headings and the like would
         // wrap its Markdown and turn it into raw text.
+        // Line formats (headings, lists, quotes, code blocks) rewrite the whole
+        // line, so they never apply to a picture line. Inline formats only
+        // stop when the picture itself is selected: with the caret beside it
+        // they set up the text typed next.
         let sel = self.selection_range();
-        if mode == ViewMode::Wysiwyg
-            && self
+        if mode == ViewMode::Wysiwyg {
+            let on_picture = self
                 .picture_block_at(sel.start)
-                .is_some_and(|block| sel.end <= block.end)
-        {
-            return;
+                .is_some_and(|block| sel.end <= block.end);
+            let line_format = matches!(
+                cmd,
+                "h1" | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "ul"
+                    | "ol"
+                    | "checklist"
+                    | "quote"
+                    | "codeblock"
+            );
+            if on_picture && (line_format || !sel.is_empty()) {
+                return;
+            }
         }
 
         // 1. Block-level formats: h1, h2, h3, ul, ol, checklist, quote
@@ -229,10 +247,27 @@ impl DocumentTab {
                 }
 
                 // In Raw mode (or for Link), insert placeholder and select inner placeholder so a second press unwraps/removes it
-                self.edit(
-                    range.clone(),
-                    &format!("{}{}{}", prefix, placeholder, suffix),
-                );
+                let snippet = format!("{}{}{}", prefix, placeholder, suffix);
+                // Beside a picture the placeholder goes on a line of its own, or
+                // it would join the picture's Markdown and break the picture.
+                let mut at = range.start;
+                let beside = if mode == ViewMode::Wysiwyg && range.is_empty() {
+                    self.picture_block_at(range.start)
+                } else {
+                    None
+                };
+                if let Some(block) = beside {
+                    let nl = self.line_break(block.start);
+                    if range.start == block.start {
+                        self.edit(block.start..block.start, &format!("{snippet}{nl}"));
+                    } else {
+                        self.edit(block.end..block.end, &format!("{nl}{snippet}"));
+                        at = block.end + nl.len();
+                    }
+                } else {
+                    self.edit(range.clone(), &snippet);
+                }
+                let range = at..at;
                 let start = floor_boundary(&self.content, range.start + prefix.len());
                 let end = floor_boundary(&self.content, start + placeholder.len());
                 self.caret.range = start..end;

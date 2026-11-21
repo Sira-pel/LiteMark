@@ -49,7 +49,9 @@ impl EntityInputHandler for LiteMarkApp {
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
         if let Some(tab) = self.active_tab_mut() {
             tab.marked_range = None;
-            tab.ime_opened_line = None;
+            if tab.ime_opened_line.take().is_some() {
+                tab.seal_history();
+            }
         }
     }
 
@@ -60,9 +62,9 @@ impl EntityInputHandler for LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab) = self.active_tab_mut() {
-            tab.ime_opened_line = None;
-        }
+        let had_ime_line = self
+            .active_tab_mut()
+            .is_some_and(|tab| tab.ime_opened_line.take().is_some());
         if self.table_drag.is_some() || self.table_drag_press_held {
             let (drag, insert) = clear_drag_for_key(self.table_drag.take(), "key", text);
             self.table_drag = drag;
@@ -214,6 +216,10 @@ impl EntityInputHandler for LiteMarkApp {
         let mode = self.effective_view_mode();
         if let Some(tab) = self.active_tab_mut() {
             tab.insert_text_in_mode(range, text, mode);
+            // The committed text ends the group that began with the opened line.
+            if had_ime_line {
+                tab.seal_history();
+            }
         }
         self.refresh_find();
         window.refresh();
