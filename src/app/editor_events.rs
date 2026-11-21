@@ -374,25 +374,31 @@ impl LiteMarkApp {
         self.field_owns_keys = false;
         let mut on_picture = false;
         // Only a click on the picture itself selects it.
-        let hit_picture = self
+        // A row of thumbnails has one entry per image; the click offset sits
+        // at the line's edge, so only the bounds tell which image was hit.
+        let hit_picture: Option<std::ops::Range<usize>> = self
             .editor_paint
             .borrow()
             .pictures
             .iter()
-            .any(|(range, bounds)| {
-                range.start <= offset && offset <= range.end && bounds.contains(&event.position)
-            });
+            .find(|(_, bounds)| bounds.contains(&event.position))
+            .map(|(range, _)| range.clone());
         if let Some(tab) = self.active_tab_mut() {
             let block = if event.modifiers.shift {
                 None
             } else {
                 tab.picture_block_at(offset)
             };
-            if let Some(block) = block.clone().filter(|_| hit_picture) {
-                // A picture is one block: a click selects it, a double-click
-                // shows its Markdown.
+            let hit = hit_picture.filter(|range| {
+                block
+                    .as_ref()
+                    .is_some_and(|b| range.start >= b.start && range.end <= b.end)
+            });
+            if let Some(range) = hit {
+                // A picture is one block: a click selects it (one image of a
+                // row, by itself), a double-click shows its Markdown.
                 on_picture = true;
-                tab.select_picture(block);
+                tab.select_picture(range);
                 if event.click_count == 2 {
                     tab.show_picture_source();
                 }

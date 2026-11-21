@@ -472,3 +472,257 @@ fn sizing_does_nothing_off_a_picture() {
     assert!(!d.cycle_picture_size());
     assert_eq!(d.content.as_ref() as &str, "plain text\n");
 }
+
+const ROW: &str = "![a](a.png) ![b](b.png) ![c](c.png)";
+const A: std::ops::Range<usize> = 0..11;
+const B: std::ops::Range<usize> = 12..23;
+const C: std::ops::Range<usize> = 24..35;
+
+fn row_doc() -> DocumentTab {
+    doc(&format!("{ROW}\nafter\n"))
+}
+
+#[test]
+fn a_row_of_images_is_one_picture_block() {
+    let mut d = row_doc();
+    assert_eq!(d.picture_block_at(14), Some(0..ROW.len()));
+    // The caret rests only before or after the row.
+    d.place(14, false);
+    assert!([0, ROW.len()].contains(&d.cursor_offset()));
+}
+
+#[test]
+fn one_image_of_a_row_can_be_selected_and_stays_selected() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert_eq!(d.selected_image(), Some(B));
+    assert_eq!(d.selected_picture(), None);
+    d.expire_picture_raw();
+    d.refresh_cursor();
+    assert_eq!(d.selection_range(), B);
+    // The whole row is the picture, not one of its images.
+    d.select_picture(0..ROW.len());
+    assert_eq!(d.selected_image(), None);
+    assert_eq!(d.selected_picture(), Some(0..ROW.len()));
+}
+
+#[test]
+fn deleting_an_image_takes_the_blank_beside_it() {
+    for (image, left, selected) in [
+        (A, "![b](b.png) ![c](c.png)", 0..11),
+        (B, "![a](a.png) ![c](c.png)", 12..23),
+        (C, "![a](a.png) ![b](b.png)", 12..23),
+    ] {
+        let mut d = row_doc();
+        d.select_picture(image);
+        d.smart_backspace_in_mode(MODE);
+        assert_eq!(d.content, format!("{left}\nafter\n"));
+        assert_eq!(d.selection_range(), selected);
+        assert!(d.undo());
+        assert_eq!(d.content, format!("{ROW}\nafter\n"));
+    }
+}
+
+#[test]
+fn two_images_left_become_one_then_a_plain_picture_line() {
+    let mut d = doc("![a](a.png) ![b](b.png)\n");
+    d.select_picture(0..11);
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, "![b](b.png)\n");
+    // One image left: the whole line is the picture again.
+    assert_eq!(d.selected_picture(), Some(0..11));
+}
+
+#[test]
+fn resizing_changes_only_the_selected_image() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert!(d.cycle_picture_size());
+    assert_eq!(
+        d.content,
+        "![a](a.png) ![b|200](b.png) ![c](c.png)\nafter\n"
+    );
+    assert_eq!(d.selected_image(), Some(12..27));
+    // With the whole row selected nothing is resized.
+    d.select_picture(0..d.content.find('\n').unwrap());
+    let before = d.content.clone();
+    assert!(!d.cycle_picture_size());
+    assert_eq!(d.content, before);
+}
+
+#[test]
+fn typing_with_an_image_selected_goes_on_a_new_line_after_the_row() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    let sel = d.selection_range();
+    d.insert_text_in_mode(sel, "x", MODE);
+    assert_eq!(d.content, format!("{ROW}\nx\nafter\n"));
+}
+
+#[test]
+fn cutting_one_image_leaves_the_rest() {
+    let mut d = row_doc();
+    d.select_picture(A);
+    assert!(d.cut_selected_picture());
+    assert_eq!(d.content, "![b](b.png) ![c](c.png)\nafter\n");
+}
+
+#[test]
+fn formatting_never_touches_one_selected_image_of_a_row() {
+    for cmd in [
+        "bold",
+        "italic",
+        "underline",
+        "strike",
+        "code",
+        "h1",
+        "ul",
+        "ol",
+        "checklist",
+        "quote",
+        "codeblock",
+        "link",
+    ] {
+        let mut d = row_doc();
+        d.select_picture(B);
+        d.apply_format_in_mode(cmd, MODE);
+        assert_eq!(d.content, format!("{ROW}\nafter\n"), "{cmd}");
+    }
+    let mut d = row_doc();
+    d.select_picture(B);
+    d.indent();
+    d.outdent();
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+}
+
+#[test]
+fn row_edits_follow_crlf_and_work_on_the_last_line() {
+    let mut d = doc(&format!("x\r\n{ROW}"));
+    let b = 3 + B.start..3 + B.end;
+    d.select_picture(b);
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, "x\r\n![a](a.png) ![c](c.png)");
+    // Last image of the last line, no trailing line break.
+    let last = 3 + 12..3 + 23;
+    d.select_picture(last);
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, "x\r\n![a](a.png)");
+    assert!(d.undo());
+    assert_eq!(d.content, "x\r\n![a](a.png) ![c](c.png)");
+}
+
+#[test]
+fn a_row_with_trailing_blanks_or_tabs_still_edits_cleanly() {
+    let mut d = doc("![a](a.png)\t![b](b.png)  \n");
+    assert_eq!(d.picture_block_at(3), Some(0..25));
+    d.select_picture(12..23);
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, "![a](a.png)  \n");
+    // Remaining single image still behaves as a picture.
+    assert!(d.picture_block_at(3).is_some());
+}
+
+#[test]
+fn size_changes_and_deletes_redo_after_undo() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert!(d.cycle_picture_size());
+    let sized = d.content.clone();
+    assert!(d.undo());
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+    assert!(d.redo());
+    assert_eq!(d.content, sized);
+    // Two steps back and forward with a delete in between.
+    d.select_picture(12..27);
+    d.smart_backspace_in_mode(MODE);
+    let deleted = d.content.clone();
+    assert!(d.undo());
+    assert_eq!(d.content, sized);
+    assert!(d.redo());
+    assert_eq!(d.content, deleted);
+}
+
+#[test]
+fn a_single_picture_cycles_sizes_and_keeps_its_title() {
+    let line = "![cat|600](<my cat.png> \"A cat\")";
+    let mut d = doc(&format!("{line}\n"));
+    d.select_picture(0..line.len());
+    assert!(d.cycle_picture_size());
+    assert_eq!(d.content, "![cat](<my cat.png> \"A cat\")\n");
+    assert!(d.cycle_picture_size());
+    assert_eq!(d.content, "![cat|200](<my cat.png> \"A cat\")\n");
+    // A width that is not a preset starts again at the first one.
+    assert!(d.set_picture_width(Some(333)));
+    assert!(d.cycle_picture_size());
+    assert!(d.content.starts_with("![cat|200]"));
+}
+
+#[test]
+fn sizing_a_picture_with_the_caret_beside_it_resizes_the_whole_picture() {
+    let mut d = doc("![a](a.png)\n");
+    d.place(11, false);
+    assert!(d.cycle_picture_size());
+    assert_eq!(d.content, "![a|200](a.png)\n");
+}
+
+#[test]
+fn in_raw_view_pictures_are_plain_text_and_sizing_does_nothing() {
+    let mut d = row_doc();
+    d.view_mode = ViewMode::Raw;
+    d.place(14, false);
+    assert!(!d.cycle_picture_size());
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+}
+
+#[test]
+fn f2_shows_a_rows_markdown_for_editing_until_the_caret_leaves() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert!(d.show_picture_source());
+    // Raw while editing: no picture block, so text goes into the Markdown.
+    assert_eq!(d.picture_block_at(5), None);
+    let at = d.cursor_offset();
+    d.insert_text_in_mode(at..at, " ", MODE);
+    assert!(d.content.starts_with("![a](a.png) ![b](b.png) "));
+    // Moving off the line makes it a row of pictures again.
+    d.place(d.content.len(), false);
+    d.expire_picture_raw();
+    assert!(d.picture_block_at(5).is_some());
+}
+
+#[test]
+fn enter_with_one_image_selected_opens_a_line_after_the_row() {
+    for plain in [false, true] {
+        let mut d = row_doc();
+        d.select_picture(B);
+        if plain {
+            d.smart_newline(true);
+        } else {
+            d.smart_newline(false);
+        }
+        assert_eq!(d.content, format!("{ROW}\n\nafter\n"), "plain={plain}");
+    }
+}
+
+#[test]
+fn backspace_after_a_row_selects_its_last_image_first() {
+    let mut d = row_doc();
+    d.place(ROW.len(), false);
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+    assert_eq!(d.selected_image(), Some(C));
+    // The next press removes only that image.
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, "![a](a.png) ![b](b.png)\nafter\n");
+}
+
+#[test]
+fn delete_before_a_row_selects_its_first_image_first() {
+    let mut d = row_doc();
+    d.place(0, false);
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+    assert_eq!(d.selected_image(), Some(A));
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, "![b](b.png) ![c](c.png)\nafter\n");
+}
