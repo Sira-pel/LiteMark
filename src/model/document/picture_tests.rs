@@ -472,3 +472,97 @@ fn sizing_does_nothing_off_a_picture() {
     assert!(!d.cycle_picture_size());
     assert_eq!(d.content.as_ref() as &str, "plain text\n");
 }
+
+const ROW: &str = "![a](a.png) ![b](b.png) ![c](c.png)";
+const A: std::ops::Range<usize> = 0..11;
+const B: std::ops::Range<usize> = 12..23;
+const C: std::ops::Range<usize> = 24..35;
+
+fn row_doc() -> DocumentTab {
+    doc(&format!("{ROW}\nafter\n"))
+}
+
+#[test]
+fn a_row_of_images_is_one_picture_block() {
+    let mut d = row_doc();
+    assert_eq!(d.picture_block_at(14), Some(0..ROW.len()));
+    // The caret rests only before or after the row.
+    d.place(14, false);
+    assert!([0, ROW.len()].contains(&d.cursor_offset()));
+}
+
+#[test]
+fn one_image_of_a_row_can_be_selected_and_stays_selected() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert_eq!(d.selected_image(), Some(B));
+    assert_eq!(d.selected_picture(), None);
+    d.expire_picture_raw();
+    d.refresh_cursor();
+    assert_eq!(d.selection_range(), B);
+    // The whole row is the picture, not one of its images.
+    d.select_picture(0..ROW.len());
+    assert_eq!(d.selected_image(), None);
+    assert_eq!(d.selected_picture(), Some(0..ROW.len()));
+}
+
+#[test]
+fn deleting_an_image_takes_the_blank_beside_it() {
+    for (image, left, selected) in [
+        (A, "![b](b.png) ![c](c.png)", 0..11),
+        (B, "![a](a.png) ![c](c.png)", 12..23),
+        (C, "![a](a.png) ![b](b.png)", 12..23),
+    ] {
+        let mut d = row_doc();
+        d.select_picture(image);
+        d.smart_backspace_in_mode(MODE);
+        assert_eq!(d.content, format!("{left}\nafter\n"));
+        assert_eq!(d.selection_range(), selected);
+        assert!(d.undo());
+        assert_eq!(d.content, format!("{ROW}\nafter\n"));
+    }
+}
+
+#[test]
+fn two_images_left_become_one_then_a_plain_picture_line() {
+    let mut d = doc("![a](a.png) ![b](b.png)\n");
+    d.select_picture(0..11);
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, "![b](b.png)\n");
+    // One image left: the whole line is the picture again.
+    assert_eq!(d.selected_picture(), Some(0..11));
+}
+
+#[test]
+fn resizing_changes_only_the_selected_image() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert!(d.cycle_picture_size());
+    assert_eq!(
+        d.content,
+        format!("![a](a.png) ![b|200](b.png) ![c](c.png)\nafter\n")
+    );
+    assert_eq!(d.selected_image(), Some(12..27));
+    // With the whole row selected nothing is resized.
+    d.select_picture(0..d.content.find('\n').unwrap());
+    let before = d.content.clone();
+    assert!(!d.cycle_picture_size());
+    assert_eq!(d.content, before);
+}
+
+#[test]
+fn typing_with_an_image_selected_goes_on_a_new_line_after_the_row() {
+    let mut d = row_doc();
+    d.select_picture(B);
+    let sel = d.selection_range();
+    d.insert_text_in_mode(sel, "x", MODE);
+    assert_eq!(d.content, format!("{ROW}\nx\nafter\n"));
+}
+
+#[test]
+fn cutting_one_image_leaves_the_rest() {
+    let mut d = row_doc();
+    d.select_picture(A);
+    assert!(d.cut_selected_picture());
+    assert_eq!(d.content, "![b](b.png) ![c](c.png)\nafter\n");
+}

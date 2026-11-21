@@ -5,7 +5,7 @@
 //! raw Markdown until the caret leaves the line.
 
 use super::*;
-use crate::markdown::image::{parse_image_line, set_image_width};
+use crate::markdown::image::{is_image_block, parse_image_line, parse_image_row, set_image_width};
 
 /// Widths in pixels that `cycle_picture_size` steps through: small, medium, large.
 pub const PICTURE_SIZES: [u32; 3] = [200, 400, 600];
@@ -25,7 +25,7 @@ impl DocumentTab {
             return None;
         }
         let src = line.source.clone();
-        if offset > src.end || parse_image_line(self.content.get(src.clone())?).is_none() {
+        if offset > src.end || !is_image_block(self.content.get(src.clone())?) {
             return None;
         }
         if self.picture_raw_line == Some(src.start) && self.caret_within(&src) {
@@ -46,6 +46,25 @@ impl DocumentTab {
         }
         let block = self.picture_block_at(sel.start)?;
         (block == sel).then_some(block)
+    }
+
+    /// The one image of a thumbnail row that is selected by itself.
+    pub fn selected_image(&mut self) -> Option<Range<usize>> {
+        let sel = self.selection_range();
+        if sel.is_empty() {
+            return None;
+        }
+        let block = self.picture_block_at(sel.start)?;
+        if sel == block || sel.end > block.end {
+            return None;
+        }
+        let images = parse_image_row(self.content.get(block.clone())?)?;
+        images
+            .iter()
+            .any(|(range, _)| {
+                range.start + block.start == sel.start && range.end + block.start == sel.end
+            })
+            .then_some(sel)
     }
 
     /// Select a picture block as a whole.
@@ -77,6 +96,8 @@ impl DocumentTab {
         let Some(block) = self.picture_block_at(at) else {
             return false;
         };
+        // In a row only a selected image is resized, and only that one.
+        let block = self.selected_image().unwrap_or(block);
         let Some(line) = self.content.get(block.clone()) else {
             return false;
         };
@@ -101,6 +122,7 @@ impl DocumentTab {
         let Some(block) = self.picture_block_at(at) else {
             return false;
         };
+        let block = self.selected_image().unwrap_or(block);
         let current = self
             .content
             .get(block)
@@ -284,7 +306,8 @@ impl DocumentTab {
     /// Cut: a selected picture goes with its whole line. Returns false when
     /// the selection is not a picture, so the caller cuts as usual.
     pub fn cut_selected_picture(&mut self) -> bool {
-        self.selected_picture().is_some() && self.picture_remove(false)
+        (self.selected_picture().is_some() || self.selected_image().is_some())
+            && self.picture_remove(false)
     }
 
     /// Enter on a selected picture opens a new line after it.
@@ -300,6 +323,43 @@ impl DocumentTab {
         true
     }
 
+    /// Remove the selected image `image` from the row `block`, with the
+    /// blanks that separated it from its neighbour. The neighbour that takes
+    /// its place becomes the selection; with one image left the line is an
+    /// ordinary picture again.
+    fn remove_row_image(&mut self, block: Range<usize>, image: Range<usize>) -> bool {
+        let Some(images) = self.content.get(block.clone()).and_then(parse_image_row) else {
+            return false;
+        };
+        let spans: Vec<Range<usize>> = images
+            .iter()
+            .map(|(r, _)| r.start + block.start..r.end + block.start)
+            .collect();
+        let Some(i) = spans.iter().position(|r| *r == image) else {
+            return false;
+        };
+        let (cut, keep) = match spans.get(i + 1) {
+            Some(next) => (image.start..next.start, i),
+            None => (spans[i - 1].end..image.end, i - 1),
+        };
+        self.history.seal();
+        self.edit(cut.clone(), "");
+        let end = block.end - cut.len();
+        let line = block.start..end;
+        // `keep` indexes the survivors: the next image moved into this slot,
+        // or the previous one is last.
+        let survivors = self.content.get(line.clone()).and_then(parse_image_row);
+        match survivors {
+            Some(rest) => {
+                let r = &rest[keep.min(rest.len() - 1)].0;
+                self.select_picture(r.start + block.start..r.end + block.start);
+            }
+            None => self.select_picture(line),
+        }
+        self.history.seal();
+        true
+    }
+
     /// Backspace/Delete: remove the whole picture line when it is selected,
     /// or when the caret is just after it (Backspace) or before it (Delete).
     pub(super) fn picture_remove(&mut self, forward: bool) -> bool {
@@ -307,6 +367,9 @@ impl DocumentTab {
         let Some(block) = self.picture_block_at(sel.start) else {
             return false;
         };
+        if self.selected_image().is_some() {
+            return self.remove_row_image(block, sel);
+        }
         // Backspace at the start of a picture would join its Markdown onto
         // the line above: move the caret up there instead.
         if !forward && sel.is_empty() && sel.start == block.start && block.start > 0 {

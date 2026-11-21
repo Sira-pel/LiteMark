@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use gpui::*;
 
-use crate::markdown::image::{parse_image_line, resolve_image_target, ImageTarget};
+use crate::markdown::image::{is_image_block, parse_image_line, resolve_image_target, ImageTarget};
 use crate::markdown::{
     LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
     TableRowBody,
@@ -706,10 +706,7 @@ fn snap_off_picture(
         || at <= src.start
         || at >= src.end
         || (src.start..=src.end).contains(&from)
-        || content
-            .get(src.clone())
-            .and_then(parse_image_line)
-            .is_none()
+        || content.get(src.clone()).map(is_image_block) != Some(true)
     {
         return;
     }
