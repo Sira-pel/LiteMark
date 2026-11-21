@@ -726,3 +726,33 @@ fn delete_before_a_row_selects_its_first_image_first() {
     d.delete_forward_in_mode(MODE);
     assert_eq!(d.content, "![b](b.png) ![c](c.png)\nafter\n");
 }
+
+#[test]
+fn setting_a_width_at_a_range_changes_only_that_picture() {
+    let mut d = row_doc();
+    // The caret is elsewhere; the range alone says which image.
+    d.place(ROW.len() + 3, false);
+    assert!(d.set_picture_width_at(B, Some(333)));
+    assert_eq!(
+        d.content,
+        "![a](a.png) ![b|333](b.png) ![c](c.png)\nafter\n"
+    );
+    assert_eq!(d.selected_image(), Some(12..27));
+    // One undo step.
+    assert!(d.undo());
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+}
+
+#[test]
+fn setting_the_same_width_is_no_edit_and_no_undo_step() {
+    let mut d = doc("![a|200](a.png)\n");
+    let before = d.content.clone();
+    assert!(!d.set_picture_width_at(0..15, Some(200)));
+    assert_eq!(d.content, before);
+    assert!(!d.undo());
+    // A lone picture takes a width from its first drag.
+    let mut d = doc("![a](a.png)\n");
+    assert!(d.set_picture_width_at(0..11, Some(120)));
+    assert_eq!(d.content, "![a|120](a.png)\n");
+    assert!(!d.set_picture_width_at(0..3, Some(5)));
+}
