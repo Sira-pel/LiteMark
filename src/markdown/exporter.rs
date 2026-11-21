@@ -11,6 +11,7 @@ pub fn markdown_to_html_body(markdown: &str) -> String {
     markdown_to_html_body_in(markdown, None, None)
 }
 
+// SVG is left out: a data: SVG can run script if opened on its own.
 fn image_mime(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "png" => Some("image/png"),
@@ -18,7 +19,6 @@ fn image_mime(path: &Path) -> Option<&'static str> {
         "gif" => Some("image/gif"),
         "webp" => Some("image/webp"),
         "bmp" => Some("image/bmp"),
-        "svg" => Some("image/svg+xml"),
         _ => None,
     }
 }
