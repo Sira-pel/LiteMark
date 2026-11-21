@@ -1372,6 +1372,14 @@ impl CharWidths {
     }
 }
 
+/// True when `ch` belongs to the cluster of `prev` and must stay on its row:
+/// a Khmer vowel, sign or coeng, the letter after a coeng (a subscript), or a
+/// combining mark.
+fn joins_previous(prev: char, ch: char) -> bool {
+    matches!(ch, '\u{17B6}'..='\u{17D3}' | '\u{17DD}' | '\u{0300}'..='\u{036F}')
+        || prev == '\u{17D2}'
+}
+
 fn push_wrapped(
     rows: &mut Vec<(usize, usize)>,
     content: &str,
@@ -1429,7 +1437,20 @@ fn push_wrapped(
             }
         }
 
-        let next = if let Some(b) = break_idx { b } else { max_next };
+        let mut next = if let Some(b) = break_idx { b } else { max_next };
+        // Never split a letter from the vowel, sign or subscript that
+        // belongs to it: back up to the start of its cluster, unless that
+        // would leave the row empty.
+        if break_idx.is_none() {
+            let mut at = next;
+            while at > index + 1 && at < chars.len() && joins_previous(chars[at - 1].1, chars[at].1)
+            {
+                at -= 1;
+            }
+            if at > index {
+                next = at;
+            }
+        }
 
         let row_end = if next < chars.len() {
             chars[next].0
@@ -2054,6 +2075,27 @@ mod tests {
         ascii[b'i' as usize] = 4;
         ascii[b'W' as usize] = 16;
         CharWidths::from_ascii(ascii, 10, 10)
+    }
+
+    #[test]
+    fn a_row_never_starts_with_a_vowel_sign_or_a_subscript() {
+        // Letter, vowel, letter, vowel ...: a break after the second letter
+        // would leave a vowel alone at the start of the next row.
+        let word = "កាកាកា";
+        let rows = visual_rows(word, 3);
+        for (start, _) in &rows {
+            let first = word[*start..].chars().next().unwrap();
+            assert!(!matches!(first, '\u{17B6}'..='\u{17D3}'), "{rows:?}");
+        }
+        // Letter, coeng, letter is one cluster too.
+        let sub = "ក្កក្កក្ក";
+        let rows = visual_rows(sub, 4);
+        for (start, _) in &rows {
+            let prev = sub[..*start].chars().next_back();
+            assert_ne!(prev, Some('\u{17D2}'), "{rows:?}");
+        }
+        // A cluster wider than the row still takes at least one row, never none.
+        assert!(!visual_rows("កាាាា", 2).is_empty());
     }
 
     #[test]
