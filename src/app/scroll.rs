@@ -10,6 +10,11 @@ impl LiteMarkApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Scrolling brings back a pointer hidden by typing or a click.
+        if self.pointer_hidden {
+            self.pointer_hidden = false;
+            cx.notify();
+        }
         // macOS already sends its own inertial events after the lift, and
         // Windows only reports line steps, so this is for Linux touchpads.
         match ev.delta {

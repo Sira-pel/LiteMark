@@ -379,7 +379,7 @@ fn line_formats_never_touch_a_picture_line() {
     let src = format!("intro\n{PIC}\nafter\n");
     let end = start_of(&src) + PIC.len();
     for caret in [start_of(&src), end] {
-        for cmd in ["h1", "ul", "ol", "checklist", "quote", "codeblock"] {
+        for cmd in ["h1", "ul", "ol", "checklist", "quote", "codeblock", "hr"] {
             let mut d = doc(&src);
             d.place(caret, false);
             d.apply_format_in_mode(cmd, MODE);
@@ -779,4 +779,16 @@ fn one_image_of_a_row_takes_a_width_and_height_by_itself() {
         d.content,
         "![a](a.png) ![b|90x60](b.png) ![c](c.png)\nafter\n"
     );
+}
+
+#[test]
+fn a_read_only_tab_ignores_every_picture_resize() {
+    let mut d = doc("![cat](c.png)\n");
+    d.file_type = FileType::Pdf;
+    d.select_picture(0..13);
+    let before = (d.content.clone(), d.selection_range());
+    assert!(!d.set_picture_width(Some(200)));
+    assert!(!d.set_picture_size_at(0..13, Some(200), Some(100)));
+    assert!(!d.cycle_picture_size());
+    assert_eq!((d.content.clone(), d.selection_range()), before);
 }

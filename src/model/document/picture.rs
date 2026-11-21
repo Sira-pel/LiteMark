@@ -94,6 +94,9 @@ impl DocumentTab {
     /// it, back to fitting the column) as one undo step; the picture stays
     /// selected.
     pub fn set_picture_width(&mut self, width: Option<u32>) -> bool {
+        if self.is_read_only() {
+            return false;
+        }
         let at = self.selection_range().start;
         let Some(block) = self.picture_block_at(at) else {
             return false;
@@ -133,6 +136,9 @@ impl DocumentTab {
         width: Option<u32>,
         height: Option<u32>,
     ) -> bool {
+        if self.is_read_only() {
+            return false;
+        }
         let Some(block) = self.picture_block_at(range.start) else {
             return false;
         };

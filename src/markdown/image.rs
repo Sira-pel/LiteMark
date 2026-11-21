@@ -167,9 +167,12 @@ fn alt_end(rest: &str) -> Option<usize> {
     }
 }
 
-/// One size number: 1 to 4 digits, not zero.
+/// One size number: 1 to 4 digits, not zero, no leading zero (so what is
+/// written back, `|{n}`, is exactly what was read).
 fn size_number(digits: &str) -> Option<u32> {
-    let valid = (1..=4).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit());
+    let valid = (1..=4).contains(&digits.len())
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && !digits.starts_with('0');
     digits.parse::<u32>().ok().filter(|&n| valid && n > 0)
 }
 
@@ -180,7 +183,10 @@ pub fn split_alt_size(raw: &str) -> (&str, Option<(u32, Option<u32>)>) {
     let Some(bar) = raw.rfind('|') else {
         return (raw, None);
     };
-    if raw[..bar].ends_with('\\') {
+    // The bar is escaped by an odd run of backslashes; an even run is
+    // escaped backslashes and leaves the bar free.
+    let backslashes = raw[..bar].bytes().rev().take_while(|&b| b == b'\\').count();
+    if backslashes % 2 == 1 {
         return (raw, None);
     }
     let tail = &raw[bar + 1..];
@@ -440,6 +446,20 @@ mod tests {
         ] {
             assert_eq!(alt_and_width(line), (alt.into(), None), "{line}");
         }
+    }
+
+    #[test]
+    fn an_even_run_of_backslashes_leaves_the_bar_free_and_leading_zeros_are_alt() {
+        let read = |line: &str| {
+            let image = parse_image_line(line).unwrap();
+            (image.alt, image.width)
+        };
+        assert_eq!(read(r"![a\\|200](c.png)"), (r"a\".into(), Some(200)));
+        assert_eq!(read(r"![a\\\|200](c.png)"), (r"a\|200".into(), None));
+        assert_eq!(read("![cat|0200](c.png)"), ("cat|0200".into(), None));
+        // A resize of an alt ending in a backslash reads back as one.
+        let out = set_image_width(r"![a\\](c.png)", Some(200)).unwrap();
+        assert_eq!(read(&out), (r"a\".into(), Some(200)));
     }
 
     #[test]

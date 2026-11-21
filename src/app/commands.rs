@@ -9,11 +9,13 @@ impl LiteMarkApp {
     }
 
     pub(super) fn handle_window_deactivated(&mut self) {
+        self.cancel_image_drag();
         self.table_drag = None;
         self.clear_table_drag_press();
     }
 
     pub(super) fn handle_mouse_down_out(&mut self) {
+        self.cancel_image_drag();
         self.table_drag = None;
         self.clear_table_drag_press();
     }
@@ -32,12 +34,17 @@ impl LiteMarkApp {
         if event.pressed_button.is_some() {
             return;
         }
+        self.cancel_image_drag();
         self.table_drag = None;
         self.table_hot = None;
         self.clear_table_drag_press();
     }
 
     pub(super) fn handle_close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_image_drag() {
+            cx.notify();
+            return;
+        }
         self.clear_table_drag_press();
         if self.table_drag.take().is_some() {
             cx.notify();

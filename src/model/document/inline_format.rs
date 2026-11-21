@@ -39,6 +39,7 @@ impl DocumentTab {
                     | "checklist"
                     | "quote"
                     | "codeblock"
+                    | "hr"
             );
             if on_picture && (line_format || !sel.is_empty()) {
                 return;
