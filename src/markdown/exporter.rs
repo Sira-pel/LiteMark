@@ -115,7 +115,10 @@ pub fn markdown_to_html_body_in(
         (event, _) => (event, range),
     });
     let mut html_output = String::new();
-    html::push_html(&mut html_output, with_image_widths(markdown, parser).into_iter());
+    html::push_html(
+        &mut html_output,
+        with_image_widths(markdown, parser).into_iter(),
+    );
     html_output
 }
 
@@ -146,7 +149,9 @@ fn with_image_widths<'a>(
         }
         if let (Event::End(TagEnd::Image), Some((at, alt, width))) = (&event, &open) {
             let at = *at;
-            let plain = alt.strip_suffix(&format!("|{}", width.unwrap_or(0))).unwrap_or(alt);
+            let plain = alt
+                .strip_suffix(&format!("|{}", width.unwrap_or(0)))
+                .unwrap_or(alt);
             if let (
                 Some(width),
                 Event::Start(Tag::Image {
@@ -483,7 +488,10 @@ mod tests {
             None,
             None,
         );
-        assert!(html.contains(r#"<img src="r.png" alt="e|200" />"#), "{html}");
+        assert!(
+            html.contains(r#"<img src="r.png" alt="e|200" />"#),
+            "{html}"
+        );
         assert!(
             html.contains(r#"<img src="c.png" alt="a &quot;cat&quot;" title="T" width="200" />"#),
             "{html}"
@@ -501,7 +509,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("assets")).unwrap();
         std::fs::write(dir.join("assets/a b.png"), b"abcd").unwrap();
         let html = markdown_to_html_body_in("![x|50](<assets/a b.png>)", Some(&dir), None);
-        assert!(html.contains("src=\"data:image/png;base64,YWJjZA==\""), "{html}");
+        assert!(
+            html.contains("src=\"data:image/png;base64,YWJjZA==\""),
+            "{html}"
+        );
         assert!(html.contains("width=\"50\""), "{html}");
         let _ = std::fs::remove_dir_all(&dir);
     }
