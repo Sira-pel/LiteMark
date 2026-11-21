@@ -756,3 +756,27 @@ fn setting_the_same_width_is_no_edit_and_no_undo_step() {
     assert_eq!(d.content, "![a|120](a.png)\n");
     assert!(!d.set_picture_width_at(0..3, Some(5)));
 }
+
+#[test]
+fn a_width_and_height_are_written_and_a_later_width_drops_the_height() {
+    let mut d = doc("![a](a.png)\n");
+    assert!(d.set_picture_size_at(0..11, Some(120), Some(40)));
+    assert_eq!(d.content, "![a|120x40](a.png)\n");
+    assert!(!d.set_picture_size_at(0..19, Some(120), Some(40)));
+    // F3 steps by width alone, so the stretch is gone.
+    d.place(3, false);
+    assert!(d.cycle_picture_size());
+    assert_eq!(d.content, "![a|200](a.png)\n");
+    assert!(d.undo());
+    assert_eq!(d.content, "![a|120x40](a.png)\n");
+}
+
+#[test]
+fn one_image_of_a_row_takes_a_width_and_height_by_itself() {
+    let mut d = row_doc();
+    assert!(d.set_picture_size_at(B, Some(90), Some(60)));
+    assert_eq!(
+        d.content,
+        "![a](a.png) ![b|90x60](b.png) ![c](c.png)\nafter\n"
+    );
+}

@@ -14,6 +14,20 @@ pub struct ImageLine {
     pub title: Option<String>,
     /// Width in pixels from `![alt|200](path)`: the alt text ends in `|` and digits.
     pub width: Option<u32>,
+    /// Height from `![alt|200x100](path)`. Only ever set together with `width`.
+    pub height: Option<u32>,
+}
+
+/// `|200` for a width, `|200x100` for both, nothing without a width.
+/// Values are clamped to the 1..=9999 syntax range so the written suffix
+/// always parses back as a size.
+pub fn size_suffix(width: Option<u32>, height: Option<u32>) -> String {
+    const MAX_SIZE: u32 = 9999;
+    match (width, height) {
+        (Some(w), Some(h)) => format!("|{}x{}", w.clamp(1, MAX_SIZE), h.clamp(1, MAX_SIZE)),
+        (Some(w), None) => format!("|{}", w.clamp(1, MAX_SIZE)),
+        _ => String::new(),
+    }
 }
 
 /// Parses `line` as an image line. Surrounding whitespace is allowed; any
@@ -29,7 +43,8 @@ pub fn parse_image_line(line: &str) -> Option<ImageLine> {
 fn parse_image_at(text: &str) -> Option<(ImageLine, usize)> {
     let rest = text.strip_prefix("![")?;
     let alt_end = alt_end(rest)?;
-    let (alt_raw, width) = split_alt_width(&rest[..alt_end]);
+    let (alt_raw, size) = split_alt_size(&rest[..alt_end]);
+    let (width, height) = size.map_or((None, None), |(w, h)| (Some(w), h));
     let alt = unescape(alt_raw);
     let after = rest[alt_end + 1..].strip_prefix('(')?;
     let after = after.trim_start();
@@ -102,6 +117,7 @@ fn parse_image_at(text: &str) -> Option<(ImageLine, usize)> {
             target,
             title,
             width,
+            height,
         },
         len,
     ))
@@ -151,35 +167,52 @@ fn alt_end(rest: &str) -> Option<usize> {
     }
 }
 
-/// Splits raw alt text `alt|200` into the alt and its width. The part after
-/// the last unescaped `|` counts only when it is 1 to 4 digits and not zero;
-/// anything else stays part of the alt.
-pub fn split_alt_width(raw: &str) -> (&str, Option<u32>) {
+/// One size number: 1 to 4 digits, not zero.
+fn size_number(digits: &str) -> Option<u32> {
+    let valid = (1..=4).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit());
+    digits.parse::<u32>().ok().filter(|&n| valid && n > 0)
+}
+
+/// Splits raw alt text `alt|200` or `alt|200x100` into the alt and its size
+/// (width, and height when given). The part after the last unescaped `|`
+/// counts only when it is a valid size; anything else stays part of the alt.
+pub fn split_alt_size(raw: &str) -> (&str, Option<(u32, Option<u32>)>) {
     let Some(bar) = raw.rfind('|') else {
         return (raw, None);
     };
-    let digits = &raw[bar + 1..];
-    let escaped = raw[..bar].ends_with('\\');
-    let valid = (1..=4).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit());
-    match digits.parse::<u32>() {
-        Ok(width) if valid && !escaped && width > 0 => (&raw[..bar], Some(width)),
-        _ => (raw, None),
+    if raw[..bar].ends_with('\\') {
+        return (raw, None);
+    }
+    let tail = &raw[bar + 1..];
+    let size = match tail.split_once('x') {
+        Some((w, h)) => size_number(w)
+            .zip(size_number(h))
+            .map(|(w, h)| (w, Some(h))),
+        None => size_number(tail).map(|w| (w, None)),
+    };
+    match size {
+        Some(size) => (&raw[..bar], Some(size)),
+        None => (raw, None),
     }
 }
 
 /// `line` (a whole image line) with its width set to `width`, or removed for
 /// `None`. Only the alt text changes; the target and title stay as written.
 pub fn set_image_width(line: &str, width: Option<u32>) -> Option<String> {
+    set_image_size(line, width, None)
+}
+
+/// [`set_image_width`] for a width and height. A height without a width is
+/// dropped, since the syntax has no height-only form.
+pub fn set_image_size(line: &str, width: Option<u32>, height: Option<u32>) -> Option<String> {
     parse_image_line(line)?;
     let start = line.len() - line.trim_start().len() + 2;
     let end = start + alt_end(&line[start..])?;
-    let (base, _) = split_alt_width(&line[start..end]);
-    let mut out = String::with_capacity(line.len() + 6);
+    let (base, _) = split_alt_size(&line[start..end]);
+    let mut out = String::with_capacity(line.len() + 9);
     out.push_str(&line[..start]);
     out.push_str(base);
-    if let Some(width) = width {
-        out.push_str(&format!("|{width}"));
-    }
+    out.push_str(&size_suffix(width, height));
     out.push_str(&line[end..]);
     Some(out)
 }
@@ -403,11 +436,76 @@ mod tests {
             ("![a|](c.png)", "a|"),
             ("![a|0](c.png)", "a|0"),
             ("![a|12345](c.png)", "a|12345"),
-            ("![a|20x10](c.png)", "a|20x10"),
             (r"![a\|200](c.png)", "a|200"),
         ] {
             assert_eq!(alt_and_width(line), (alt.into(), None), "{line}");
         }
+    }
+
+    #[test]
+    fn a_width_and_height_read_as_200x100() {
+        let size = |line: &str| {
+            let image = parse_image_line(line).unwrap();
+            (image.alt, image.width, image.height)
+        };
+        assert_eq!(
+            size("![cat|200x100](c.png)"),
+            ("cat".into(), Some(200), Some(100))
+        );
+        assert_eq!(size("![|20x30](c.png)"), ("".into(), Some(20), Some(30)));
+        assert_eq!(size("![cat|200](c.png)"), ("cat".into(), Some(200), None));
+        // Half a size, a zero or an escaped bar is just alt text.
+        for alt in [
+            "cat|200x",
+            "cat|x100",
+            "cat|0x50",
+            "cat|50x0",
+            "cat|20000x5",
+            "cat|1x2x3",
+        ] {
+            assert_eq!(
+                size(&format!("![{alt}](c.png)")),
+                (alt.into(), None, None),
+                "{alt}"
+            );
+        }
+        assert_eq!(
+            size("![a|b|64x32](c.png)"),
+            ("a|b".into(), Some(64), Some(32))
+        );
+    }
+
+    #[test]
+    fn set_image_size_writes_one_or_both_numbers_and_drops_a_lone_height() {
+        let line = "![cat|200x100](c.png \"t\")";
+        assert_eq!(
+            set_image_size(line, Some(300), Some(50)).unwrap(),
+            "![cat|300x50](c.png \"t\")"
+        );
+        assert_eq!(
+            set_image_size(line, Some(300), None).unwrap(),
+            "![cat|300](c.png \"t\")"
+        );
+        assert_eq!(
+            set_image_size(line, None, Some(50)).unwrap(),
+            "![cat](c.png \"t\")"
+        );
+        assert_eq!(
+            set_image_width(line, Some(64)).unwrap(),
+            "![cat|64](c.png \"t\")"
+        );
+        assert_eq!(
+            set_image_size("![](a.png)", Some(64), Some(32)).unwrap(),
+            "![|64x32](a.png)"
+        );
+        // Out-of-range values clamp to 1..=9999 so they round-trip as a size.
+        let clamped = set_image_size("![cat](a.png)", Some(20000), Some(0)).unwrap();
+        assert_eq!(clamped, "![cat|9999x1](a.png)");
+        let parsed = parse_image_line(&clamped).unwrap();
+        assert_eq!(
+            (parsed.alt.as_str(), parsed.width, parsed.height),
+            ("cat", Some(9999), Some(1))
+        );
     }
 
     #[test]

@@ -5,7 +5,9 @@
 //! raw Markdown until the caret leaves the line.
 
 use super::*;
-use crate::markdown::image::{is_image_block, parse_image_line, parse_image_row, set_image_width};
+use crate::markdown::image::{
+    is_image_block, parse_image_line, parse_image_row, set_image_size, set_image_width,
+};
 
 /// Widths in pixels that `cycle_picture_size` steps through: small, medium, large.
 pub const PICTURE_SIZES: [u32; 3] = [200, 400, 600];
@@ -119,7 +121,18 @@ impl DocumentTab {
     /// of a row), whatever the selection is. One undo step; the picture is
     /// selected afterwards. False, and nothing changed, when `range` is not a
     /// picture or the width is already `width`.
+    #[cfg(test)]
     pub fn set_picture_width_at(&mut self, range: Range<usize>, width: Option<u32>) -> bool {
+        self.set_picture_size_at(range, width, None)
+    }
+
+    /// [`Self::set_picture_width_at`] with a height as well (`|200x100`).
+    pub fn set_picture_size_at(
+        &mut self,
+        range: Range<usize>,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> bool {
         let Some(block) = self.picture_block_at(range.start) else {
             return false;
         };
@@ -129,7 +142,7 @@ impl DocumentTab {
         let Some(line) = self.content.get(range.clone()) else {
             return false;
         };
-        let Some(new) = set_image_width(line, width) else {
+        let Some(new) = set_image_size(line, width, height) else {
             return false;
         };
         if new == line {
