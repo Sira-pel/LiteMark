@@ -1,6 +1,6 @@
 [package]
 name = "litemark"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 authors = ["LiteMark Contributors"]
 description = "Native Markdown and text editor"
