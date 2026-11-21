@@ -2446,10 +2446,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     }
                     let block_size = match &picture {
                         Some((_, picture_size)) => *picture_size,
-                        None => size(
-                            wanted.map_or(content_width, |(w, _)| px(w as f32).min(content_width)),
-                            placeholder_h,
-                        ),
+                        None => match wanted {
+                            Some((w, Some(h))) => {
+                                let (w, h) = fit_image_size((1, 1), w, Some(h), content_width);
+                                size(w, h)
+                            }
+                            Some((w, None)) => size(px(w as f32).min(content_width), placeholder_h),
+                            None => size(content_width, placeholder_h),
+                        },
                     };
                     let row_h = block_size.height + IMAGE_MARGIN_Y * 2.0;
                     let block_bounds =
