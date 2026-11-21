@@ -1165,6 +1165,8 @@ pub struct EditorElement<V: 'static> {
     pub table_pressed: bool,
     /// A picture being resized by its handle: drawn at the dragged width.
     pub image_drag: Option<super::note_images::ImageDrag>,
+    /// Hide the mouse pointer over the text (after typing).
+    pub pointer_hidden: bool,
     pub table_hover_fill: Hsla,
     pub table_active_fill: Hsla,
     /// Folder of the note, for relative image paths; `None` for an unsaved note.
@@ -3163,8 +3165,13 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let total_height = (cur_y - bounds.top() + px(32.0)).max(px(64.0));
         // The text is an I-beam; a picture is a plain arrow, and its resize
         // handle a diagonal arrow. Later hitboxes win where they overlap.
+        let text_cursor = if self.pointer_hidden && self.image_drag.is_none() {
+            CursorStyle::None
+        } else {
+            CursorStyle::IBeam
+        };
         let mut cursor_hitboxes = vec![(
-            CursorStyle::IBeam,
+            text_cursor,
             window.insert_hitbox(bounds, HitboxBehavior::Normal),
         )];
         for (_, b) in &pictures {

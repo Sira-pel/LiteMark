@@ -65,6 +65,10 @@ impl EntityInputHandler for LiteMarkApp {
         let had_ime_line = self
             .active_tab_mut()
             .is_some_and(|tab| tab.ime_opened_line.take().is_some());
+        if !text.is_empty() && !self.pointer_hidden {
+            self.pointer_hidden = true;
+            cx.notify();
+        }
         if self.table_drag.is_some() || self.table_drag_press_held {
             let (drag, insert) = clear_drag_for_key(self.table_drag.take(), "key", text);
             self.table_drag = drag;

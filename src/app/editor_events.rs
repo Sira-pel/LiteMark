@@ -479,6 +479,10 @@ impl LiteMarkApp {
     }
 
     pub(super) fn editor_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.pointer_hidden {
+            self.pointer_hidden = false;
+            cx.notify();
+        }
         // A move with no button means the originating press is over. On X11
         // a release outside the window is never delivered (no grab); the
         // first in-window move after that has pressed_button None. Wayland's
@@ -685,6 +689,7 @@ impl LiteMarkApp {
             table_hover: self.table_hover.clone(),
             table_drag: self.table_drag.clone(),
             image_drag: self.image_drag.clone(),
+            pointer_hidden: self.pointer_hidden,
             table_hot: self.table_hot.clone(),
             table_pressed: self.table_pressed,
             table_hover_fill: theme.bg_hover.into(),
