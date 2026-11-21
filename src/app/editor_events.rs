@@ -288,6 +288,16 @@ impl LiteMarkApp {
                 self.refresh_find();
             }
         }
+        // A click that only places the caret is the start of typing: the
+        // pointer steps aside until the mouse moves.
+        if self.selecting
+            && event.button == MouseButton::Left
+            && self
+                .active_tab()
+                .is_some_and(|tab| tab.selection_range().is_empty() && !tab.is_read_only())
+        {
+            self.pointer_hidden = true;
+        }
         if self.selecting {
             self.selecting = false;
         }
