@@ -195,6 +195,24 @@ pub fn fit_image_width(natural: (u32, u32), width: u32, content_width: Pixels) -
     (px(w), px((nh * w / nw).max(1.0)))
 }
 
+/// The size for a picture with an explicit `width` and, optionally, `height`
+/// (`|200x100`): both as written, so the picture is stretched to fit. Never
+/// wider than `content_width`; the height shrinks with the width then. Without
+/// a height this is [`fit_image_width`].
+pub fn fit_image_size(
+    natural: (u32, u32),
+    width: u32,
+    height: Option<u32>,
+    content_width: Pixels,
+) -> (Pixels, Pixels) {
+    let Some(height) = height else {
+        return fit_image_width(natural, width, content_width);
+    };
+    let width = width.max(1) as f32;
+    let w = width.min(f32::from(content_width)).max(1.0);
+    (px(w), px((height.max(1) as f32 * w / width).max(1.0)))
+}
+
 /// Height of a thumbnail in a row of images, before zoom.
 pub const THUMB_HEIGHT: Pixels = px(160.0);
 /// Space between thumbnails.
@@ -208,6 +226,7 @@ pub const THUMB_GAP: Pixels = px(8.0);
 pub fn thumbnail_size(
     natural: Option<(u32, u32)>,
     width: Option<u32>,
+    height: Option<u32>,
     content_width: Pixels,
 ) -> (Pixels, Pixels) {
     let column = f32::from(content_width).max(1.0);
@@ -220,7 +239,13 @@ pub fn thumbnail_size(
         None => f32::from(THUMB_HEIGHT).min(nh) * nw / nh,
     }
     .clamp(1.0, column);
-    (px(w), px((nh * w / nw).max(1.0)))
+    match (width, height) {
+        (Some(wanted), Some(h)) => (
+            px(w),
+            px((h.max(1) as f32 * w / wanted.max(1) as f32).max(1.0)),
+        ),
+        _ => (px(w), px((nh * w / nw).max(1.0))),
+    }
 }
 
 /// Smallest width a picture can be dragged to.
@@ -232,35 +257,157 @@ pub const HANDLE_SIZE: Pixels = px(10.0);
 /// Side of the area that grabs the handle, larger than what is drawn.
 pub const HANDLE_GRAB: Pixels = px(18.0);
 
-/// A picture being resized by its corner handle. The note is untouched until
-/// the drag ends; `width` is what is drawn meanwhile.
+/// Which edge of a picture a drag holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragAxis {
+    /// The bottom-right corner: width and height together, ratio kept.
+    Corner,
+    /// The right edge: the width alone.
+    Right,
+    /// The bottom edge: the height alone.
+    Bottom,
+}
+
+/// A picture being resized by a handle. The note is untouched until the drag
+/// ends; `width` and `height` are what is drawn meanwhile.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageDrag {
     /// Source range of the picture (or the one image of a row) being dragged.
     pub range: std::ops::Range<usize>,
+    pub axis: DragAxis,
     pub start_x: Pixels,
+    pub start_y: Pixels,
     pub start_width: Pixels,
+    pub start_height: Pixels,
     /// Width of the editor column: the most a picture can be dragged to.
     pub column: Pixels,
     pub width: Pixels,
+    pub height: Pixels,
+    /// The picture already had a height (`|200x100`) when the drag began.
+    pub had_height: bool,
 }
 
-/// The width for a handle dragged `dx` from where it was grabbed: at least
-/// `MIN_DRAG_WIDTH`, at most the column and `MAX_WIDTH`, whole pixels.
-pub fn drag_width(start_width: Pixels, dx: Pixels, column: Pixels) -> Pixels {
-    let most = f32::from(column).clamp(MIN_DRAG_WIDTH, MAX_WIDTH);
-    px((f32::from(start_width) + f32::from(dx))
-        .clamp(MIN_DRAG_WIDTH, most)
-        .round())
+impl ImageDrag {
+    /// The size to write for the picture when the drag ends: a corner drag of
+    /// a picture that only had a width stays width-only (its natural ratio),
+    /// everything else writes both numbers.
+    pub fn result(&self) -> (u32, Option<u32>) {
+        let w = f32::from(self.width).round().clamp(1.0, MAX_WIDTH) as u32;
+        let h = f32::from(self.height).round().clamp(1.0, MAX_WIDTH) as u32;
+        if self.axis == DragAxis::Corner && !self.had_height {
+            (w, None)
+        } else {
+            (w, Some(h))
+        }
+    }
+
+    /// True when the drag changed the size from where it began.
+    pub fn moved(&self) -> bool {
+        self.width != self.start_width || self.height != self.start_height
+    }
+
+    /// The drag moved by (`dx`, `dy`) from where it was grabbed.
+    pub fn update(&mut self, dx: Pixels, dy: Pixels) {
+        let (w, h) = drag_size(
+            self.axis,
+            (self.start_width, self.start_height),
+            (dx, dy),
+            self.column,
+        );
+        self.width = w;
+        self.height = h;
+    }
 }
 
-/// The area of `picture` that grabs its handle: the bottom-right corner.
+/// The size for a handle dragged by (`dx`, `dy`) from where it was grabbed:
+/// at least `MIN_DRAG_WIDTH` either way, at most the column wide and
+/// `MAX_WIDTH` either way, whole pixels. A corner keeps the ratio, following
+/// whichever direction moved further.
+pub fn drag_size(
+    axis: DragAxis,
+    start: (Pixels, Pixels),
+    (dx, dy): (Pixels, Pixels),
+    column: Pixels,
+) -> (Pixels, Pixels) {
+    let most_w = f32::from(column).clamp(MIN_DRAG_WIDTH, MAX_WIDTH);
+    let (sw, sh) = (f32::from(start.0).max(1.0), f32::from(start.1).max(1.0));
+    let (dx, dy) = (f32::from(dx), f32::from(dy));
+    let min_h = MIN_DRAG_WIDTH;
+    match axis {
+        DragAxis::Right => (
+            px((sw + dx).clamp(MIN_DRAG_WIDTH, most_w).round()),
+            px(sh.clamp(1.0, MAX_WIDTH)),
+        ),
+        DragAxis::Bottom => (
+            px(sw.clamp(1.0, MAX_WIDTH)),
+            px((sh + dy).clamp(min_h, MAX_WIDTH).round()),
+        ),
+        DragAxis::Corner => {
+            let ratio = sh / sw;
+            // The scale that follows the pointer along its larger move.
+            let by_x = (sw + dx) / sw;
+            let by_y = (sh + dy) / sh;
+            let scale = if dx.abs() * ratio >= dy.abs() {
+                by_x
+            } else {
+                by_y
+            };
+            let lowest = (MIN_DRAG_WIDTH.min(sw) / sw).max(min_h.min(sh) / sh);
+            let highest = (most_w / sw).min(MAX_WIDTH / sh);
+            let scale = scale.clamp(lowest.min(highest), highest);
+            (
+                px((sw * scale).round().clamp(1.0, most_w)),
+                px((sh * scale).round().clamp(1.0, MAX_WIDTH)),
+            )
+        }
+    }
+}
+
+/// The area of `picture` that grabs its corner handle: the bottom-right corner.
 pub fn handle_grab_area(picture: Bounds<Pixels>) -> Bounds<Pixels> {
     let side = HANDLE_GRAB.min(picture.size.width).min(picture.size.height);
     Bounds::new(
         point(picture.right() - side, picture.bottom() - side),
         size(side, side),
     )
+}
+
+/// The strip along the right edge that grabs the width alone, clear of the
+/// corner handle.
+pub fn right_edge_area(picture: Bounds<Pixels>) -> Bounds<Pixels> {
+    let corner = handle_grab_area(picture);
+    let grab = px(8.0).min(picture.size.width);
+    Bounds::new(
+        point(picture.right() - grab / 2.0, picture.top()),
+        size(
+            grab,
+            (picture.size.height - corner.size.height).max(px(0.0)),
+        ),
+    )
+}
+
+/// The strip along the bottom edge that grabs the height alone, clear of the
+/// corner handle.
+pub fn bottom_edge_area(picture: Bounds<Pixels>) -> Bounds<Pixels> {
+    let corner = handle_grab_area(picture);
+    let grab = px(8.0).min(picture.size.height);
+    Bounds::new(
+        point(picture.left(), picture.bottom() - grab / 2.0),
+        size((picture.size.width - corner.size.width).max(px(0.0)), grab),
+    )
+}
+
+/// Which handle of `picture` is at `at`, if any. The corner wins where areas meet.
+pub fn handle_at(picture: Bounds<Pixels>, at: &gpui::Point<Pixels>) -> Option<DragAxis> {
+    if handle_grab_area(picture).contains(at) {
+        Some(DragAxis::Corner)
+    } else if right_edge_area(picture).contains(at) {
+        Some(DragAxis::Right)
+    } else if bottom_edge_area(picture).contains(at) {
+        Some(DragAxis::Bottom)
+    } else {
+        None
+    }
 }
 
 /// Where each thumbnail goes when they flow left to right and wrap to a new
@@ -323,14 +470,128 @@ mod tests {
 
     #[test]
     fn dragging_the_handle_clamps_to_the_minimum_the_column_and_four_digits() {
-        let width =
-            |start: f32, dx: f32, column: f32| f32::from(drag_width(px(start), px(dx), px(column)));
+        let width = |start: f32, dx: f32, column: f32| {
+            let (w, _) = drag_size(
+                DragAxis::Right,
+                (px(start), px(100.0)),
+                (px(dx), px(0.0)),
+                px(column),
+            );
+            f32::from(w)
+        };
         assert_eq!(width(200.0, 50.0, 700.0), 250.0);
         assert_eq!(width(200.0, -500.0, 700.0), 24.0);
         assert_eq!(width(200.0, 900.0, 700.0), 700.0);
         // A column wider than four digits still stops at 9999.
         assert_eq!(width(200.0, 20000.0, 30000.0), 9999.0);
         assert_eq!(width(200.4, 0.2, 700.0), 201.0);
+    }
+
+    #[test]
+    fn edge_drags_change_one_side_and_the_corner_keeps_the_ratio() {
+        let start = (px(200.0), px(100.0));
+        let size = |axis, dx: f32, dy: f32| {
+            let (w, h) = drag_size(axis, start, (px(dx), px(dy)), px(700.0));
+            (f32::from(w), f32::from(h))
+        };
+        assert_eq!(size(DragAxis::Right, 50.0, 30.0), (250.0, 100.0));
+        assert_eq!(size(DragAxis::Bottom, 50.0, 30.0), (200.0, 130.0));
+        assert_eq!(size(DragAxis::Bottom, 0.0, -500.0), (200.0, 24.0));
+        // The corner follows the larger move and keeps 2:1.
+        assert_eq!(size(DragAxis::Corner, 100.0, 0.0), (300.0, 150.0));
+        assert_eq!(size(DragAxis::Corner, 0.0, 100.0), (400.0, 200.0));
+        // Held at the column and the minimum, still 2:1.
+        assert_eq!(size(DragAxis::Corner, 900.0, 0.0), (700.0, 350.0));
+        let (w, h) = size(DragAxis::Corner, -900.0, -900.0);
+        assert!(
+            w >= 24.0 && h >= 24.0 && (w / h - 2.0).abs() < 0.1,
+            "{w}x{h}"
+        );
+    }
+
+    #[test]
+    fn a_drag_writes_only_what_it_changed() {
+        let drag = |axis, had_height| {
+            let mut d = ImageDrag {
+                range: 0..0,
+                axis,
+                start_x: px(0.0),
+                start_y: px(0.0),
+                start_width: px(200.0),
+                start_height: px(100.0),
+                column: px(700.0),
+                width: px(200.0),
+                height: px(100.0),
+                had_height,
+            };
+            d.update(px(40.0), px(10.0));
+            d
+        };
+        assert_eq!(drag(DragAxis::Corner, false).result().1, None);
+        assert!(drag(DragAxis::Corner, true).result().1.is_some());
+        assert_eq!(drag(DragAxis::Right, false).result(), (240, Some(100)));
+        assert_eq!(drag(DragAxis::Bottom, false).result(), (200, Some(110)));
+        assert!(drag(DragAxis::Right, false).moved());
+    }
+
+    #[test]
+    fn a_width_and_height_stretch_the_picture_and_shrink_together_in_a_narrow_column() {
+        let (w, h) = fit_image_size((400, 400), 200, Some(50), px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (200.0, 50.0));
+        let (w, h) = fit_image_size((400, 400), 200, Some(50), px(100.0));
+        assert_eq!((f32::from(w), f32::from(h)), (100.0, 25.0));
+        let (w, h) = fit_image_size((400, 200), 100, None, px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (100.0, 50.0));
+        let (w, h) = thumbnail_size(Some((400, 200)), Some(100), Some(80), px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (100.0, 80.0));
+        // A zero wanted width does not divide by zero.
+        let (w, h) = thumbnail_size(Some((400, 200)), Some(0), Some(80), px(700.0));
+        assert!(f32::from(w).is_finite() && f32::from(h).is_finite());
+    }
+
+    #[test]
+    fn extreme_aspect_ratios_never_drag_past_the_column_or_four_digits() {
+        // Wide thin banner: corner drag stays within the column and 4-digit cap.
+        let (w, h) = drag_size(
+            DragAxis::Corner,
+            (px(700.0), px(14.0)),
+            (px(10.0), px(10.0)),
+            px(700.0),
+        );
+        assert!(f32::from(w) <= 700.0 && f32::from(h) <= MAX_WIDTH);
+        let (w, h) = drag_size(
+            DragAxis::Corner,
+            (px(700.0), px(1.0)),
+            (px(1.0), px(0.0)),
+            px(700.0),
+        );
+        assert!(f32::from(w) <= 700.0 && f32::from(h) <= MAX_WIDTH);
+        // Very tall image: right-edge drag clamps height to 4 digits too.
+        let (w, h) = drag_size(
+            DragAxis::Right,
+            (px(200.0), px(20000.0)),
+            (px(50.0), px(0.0)),
+            px(700.0),
+        );
+        assert_eq!((f32::from(w), f32::from(h)), (250.0, MAX_WIDTH));
+    }
+
+    #[test]
+    fn the_edge_areas_sit_on_the_edges_clear_of_the_corner() {
+        let p = Bounds::new(point(px(10.0), px(20.0)), size(px(100.0), px(80.0)));
+        assert_eq!(
+            handle_at(p, &point(px(109.0), px(99.0))),
+            Some(DragAxis::Corner)
+        );
+        assert_eq!(
+            handle_at(p, &point(px(109.0), px(40.0))),
+            Some(DragAxis::Right)
+        );
+        assert_eq!(
+            handle_at(p, &point(px(40.0), px(99.0))),
+            Some(DragAxis::Bottom)
+        );
+        assert_eq!(handle_at(p, &point(px(50.0), px(50.0))), None);
     }
 
     #[test]
@@ -351,18 +612,18 @@ mod tests {
 
     #[test]
     fn thumbnails_are_a_fixed_height_unless_they_have_a_width() {
-        let (w, h) = thumbnail_size(Some((400, 200)), None, px(700.0));
+        let (w, h) = thumbnail_size(Some((400, 200)), None, None, px(700.0));
         assert_eq!((f32::from(w), f32::from(h)), (320.0, 160.0));
-        let (w, h) = thumbnail_size(Some((400, 200)), Some(100), px(700.0));
+        let (w, h) = thumbnail_size(Some((400, 200)), Some(100), None, px(700.0));
         assert_eq!((f32::from(w), f32::from(h)), (100.0, 50.0));
         // Never past the column.
-        let (w, h) = thumbnail_size(Some((4000, 200)), None, px(700.0));
+        let (w, h) = thumbnail_size(Some((4000, 200)), None, None, px(700.0));
         assert_eq!((f32::from(w), f32::from(h)), (700.0, 35.0));
         // A small picture is not enlarged.
-        let (w, h) = thumbnail_size(Some((40, 30)), None, px(700.0));
+        let (w, h) = thumbnail_size(Some((40, 30)), None, None, px(700.0));
         assert_eq!((f32::from(w), f32::from(h)), (40.0, 30.0));
         // Unknown size: a square.
-        let (w, h) = thumbnail_size(None, None, px(700.0));
+        let (w, h) = thumbnail_size(None, None, None, px(700.0));
         assert_eq!((f32::from(w), f32::from(h)), (160.0, 160.0));
     }
 

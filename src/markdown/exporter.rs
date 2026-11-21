@@ -1,4 +1,4 @@
-use crate::markdown::image::parse_image_line;
+use crate::markdown::image::{parse_image_line, size_suffix};
 use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 use std::path::Path;
@@ -122,10 +122,11 @@ pub fn markdown_to_html_body_in(
     html_output
 }
 
-/// The width of the image written at `range` of `markdown`: the same rule the
-/// editor uses, so `a\|200` (an escaped bar) has none.
-fn written_width(markdown: &str, range: &Range<usize>) -> Option<u32> {
-    parse_image_line(markdown.get(range.clone())?)?.width
+/// The width and height of the image written at `range` of `markdown`: the
+/// same rule the editor uses, so `a\|200` (an escaped bar) has none.
+fn written_size(markdown: &str, range: &Range<usize>) -> Option<(u32, Option<u32>)> {
+    let image = parse_image_line(markdown.get(range.clone())?)?;
+    Some((image.width?, image.height))
 }
 
 /// Turns each `![alt|200](src)` into an `<img>` with `width="200"`. The alt
@@ -136,10 +137,11 @@ fn with_image_widths<'a>(
     events: impl Iterator<Item = (Event<'a>, Range<usize>)>,
 ) -> Vec<Event<'a>> {
     let mut out: Vec<Event<'a>> = Vec::new();
-    let mut open: Option<(usize, String, Option<u32>)> = None;
+    type Size = Option<(u32, Option<u32>)>;
+    let mut open: Option<(usize, String, Size)> = None;
     for (event, range) in events {
         if matches!(event, Event::Start(Tag::Image { .. })) {
-            open = Some((out.len(), String::new(), written_width(markdown, &range)));
+            open = Some((out.len(), String::new(), written_size(markdown, &range)));
         } else if let Some((_, alt, _)) = open.as_mut() {
             match &event {
                 Event::Text(t) | Event::Code(t) => alt.push_str(t),
@@ -147,17 +149,16 @@ fn with_image_widths<'a>(
                 _ => {}
             }
         }
-        if let (Event::End(TagEnd::Image), Some((at, alt, width))) = (&event, &open) {
+        if let (Event::End(TagEnd::Image), Some((at, alt, size))) = (&event, &open) {
             let at = *at;
-            let plain = alt
-                .strip_suffix(&format!("|{}", width.unwrap_or(0)))
-                .unwrap_or(alt);
+            let suffix = size.map_or(String::new(), |(w, h)| size_suffix(Some(w), h));
+            let plain = alt.strip_suffix(suffix.as_str()).unwrap_or(alt);
             if let (
-                Some(width),
+                Some((width, height)),
                 Event::Start(Tag::Image {
                     dest_url, title, ..
                 }),
-            ) = (width, &out[at])
+            ) = (size, &out[at])
             {
                 let mut tag = format!(
                     "<img src=\"{}\" alt=\"{}\"",
@@ -167,7 +168,14 @@ fn with_image_widths<'a>(
                 if !title.is_empty() {
                     tag.push_str(&format!(" title=\"{}\"", escape_html_text(title)));
                 }
-                tag.push_str(&format!(" width=\"{width}\" />"));
+                match height {
+                    // Both sizes stretch the picture; the ratio holds when the
+                    // page is narrower than the width.
+                    Some(height) => tag.push_str(&format!(
+                        " width=\"{width}\" height=\"{height}\" style=\"height: auto; aspect-ratio: {width} / {height}\" />"
+                    )),
+                    None => tag.push_str(&format!(" width=\"{width}\" />")),
+                }
                 out.truncate(at);
                 out.push(Event::Html(CowStr::from(tag)));
                 open = None;
@@ -283,7 +291,7 @@ pub fn export_to_plaintext(markdown: &str) -> String {
         match event {
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { .. }) => {
                 in_image = true;
-                width_suffix = written_width(markdown, &range).map(|w| format!("|{w}"));
+                width_suffix = written_size(markdown, &range).map(|(w, h)| size_suffix(Some(w), h));
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Image) => {
                 in_image = false;
@@ -473,6 +481,23 @@ mod tests {
         let rows = vec![vec!["1".to_string(), "2".to_string()]];
         let out = format_markdown_table(&headers, &rows);
         assert_eq!(out, "| A | B |\n| :--- | :--- |\n| 1 | 2 |\n");
+    }
+
+    #[test]
+    fn html_export_writes_a_width_and_height_and_text_export_drops_them() {
+        let md = "![cat|200x100](c.png)\n\nafter";
+        let html = markdown_to_html_body_in(md, None, None);
+        assert!(
+            html.contains(
+                r#"<img src="c.png" alt="cat" width="200" height="100" style="height: auto; aspect-ratio: 200 / 100" />"#
+            ),
+            "{html}"
+        );
+        let text = export_to_plaintext(md);
+        assert!(
+            text.contains("cat") && !text.contains('|') && !text.contains("200"),
+            "{text}"
+        );
     }
 
     #[test]

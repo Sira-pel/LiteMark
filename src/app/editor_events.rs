@@ -1,7 +1,7 @@
 //! Editor keyboard and mouse events, including table chrome.
 
 use super::*;
-use crate::ui::note_images::{drag_width, handle_grab_area, ImageDrag};
+use crate::ui::note_images::{handle_at, ImageDrag};
 
 impl LiteMarkApp {
     pub(super) fn editor_backspace(&mut self, _cx: &mut App) {
@@ -268,10 +268,10 @@ impl LiteMarkApp {
         if let Some(drag) = self.image_drag.take() {
             // The note changes once, when the drag ends, and not at all for
             // a press on the handle that never moved.
-            if drag.width != drag.start_width {
-                let width = f32::from(drag.width).round() as u32;
+            if drag.moved() {
+                let (width, height) = drag.result();
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.set_picture_width_at(drag.range, Some(width));
+                    tab.set_picture_size_at(drag.range, Some(width), height);
                 }
             }
             window.refresh();
@@ -325,9 +325,14 @@ impl LiteMarkApp {
         else {
             return false;
         };
-        if !handle_grab_area(bounds).contains(&event.position) {
+        let Some(axis) = handle_at(bounds, &event.position) else {
             return false;
-        }
+        };
+        let had_height = self
+            .active_tab()
+            .and_then(|tab| tab.content.get(range.clone()))
+            .and_then(crate::markdown::image::parse_image_line)
+            .is_some_and(|image| image.height.is_some());
         self.focus_handle.focus(window);
         self.applied_focus = Some(FocusSlot::Editor);
         self.field_focus = TextInput::Editor;
@@ -335,10 +340,15 @@ impl LiteMarkApp {
         self.table_drag = None;
         self.image_drag = Some(ImageDrag {
             range,
+            axis,
             start_x: event.position.x,
+            start_y: event.position.y,
             start_width: bounds.size.width,
+            start_height: bounds.size.height,
             column,
             width: bounds.size.width,
+            height: bounds.size.height,
+            had_height,
         });
         window.refresh();
         cx.notify();
@@ -514,13 +524,12 @@ impl LiteMarkApp {
             return;
         }
         if let Some(drag) = self.image_drag.as_mut() {
-            let width = drag_width(
-                drag.start_width,
+            let before = (drag.width, drag.height);
+            drag.update(
                 event.position.x - drag.start_x,
-                drag.column,
+                event.position.y - drag.start_y,
             );
-            if width != drag.width {
-                drag.width = width;
+            if (drag.width, drag.height) != before {
                 cx.notify();
             }
             return;
