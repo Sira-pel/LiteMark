@@ -288,6 +288,16 @@ impl LiteMarkApp {
                 self.refresh_find();
             }
         }
+        // A click that only places the caret is the start of typing: the
+        // pointer steps aside until the mouse moves.
+        if self.selecting
+            && event.button == MouseButton::Left
+            && self
+                .active_tab()
+                .is_some_and(|tab| tab.selection_range().is_empty() && !tab.is_read_only())
+        {
+            self.pointer_hidden = true;
+        }
         if self.selecting {
             self.selecting = false;
         }
@@ -479,6 +489,10 @@ impl LiteMarkApp {
     }
 
     pub(super) fn editor_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.pointer_hidden {
+            self.pointer_hidden = false;
+            cx.notify();
+        }
         // A move with no button means the originating press is over. On X11
         // a release outside the window is never delivered (no grab); the
         // first in-window move after that has pressed_button None. Wayland's
@@ -685,6 +699,7 @@ impl LiteMarkApp {
             table_hover: self.table_hover.clone(),
             table_drag: self.table_drag.clone(),
             image_drag: self.image_drag.clone(),
+            pointer_hidden: self.pointer_hidden,
             table_hot: self.table_hot.clone(),
             table_pressed: self.table_pressed,
             table_hover_fill: theme.bg_hover.into(),
