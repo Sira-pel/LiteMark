@@ -1272,6 +1272,8 @@ fn fits_one_row(
 pub struct CharWidths {
     ascii: [u16; 128],
     other: u16,
+    /// A typical Khmer letter, which is wider than a Latin one.
+    khmer: u16,
     /// Width of the widest char, for the one-row fast path.
     max: usize,
     /// Width of a `0`, the unit a tab stop is counted in.
@@ -1305,14 +1307,49 @@ impl CharWidths {
         Self {
             ascii,
             other,
+            khmer: other,
             max: usize::from(widest),
             unit: usize::from(unit.max(1)),
         }
     }
 
+    /// Use `khmer` for the width of Khmer letters.
+    pub fn with_khmer(mut self, khmer: u16) -> Self {
+        self.khmer = khmer.max(1);
+        self.max = self.max.max(usize::from(self.khmer));
+        self
+    }
+
+    /// Width of `ch` when it follows `prev` in the text. A Khmer subscript
+    /// consonant (the one after a coeng, U+17D2) is drawn under the letter
+    /// before it, so it takes no room.
+    pub fn width_after(&self, prev: Option<char>, ch: char) -> usize {
+        if prev == Some('\u{17D2}') && matches!(ch as u32, 0x1780..=0x17A2) {
+            return 0;
+        }
+        self.width(ch)
+    }
+
     pub fn width(&self, ch: char) -> usize {
         if ch.is_ascii() {
             return usize::from(self.ascii[ch as usize]);
+        }
+        // Marks drawn on or under the letter before them take no room:
+        // combining accents, Khmer above/below vowels, signs and the coeng,
+        // zero-width characters and variation selectors.
+        if matches!(
+            ch as u32,
+            0x0300..=0x036F
+                | 0x17B4..=0x17B5
+                | 0x17B7..=0x17BD
+                | 0x17C6
+                | 0x17C9..=0x17D3
+                | 0x17DD
+                | 0x200B..=0x200F
+                | 0x20D0..=0x20FF
+                | 0xFE00..=0xFE0F
+        ) {
+            return 0;
         }
         let wide = matches!(
             ch as u32,
@@ -1326,6 +1363,11 @@ impl CharWidths {
                 | 0x1F300..=0x1FAFF
                 | 0x20000..=0x3FFFD
         );
+        if matches!(ch as u32, 0x1780..=0x17FF) {
+            // Dependent vowels that sit beside a letter are narrower than one.
+            let beside = matches!(ch as u32, 0x17B6 | 0x17BE..=0x17C5 | 0x17C7 | 0x17C8);
+            return usize::from(if beside { self.khmer / 2 } else { self.khmer }.max(1));
+        }
         usize::from(self.other) * if wide { 2 } else { 1 }
     }
 }
@@ -1359,11 +1401,12 @@ fn push_wrapped(
         let mut col = 0usize;
         let mut max_next = index;
         while max_next < chars.len() {
+            let prev = (max_next > index).then(|| chars[max_next - 1].1);
             let width = if tab_width > 0 && chars[max_next].1 == '\t' {
                 let stop = tab_width * widths.unit;
                 stop - col % stop
             } else {
-                widths.width(chars[max_next].1)
+                widths.width_after(prev, chars[max_next].1)
             };
             if col + width > wrap_cols && max_next > index {
                 break;
@@ -2040,6 +2083,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn marks_that_stack_on_a_letter_take_no_room() {
+        let widths = narrow_i_wide_w();
+        assert_eq!(widths.width('\u{301}'), 0);
+        assert_eq!(widths.width('\u{17D2}'), 0);
+        assert_eq!(widths.width('\u{17B7}'), 0);
+        assert_eq!(widths.width_after(Some('\u{17D2}'), '\u{1780}'), 0);
+        assert_eq!(widths.width_after(None, '\u{1780}'), 10);
+        // Letter, coeng, subscript letter, above vowel: one letter wide.
+        let cluster = "\u{1780}\u{17D2}\u{1780}\u{17B7}";
+        let text = cluster.repeat(5);
+        // Budget 30 holds three clusters, and a row never ends inside one.
+        let rows = visual_rows_measured(&text, 30, 0, &widths);
+        assert_eq!(rows.len(), 2);
+        let first = &text[rows[0].0..rows[0].1];
+        assert_eq!(first.chars().count(), 12);
     }
 
     #[test]
