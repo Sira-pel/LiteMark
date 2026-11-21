@@ -79,6 +79,8 @@ pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
     let on_close = props.on_close;
     let root = div()
         .id("outline")
+        // The editor's I-beam stops at the card.
+        .occlude()
         .absolute()
         .top(px(OUTLINE_EDGE))
         .on_hover(move |hovered, window, cx| on_hover(*hovered, window, cx));

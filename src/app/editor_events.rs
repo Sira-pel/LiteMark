@@ -274,7 +274,12 @@ impl LiteMarkApp {
             // a press on the handle that never moved.
             if drag.moved() {
                 let (width, height) = drag.result();
-                if let Some(tab) = self.active_tab_mut().filter(|tab| tab.id == drag.tab_id) {
+                // Only if the note still holds the same picture there: typing,
+                // undo or a reload mid-drag may have moved or changed it.
+                if let Some(tab) = self.active_tab_mut().filter(|tab| {
+                    tab.id == drag.tab_id
+                        && tab.content.get(drag.range.clone()) == Some(drag.source.as_str())
+                }) {
                     tab.set_picture_size_at(drag.range, Some(width), height);
                 }
             }
@@ -352,9 +357,16 @@ impl LiteMarkApp {
             .active_tab()
             .map(|tab| tab.id.clone())
             .unwrap_or_default();
+        let source = self
+            .active_tab()
+            .and_then(|tab| tab.content.get(range.clone()))
+            .unwrap_or_default()
+            .to_string();
         self.image_drag = Some(ImageDrag {
             range,
             tab_id,
+            source,
+            active: false,
             axis,
             start_x: event.position.x,
             start_y: event.position.y,

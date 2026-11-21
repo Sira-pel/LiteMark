@@ -257,6 +257,10 @@ pub const HANDLE_SIZE: Pixels = px(10.0);
 /// Side of the area that grabs the handle, larger than what is drawn.
 pub const HANDLE_GRAB: Pixels = px(18.0);
 
+/// How far the pointer must travel before a press on a handle is a drag, so a
+/// click that wobbles by a pixel does not write a size.
+pub const DRAG_SLOP: f32 = 3.0;
+
 /// Which edge of a picture a drag holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DragAxis {
@@ -276,6 +280,11 @@ pub struct ImageDrag {
     pub range: std::ops::Range<usize>,
     /// The tab the picture is in, so a drag never lands in another note.
     pub tab_id: String,
+    /// The picture's Markdown when the drag began. The size is written only
+    /// if the note still holds exactly this there when the drag ends.
+    pub source: String,
+    /// The pointer has moved far enough to count as a drag, not a click.
+    pub active: bool,
     pub axis: DragAxis,
     pub start_x: Pixels,
     pub start_y: Pixels,
@@ -310,6 +319,12 @@ impl ImageDrag {
 
     /// The drag moved by (`dx`, `dy`) from where it was grabbed.
     pub fn update(&mut self, dx: Pixels, dy: Pixels) {
+        if !self.active {
+            if f32::from(dx).abs().max(f32::from(dy).abs()) < DRAG_SLOP {
+                return;
+            }
+            self.active = true;
+        }
         let (w, h) = drag_size(
             self.axis,
             (self.start_width, self.start_height),
@@ -512,11 +527,39 @@ mod tests {
     }
 
     #[test]
+    fn a_wobble_under_the_slop_is_not_a_drag() {
+        let mut d = ImageDrag {
+            range: 0..0,
+            tab_id: String::new(),
+            source: String::new(),
+            active: false,
+            axis: DragAxis::Right,
+            start_x: px(0.0),
+            start_y: px(0.0),
+            start_width: px(200.0),
+            start_height: px(100.0),
+            column: px(700.0),
+            width: px(200.0),
+            height: px(100.0),
+            had_height: false,
+        };
+        d.update(px(2.0), px(-2.0));
+        assert!(!d.moved());
+        d.update(px(10.0), px(0.0));
+        assert!(d.moved());
+        // Once going, coming back near the start still follows the pointer.
+        d.update(px(1.0), px(0.0));
+        assert_eq!(f32::from(d.width), 201.0);
+    }
+
+    #[test]
     fn a_drag_writes_only_what_it_changed() {
         let drag = |axis, had_height| {
             let mut d = ImageDrag {
                 range: 0..0,
                 tab_id: String::new(),
+                source: String::new(),
+                active: false,
                 axis,
                 start_x: px(0.0),
                 start_y: px(0.0),
