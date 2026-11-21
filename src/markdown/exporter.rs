@@ -1,4 +1,6 @@
-use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
+use crate::markdown::image::parse_image_line;
+use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
+use std::ops::Range;
 use std::path::Path;
 
 /// Largest local image embedded in an HTML export.
@@ -86,7 +88,8 @@ pub fn markdown_to_html_body_in(
     options.insert(Options::ENABLE_TASKLISTS);
 
     let mut budget = MAX_EMBED_TOTAL;
-    let parser = Parser::new_ext(markdown, options).map(|event| match (event, base_dir) {
+    let parser = Parser::new_ext(markdown, options).into_offset_iter();
+    let parser = parser.map(|(event, range)| match (event, base_dir) {
         (
             Event::Start(Tag::Image {
                 link_type,
@@ -99,18 +102,82 @@ pub fn markdown_to_html_body_in(
             let scope = scope.unwrap_or(base);
             let dest_url =
                 embedded_image(&dest_url, base, scope, &mut budget).map_or(dest_url, CowStr::from);
-            Event::Start(Tag::Image {
-                link_type,
-                dest_url,
-                title,
-                id,
-            })
+            (
+                Event::Start(Tag::Image {
+                    link_type,
+                    dest_url,
+                    title,
+                    id,
+                }),
+                range,
+            )
         }
-        (event, _) => event,
+        (event, _) => (event, range),
     });
     let mut html_output = String::new();
-    html::push_html(&mut html_output, parser);
+    html::push_html(
+        &mut html_output,
+        with_image_widths(markdown, parser).into_iter(),
+    );
     html_output
+}
+
+/// The width of the image written at `range` of `markdown`: the same rule the
+/// editor uses, so `a\|200` (an escaped bar) has none.
+fn written_width(markdown: &str, range: &Range<usize>) -> Option<u32> {
+    parse_image_line(markdown.get(range.clone())?)?.width
+}
+
+/// Turns each `![alt|200](src)` into an `<img>` with `width="200"`. The alt
+/// text reaches the parser's events as text between the image's start and
+/// end, so it is gathered here; images without a width pass through as is.
+fn with_image_widths<'a>(
+    markdown: &str,
+    events: impl Iterator<Item = (Event<'a>, Range<usize>)>,
+) -> Vec<Event<'a>> {
+    let mut out: Vec<Event<'a>> = Vec::new();
+    let mut open: Option<(usize, String, Option<u32>)> = None;
+    for (event, range) in events {
+        if matches!(event, Event::Start(Tag::Image { .. })) {
+            open = Some((out.len(), String::new(), written_width(markdown, &range)));
+        } else if let Some((_, alt, _)) = open.as_mut() {
+            match &event {
+                Event::Text(t) | Event::Code(t) => alt.push_str(t),
+                Event::SoftBreak | Event::HardBreak => alt.push(' '),
+                _ => {}
+            }
+        }
+        if let (Event::End(TagEnd::Image), Some((at, alt, width))) = (&event, &open) {
+            let at = *at;
+            let plain = alt
+                .strip_suffix(&format!("|{}", width.unwrap_or(0)))
+                .unwrap_or(alt);
+            if let (
+                Some(width),
+                Event::Start(Tag::Image {
+                    dest_url, title, ..
+                }),
+            ) = (width, &out[at])
+            {
+                let mut tag = format!(
+                    "<img src=\"{}\" alt=\"{}\"",
+                    escape_html_text(dest_url),
+                    escape_html_text(plain)
+                );
+                if !title.is_empty() {
+                    tag.push_str(&format!(" title=\"{}\"", escape_html_text(title)));
+                }
+                tag.push_str(&format!(" width=\"{width}\" />"));
+                out.truncate(at);
+                out.push(Event::Html(CowStr::from(tag)));
+                open = None;
+                continue;
+            }
+            open = None;
+        }
+        out.push(event);
+    }
+    out
 }
 
 /// File stem with one extension removed. `a.txt` becomes `a`, not `a.txt`.
@@ -204,13 +271,31 @@ pub fn export_to_plaintext(markdown: &str) -> String {
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
 
-    let parser = Parser::new_ext(markdown, options);
+    let parser = Parser::new_ext(markdown, options).into_offset_iter();
     let mut text_output = String::new();
     let mut list_stack: Vec<Option<u64>> = Vec::new();
     let mut first_cell_in_row = false;
+    // The `|200` to cut from the alt text of the image being read.
+    let mut width_suffix: Option<String> = None;
+    let mut in_image = false;
 
-    for event in parser {
+    for (event, range) in parser {
         match event {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { .. }) => {
+                in_image = true;
+                width_suffix = written_width(markdown, &range).map(|w| format!("|{w}"));
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Image) => {
+                in_image = false;
+                width_suffix = None;
+            }
+            pulldown_cmark::Event::Text(t) if in_image => {
+                let text = width_suffix
+                    .as_deref()
+                    .and_then(|suffix| t.strip_suffix(suffix))
+                    .unwrap_or(&t);
+                text_output.push_str(text);
+            }
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::List(start)) => {
                 if !list_stack.is_empty() && !text_output.ends_with('\n') {
                     text_output.push('\n');
@@ -388,6 +473,54 @@ mod tests {
         let rows = vec![vec!["1".to_string(), "2".to_string()]];
         let out = format_markdown_table(&headers, &rows);
         assert_eq!(out, "| A | B |\n| :--- | :--- |\n| 1 | 2 |\n");
+    }
+
+    #[test]
+    fn html_export_writes_the_image_width() {
+        let html = markdown_to_html_body_in(
+            "![a \"cat\"|200](c.png \"T\")
+
+![plain](p.png)
+
+![a|b](q.png)
+
+![e\\|200](r.png)",
+            None,
+            None,
+        );
+        assert!(
+            html.contains(r#"<img src="r.png" alt="e|200" />"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<img src="c.png" alt="a &quot;cat&quot;" title="T" width="200" />"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<img src="p.png" alt="plain" />"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<img src="q.png" alt="a|b" />"#), "{html}");
+    }
+
+    #[test]
+    fn a_sized_image_is_still_embedded() {
+        let dir = std::env::temp_dir().join(format!("litemark-export-w-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets/a b.png"), b"abcd").unwrap();
+        let html = markdown_to_html_body_in("![x|50](<assets/a b.png>)", Some(&dir), None);
+        assert!(
+            html.contains("src=\"data:image/png;base64,YWJjZA==\""),
+            "{html}"
+        );
+        assert!(html.contains("width=\"50\""), "{html}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn text_export_drops_the_width_from_the_alt() {
+        assert_eq!(export_to_plaintext("![cat|200](c.png)"), "cat");
+        assert_eq!(export_to_plaintext("![a|b](c.png)"), "a|b");
     }
 
     #[test]

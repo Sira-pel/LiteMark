@@ -37,6 +37,16 @@ impl LiteMarkApp {
         }
     }
 
+    /// F3: step the selected picture through its preset widths.
+    pub(super) fn editor_cycle_picture_size(&mut self, _cx: &mut App) {
+        if self.input_blocked() || !document_accepts_keystrokes(self.field_focus) {
+            return;
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.cycle_picture_size();
+        }
+    }
+
     pub(super) fn editor_newline(&mut self, _cx: &mut App) {
         self.dispatch_editor_input(EditorInput::Newline);
     }

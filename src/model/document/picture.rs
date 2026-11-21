@@ -5,7 +5,10 @@
 //! raw Markdown until the caret leaves the line.
 
 use super::*;
-use crate::markdown::image::parse_image_line;
+use crate::markdown::image::{parse_image_line, set_image_width};
+
+/// Widths in pixels that `cycle_picture_size` steps through: small, medium, large.
+pub const PICTURE_SIZES: [u32; 3] = [200, 400, 600];
 
 impl DocumentTab {
     /// The source range (without line ending) of the picture block at
@@ -64,6 +67,55 @@ impl DocumentTab {
         self.caret.move_to(block.end);
         self.refresh_cursor();
         true
+    }
+
+    /// Set the width of the picture at the caret or selection (`None` removes
+    /// it, back to fitting the column) as one undo step; the picture stays
+    /// selected.
+    pub fn set_picture_width(&mut self, width: Option<u32>) -> bool {
+        let at = self.selection_range().start;
+        let Some(block) = self.picture_block_at(at) else {
+            return false;
+        };
+        let Some(line) = self.content.get(block.clone()) else {
+            return false;
+        };
+        let Some(new) = set_image_width(line, width) else {
+            return false;
+        };
+        if new == line {
+            return true;
+        }
+        self.history.seal();
+        let end = block.start + new.len();
+        self.edit(block.clone(), &new);
+        self.select_picture(block.start..end);
+        self.history.seal();
+        true
+    }
+
+    /// Step the picture through Small, Medium, Large and back to its natural
+    /// fit. A width that is not a preset starts again at Small.
+    pub fn cycle_picture_size(&mut self) -> bool {
+        let at = self.selection_range().start;
+        let Some(block) = self.picture_block_at(at) else {
+            return false;
+        };
+        let current = self
+            .content
+            .get(block)
+            .and_then(parse_image_line)
+            .and_then(|image| image.width);
+        let next = match current {
+            None => Some(PICTURE_SIZES[0]),
+            Some(w) => PICTURE_SIZES
+                .iter()
+                .position(|&size| size == w)
+                .map_or(Some(PICTURE_SIZES[0]), |i| {
+                    PICTURE_SIZES.get(i + 1).copied()
+                }),
+        };
+        self.set_picture_width(next)
     }
 
     /// End the current undo group (input-method text has been committed).

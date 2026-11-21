@@ -24,8 +24,8 @@ use crate::model::ViewMode;
 use crate::theme::sz;
 
 use super::note_images::{
-    ellipsize, fit_image, placeholder_height, ImageSizeCache, IMAGE_MARGIN_Y, IMAGE_RADIUS,
-    MAX_IMAGE_HEIGHT,
+    ellipsize, fit_image, fit_image_width, placeholder_height, ImageSizeCache, IMAGE_MARGIN_Y,
+    IMAGE_RADIUS, MAX_IMAGE_HEIGHT,
 };
 
 #[derive(Clone)]
@@ -2459,15 +2459,18 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         .iter()
                         .any(|&a| a + 2 >= line_idx && a <= line_idx + 2);
                     let placeholder_h = placeholder_height(self.font_size);
+                    // An explicit `|width` wins over the height limit.
+                    let fit = |natural: (u32, u32)| match image.width {
+                        Some(w) => fit_image_width(natural, w, content_width),
+                        None => fit_image(natural, content_width, MAX_IMAGE_HEIGHT),
+                    };
                     // Local pictures: the cached size first (no file access),
                     // then a re-check once the block is known to be on screen.
                     let mut picture: Option<(PathBuf, Size<Pixels>)> = None;
                     if let ImageTarget::Local(path) = &target {
                         image_paths.insert(path.clone());
                         let mut natural = image_cache.size(path, false);
-                        let guess = natural.map_or(placeholder_h, |n| {
-                            fit_image(n, content_width, MAX_IMAGE_HEIGHT).1
-                        });
+                        let guess = natural.map_or(placeholder_h, |n| fit(n).1);
                         if band.contains(cur_y, guess + IMAGE_MARGIN_Y * 2.0) || near_anchor {
                             let (checked, changed) = image_cache.size_checked(path, true);
                             natural = checked;
@@ -2478,13 +2481,18 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             }
                         }
                         picture = natural.map(|n| {
-                            let (w, h) = fit_image(n, content_width, MAX_IMAGE_HEIGHT);
+                            let (w, h) = fit(n);
                             (path.clone(), size(w, h))
                         });
                     }
                     let block_size = match &picture {
                         Some((_, picture_size)) => *picture_size,
-                        None => size(content_width, placeholder_h),
+                        None => size(
+                            image
+                                .width
+                                .map_or(content_width, |w| px(w as f32).min(content_width)),
+                            placeholder_h,
+                        ),
                     };
                     let row_h = block_size.height + IMAGE_MARGIN_Y * 2.0;
                     let block_bounds =
@@ -2541,9 +2549,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                     ImageTarget::Remote(url) => url.clone(),
                                     _ => "Image not found".to_string(),
                                 };
-                                let max_chars =
-                                    ((content_width - px(24.0)) / char_width).floor().max(4.0)
-                                        as usize;
+                                let max_chars = ((block_size.width - px(24.0)) / char_width)
+                                    .floor()
+                                    .max(4.0)
+                                    as usize;
                                 let text_line_h = self.font_size * 1.65;
                                 for (i, (text, color, fs)) in [
                                     (alt, self.text_color, self.font_size),

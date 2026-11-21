@@ -186,6 +186,15 @@ pub fn fit_image(
     (px((nw * scale).max(1.0)), px((nh * scale).max(1.0)))
 }
 
+/// The size for a picture given an explicit `width`: that width (enlarging
+/// the picture if need be, but never past `content_width`), aspect ratio
+/// kept. The height limit of `fit_image` does not apply.
+pub fn fit_image_width(natural: (u32, u32), width: u32, content_width: Pixels) -> (Pixels, Pixels) {
+    let (nw, nh) = (natural.0.max(1) as f32, natural.1.max(1) as f32);
+    let w = (width as f32).min(f32::from(content_width)).max(1.0);
+    (px(w), px((nh * w / nw).max(1.0)))
+}
+
 /// Height of the box shown instead of a picture that can't be drawn:
 /// two text lines and padding.
 pub fn placeholder_height(font_size: Pixels) -> Pixels {
@@ -218,6 +227,17 @@ mod tests {
         let (w, h) = fit_image((1000, 4000), px(700.0), MAX_IMAGE_HEIGHT);
         assert_eq!(f32::from(h), 480.0);
         assert_eq!(f32::from(w), 120.0);
+    }
+
+    #[test]
+    fn an_explicit_width_enlarges_but_stays_in_the_column() {
+        let (w, h) = fit_image_width((100, 50), 300, px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (300.0, 150.0));
+        // The height limit does not apply to a tall picture.
+        let (w, h) = fit_image_width((100, 800), 400, px(700.0));
+        assert_eq!((f32::from(w), f32::from(h)), (400.0, 3200.0));
+        let (w, _) = fit_image_width((100, 50), 900, px(700.0));
+        assert_eq!(f32::from(w), 700.0);
     }
 
     #[test]

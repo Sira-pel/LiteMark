@@ -101,6 +101,7 @@ actions!(
         EditorNewline,
         EditorPlainNewline,
         EditorEditPicture,
+        EditorCyclePictureSize,
         EditorTableRowBelow,
         EditorMoveLineUp,
         EditorMoveLineDown,

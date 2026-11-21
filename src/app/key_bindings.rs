@@ -827,6 +827,11 @@ impl LiteMarkApp {
             window.refresh();
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &EditorCyclePictureSize, window, cx| {
+            this.editor_cycle_picture_size(cx);
+            window.refresh();
+            cx.notify();
+        }))
         .on_action(cx.listener(|this, _: &EditorPlainNewline, window, cx| {
             this.editor_plain_newline(cx);
             window.refresh();
