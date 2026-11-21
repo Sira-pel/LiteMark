@@ -1165,6 +1165,8 @@ pub struct EditorElement<V: 'static> {
     pub table_pressed: bool,
     /// A picture being resized by its handle: drawn at the dragged width.
     pub image_drag: Option<super::note_images::ImageDrag>,
+    /// Hide the mouse pointer over the text (after typing).
+    pub pointer_hidden: bool,
     pub table_hover_fill: Hsla,
     pub table_active_fill: Hsla,
     /// Folder of the note, for relative image paths; `None` for an unsaved note.
@@ -1242,6 +1244,8 @@ pub struct Prepaint {
     images: Vec<AnyElement>,
     pictures: Vec<(Range<usize>, Bounds<Pixels>)>,
     picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)>,
+    /// Mouse-cursor regions, least specific first so a later one wins.
+    cursor_hitboxes: Vec<(CursorStyle, Hitbox)>,
     image_cache: ImageSizeCache,
 }
 
@@ -1621,6 +1625,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 images: Vec::new(),
                 pictures: Vec::new(),
                 picture_handle: None,
+                cursor_hitboxes: Vec::new(),
                 image_cache: std::mem::take(&mut self.paint.borrow_mut().images),
             };
         }
@@ -3158,6 +3163,32 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
 
         image_cache.retain_paths(&image_paths);
         let total_height = (cur_y - bounds.top() + px(32.0)).max(px(64.0));
+        // The text is an I-beam; a picture is a plain arrow, and its resize
+        // handle a diagonal arrow. Later hitboxes win where they overlap.
+        let text_cursor = if self.pointer_hidden && self.image_drag.is_none() {
+            CursorStyle::None
+        } else {
+            CursorStyle::IBeam
+        };
+        let mut cursor_hitboxes = vec![(
+            text_cursor,
+            window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        )];
+        for (_, b) in &pictures {
+            cursor_hitboxes.push((
+                CursorStyle::Arrow,
+                window.insert_hitbox(*b, HitboxBehavior::Normal),
+            ));
+        }
+        if let Some((_, b, _)) = &picture_handle {
+            cursor_hitboxes.push((
+                CursorStyle::ResizeUpLeftDownRight,
+                window.insert_hitbox(
+                    super::note_images::handle_grab_area(*b),
+                    HitboxBehavior::Normal,
+                ),
+            ));
+        }
         Prepaint {
             rows,
             numbers: Vec::new(),
@@ -3178,6 +3209,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             images,
             pictures,
             picture_handle,
+            cursor_hitboxes,
             image_cache,
         }
     }
@@ -3279,10 +3311,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             window.paint_quad(cursor);
         }
         // A resize cursor over the picture handle, and all through a drag.
-        let over_handle = prepaint.picture_handle.as_ref().is_some_and(|(_, b, _)| {
-            super::note_images::handle_grab_area(*b).contains(&window.mouse_position())
-        });
-        if over_handle || self.image_drag.is_some() {
+        for (style, hitbox) in &prepaint.cursor_hitboxes {
+            window.set_cursor_style(*style, hitbox);
+        }
+        if self.image_drag.is_some() {
             window.set_window_cursor_style(CursorStyle::ResizeUpLeftDownRight);
         }
 
