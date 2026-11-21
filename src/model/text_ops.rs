@@ -1173,10 +1173,22 @@ pub fn visual_rows(content: &str, wrap_cols: usize) -> Vec<(usize, usize)> {
 
 /// Like `visual_rows`, but a `\t` counts as the columns up to the next
 /// `tab_width` stop (measured from the row start). `tab_width` 0 counts a tab as one column.
+#[cfg(test)]
 pub fn visual_rows_tabbed(
     content: &str,
     wrap_cols: usize,
     tab_width: usize,
+) -> Vec<(usize, usize)> {
+    visual_rows_measured(content, wrap_cols, tab_width, &CharWidths::uniform())
+}
+
+/// Like `visual_rows_tabbed`, but `wrap_cols` is a width budget in the units
+/// of `widths`, so narrow letters pack more to a row than wide ones.
+pub fn visual_rows_measured(
+    content: &str,
+    wrap_cols: usize,
+    tab_width: usize,
+    widths: &CharWidths,
 ) -> Vec<(usize, usize)> {
     let mut rows = Vec::new();
     let bytes = content.as_bytes();
@@ -1184,7 +1196,7 @@ pub fn visual_rows_tabbed(
     while let Some(rel) = memchr::memchr2(b'\n', b'\r', &bytes[line_start..]) {
         let line_end = line_start + rel;
         push_wrapped(
-            &mut rows, content, line_start, line_end, wrap_cols, tab_width,
+            &mut rows, content, line_start, line_end, wrap_cols, tab_width, widths,
         );
         line_start = if bytes[line_end] == b'\r' && bytes.get(line_end + 1) == Some(&b'\n') {
             line_end + 2
@@ -1199,6 +1211,7 @@ pub fn visual_rows_tabbed(
         content.len(),
         wrap_cols,
         tab_width,
+        widths,
     );
     if rows.is_empty() {
         rows.push((0, 0));
@@ -1208,7 +1221,17 @@ pub fn visual_rows_tabbed(
 
 /// Number of rows `visual_rows` would return, without building the list for
 /// content that fits on one row (the common case).
+#[cfg(test)]
 pub fn visual_row_count_tabbed(content: &str, wrap_cols: usize, tab_width: usize) -> usize {
+    visual_row_count_measured(content, wrap_cols, tab_width, &CharWidths::uniform())
+}
+
+pub fn visual_row_count_measured(
+    content: &str,
+    wrap_cols: usize,
+    tab_width: usize,
+    widths: &CharWidths,
+) -> usize {
     if wrap_cols == 0 || wrap_cols == usize::MAX {
         return count_line_endings(content.as_bytes()) + 1;
     }
@@ -1216,11 +1239,11 @@ pub fn visual_row_count_tabbed(content: &str, wrap_cols: usize, tab_width: usize
     let bytes = content.as_bytes();
     let mut line_start = 0usize;
     let mut tally = |start: usize, end: usize| {
-        count += if fits_one_row(content, start, end, wrap_cols, tab_width) {
+        count += if fits_one_row(content, start, end, wrap_cols, tab_width, widths) {
             1
         } else {
             let mut rows = Vec::new();
-            push_wrapped(&mut rows, content, start, end, wrap_cols, tab_width);
+            push_wrapped(&mut rows, content, start, end, wrap_cols, tab_width, widths);
             rows.len()
         };
     };
@@ -1237,16 +1260,132 @@ pub fn visual_row_count_tabbed(content: &str, wrap_cols: usize, tab_width: usize
     count
 }
 
-/// A line of at most `wrap_cols` bytes has at most that many chars, so it fits
-/// unless a tab widens it.
+/// A line of `n` bytes has at most `n` chars, each at most `widths.max` wide,
+/// so it fits unless a tab widens it.
 fn fits_one_row(
     content: &str,
     start: usize,
     end: usize,
     wrap_cols: usize,
     tab_width: usize,
+    widths: &CharWidths,
 ) -> bool {
-    end - start <= wrap_cols && (tab_width == 0 || !content[start..end].contains('\t'))
+    (end - start).saturating_mul(widths.max) <= wrap_cols
+        && (tab_width == 0 || !content[start..end].contains('\t'))
+}
+
+/// Width of each char in the units of a wrap budget. `uniform` is one unit
+/// per char (a column); a measured table holds the editor font's real widths.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CharWidths {
+    ascii: [u16; 128],
+    other: u16,
+    /// A typical Khmer letter, which is wider than a Latin one.
+    khmer: u16,
+    /// Width of the widest char, for the one-row fast path.
+    max: usize,
+    /// Width of a `0`, the unit a tab stop is counted in.
+    unit: usize,
+}
+
+impl Default for CharWidths {
+    fn default() -> Self {
+        Self::uniform()
+    }
+}
+
+impl CharWidths {
+    pub fn uniform() -> Self {
+        Self::from_ascii([1; 128], 1, 1)
+    }
+
+    /// `ascii[c]` is the width of char `c`; `other` is a typical non-ASCII
+    /// letter, and `unit` the width of a `0`. Widths are at least 1.
+    pub fn from_ascii(mut ascii: [u16; 128], other: u16, unit: u16) -> Self {
+        for w in ascii.iter_mut() {
+            *w = (*w).max(1);
+        }
+        let other = other.max(1);
+        let widest = ascii
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(1)
+            .max(other.saturating_mul(2));
+        Self {
+            ascii,
+            other,
+            khmer: other,
+            max: usize::from(widest),
+            unit: usize::from(unit.max(1)),
+        }
+    }
+
+    /// Use `khmer` for the width of Khmer letters.
+    pub fn with_khmer(mut self, khmer: u16) -> Self {
+        self.khmer = khmer.max(1);
+        self.max = self.max.max(usize::from(self.khmer));
+        self
+    }
+
+    /// Width of `ch` when it follows `prev` in the text. A Khmer subscript
+    /// consonant (the one after a coeng, U+17D2) is drawn under the letter
+    /// before it, so it takes no room.
+    pub fn width_after(&self, prev: Option<char>, ch: char) -> usize {
+        if prev == Some('\u{17D2}') && matches!(ch as u32, 0x1780..=0x17A2) {
+            return 0;
+        }
+        self.width(ch)
+    }
+
+    pub fn width(&self, ch: char) -> usize {
+        if ch.is_ascii() {
+            return usize::from(self.ascii[ch as usize]);
+        }
+        // Marks drawn on or under the letter before them take no room:
+        // combining accents, Khmer above/below vowels, signs and the coeng,
+        // zero-width characters and variation selectors.
+        if matches!(
+            ch as u32,
+            0x0300..=0x036F
+                | 0x17B4..=0x17B5
+                | 0x17B7..=0x17BD
+                | 0x17C6
+                | 0x17C9..=0x17D3
+                | 0x17DD
+                | 0x200B..=0x200F
+                | 0x20D0..=0x20FF
+                | 0xFE00..=0xFE0F
+        ) {
+            return 0;
+        }
+        let wide = matches!(
+            ch as u32,
+            0x1100..=0x115F
+                | 0x2E80..=0xA4CF
+                | 0xAC00..=0xD7A3
+                | 0xF900..=0xFAFF
+                | 0xFE30..=0xFE6F
+                | 0xFF00..=0xFF60
+                | 0xFFE0..=0xFFE6
+                | 0x1F300..=0x1FAFF
+                | 0x20000..=0x3FFFD
+        );
+        if matches!(ch as u32, 0x1780..=0x17FF) {
+            // Dependent vowels that sit beside a letter are narrower than one.
+            let beside = matches!(ch as u32, 0x17B6 | 0x17BE..=0x17C5 | 0x17C7 | 0x17C8);
+            return usize::from(if beside { self.khmer / 2 } else { self.khmer }.max(1));
+        }
+        usize::from(self.other) * if wide { 2 } else { 1 }
+    }
+}
+
+/// True when `ch` belongs to the cluster of `prev` and must stay on its row:
+/// a Khmer vowel, sign or coeng, the letter after a coeng (a subscript), or a
+/// combining mark.
+fn joins_previous(prev: char, ch: char) -> bool {
+    matches!(ch, '\u{17B6}'..='\u{17D3}' | '\u{17DD}' | '\u{0300}'..='\u{036F}')
+        || prev == '\u{17D2}'
 }
 
 fn push_wrapped(
@@ -1256,11 +1395,12 @@ fn push_wrapped(
     end: usize,
     wrap_cols: usize,
     tab_width: usize,
+    widths: &CharWidths,
 ) {
     if wrap_cols == 0
         || wrap_cols == usize::MAX
         || start >= end
-        || fits_one_row(content, start, end, wrap_cols, tab_width)
+        || fits_one_row(content, start, end, wrap_cols, tab_width, widths)
     {
         rows.push((start, end));
         return;
@@ -1277,10 +1417,12 @@ fn push_wrapped(
         let mut col = 0usize;
         let mut max_next = index;
         while max_next < chars.len() {
+            let prev = (max_next > index).then(|| chars[max_next - 1].1);
             let width = if tab_width > 0 && chars[max_next].1 == '\t' {
-                tab_width - col % tab_width
+                let stop = tab_width * widths.unit;
+                stop - col % stop
             } else {
-                1
+                widths.width_after(prev, chars[max_next].1)
             };
             if col + width > wrap_cols && max_next > index {
                 break;
@@ -1303,7 +1445,20 @@ fn push_wrapped(
             }
         }
 
-        let next = if let Some(b) = break_idx { b } else { max_next };
+        let mut next = if let Some(b) = break_idx { b } else { max_next };
+        // Never split a letter from the vowel, sign or subscript that
+        // belongs to it: back up to the start of its cluster, unless that
+        // would leave the row empty.
+        if break_idx.is_none() {
+            let mut at = next;
+            while at > index + 1 && at < chars.len() && joins_previous(chars[at - 1].1, chars[at].1)
+            {
+                at -= 1;
+            }
+            if at > index {
+                next = at;
+            }
+        }
 
         let row_end = if next < chars.len() {
             chars[next].0
@@ -1921,6 +2076,97 @@ mod tests {
                 started_line.elapsed()
             );
         }
+    }
+
+    fn narrow_i_wide_w() -> CharWidths {
+        let mut ascii = [10u16; 128];
+        ascii[b'i' as usize] = 4;
+        ascii[b'W' as usize] = 16;
+        CharWidths::from_ascii(ascii, 10, 10)
+    }
+
+    #[test]
+    fn a_row_never_starts_with_a_vowel_sign_or_a_subscript() {
+        // Letter, vowel, letter, vowel ...: a break after the second letter
+        // would leave a vowel alone at the start of the next row.
+        let word = "កាកាកា";
+        let rows = visual_rows(word, 3);
+        for (start, _) in &rows {
+            let first = word[*start..].chars().next().unwrap();
+            assert!(!matches!(first, '\u{17B6}'..='\u{17D3}'), "{rows:?}");
+        }
+        // Letter, coeng, letter is one cluster too.
+        let sub = "ក្កក្កក្ក";
+        let rows = visual_rows(sub, 4);
+        for (start, _) in &rows {
+            let prev = sub[..*start].chars().next_back();
+            assert_ne!(prev, Some('\u{17D2}'), "{rows:?}");
+        }
+        // A cluster wider than the row still takes at least one row, never none.
+        assert!(!visual_rows("កាាាា", 2).is_empty());
+    }
+
+    #[test]
+    fn narrow_letters_pack_more_to_a_row_than_wide_ones() {
+        let widths = narrow_i_wide_w();
+        // Budget 40: ten `i` (4 each) fit, but only two `W` (16 each).
+        let narrow = visual_rows_measured(&"i".repeat(20), 40, 0, &widths);
+        assert_eq!(narrow, vec![(0, 10), (10, 20)]);
+        let wide = visual_rows_measured(&"W".repeat(6), 40, 0, &widths);
+        assert_eq!(wide, vec![(0, 2), (2, 4), (4, 6)]);
+    }
+
+    #[test]
+    fn measured_row_count_matches_measured_rows() {
+        let widths = narrow_i_wide_w();
+        for text in [
+            "",
+            "iiii",
+            "WWWW WWWW iii",
+            "a\nWWWWWWW\r\ni i i i i i i i i i i i",
+        ] {
+            for budget in [1, 16, 40, 100] {
+                assert_eq!(
+                    visual_row_count_measured(text, budget, 0, &widths),
+                    visual_rows_measured(text, budget, 0, &widths).len(),
+                    "{text:?} at {budget}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn marks_that_stack_on_a_letter_take_no_room() {
+        let widths = narrow_i_wide_w();
+        assert_eq!(widths.width('\u{301}'), 0);
+        assert_eq!(widths.width('\u{17D2}'), 0);
+        assert_eq!(widths.width('\u{17B7}'), 0);
+        assert_eq!(widths.width_after(Some('\u{17D2}'), '\u{1780}'), 0);
+        assert_eq!(widths.width_after(None, '\u{1780}'), 10);
+        // Letter, coeng, subscript letter, above vowel: one letter wide.
+        let cluster = "\u{1780}\u{17D2}\u{1780}\u{17B7}";
+        let text = cluster.repeat(5);
+        // Budget 30 holds three clusters, and a row never ends inside one.
+        let rows = visual_rows_measured(&text, 30, 0, &widths);
+        assert_eq!(rows.len(), 2);
+        let first = &text[rows[0].0..rows[0].1];
+        assert_eq!(first.chars().count(), 12);
+    }
+
+    #[test]
+    fn uniform_widths_wrap_like_columns() {
+        let widths = CharWidths::uniform();
+        assert_eq!(
+            visual_rows_measured("hello world test", 8, 0, &widths),
+            visual_rows("hello world test", 8)
+        );
+    }
+
+    #[test]
+    fn wide_non_ascii_chars_count_double() {
+        let widths = narrow_i_wide_w();
+        assert_eq!(widths.width('字'), 20);
+        assert_eq!(widths.width('é'), 10);
     }
 
     #[test]
