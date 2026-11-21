@@ -12,6 +12,8 @@ pub struct ImageLine {
     pub alt: String,
     pub target: String,
     pub title: Option<String>,
+    /// Width in pixels from `![alt|200](path)`: the alt text ends in `|` and digits.
+    pub width: Option<u32>,
 }
 
 /// Parses `line` as an image line. Surrounding whitespace is allowed; any
@@ -19,22 +21,9 @@ pub struct ImageLine {
 pub fn parse_image_line(line: &str) -> Option<ImageLine> {
     let line = line.trim();
     let rest = line.strip_prefix("![")?;
-    let bytes = rest.as_bytes();
-
-    // Alt text: up to the matching `]`, allowing nested brackets and `\]`.
-    let mut depth = 0usize;
-    let mut i = 0usize;
-    let alt_end = loop {
-        match *bytes.get(i)? {
-            b'\\' => i += 1,
-            b'[' => depth += 1,
-            b']' if depth == 0 => break i,
-            b']' => depth -= 1,
-            _ => {}
-        }
-        i += 1;
-    };
-    let alt = unescape(&rest[..alt_end]);
+    let alt_end = alt_end(rest)?;
+    let (alt_raw, width) = split_alt_width(&rest[..alt_end]);
+    let alt = unescape(alt_raw);
     let after = rest[alt_end + 1..].strip_prefix('(')?;
     let after = after.trim_start();
 
@@ -99,7 +88,63 @@ pub fn parse_image_line(line: &str) -> Option<ImageLine> {
     if after != ")" {
         return None;
     }
-    Some(ImageLine { alt, target, title })
+    Some(ImageLine {
+        alt,
+        target,
+        title,
+        width,
+    })
+}
+
+/// Where the alt text of `rest` (the text after `![`) ends: the matching `]`,
+/// allowing nested brackets and `\]`.
+fn alt_end(rest: &str) -> Option<usize> {
+    let bytes = rest.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    loop {
+        match *bytes.get(i)? {
+            b'\\' => i += 1,
+            b'[' => depth += 1,
+            b']' if depth == 0 => return Some(i),
+            b']' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Splits raw alt text `alt|200` into the alt and its width. The part after
+/// the last unescaped `|` counts only when it is 1 to 4 digits and not zero;
+/// anything else stays part of the alt.
+pub fn split_alt_width(raw: &str) -> (&str, Option<u32>) {
+    let Some(bar) = raw.rfind('|') else {
+        return (raw, None);
+    };
+    let digits = &raw[bar + 1..];
+    let escaped = raw[..bar].ends_with('\\');
+    let valid = (1..=4).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit());
+    match digits.parse::<u32>() {
+        Ok(width) if valid && !escaped && width > 0 => (&raw[..bar], Some(width)),
+        _ => (raw, None),
+    }
+}
+
+/// `line` (a whole image line) with its width set to `width`, or removed for
+/// `None`. Only the alt text changes; the target and title stay as written.
+pub fn set_image_width(line: &str, width: Option<u32>) -> Option<String> {
+    parse_image_line(line)?;
+    let start = line.len() - line.trim_start().len() + 2;
+    let end = start + alt_end(&line[start..])?;
+    let (base, _) = split_alt_width(&line[start..end]);
+    let mut out = String::with_capacity(line.len() + 6);
+    out.push_str(&line[..start]);
+    out.push_str(base);
+    if let Some(width) = width {
+        out.push_str(&format!("|{width}"));
+    }
+    out.push_str(&line[end..]);
+    Some(out)
 }
 
 /// Markdown for an image at `path`: `![alt](path)`. A path with spaces or
@@ -297,6 +342,53 @@ mod tests {
 
     fn parse(line: &str) -> Option<(String, String, Option<String>)> {
         parse_image_line(line).map(|i| (i.alt, i.target, i.title))
+    }
+
+    fn alt_and_width(line: &str) -> (String, Option<u32>) {
+        let image = parse_image_line(line).unwrap();
+        (image.alt, image.width)
+    }
+
+    #[test]
+    fn a_bar_and_digits_in_the_alt_set_the_width() {
+        assert_eq!(
+            alt_and_width("![cat|200](c.png)"),
+            ("cat".into(), Some(200))
+        );
+        assert_eq!(alt_and_width("![|120](c.png)"), ("".into(), Some(120)));
+        assert_eq!(alt_and_width("![a|b|64](c.png)"), ("a|b".into(), Some(64)));
+    }
+
+    #[test]
+    fn other_bars_stay_in_the_alt() {
+        for (line, alt) in [
+            ("![a|b](c.png)", "a|b"),
+            ("![a|](c.png)", "a|"),
+            ("![a|0](c.png)", "a|0"),
+            ("![a|12345](c.png)", "a|12345"),
+            ("![a|20x10](c.png)", "a|20x10"),
+            (r"![a\|200](c.png)", "a|200"),
+        ] {
+            assert_eq!(alt_and_width(line), (alt.into(), None), "{line}");
+        }
+    }
+
+    #[test]
+    fn set_image_width_rewrites_only_the_alt() {
+        let line = "  ![cat|200](<my cat.png> \"A cat\")";
+        assert_eq!(
+            set_image_width(line, Some(320)).unwrap(),
+            "  ![cat|320](<my cat.png> \"A cat\")"
+        );
+        assert_eq!(
+            set_image_width(line, None).unwrap(),
+            "  ![cat](<my cat.png> \"A cat\")"
+        );
+        assert_eq!(
+            set_image_width("![](a.png)", Some(64)).unwrap(),
+            "![|64](a.png)"
+        );
+        assert_eq!(set_image_width("not an image", Some(64)), None);
     }
 
     #[test]

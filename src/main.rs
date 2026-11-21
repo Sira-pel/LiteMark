@@ -236,6 +236,7 @@ fn main() {
                 KeyBinding::new("enter", EditorNewline, Some("Editor")),
                 KeyBinding::new("shift-enter", EditorPlainNewline, Some("Editor")),
                 KeyBinding::new("f2", EditorEditPicture, Some("Editor")),
+                KeyBinding::new("f3", EditorCyclePictureSize, Some("Editor")),
                 KeyBinding::new("secondary-enter", EditorTableRowBelow, Some("Editor")),
                 KeyBinding::new("tab", IndentAction, Some("Editor")),
                 KeyBinding::new("shift-tab", OutdentAction, Some("Editor")),
