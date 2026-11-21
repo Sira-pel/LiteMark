@@ -67,7 +67,8 @@ impl Render for LiteMarkApp {
             move |id: String, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     let ids: Vec<&str> = this.tabs.iter().map(|tab| tab.id.as_str()).collect();
-                    this.active_tab_id = active_after_click(&ids, &id, &this.active_tab_id);
+                    let next = active_after_click(&ids, &id, &this.active_tab_id);
+                    this.activate_tab(next);
                     this.sync_selection_to_active_tab();
                     this.refresh_find();
                     cx.notify();

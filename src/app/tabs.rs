@@ -180,7 +180,7 @@ impl LiteMarkApp {
                 .collect();
             if let Some(index) = tab_index_for_path(&paths, path) {
                 let id = self.tabs[index].id.clone();
-                self.active_tab_id = id.clone();
+                self.activate_tab(id.clone());
                 // `content` was just read from disk. A tab without edits
                 // shows it if it is newer; a tab with edits keeps them, and
                 // its next save asks because the file changed.
@@ -205,18 +205,33 @@ impl LiteMarkApp {
             workspace_file_id,
         ));
         self.record_disk_version(&id);
-        self.active_tab_id = id;
+        self.activate_tab(id);
         self.refresh_find();
     }
 
     pub(super) fn remove_tab(&mut self, id: &str, next_active: Option<String>) {
         let pos = self.tabs.iter().position(|tab| tab.id == id);
+        let removing_active = self.active_tab_id == id;
+        if removing_active {
+            self.reset_editor_transient_state();
+        }
         self.tabs.retain(|tab| tab.id != id);
-        if let Some(next) = next_active.filter(|next| self.tabs.iter().any(|tab| &tab.id == next)) {
-            self.active_tab_id = next;
-        } else if let Some(pos) = pos {
-            if let Some(tab) = self.tabs.get(pos).or_else(|| self.tabs.last()) {
-                self.active_tab_id = tab.id.clone();
+        let target = next_active
+            .filter(|next| self.tabs.iter().any(|tab| &tab.id == next))
+            .or_else(|| {
+                pos.and_then(|pos| self.tabs.get(pos).or_else(|| self.tabs.last()))
+                    .map(|tab| tab.id.clone())
+            });
+        if let Some(next) = target {
+            if removing_active {
+                self.active_tab_id = next;
+                if self.effective_view_mode() == ViewMode::Wysiwyg {
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.snap_wysiwyg_table_delimiter();
+                    }
+                }
+            } else {
+                self.activate_tab(next);
             }
         }
         self.sync_selection_to_active_tab();
@@ -226,6 +241,7 @@ impl LiteMarkApp {
     pub(super) fn discard_tab(&mut self, id: &str) {
         let only = self.tabs.len() <= 1 && self.tabs.iter().any(|tab| tab.id == id);
         if only {
+            self.reset_editor_transient_state();
             let new_id = self.tab_ids.alloc();
             let number = new_id.trim_start_matches("tab-");
             let title = format!("Untitled-{number}.md");

@@ -792,3 +792,171 @@ fn a_read_only_tab_ignores_every_picture_resize() {
     assert!(!d.cycle_picture_size());
     assert_eq!((d.content.clone(), d.selection_range()), before);
 }
+
+#[test]
+fn ctrl_left_and_right_jump_cleanly_over_picture_blocks() {
+    let text = "hello\n![cat](pics/cat.png)\nworld";
+    let pic_start = text.find("![").unwrap();
+    let pic_end = text.find("\nworld").unwrap();
+    let world_start = text.find("world").unwrap();
+    let mut d = doc(text);
+
+    // Forward walk: 0 -> end of "hello" -> end of picture -> end of "world".
+    d.place(0, false);
+    d.move_word_right(false);
+    assert_eq!(d.cursor_offset(), 5);
+    d.move_word_right(false);
+    assert_eq!(
+        d.cursor_offset(),
+        pic_end,
+        "Ctrl+Right must jump past picture"
+    );
+    d.move_word_right(false);
+    assert_eq!(d.cursor_offset(), text.len());
+
+    // Backward walk: end -> start of "world" -> start of picture -> 0.
+    d.move_word_left(false);
+    assert_eq!(d.cursor_offset(), world_start);
+    d.move_word_left(false);
+    assert_eq!(
+        d.cursor_offset(),
+        pic_start,
+        "Ctrl+Left must jump before picture"
+    );
+    d.move_word_left(false);
+    assert_eq!(d.cursor_offset(), 0);
+
+    // Starting right at picture edges jumps across the whole block in one step.
+    d.place(pic_start, false);
+    d.move_word_right(false);
+    assert_eq!(d.cursor_offset(), pic_end);
+    d.move_word_left(false);
+    assert_eq!(d.cursor_offset(), pic_start);
+
+    // Shift+Ctrl+Right / Left extends selection cleanly over the block.
+    d.place(5, false);
+    d.move_word_right(true);
+    assert_eq!(d.selection_range(), 5..pic_end);
+    d.place(world_start, false);
+    d.move_word_left(true);
+    assert_eq!(d.selection_range(), pic_start..world_start);
+
+    // Consecutive pictures do not trap word movement.
+    let two = "![a](a.png)\n![b](b.png)";
+    let b_start = two.find("![b").unwrap();
+    let mut d2 = doc(two);
+    d2.place(0, false);
+    d2.move_word_right(false);
+    assert_eq!(d2.cursor_offset(), "![a](a.png)".len());
+    d2.move_word_right(false);
+    assert_eq!(d2.cursor_offset(), two.len());
+    d2.move_word_left(false);
+    assert_eq!(d2.cursor_offset(), b_start);
+    d2.move_word_left(false);
+    assert_eq!(d2.cursor_offset(), 0);
+}
+
+#[test]
+fn raw_to_wysiwyg_toggle_snaps_caret_out_of_picture_interior() {
+    let text = "![hello](pics/cat.png)\n";
+    let mut d = doc(text);
+    d.set_view_mode(ViewMode::Raw);
+    d.place(4, false); // near start inside ![hello](...)
+    assert_eq!(d.cursor_offset(), 4);
+    d.set_view_mode(ViewMode::Wysiwyg);
+    assert_eq!(
+        d.cursor_offset(),
+        0,
+        "caret near start of picture should snap to block.start"
+    );
+
+    d.set_view_mode(ViewMode::Raw);
+    d.place(18, false); // near end inside ![hello](...)
+    assert_eq!(d.cursor_offset(), 18);
+    d.set_view_mode(ViewMode::Wysiwyg);
+    assert_eq!(
+        d.cursor_offset(),
+        "![hello](pics/cat.png)".len(),
+        "caret near end of picture should snap to block.end"
+    );
+}
+
+#[test]
+fn undo_and_redo_on_thumbnail_row_restore_selection_without_trapping_caret() {
+    // 1. set_picture_width on middle thumbnail
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert!(d.set_picture_width(Some(200)));
+    let resized_b = B.start..B.start + "![b|200](b.png)".len();
+    assert_eq!(d.selection_range(), resized_b);
+    assert!(d.undo());
+    assert_eq!(
+        d.selection_range(),
+        B,
+        "undo of thumbnail width must restore thumbnail selection"
+    );
+    assert!(d.redo());
+    assert_eq!(
+        d.selection_range(),
+        resized_b,
+        "redo of thumbnail width must restore resized thumbnail selection"
+    );
+
+    // 2. set_picture_size_at on middle thumbnail
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert!(d.set_picture_size_at(B, Some(150), Some(90)));
+    let sized_b = B.start..B.start + "![b|150x90](b.png)".len();
+    assert_eq!(d.selection_range(), sized_b);
+    assert!(d.undo());
+    assert_eq!(d.selection_range(), B);
+    assert!(d.redo());
+    assert_eq!(d.selection_range(), sized_b);
+
+    // 3. remove_row_image (Backspace on middle thumbnail)
+    let mut d = row_doc();
+    d.select_picture(B);
+    assert!(d.smart_backspace_in_mode(MODE));
+    assert_eq!(d.content, "![a](a.png) ![c](c.png)\nafter\n");
+    let after_sel = d.selection_range();
+    assert!(!after_sel.is_empty());
+    assert!(d.undo());
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+    assert_eq!(
+        d.selection_range(),
+        B,
+        "undo of thumbnail removal must restore removed thumbnail selection"
+    );
+    assert!(d.redo());
+    assert_eq!(d.content, "![a](a.png) ![c](c.png)\nafter\n");
+    assert_eq!(
+        d.selection_range(),
+        after_sel,
+        "redo of thumbnail removal must restore surviving thumbnail selection"
+    );
+}
+
+#[test]
+fn find_match_inside_wysiwyg_picture_opens_raw_picture_line() {
+    let text = "intro\n![needle](pics/cat.png)\noutro needle\n";
+    let mut d = doc(text);
+    d.place(0, false);
+
+    let first = d.select_match("needle", false, None, true);
+    assert_eq!(first, Some(0));
+    let pic_start = text.find("![").unwrap();
+    let hit_start = text.find("needle").unwrap();
+    assert_eq!(d.selection_range(), hit_start..hit_start + "needle".len());
+    assert_eq!(
+        d.picture_raw_line,
+        Some(pic_start),
+        "Find match inside a WYSIWYG picture must expose raw Markdown"
+    );
+    assert_eq!(d.picture_block_at(hit_start), None);
+
+    // Moving to the next match on a normal line expires raw picture editing.
+    let second = d.select_match("needle", false, first, true);
+    assert_eq!(second, Some(1));
+    assert_eq!(d.picture_raw_line, None);
+    assert!(d.picture_block_at(pic_start).is_some());
+}

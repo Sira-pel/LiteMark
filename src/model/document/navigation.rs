@@ -265,14 +265,29 @@ impl DocumentTab {
         self.refresh_cursor();
     }
 
-    /// Up/Down and a mode switch land on a source column. A collapsed caret
-    /// that stopped inside a hidden closing-hash run moves to the visible
-    /// end. A selection keeps both endpoints.
+    /// Up/Down, Undo/Redo, and mode switches land on a source column. A collapsed
+    /// caret that stopped inside a WYSIWYG picture block snaps to its nearest edge,
+    /// and one inside a hidden closing-hash run moves to the visible end. A
+    /// selection keeps both endpoints.
     pub(super) fn snap_caret_to_visible_line_end(&mut self) {
         if !self.caret.range.is_empty() || !self.file_type.supports_markdown_features() {
             return;
         }
         let offset = self.cursor_offset();
+        if let Some(block) = self.picture_block_at(offset) {
+            if offset > block.start && offset < block.end {
+                let snapped = if offset - block.start <= block.end - offset {
+                    block.start
+                } else {
+                    block.end
+                };
+                let prefer = self.caret.preferred_col;
+                self.caret.range = snapped..snapped;
+                self.caret.reversed = false;
+                self.caret.preferred_col = prefer;
+                return;
+            }
+        }
         let parsed = self.parsed();
         let Some(line) = parsed.line_at_offset(offset) else {
             return;
@@ -425,11 +440,27 @@ impl DocumentTab {
     }
 
     pub fn move_word_left(&mut self, extend: bool) {
-        let target = if !extend && !self.caret.range.is_empty() {
-            crate::model::text_ops::word_left(&self.content, self.selection_range().start)
+        let origin = if !extend && !self.caret.range.is_empty() {
+            self.selection_range().start
         } else {
-            crate::model::text_ops::word_left(&self.content, self.cursor_offset())
+            self.cursor_offset()
         };
+        if self.file_type.supports_markdown_features() {
+            if let Some(block) = self.picture_block_at(origin) {
+                if origin > block.start {
+                    self.place(block.start, extend);
+                    return;
+                }
+            }
+        }
+        let mut target = crate::model::text_ops::word_left(&self.content, origin);
+        if self.file_type.supports_markdown_features() {
+            if let Some(block) = self.picture_block_at(target) {
+                if target > block.start && target < block.end {
+                    target = block.start;
+                }
+            }
+        }
         self.place(target, extend);
     }
 
@@ -439,9 +470,21 @@ impl DocumentTab {
         } else {
             self.cursor_offset()
         };
+        if self.file_type.supports_markdown_features() {
+            if let Some(block) = self.picture_block_at(origin) {
+                if origin < block.end {
+                    self.place(block.end, extend);
+                    return;
+                }
+            }
+        }
         let mut target = crate::model::text_ops::word_right(&self.content, origin);
         if self.file_type.supports_markdown_features() {
-            if let Some(line) = self.parsed().line_at_offset(origin) {
+            if let Some(block) = self.picture_block_at(target) {
+                if target > block.start && target < block.end {
+                    target = block.end;
+                }
+            } else if let Some(line) = self.parsed().line_at_offset(origin) {
                 let vend = visible_line_end(line, self.view_mode);
                 if vend < line.source.end
                     && origin <= vend

@@ -251,3 +251,321 @@ fn a_far_image_keeps_its_height_without_being_loaded() {
     assert!((total - total_with_source).abs() < 0.5);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn write_two_frame_gif(path: &Path) {
+    use image::{codecs::gif::GifEncoder, Delay, Frame, Rgba, RgbaImage};
+    let file = std::fs::File::create(path).unwrap();
+    let mut encoder = GifEncoder::new(file);
+    let frame1 = Frame::from_parts(
+        RgbaImage::from_pixel(16, 16, Rgba([255, 0, 0, 255])),
+        0,
+        0,
+        Delay::from_numer_denom_ms(10, 1),
+    );
+    let frame2 = Frame::from_parts(
+        RgbaImage::from_pixel(16, 16, Rgba([0, 0, 255, 255])),
+        0,
+        0,
+        Delay::from_numer_denom_ms(10, 1),
+    );
+    encoder.encode_frames([frame1, frame2]).unwrap();
+}
+
+fn write_static_png(path: &Path) {
+    use image::{Rgba, RgbaImage};
+    let img = RgbaImage::from_pixel(24, 24, Rgba([0, 255, 0, 255]));
+    img.save(path).unwrap();
+}
+
+#[std_test]
+fn swapping_animated_gif_with_static_png_on_same_line_does_not_panic() {
+    let dir = fixture_dir("gif-swap");
+    let gif = dir.join("pics").join("anim.gif");
+    let png = dir.join("pics").join("still.png");
+    write_two_frame_gif(&gif);
+    write_static_png(&png);
+
+    let (view, mut cx) = harness("![anim](pics/anim.gif)\n", &dir);
+    // Render several frames so GPUI decodes and advances the animated GIF.
+    for _ in 0..4 {
+        redraw(&mut cx);
+    }
+
+    // Swap to a static PNG at the exact same line index (0).
+    view.update(&mut cx, |app, _cx| {
+        let tab = app.active_tab_mut().expect("tab");
+        let len = tab.content.len();
+        tab.edit(0..len, "![still](pics/still.png)\n");
+    });
+    redraw(&mut cx);
+    redraw(&mut cx);
+
+    // Swap back to the animated GIF, then overwrite that same file path on disk
+    // with a static PNG (different size/stamp) and redraw.
+    view.update(&mut cx, |app, _cx| {
+        let tab = app.active_tab_mut().expect("tab");
+        let len = tab.content.len();
+        tab.edit(0..len, "![anim](pics/anim.gif)\n");
+    });
+    for _ in 0..3 {
+        redraw(&mut cx);
+    }
+    write_static_png(&gif);
+    redraw(&mut cx);
+    redraw(&mut cx);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn clicking_a_tall_picture_does_not_scroll_it_off_screen() {
+    let dir = fixture_dir("tall-scroll");
+    std::fs::write(
+        dir.join("pics").join("tall.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="480"><rect width="400" height="480" fill="blue"/></svg>"#,
+    )
+    .unwrap();
+    let filler: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let doc = format!("intro\n![tall](pics/tall.svg)\n{filler}");
+    let pic_start = doc.find("![").unwrap();
+    let pic_end = doc.find("\nline 0").unwrap();
+
+    let (view, mut cx) = harness(&doc, &dir);
+    redraw(&mut cx);
+
+    // Select the tall picture while it is visible near the top.
+    view.update(&mut cx, |app, _cx| {
+        app.active_tab_mut()
+            .expect("tab")
+            .select_picture(pic_start..pic_end);
+    });
+    redraw(&mut cx);
+    redraw(&mut cx);
+
+    let (view_bounds, pic_row_y, pic_row_h) = view.read_with(&cx, |app, _| {
+        let view_b = app.editor_scroll.bounds();
+        let paint = app.editor_paint.borrow();
+        let row = paint
+            .rows
+            .iter()
+            .find(|r| r.byte_start == pic_start)
+            .expect("tall picture row");
+        (view_b, row.origin.y, row.line_height)
+    });
+    assert!(
+        pic_row_h >= px(400.0),
+        "expected a tall picture row, got {pic_row_h:?}"
+    );
+    assert!(
+        pic_row_y + pic_row_h > view_bounds.top() && pic_row_y < view_bounds.bottom(),
+        "tall picture scrolled off screen: row_y={pic_row_y:?}, row_h={pic_row_h:?}, view={view_bounds:?}"
+    );
+    assert!(
+        pic_row_y >= view_bounds.top() - px(4.0),
+        "tall picture must not be thrown off the top: row_y={pic_row_y:?}, view_top={:?}",
+        view_bounds.top()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn status_bar_clicks_do_not_hit_scrolled_off_pictures_or_text_underneath() {
+    let dir = fixture_dir("status-bar-clip");
+    std::fs::write(
+        dir.join("pics").join("tall.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="400"><rect width="300" height="400" fill="green"/></svg>"#,
+    )
+    .unwrap();
+    let filler: String = (0..30).map(|i| format!("row {i}\n")).collect();
+    let doc = format!("{filler}![tall](pics/tall.svg)\n{filler}");
+    let (view, mut cx) = harness(&doc, &dir);
+    redraw(&mut cx);
+
+    // Put caret at start of document and scroll so the tall picture straddles
+    // the bottom of the editor viewport and extends behind the status bar.
+    let (pic_start, pic_end, view_bounds) = view.read_with(&cx, |app, _| {
+        let s = doc.find("![").unwrap();
+        let e = s + "![tall](pics/tall.svg)".len();
+        (s, e, app.editor_scroll.bounds())
+    });
+    let (_, _, pic_y, _) = row_at(&view, &cx, pic_start);
+    let scroll_y = -(px(pic_y) - (view_bounds.bottom() - px(40.0)));
+    view.update(&mut cx, |app, _cx| {
+        app.editor_scroll.set_offset(point(px(0.0), scroll_y));
+        app.active_tab_mut().expect("tab").place(0, false);
+    });
+    redraw(&mut cx);
+
+    // Every recorded picture hit box must be clipped inside the editor viewport.
+    view.read_with(&cx, |app, _| {
+        let view_b = app.editor_scroll.bounds();
+        let paint = app.editor_paint.borrow();
+        for (_, b) in &paint.pictures {
+            assert!(
+                b.bottom() <= view_b.bottom() + px(1.0),
+                "picture hit bounds {b:?} leaked past editor viewport bottom {:?}",
+                view_b.bottom()
+            );
+        }
+    });
+
+    // Click inside the status bar (below editor_scroll.bounds().bottom()).
+    let status_pos = point(
+        view_bounds.left() + px(80.0),
+        view_bounds.bottom() + px(12.0),
+    );
+    cx.simulate_mouse_down(status_pos, gpui::MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
+    view.read_with(&cx, |app, _| {
+        let sel = app.active_tab().expect("tab").selection_range();
+        assert_eq!(
+            sel,
+            0..0,
+            "status bar left-click must not select editor content"
+        );
+        assert!(app.image_drag.is_none());
+    });
+
+    // Even a direct editor_mouse_down / editor_right_mouse_down outside the
+    // viewport (e.g. over the selected picture's handle under the status bar)
+    // must be ignored.
+    view.update(&mut cx, |app, _cx| {
+        app.active_tab_mut()
+            .expect("tab")
+            .select_picture(pic_start..pic_end);
+    });
+    redraw(&mut cx);
+    let before_sel = view.read_with(&cx, |app, _| {
+        app.active_tab().expect("tab").selection_range()
+    });
+    cx.update(|window, app_cx| {
+        view.update(app_cx, |app, cx| {
+            app.editor_mouse_down(
+                &gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position: status_pos,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                },
+                window,
+                cx,
+            );
+            app.editor_right_mouse_down(
+                &gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Right,
+                    position: status_pos,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                },
+                window,
+                cx,
+            );
+        });
+    });
+    view.read_with(&cx, |app, _| {
+        assert_eq!(app.active_tab().expect("tab").selection_range(), before_sel);
+        assert!(app.image_drag.is_none());
+        assert!(app.editor_context_menu.is_none());
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn mode_and_tab_switches_clear_transient_state_and_invalidate_follow_caret() {
+    let dir = fixture_dir("mode-reset");
+    let doc = "| a | b |\n| --- | --- |\n| 1 | 2 |\n![cat](pics/small.svg)\n";
+    let (view, mut cx) = harness(doc, &dir);
+    redraw(&mut cx);
+
+    // Dirty every transient interaction field, then switch via handle_set_view_mode.
+    view.update(&mut cx, |app, _cx| {
+        app.table_pressed = true;
+        app.table_drag_press_held = true;
+        app.editor_context_menu = Some(EditorContextMenu {
+            position: point(px(10.0), px(10.0)),
+            is_table: true,
+        });
+        app.image_drag = Some(crate::ui::note_images::ImageDrag {
+            range: 0..1,
+            tab_id: app.active_tab_id.clone(),
+            source: String::new(),
+            active: true,
+            axis: crate::ui::note_images::DragAxis::Corner,
+            start_x: px(0.0),
+            start_y: px(0.0),
+            start_width: px(100.0),
+            start_height: px(50.0),
+            column: px(400.0),
+            width: px(120.0),
+            height: px(60.0),
+            had_height: false,
+        });
+        let tab = app.active_tab_mut().expect("tab");
+        tab.pending_formats.bold = true;
+        tab.marked_range = Some(0..1);
+        tab.picture_raw_line = Some(doc.find("![").unwrap());
+        app.handle_set_view_mode(ViewMode::Raw);
+    });
+
+    view.read_with(&cx, |app, _| {
+        assert_eq!(app.settings.view_mode, ViewMode::Raw);
+        assert!(app.image_drag.is_none());
+        assert!(app.table_hover.is_none());
+        assert!(app.table_hot.is_none());
+        assert!(!app.table_pressed);
+        assert!(!app.table_drag_press_held);
+        assert!(app.editor_context_menu.is_none());
+        assert_eq!(app.editor_paint.borrow().total_height, px(0.0));
+        let tab = app.active_tab().expect("tab");
+        assert!(!tab.pending_formats.bold);
+        assert!(tab.marked_range.is_none());
+        assert!(tab.picture_raw_line.is_none());
+    });
+
+    // Place caret on the table delimiter line in Raw mode, then toggle back to
+    // WYSIWYG: caret snaps off the hidden delimiter and painted_view_mode updates.
+    let delim = doc.find("| ---").unwrap() + 2;
+    view.update(&mut cx, |app, _cx| {
+        app.active_tab_mut().expect("tab").place(delim, false);
+        app.handle_toggle_mode();
+    });
+    redraw(&mut cx);
+    redraw(&mut cx);
+    view.read_with(&cx, |app, _| {
+        assert_eq!(app.settings.view_mode, ViewMode::Wysiwyg);
+        assert_eq!(
+            app.editor_paint.borrow().painted_view_mode,
+            ViewMode::Wysiwyg
+        );
+        let cursor = app.active_tab().expect("tab").cursor_offset();
+        let delim_end = doc.find("\n| 1").unwrap();
+        assert!(
+            cursor < doc.find("| ---").unwrap() || cursor > delim_end,
+            "caret {cursor} must snap off hidden TableDelimiter line on Raw->WYSIWYG"
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn remote_only_image_note_still_corrects_layout_height() {
+    let dir = fixture_dir("remote-height");
+    let doc = "![remote1](https://example.com/1.png)\n![remote2](https://example.com/2.png)\n![remote3](https://example.com/3.png)\nbottom\n";
+    let (view, mut cx) = harness(doc, &dir);
+    redraw(&mut cx);
+    redraw(&mut cx);
+    view.read_with(&cx, |app, _| {
+        let paint = app.editor_paint.borrow();
+        let bounds = paint.bounds.expect("painted");
+        assert!(
+            bounds.size.height >= paint.total_height - px(1.0),
+            "remote-only image document bounds {:?} must cover total_height {:?}",
+            bounds.size.height,
+            paint.total_height
+        );
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}

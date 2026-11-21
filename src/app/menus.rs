@@ -480,7 +480,7 @@ impl LiteMarkApp {
                 change => Some((tab.id.clone(), change == DiskChange::Deleted)),
             });
         if let Some((id, deleted)) = changed {
-            self.active_tab_id = id.clone();
+            self.activate_tab(id.clone());
             self.pending_after_save = Some(PendingAfterSave::CloseWindow);
             self.show_prompt(Prompt::ExternalChange { id, deleted });
             return;

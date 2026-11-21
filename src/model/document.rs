@@ -824,6 +824,11 @@ impl DocumentTab {
             find_prev(hits, self.selection_range().start, current)
         }?;
         let hit = hits.get(index)?.clone();
+        if let Some(block) = self.picture_block_at(hit.start) {
+            if hit.end <= block.end {
+                self.picture_raw_line = Some(block.start);
+            }
+        }
         self.caret.range = hit;
         self.caret.reversed = false;
         self.caret.preferred_col = None;
@@ -858,7 +863,12 @@ impl DocumentTab {
             .or_else(|| find_next(&hits, self.cursor_offset(), None))?;
         let hit = hits.get(index)?.clone();
         self.edit(hit, replacement);
-        self.select_match(term, match_case, None, true)
+        let next = self.select_match(term, match_case, None, true);
+        if next.is_none() {
+            self.snap_caret_to_visible_line_end();
+            self.refresh_cursor();
+        }
+        next
     }
 
     pub fn replace_every_match(&mut self, term: &str, replacement: &str, match_case: bool) -> bool {
