@@ -115,6 +115,34 @@ impl DocumentTab {
         true
     }
 
+    /// Set the width of the picture at `range` (a lone picture, or one image
+    /// of a row), whatever the selection is. One undo step; the picture is
+    /// selected afterwards. False, and nothing changed, when `range` is not a
+    /// picture or the width is already `width`.
+    pub fn set_picture_width_at(&mut self, range: Range<usize>, width: Option<u32>) -> bool {
+        let Some(block) = self.picture_block_at(range.start) else {
+            return false;
+        };
+        if range.end > block.end {
+            return false;
+        }
+        let Some(line) = self.content.get(range.clone()) else {
+            return false;
+        };
+        let Some(new) = set_image_width(line, width) else {
+            return false;
+        };
+        if new == line {
+            return false;
+        }
+        self.history.seal();
+        let end = range.start + new.len();
+        self.edit(range.clone(), &new);
+        self.select_picture(range.start..end);
+        self.history.seal();
+        true
+    }
+
     /// Step the picture through Small, Medium, Large and back to its natural
     /// fit. A width that is not a preset starts again at Small.
     pub fn cycle_picture_size(&mut self) -> bool {
