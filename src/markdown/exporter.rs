@@ -1,4 +1,5 @@
-use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
+use crate::markdown::image::split_alt_width;
+use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 use std::path::Path;
 
 /// Largest local image embedded in an HTML export.
@@ -109,8 +110,55 @@ pub fn markdown_to_html_body_in(
         (event, _) => event,
     });
     let mut html_output = String::new();
-    html::push_html(&mut html_output, parser);
+    html::push_html(&mut html_output, with_image_widths(parser).into_iter());
     html_output
+}
+
+/// Turns each `![alt|200](src)` into an `<img>` with `width="200"`. The alt
+/// text reaches the parser's events as text between the image's start and
+/// end, so it is gathered here; images without a width pass through as is.
+fn with_image_widths<'a>(events: impl Iterator<Item = Event<'a>>) -> Vec<Event<'a>> {
+    let mut out: Vec<Event<'a>> = Vec::new();
+    let mut open: Option<(usize, String)> = None;
+    for event in events {
+        if matches!(event, Event::Start(Tag::Image { .. })) {
+            open = Some((out.len(), String::new()));
+        } else if let Some((_, alt)) = open.as_mut() {
+            match &event {
+                Event::Text(t) | Event::Code(t) => alt.push_str(t),
+                Event::SoftBreak | Event::HardBreak => alt.push(' '),
+                _ => {}
+            }
+        }
+        if let (Event::End(TagEnd::Image), Some((at, alt))) = (&event, &open) {
+            let at = *at;
+            let (plain, width) = split_alt_width(alt);
+            if let (
+                Some(width),
+                Event::Start(Tag::Image {
+                    dest_url, title, ..
+                }),
+            ) = (width, &out[at])
+            {
+                let mut tag = format!(
+                    "<img src=\"{}\" alt=\"{}\"",
+                    escape_html_text(dest_url),
+                    escape_html_text(plain)
+                );
+                if !title.is_empty() {
+                    tag.push_str(&format!(" title=\"{}\"", escape_html_text(title)));
+                }
+                tag.push_str(&format!(" width=\"{width}\" />"));
+                out.truncate(at);
+                out.push(Event::Html(CowStr::from(tag)));
+                open = None;
+                continue;
+            }
+            open = None;
+        }
+        out.push(event);
+    }
+    out
 }
 
 /// File stem with one extension removed. `a.txt` becomes `a`, not `a.txt`.
@@ -388,6 +436,28 @@ mod tests {
         let rows = vec![vec!["1".to_string(), "2".to_string()]];
         let out = format_markdown_table(&headers, &rows);
         assert_eq!(out, "| A | B |\n| :--- | :--- |\n| 1 | 2 |\n");
+    }
+
+    #[test]
+    fn html_export_writes_the_image_width() {
+        let html = markdown_to_html_body_in(
+            "![a \"cat\"|200](c.png \"T\")
+
+![plain](p.png)
+
+![a|b](q.png)",
+            None,
+            None,
+        );
+        assert!(
+            html.contains(r#"<img src="c.png" alt="a &quot;cat&quot;" title="T" width="200" />"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<img src="p.png" alt="plain" />"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<img src="q.png" alt="a|b" />"#), "{html}");
     }
 
     #[test]

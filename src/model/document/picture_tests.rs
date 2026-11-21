@@ -433,3 +433,42 @@ fn bold_text_beside_a_picture_is_one_undo_step() {
         assert!(!d.undo());
     }
 }
+
+#[test]
+fn cycling_the_size_steps_through_the_presets_and_back() {
+    let src = format!("intro\n{PIC}\nafter\n");
+    let start = start_of(&src);
+    let mut d = doc(&src);
+    d.select_picture(start..start + PIC.len());
+    let line = |d: &mut DocumentTab| d.content.lines().nth(1).unwrap().to_string();
+    for expected in [
+        "![cat|200](pics/cat.png)",
+        "![cat|400](pics/cat.png)",
+        "![cat|600](pics/cat.png)",
+        PIC,
+    ] {
+        assert!(d.cycle_picture_size());
+        assert_eq!(line(&mut d), expected);
+        // The picture stays selected, so the next press resizes it again.
+        assert!(d.selected_picture().is_some());
+    }
+}
+
+#[test]
+fn a_size_change_is_one_undo_step() {
+    let src = format!("{PIC}\n");
+    let mut d = doc(&src);
+    d.select_picture(0..PIC.len());
+    assert!(d.set_picture_width(Some(300)));
+    assert!(d.content.starts_with("![cat|300](pics/cat.png)"));
+    d.undo();
+    assert_eq!(d.content.as_ref() as &str, src);
+}
+
+#[test]
+fn sizing_does_nothing_off_a_picture() {
+    let mut d = doc("plain text\n");
+    d.place(2, false);
+    assert!(!d.cycle_picture_size());
+    assert_eq!(d.content.as_ref() as &str, "plain text\n");
+}
