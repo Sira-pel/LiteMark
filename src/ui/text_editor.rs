@@ -680,6 +680,31 @@ pub fn checkbox_for_position(paint: &EditorPaint, position: Point<Pixels>) -> Op
     None
 }
 
+pub fn padded_table_cell_col(paint: &EditorPaint, position: Point<Pixels>) -> Option<usize> {
+    let bounds = paint.bounds?;
+    if !bounds.contains(&position) {
+        return None;
+    }
+    let row = paint.rows.iter().find(|r| {
+        !r.cells.is_empty() && position.y >= r.origin.y && position.y < r.origin.y + r.line_height
+    })?;
+    let (col_idx, cell) = row
+        .cells
+        .iter()
+        .enumerate()
+        .find(|(_, c)| position.x >= c.box_bounds.left() && position.x < c.box_bounds.right())
+        .or_else(|| {
+            let first = row.cells.first()?;
+            if position.x >= first.box_bounds.left() {
+                row.cells.len().checked_sub(1).map(|i| (i, &row.cells[i]))
+            } else {
+                None
+            }
+        })?;
+    (col_idx > 0 && cell.raw_range.is_empty() && cell.raw_range.start == row.byte_end)
+        .then_some(col_idx)
+}
+
 pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<String> {
     for row in &paint.rows {
         if source_offset >= row.byte_start && source_offset <= row.byte_end {
@@ -1595,14 +1620,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     ),
                 };
                 let display_len = if start == end { 0 } else { slice.len() };
-                let marked = self.marked.clone().map(|m| {
-                    if m.end <= start || m.start >= end {
-                        return m;
-                    }
-                    let lo = offset_map.source_to_display(m.start.clamp(start, end));
-                    let hi = offset_map.source_to_display(m.end.clamp(start, end));
-                    start + lo..start + hi
-                });
+                let marked = raw_line_marked_range(self.marked.as_ref(), &offset_map, start, end);
                 let runs = raw_line_runs(
                     display_len.max(slice.len()),
                     start,
@@ -2204,12 +2222,27 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let wrapped_slices = wrap_cell_text(&cell_display, avail_inner, &full_shaped);
                     let mut lines = Vec::with_capacity(wrapped_slices.len());
 
-                    for (d_start, d_end) in wrapped_slices {
+                    let total_slices = wrapped_slices.len();
+                    let mut prev_cell_end = cell_map.line_start;
+                    for (sub_idx, (d_start, d_end)) in wrapped_slices.into_iter().enumerate() {
+                        let is_last = sub_idx + 1 == total_slices;
                         let sub_len = d_end.saturating_sub(d_start);
                         let (sub_map, shaped_sub) = if d_start == 0 && d_end == disp_len {
+                            prev_cell_end = cell_map.line_end;
                             (cell_map.clone(), full_shaped.clone())
                         } else {
-                            let sub_map = cell_map.slice_display(d_start..d_end);
+                            let mut sub_map = cell_map.slice_display(d_start..d_end);
+                            sub_map.line_start = if sub_idx == 0 {
+                                cell_map.line_start
+                            } else {
+                                prev_cell_end
+                            };
+                            if is_last {
+                                sub_map.line_end = cell_map.line_end;
+                            } else {
+                                sub_map.line_end = sub_map.line_end.max(sub_map.line_start);
+                            }
+                            prev_cell_end = sub_map.line_end;
                             let sub_slice: SharedString = if sub_len == 0 {
                                 SharedString::from(" ")
                             } else {
@@ -3003,22 +3036,34 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             };
             let single_row = line_rows.rows.len() == 1;
 
+            let mut prev_byte_end = parsed_line.source.start;
             for (sub_idx, &(d_start, d_end)) in line_rows.rows.iter().enumerate() {
                 let is_last_sub = sub_idx + 1 == line_rows.rows.len();
+                let (byte_start, byte_end) = if single_row {
+                    (
+                        parsed_line.offset_map.line_start,
+                        parsed_line.offset_map.line_end,
+                    )
+                } else {
+                    let s = if sub_idx == 0 {
+                        parsed_line.source.start
+                    } else {
+                        prev_byte_end
+                    };
+                    let e = if is_last_sub {
+                        parsed_line.source.end
+                    } else {
+                        parsed_line.offset_map.slice_bounds(d_start..d_end).1.max(s)
+                    };
+                    (s, e)
+                };
+                prev_byte_end = byte_end;
 
                 let row_origin = point(base_x + indent_x, cur_y);
                 let near_anchor = anchor_lines
                     .iter()
                     .any(|&a| a + 2 >= parsed_line.line_index && a <= parsed_line.line_index + 2);
                 if !band.contains(cur_y, row_line_height) && !near_anchor {
-                    let (byte_start, byte_end) = if single_row {
-                        (
-                            parsed_line.offset_map.line_start,
-                            parsed_line.offset_map.line_end,
-                        )
-                    } else {
-                        parsed_line.offset_map.slice_bounds(d_start..d_end)
-                    };
                     rows.push(PaintRow {
                         line_index: line_idx,
                         byte_start,
@@ -3037,7 +3082,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let sub_map = if single_row {
                     parsed_line.offset_map.clone()
                 } else {
-                    Arc::new(parsed_line.offset_map.slice_display(d_start..d_end))
+                    let mut map = parsed_line.offset_map.slice_display(d_start..d_end);
+                    map.line_start = byte_start;
+                    map.line_end = byte_end;
+                    Arc::new(map)
                 };
 
                 // Block backgrounds / decorations
@@ -4118,6 +4166,22 @@ fn logical_line_number(content: &str, offset: usize) -> usize {
         end -= 1;
     }
     count_line_endings(&bytes[..end]) + 1
+}
+
+fn raw_line_marked_range(
+    marked: Option<&Range<usize>>,
+    offset_map: &RowOffsetMap,
+    start: usize,
+    end: usize,
+) -> Option<Range<usize>> {
+    marked.and_then(|m| {
+        if m.end <= start || m.start >= end {
+            return None;
+        }
+        let lo = offset_map.source_to_display(m.start.clamp(start, end));
+        let hi = offset_map.source_to_display(m.end.clamp(start, end));
+        Some(start + lo..start + hi)
+    })
 }
 
 fn raw_line_runs(
@@ -5222,5 +5286,23 @@ mod tests {
                 assert_eq!(near, scanned, "row {row_start}..={row_end}");
             }
         }
+    }
+
+    #[test]
+    fn raw_mode_ime_marked_range_does_not_leak_onto_earlier_tab_line() {
+        let (_disp, map) = RowOffsetMap::expand_tabs("\tfoo", 0, 4).expect("tab map");
+        let marked = Some(5..8);
+        assert_eq!(
+            super::raw_line_marked_range(marked.as_ref(), &map, 0, 4),
+            None
+        );
+        let runs = super::raw_line_runs(
+            7,
+            0,
+            super::raw_line_marked_range(marked.as_ref(), &map, 0, 4),
+            gpui::font("Ubuntu"),
+            gpui::hsla(0.0, 0.0, 0.0, 1.0),
+        );
+        assert!(runs.iter().all(|r| r.underline.is_none()));
     }
 }

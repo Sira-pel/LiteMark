@@ -22,11 +22,10 @@ pub(super) struct OpenFence {
 /// a tab stops at the next multiple of 4, so `- item` followed by `\t---` is
 /// a rule.
 pub(super) fn exact_thematic_break(line: &str, parent_col: usize) -> bool {
-    let trimmed = line.trim();
-    if !(trimmed == "---" || trimmed == "***" || trimmed == "___") {
+    let (start, column) = split_indent(line);
+    if !is_thematic_break(&line[start..]) {
         return false;
     }
-    let column = leading_column(line);
     if column <= 3 {
         return true;
     }
@@ -221,29 +220,7 @@ pub(crate) fn in_list_or_quote(lines: &[ParsedLine]) -> bool {
 }
 
 pub(super) fn atx_heading(line: &str) -> Option<(u8, std::ops::Range<usize>)> {
-    if let Some(found) = atx_heading_within(line, 3) {
-        return Some(found);
-    }
-    // A tab is one byte. Red still treats up to three bytes of indent as a heading.
-    let trimmed = line.trim_start();
-    let indent_len = line.len() - trimmed.len();
-    if indent_len > 3 {
-        return None;
-    }
-    for (level, prefix) in [
-        (6u8, "###### "),
-        (5, "##### "),
-        (4, "#### "),
-        (3, "### "),
-        (2, "## "),
-        (1, "# "),
-    ] {
-        if trimmed.starts_with(prefix) {
-            let start = indent_len + prefix.len();
-            return Some((level, start..line.len()));
-        }
-    }
-    None
+    atx_heading_within(line, 3)
 }
 
 /// `max_indent` is a column, with tabs advancing to the next multiple of 4.
@@ -274,19 +251,19 @@ pub(super) fn atx_heading_within(
         content_start = index + 1;
     }
     let mut end = bytes.len();
-    while end > content_start && bytes[end - 1] == b' ' {
+    while end > content_start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
         end -= 1;
     }
     let hash_end = end;
     while end > content_start && bytes[end - 1] == b'#' {
         end -= 1;
     }
-    // A closing run may consume the whole content (`### ###`). The space that
-    // precedes it can be the opening separator, so `end` is allowed to land on
+    // A closing run may consume the whole content (`### ###`). The space or tab
+    // that precedes it can be the opening separator, so `end` is allowed to land on
     // `content_start` but not before it. A backslash does not escape a space,
     // so `# foo\ #` still strips the closer. A backslash immediately before
     // the hash (`### foo \###`) is not a separating space, and the hash stays.
-    let preceded_by_space = end > 0 && bytes[end - 1] == b' ';
+    let preceded_by_space = end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t');
     if end < hash_end && preceded_by_space {
         if end > content_start {
             end -= 1;
@@ -296,7 +273,7 @@ pub(super) fn atx_heading_within(
         }
     } else {
         end = bytes.len();
-        while end > content_start && bytes[end - 1] == b' ' {
+        while end > content_start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
             end -= 1;
         }
     }
@@ -345,6 +322,7 @@ pub(super) fn fence_marker_line(
     ParsedLine {
         line_index: index,
         source,
+        content_end: line.len(),
         kind,
         prefix_range: line_start..line_end,
         hidden_ranges: hidden,
@@ -369,6 +347,7 @@ pub(super) fn code_content_line(
         return ParsedLine {
             line_index: index,
             source: source.clone(),
+            content_end: line.len(),
             kind: LineKind::CodeLine,
             prefix_range: line_start..line_start,
             hidden_ranges: Vec::new(),
@@ -406,6 +385,7 @@ pub(super) fn code_content_line(
     ParsedLine {
         line_index: index,
         source,
+        content_end: line.len(),
         kind: LineKind::CodeLine,
         prefix_range: line_start..content_start,
         hidden_ranges: hidden,
@@ -448,6 +428,7 @@ pub(super) fn atx_line(
     ParsedLine {
         line_index: index,
         source,
+        content_end: content.end,
         kind: LineKind::Heading { level },
         prefix_range: line_start..line_start + content.start,
         hidden_ranges: hidden,

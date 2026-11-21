@@ -23,6 +23,7 @@ impl LiteMarkApp {
             tab.pending_formats = ActiveFormats::default();
             tab.finish_ime_composition();
             tab.picture_raw_line = None;
+            tab.pending_table_col = None;
         }
         self.editor_paint.borrow_mut().reset_for_switch();
     }

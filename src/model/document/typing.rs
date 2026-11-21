@@ -8,9 +8,34 @@ impl DocumentTab {
         pf.bold || pf.italic || pf.underline || pf.strike || pf.code
     }
 
-    pub fn insert_text_in_mode(&mut self, range: Range<usize>, text: &str, mode: ViewMode) {
+    pub fn insert_text_in_mode(&mut self, mut range: Range<usize>, text: &str, mode: ViewMode) {
         if self.is_read_only() {
             return;
+        }
+        if mode == ViewMode::Wysiwyg && self.file_type.supports_markdown_features() {
+            if let Some(target_col) = self.pending_table_col.take() {
+                if range.is_empty() && text != "\n" {
+                    let row_start = {
+                        let parsed = self.parsed();
+                        parsed
+                            .line_at_offset(range.start)
+                            .filter(|l| {
+                                matches!(l.kind, LineKind::TableRow { .. })
+                                    && range.start == l.source.end
+                            })
+                            .map(|l| l.source.start)
+                    };
+                    if let Some(line_start) = row_start {
+                        if let Some(cell_range) =
+                            self.materialize_table_row_cell(line_start, target_col)
+                        {
+                            range = cell_range.start..cell_range.start;
+                        }
+                    }
+                }
+            }
+        } else {
+            self.pending_table_col = None;
         }
         if mode == ViewMode::Wysiwyg
             && self.file_type.supports_markdown_features()

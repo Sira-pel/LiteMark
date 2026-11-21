@@ -370,6 +370,8 @@ pub struct DocumentTab {
     pub marked_range: Option<Range<usize>>,
     /// Start of a picture line whose raw Markdown is being edited.
     pub picture_raw_line: Option<usize>,
+    /// Padded column index clicked in a short table row before typing.
+    pub pending_table_col: Option<usize>,
     /// Line break inserted for input-method text at a picture, and whether
     /// it went before the picture. Taken back if the input is cancelled.
     pub ime_opened_line: Option<(Range<usize>, bool)>,
@@ -452,6 +454,7 @@ impl DocumentTab {
             force_inline_toggle: None,
             marked_range: None,
             picture_raw_line: None,
+            pending_table_col: None,
             ime_opened_line: None,
             revision: 1,
             cached_parse: None,
@@ -721,6 +724,7 @@ impl DocumentTab {
         self.revision = self.revision.wrapping_add(1);
         self.caret.move_to(cursor.min(self.content.len()));
         self.marked_range = None;
+        self.pending_table_col = None;
         self.is_modified = true;
         self.refresh_cursor();
     }

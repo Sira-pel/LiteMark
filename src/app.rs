@@ -5,7 +5,7 @@ use crate::editor_input::{
 use crate::markdown::{empty_parsed_document, export_stem, render_export, TableColumnAlign};
 use crate::model::clipboard::{clipboard_image, clipboard_item, paste_text};
 use crate::model::table_ops::TableOp;
-use crate::model::text_ops::{home_offset, line_end, range_from_utf16, TAB_DISPLAY_COLUMNS};
+use crate::model::text_ops::{range_from_utf16, TAB_DISPLAY_COLUMNS};
 use crate::model::*;
 use crate::services::*;
 use crate::theme::{sz, Theme, ThemeMode};

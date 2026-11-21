@@ -375,7 +375,7 @@ impl DocumentTab {
             return;
         }
 
-        let (list_item, heading_prefix_len, exit_indented_code, quote_prefix_len) = {
+        let (list_item, heading_prefix_len, exit_indented_code, quote_prefix_len, is_hr) = {
             let parsed = self.parsed();
             let list_item = accepted_list_marker_in(&parsed, &self.content, line_start);
             let line = &self.content[line_start..line_end_pos];
@@ -399,11 +399,15 @@ impl DocumentTab {
                 .line_at_offset(line_start)
                 .filter(|l| l.kind == LineKind::Blockquote)
                 .map(|l| l.prefix_range.end - l.source.start);
+            let is_hr = parsed
+                .line_at_offset(line_start)
+                .is_some_and(|l| matches!(l.kind, LineKind::HorizontalRule));
             (
                 list_item,
                 heading_prefix_len,
                 exit_indented_code,
                 quote_prefix_len,
+                is_hr,
             )
         };
         let line = &self.content[line_start..line_end_pos];
@@ -524,7 +528,7 @@ impl DocumentTab {
         }
 
         // 6. Indented code/text: maintain indentation
-        if !indent.is_empty() && !trimmed_start.is_empty() {
+        if !is_hr && !indent.is_empty() && !trimmed_start.is_empty() {
             let ins = format!("{nl}{indent}");
             if self.split_inline_span_newline(&range, &ins) {
                 return;

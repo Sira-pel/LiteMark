@@ -95,7 +95,9 @@ impl DocumentTab {
                                 let target = skip_hidden_left(&parsed, prev_end);
                                 self.place(target, extend);
                             } else if table_source.start > 0 {
-                                let target = skip_hidden_left(&parsed, table_source.start - 1);
+                                let prev = table_source.start
+                                    - line_ending_len_before(&self.content, table_source.start);
+                                let target = skip_hidden_left(&parsed, prev);
                                 self.place(target, extend);
                             } else {
                                 self.place(0, extend);
@@ -107,7 +109,8 @@ impl DocumentTab {
             }
             if pos <= pline.prefix_range.end && pos >= pline.source.start {
                 if pline.source.start > 0 {
-                    let prev = pline.source.start - 1;
+                    let prev = pline.source.start
+                        - line_ending_len_before(&self.content, pline.source.start);
                     let snapped = skip_hidden_left(&parsed, prev);
                     self.place(if extend { prev } else { snapped }, extend);
                 } else {
@@ -167,8 +170,11 @@ impl DocumentTab {
                     .position(|rc| pos >= rc.start && pos <= rc.end)
                 {
                     if pos >= cells[c_idx].end {
-                        if c_idx + 1 < cells.len() {
-                            let target = skip_hidden_right(&parsed, cells[c_idx + 1].start);
+                        if let Some(next_cell) = cells[c_idx + 1..]
+                            .iter()
+                            .find(|c| c.end > pos || c.start > pos)
+                        {
+                            let target = skip_hidden_right(&parsed, next_cell.start);
                             self.place(target, extend);
                         } else {
                             let next_row_cell_start =
@@ -191,8 +197,16 @@ impl DocumentTab {
                                 let target = skip_hidden_right(&parsed, next_start);
                                 self.place(target, extend);
                             } else {
-                                let after = (table_source.end + 1).min(self.content.len());
-                                self.place(after, extend);
+                                let break_len = line_ending_len(&self.content, table_source.end);
+                                let after = (table_source.end + break_len).min(self.content.len());
+                                let target = if break_len > 0 {
+                                    parsed.line_at_offset(after).map_or(after, |nline| {
+                                        skip_hidden_right(&parsed, nline.prefix_range.end)
+                                    })
+                                } else {
+                                    after
+                                };
+                                self.place(target, extend);
                             }
                         }
                         return;
@@ -341,10 +355,7 @@ impl DocumentTab {
     pub fn move_end(&mut self, extend: bool) {
         self.pending_formats = ActiveFormats::default();
         let cursor = self.cursor_offset();
-        let start = crate::model::text_ops::home_offset(&self.content, cursor);
-        let nl = self.content[start..]
-            .find('\n')
-            .map_or(self.content.len(), |i| start + i);
+        let nl = crate::model::text_ops::line_end(&self.content, cursor);
         let target = if extend || !self.file_type.supports_markdown_features() {
             nl
         } else {
@@ -527,6 +538,7 @@ impl DocumentTab {
 
     pub fn place(&mut self, offset: usize, extend: bool) {
         self.pending_formats = ActiveFormats::default();
+        self.pending_table_col = None;
         if self.ime_opened_line.take().is_some() {
             self.history.seal();
         }
@@ -592,7 +604,7 @@ pub(super) fn skip_hidden_interior_left(parsed: &ParsedDocument, mut pos: usize)
 /// the source, and every other line keeps the source end.
 pub(crate) fn visible_line_end(line: &ParsedLine, mode: ViewMode) -> usize {
     if mode != ViewMode::Raw && matches!(line.kind, LineKind::Heading { .. }) {
-        line.offset_map.display_to_source(line.display_text.len())
+        line.source.start + line.content_end
     } else {
         line.source.end
     }

@@ -622,6 +622,20 @@ impl RowOffsetMap {
             .unwrap_or(self.line_end)
     }
 
+    fn slice_source(pos: usize, d: &std::ops::Range<usize>, s: &std::ops::Range<usize>) -> usize {
+        if d.len() != s.len() {
+            if pos <= d.start {
+                s.start
+            } else if pos >= d.end || (pos - d.start) * 2 >= d.len() {
+                s.end
+            } else {
+                s.start
+            }
+        } else {
+            s.start + (pos - d.start)
+        }
+    }
+
     /// Slice a sub-map for a wrapped visual row covering `disp_range` in `display_text`.
     /// `(line_start, line_end)` of `slice_display(disp_range)`, without
     /// building the sliced map.
@@ -637,8 +651,8 @@ impl RowOffsetMap {
             if overlap_end > overlap_start
                 || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end)
             {
-                first.get_or_insert(s.start + (overlap_start - d.start));
-                last = Some(s.start + (overlap_end - d.start));
+                first.get_or_insert_with(|| Self::slice_source(overlap_start, d, s));
+                last = Some(Self::slice_source(overlap_end, d, s));
             }
         }
         (
@@ -658,8 +672,8 @@ impl RowOffsetMap {
             if overlap_end > overlap_start
                 || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end)
             {
-                let src_start = s.start + (overlap_start - d.start);
-                let src_end = s.start + (overlap_end - d.start);
+                let src_start = Self::slice_source(overlap_start, d, s);
+                let src_end = Self::slice_source(overlap_end, d, s);
                 let new_d_start = overlap_start - disp_range.start;
                 let new_d_end = overlap_end - disp_range.start;
                 sub_segments.push((new_d_start..new_d_end, src_start..src_end));
@@ -698,6 +712,9 @@ pub struct ParsedLine {
     pub line_index: usize,
     /// Full byte range of the line (excluding `\n`)
     pub source: std::ops::Range<usize>,
+    /// Heading content end relative to `source.start` (before any closing-hash
+    /// run); `source.len()` for every other line kind.
+    pub content_end: usize,
     pub kind: LineKind,
     /// Byte range of block prefix hidden in WYSIWYG (e.g. `# `, `- [ ] `, `> `)
     pub prefix_range: std::ops::Range<usize>,
@@ -890,6 +907,77 @@ fn merge_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<
     merged
 }
 
+fn skip_link_destination(bytes: &[u8], open_paren: usize) -> Option<usize> {
+    let len = bytes.len();
+    let mut j = open_paren + 1;
+    while j < len && bytes[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    if bytes.get(j) == Some(&b'<') {
+        j += 1;
+        while j < len {
+            match bytes[j] {
+                b'\\' if j + 1 < len => j += 2,
+                b'>' => {
+                    j += 1;
+                    break;
+                }
+                b'<' | b'\n' | b'\r' => return None,
+                _ => j += 1,
+            }
+        }
+    }
+    let mut depth = 1usize;
+    let mut quote: Option<u8> = None;
+    while j < len && depth > 0 {
+        let b = bytes[j];
+        if b == b'\\' && j + 1 < len {
+            j += 2;
+            continue;
+        }
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+            j += 1;
+            continue;
+        }
+        match b {
+            b'(' => {
+                depth += 1;
+                j += 1;
+            }
+            b')' => {
+                depth -= 1;
+                j += 1;
+            }
+            b'"' | b'\'' => {
+                quote = Some(b);
+                j += 1;
+            }
+            _ => j += 1,
+        }
+    }
+    (depth == 0).then_some(j)
+}
+
+fn skip_autolink(bytes: &[u8], lt: usize) -> Option<usize> {
+    let mut j = lt + 1;
+    let mut has_scheme_or_at = false;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'>' => return has_scheme_or_at.then_some(j + 1),
+            b'<' | b' ' | b'\t' | b'\n' | b'\r' => return None,
+            b':' | b'@' => {
+                has_scheme_or_at = true;
+                j += 1;
+            }
+            _ => j += 1,
+        }
+    }
+    None
+}
+
 pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
     let bytes = input.as_bytes();
     let len = bytes.len();
@@ -899,6 +987,49 @@ pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
 
     let mut i = 0;
     while i < len {
+        if bytes[i] == b'\\' && i + 1 < len {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'`' {
+            let open = i;
+            while i < len && bytes[i] == b'`' {
+                i += 1;
+            }
+            let width = i - open;
+            let mut cursor = i;
+            let mut closed_at = None;
+            while cursor < len {
+                if bytes[cursor] != b'`' {
+                    cursor += 1;
+                    continue;
+                }
+                let close = cursor;
+                while cursor < len && bytes[cursor] == b'`' {
+                    cursor += 1;
+                }
+                if cursor - close == width {
+                    closed_at = Some(cursor);
+                    break;
+                }
+            }
+            if let Some(end) = closed_at {
+                i = end;
+            }
+            continue;
+        }
+        if bytes[i] == b']' && bytes.get(i + 1) == Some(&b'(') {
+            if let Some(after) = skip_link_destination(bytes, i + 1) {
+                i = after;
+                continue;
+            }
+        }
+        if bytes[i] == b'<' {
+            if let Some(after) = skip_autolink(bytes, i) {
+                i = after;
+                continue;
+            }
+        }
         if bytes[i] == b'~' || bytes[i] == b'*' || bytes[i] == b'_' {
             let delim_byte = bytes[i];
             let start = i;
@@ -959,6 +1090,14 @@ type InlineSyntax = (
 );
 
 fn parse_inline_syntax(input: &str, base: usize) -> InlineSyntax {
+    parse_inline_syntax_inner(input, base, false)
+}
+
+fn parse_inline_syntax_cell(input: &str, base: usize) -> InlineSyntax {
+    parse_inline_syntax_inner(input, base, true)
+}
+
+fn parse_inline_syntax_inner(input: &str, base: usize, in_table_cell: bool) -> InlineSyntax {
     if input.is_empty() {
         return (Vec::new(), Vec::new(), Vec::new());
     }
@@ -968,7 +1107,7 @@ fn parse_inline_syntax(input: &str, base: usize) -> InlineSyntax {
     let body = input.trim_start_matches([' ', '\t']);
     if body.len() < input.len() {
         let lead = input.len() - body.len();
-        return parse_inline_syntax(body, base + lead);
+        return parse_inline_syntax_inner(body, base + lead, in_table_cell);
     }
     if is_plain_inline(input) {
         let plain = StyledSegment {
@@ -982,7 +1121,7 @@ fn parse_inline_syntax(input: &str, base: usize) -> InlineSyntax {
         };
         return (Vec::new(), Vec::new(), vec![plain]);
     }
-    parse_inline_with_pulldown(input, base)
+    parse_inline_with_pulldown(input, base, in_table_cell)
 }
 
 /// Text pulldown-cmark would return as one unstyled run: it starts with a
@@ -1015,30 +1154,72 @@ fn is_plain_inline(input: &str) -> bool {
         })
 }
 
-fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
+fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> InlineSyntax {
     let prepared = prepare_for_pulldown(input);
+    let owned_prefixed;
+    let (parse_input, offset_shift) = if in_table_cell {
+        owned_prefixed = format!("x {prepared}");
+        (owned_prefixed.as_str(), 2usize)
+    } else {
+        (prepared.as_ref(), 0usize)
+    };
     let mut options = pulldown_cmark::Options::empty();
     options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
-    let parser = pulldown_cmark::Parser::new_ext(&prepared, options).into_offset_iter();
+    let parser = pulldown_cmark::Parser::new_ext(parse_input, options).into_offset_iter();
 
     let mut raw_hidden = Vec::new();
     let mut inline_pairs = Vec::new();
     let mut styled_segments = Vec::new();
+    let mut blocked_ranges: Vec<std::ops::Range<usize>> = Vec::new();
 
     let mut bold_stack: Vec<usize> = Vec::new();
     let mut italic_stack: Vec<usize> = Vec::new();
     let mut strike_stack: Vec<usize> = Vec::new();
     let mut underline_stack: Vec<usize> = Vec::new();
     let mut link_stack: Vec<(usize, String, usize)> = Vec::new(); // (outer_start, url, last_inner_end)
+    let mut image_stack: Vec<usize> = Vec::new();
 
-    for (event, range) in parser {
+    for (event, raw_range) in parser {
+        if raw_range.end <= offset_shift {
+            continue;
+        }
+        let range = (raw_range.start.max(offset_shift) - offset_shift)
+            ..(raw_range.end.max(offset_shift) - offset_shift);
         let abs_start = base + range.start;
         let abs_end = base + range.end;
         match event {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { .. }) => {
+                image_stack.push(abs_start);
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Image) => {
+                if let Some(open_start) = image_stack.pop() {
+                    blocked_ranges.push(open_start..abs_end);
+                    if image_stack.is_empty() {
+                        if let Some(last_link) = link_stack.last_mut() {
+                            last_link.2 = last_link.2.max(abs_end);
+                        }
+                        if !link_stack.is_empty() && abs_end > open_start {
+                            styled_segments.push(StyledSegment {
+                                source: open_start..abs_end,
+                                bold: !bold_stack.is_empty(),
+                                italic: !italic_stack.is_empty(),
+                                underline: !underline_stack.is_empty(),
+                                strike: !strike_stack.is_empty(),
+                                code: false,
+                                link_url: link_stack.last().map(|(_, u, _)| u.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+            _ if !image_stack.is_empty() => {}
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::Strong) => {
                 bold_stack.push(abs_start);
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Strong) => {
+                if let Some(last_link) = link_stack.last_mut() {
+                    last_link.2 = last_link.2.max(abs_end);
+                }
                 if let Some(open_start) = bold_stack.pop() {
                     let delim_len = 2.min((abs_end.saturating_sub(open_start)) / 2);
                     if delim_len > 0 {
@@ -1060,6 +1241,9 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
                 italic_stack.push(abs_start);
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Emphasis) => {
+                if let Some(last_link) = link_stack.last_mut() {
+                    last_link.2 = last_link.2.max(abs_end);
+                }
                 if let Some(open_start) = italic_stack.pop() {
                     let delim_len = 1.min((abs_end.saturating_sub(open_start)) / 2);
                     if delim_len > 0 {
@@ -1081,6 +1265,9 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
                 strike_stack.push(abs_start);
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Strikethrough) => {
+                if let Some(last_link) = link_stack.last_mut() {
+                    last_link.2 = last_link.2.max(abs_end);
+                }
                 if let Some(open_start) = strike_stack.pop() {
                     let slice_len = abs_end.saturating_sub(open_start);
                     let delim_len = if input[range.start..range.end].starts_with("~~") {
@@ -1118,6 +1305,10 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
                 }
             }
             pulldown_cmark::Event::InlineHtml(h) | pulldown_cmark::Event::Html(h) => {
+                blocked_ranges.push(abs_start..abs_end);
+                if let Some(last_link) = link_stack.last_mut() {
+                    last_link.2 = last_link.2.max(abs_end);
+                }
                 if h.eq_ignore_ascii_case("<u>") {
                     underline_stack.push(abs_start);
                 } else if h.eq_ignore_ascii_case("</u>") {
@@ -1138,7 +1329,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
             }
             pulldown_cmark::Event::Code(_c) => {
                 if let Some(last_link) = link_stack.last_mut() {
-                    last_link.2 = abs_end;
+                    last_link.2 = last_link.2.max(abs_end);
                 }
                 let raw_slice = &input[range.start..range.end];
                 let ticks = raw_slice.bytes().take_while(|&b| b == b'`').count();
@@ -1167,7 +1358,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
             }
             pulldown_cmark::Event::Text(_t) => {
                 if let Some(last_link) = link_stack.last_mut() {
-                    last_link.2 = abs_end;
+                    last_link.2 = last_link.2.max(abs_end);
                 }
                 if abs_end > abs_start {
                     styled_segments.push(StyledSegment {
@@ -1181,7 +1372,20 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
                     });
                 }
             }
+            pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => {
+                if let Some(last_link) = link_stack.last_mut() {
+                    last_link.2 = last_link.2.max(abs_end);
+                }
+            }
             _ => {}
+        }
+    }
+
+    if let Some(&first_unclosed) = underline_stack.first() {
+        for seg in &mut styled_segments {
+            if seg.source.start >= first_unclosed {
+                seg.underline = false;
+            }
         }
     }
 
@@ -1189,6 +1393,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
     synthesize_flanking_pairs(
         input,
         base,
+        &blocked_ranges,
         &mut raw_hidden,
         &mut inline_pairs,
         &mut styled_segments,
@@ -1197,7 +1402,8 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
     // Backslash escapes: the parser consumes `\X` (X an ASCII punctuation
     // character) and shows only `X`, so the backslash is hidden in the
     // WYSIWYG display with the offset map carrying the caret across it.
-    // Backslashes inside code spans stay visible: code content is literal.
+    // Backslashes inside code spans stay visible, except `\|` inside GFM table
+    // cells which unescapes to `|`.
     let bytes = input.as_bytes();
     if bytes.contains(&b'\\') {
         let code_inner = merge_ranges(
@@ -1213,7 +1419,8 @@ fn parse_inline_with_pulldown(input: &str, base: usize) -> InlineSyntax {
         while i < bytes.len() {
             if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() {
                 let abs = base + i;
-                if !index_in_ranges(&code_inner, abs) {
+                let in_code = index_in_ranges(&code_inner, abs);
+                if !in_code || (in_table_cell && bytes[i + 1] == b'|') {
                     raw_hidden.push(abs..abs + 1);
                     escapes.push(abs);
                 }
@@ -1325,6 +1532,7 @@ fn is_escaped_delim(input: &str, pos: usize) -> bool {
 fn synthesize_flanking_pairs(
     input: &str,
     base: usize,
+    extra_blocked: &[std::ops::Range<usize>],
     raw_hidden: &mut Vec<std::ops::Range<usize>>,
     inline_pairs: &mut Vec<InlinePair>,
     styled_segments: &mut Vec<StyledSegment>,
@@ -1348,18 +1556,19 @@ fn synthesize_flanking_pairs(
     if runs.len() < 2 {
         return;
     }
-    // A run is out of play when it starts inside a code span or was consumed
-    // as the opener or closer of a parsed pair. Every byte of a consumed run
-    // sits inside an open or close delim: a `***` split into `**` + `*` is
-    // covered, but an extra leftover backtick in ``a``` is not. Both are
-    // checked against sorted, merged ranges so long lines stay linear.
-    let code_inner = merge_ranges(
-        inline_pairs
-            .iter()
-            .filter(|p| p.kind == InlineTagKind::Code)
-            .map(|p| p.inner.clone())
-            .collect(),
-    );
+    // A run is out of play when it overlaps a code span, HTML tag/comment,
+    // inline image, or was consumed as the opener or closer of a parsed pair.
+    let mut blocked_list: Vec<std::ops::Range<usize>> = inline_pairs
+        .iter()
+        .filter(|p| p.kind == InlineTagKind::Code)
+        .map(|p| p.inner.clone())
+        .collect();
+    blocked_list.extend(extra_blocked.iter().cloned());
+    let blocked_spans = merge_ranges(blocked_list);
+    let overlaps_blocked = |run: &std::ops::Range<usize>| {
+        let after = blocked_spans.partition_point(|b| b.start < run.end);
+        after > 0 && blocked_spans[after - 1].end > run.start
+    };
     let delims = merge_ranges(
         inline_pairs
             .iter()
@@ -1372,7 +1581,10 @@ fn synthesize_flanking_pairs(
     };
     let mut blocked: Vec<bool> = runs
         .iter()
-        .map(|&(s, e, _)| index_in_ranges(&code_inner, base + s) || consumed(base + s..base + e))
+        .map(|&(s, e, _)| {
+            let run = base + s..base + e;
+            overlaps_blocked(&run) || consumed(run)
+        })
         .collect();
     // Closer candidates by delimiter: emphasis keyed by exact run length,
     // backticks (any length) under length 0. Relaxed flanking: only the
@@ -1429,7 +1641,26 @@ fn synthesize_flanking_pairs(
         let from = candidates.partition_point(|&k| k <= open_idx);
         let found = candidates[from..].iter().copied().find(|&k| {
             let (c_start, c_end, _) = runs[k];
-            !used[k] && !blocked[k] && c_start != o_end && (ch != b'`' || c_end - c_start > o_len)
+            if used[k] || blocked[k] || c_start == o_end || (ch == b'`' && c_end - c_start <= o_len)
+            {
+                return false;
+            }
+            let closer_start = if ch == b'`' && c_end - c_start > o_len {
+                c_end - o_len
+            } else {
+                c_start
+            };
+            let cand_start = base + o_start;
+            let cand_end = base + c_end;
+            let cand_inner_start = base + o_end;
+            let cand_inner_end = base + closer_start;
+            !inline_pairs.iter().any(|p| {
+                let disjoint = cand_end <= p.open_delim.start || cand_start >= p.close_delim.end;
+                let inside_p = cand_start >= p.inner.start && cand_end <= p.inner.end;
+                let encloses_p =
+                    p.open_delim.start >= cand_inner_start && p.close_delim.end <= cand_inner_end;
+                !(disjoint || inside_p || encloses_p)
+            })
         });
         let Some(close_idx) = found else {
             continue;
@@ -2211,6 +2442,7 @@ fn parse_lines(
             push_line!(ParsedLine {
                 line_index: i,
                 source: line_source.clone(),
+                content_end: line.len(),
                 kind: LineKind::Empty,
                 prefix_range: line_start..line_start,
                 hidden_ranges: Vec::new(),
@@ -2241,6 +2473,7 @@ fn parse_lines(
             push_line!(ParsedLine {
                 line_index: i,
                 source: line_source,
+                content_end: line.len(),
                 kind: LineKind::HorizontalRule,
                 prefix_range: line_start..line_end,
                 hidden_ranges: hidden,
@@ -2277,6 +2510,7 @@ fn parse_lines(
                 push_line!(ParsedLine {
                     line_index: i,
                     source: line_source,
+                    content_end: line.len(),
                     kind: LineKind::TableDelimiter,
                     prefix_range: line_start..line_end,
                     hidden_ranges: hidden,
@@ -2307,7 +2541,8 @@ fn parse_lines(
                     cells.push(c_start..c_end);
                     if c_end > c_start {
                         let inner_slice = &line[(c_start - line_start)..(c_end - line_start)];
-                        let (c_hid, c_pairs, c_segs) = parse_inline_syntax(inner_slice, c_start);
+                        let (c_hid, c_pairs, c_segs) =
+                            parse_inline_syntax_cell(inner_slice, c_start);
                         row_hidden.extend(c_hid);
                         row_pairs.extend(c_pairs);
                         row_segments.extend(c_segs);
@@ -2332,6 +2567,7 @@ fn parse_lines(
                 push_line!(ParsedLine {
                     line_index: i,
                     source: line_source.clone(),
+                    content_end: line.len(),
                     kind: LineKind::TableRow {
                         is_header,
                         body: Box::new(TableRowBody {
@@ -2406,6 +2642,7 @@ fn parse_lines(
         push_line!(ParsedLine {
             line_index: i,
             source: line_source,
+            content_end: line.len(),
             kind,
             prefix_range,
             hidden_ranges: merged_hidden,
