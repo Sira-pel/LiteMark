@@ -540,7 +540,7 @@ fn resizing_changes_only_the_selected_image() {
     assert!(d.cycle_picture_size());
     assert_eq!(
         d.content,
-        format!("![a](a.png) ![b|200](b.png) ![c](c.png)\nafter\n")
+        "![a](a.png) ![b|200](b.png) ![c](c.png)\nafter\n"
     );
     assert_eq!(d.selected_image(), Some(12..27));
     // With the whole row selected nothing is resized.
@@ -688,4 +688,41 @@ fn f2_shows_a_rows_markdown_for_editing_until_the_caret_leaves() {
     d.place(d.content.len(), false);
     d.expire_picture_raw();
     assert!(d.picture_block_at(5).is_some());
+}
+
+#[test]
+fn enter_with_one_image_selected_opens_a_line_after_the_row() {
+    for plain in [false, true] {
+        let mut d = row_doc();
+        d.select_picture(B);
+        if plain {
+            d.smart_newline(true);
+        } else {
+            d.smart_newline(false);
+        }
+        assert_eq!(d.content, format!("{ROW}\n\nafter\n"), "plain={plain}");
+    }
+}
+
+#[test]
+fn backspace_after_a_row_selects_its_last_image_first() {
+    let mut d = row_doc();
+    d.place(ROW.len(), false);
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+    assert_eq!(d.selected_image(), Some(C));
+    // The next press removes only that image.
+    d.smart_backspace_in_mode(MODE);
+    assert_eq!(d.content, "![a](a.png) ![b](b.png)\nafter\n");
+}
+
+#[test]
+fn delete_before_a_row_selects_its_first_image_first() {
+    let mut d = row_doc();
+    d.place(0, false);
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, format!("{ROW}\nafter\n"));
+    assert_eq!(d.selected_image(), Some(A));
+    d.delete_forward_in_mode(MODE);
+    assert_eq!(d.content, "![b](b.png) ![c](c.png)\nafter\n");
 }

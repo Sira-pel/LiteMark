@@ -312,8 +312,19 @@ impl DocumentTab {
 
     /// Enter on a selected picture opens a new line after it.
     pub(super) fn picture_newline(&mut self) -> bool {
-        let Some(block) = self.selected_picture() else {
-            return false;
+        // One image of a row selected opens the line after the whole row.
+        let block = match self.selected_picture() {
+            Some(block) => block,
+            None => {
+                let at = self.selection_range().start;
+                match self
+                    .selected_image()
+                    .and_then(|_| self.picture_block_at(at))
+                {
+                    Some(block) => block,
+                    None => return false,
+                }
+            }
         };
         let nl = self.line_break(block.start);
         self.edit(block.end..block.end, nl);
@@ -391,6 +402,23 @@ impl DocumentTab {
                 return true;
             }
             return false;
+        }
+        // Backspace right after a row, or Delete right before it, selects the
+        // image next to the caret first; the next press removes just that one.
+        if sel.is_empty()
+            && (forward && sel.start == block.start || !forward && sel.start == block.end)
+        {
+            if let Some(images) = self.content.get(block.clone()).and_then(parse_image_row) {
+                let pick = if forward {
+                    images.first()
+                } else {
+                    images.last()
+                };
+                if let Some((range, _)) = pick {
+                    self.select_picture(range.start + block.start..range.end + block.start);
+                    return true;
+                }
+            }
         }
         let hit = if sel.is_empty() {
             if forward {
