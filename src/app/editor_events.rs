@@ -265,12 +265,16 @@ impl LiteMarkApp {
         cx: &mut Context<Self>,
     ) {
         self.clear_table_drag_press();
+        // Another button letting go does not end a resize by the left one.
+        if self.image_drag.is_some() && event.button != MouseButton::Left {
+            return;
+        }
         if let Some(drag) = self.image_drag.take() {
             // The note changes once, when the drag ends, and not at all for
             // a press on the handle that never moved.
             if drag.moved() {
                 let (width, height) = drag.result();
-                if let Some(tab) = self.active_tab_mut() {
+                if let Some(tab) = self.active_tab_mut().filter(|tab| tab.id == drag.tab_id) {
                     tab.set_picture_size_at(drag.range, Some(width), height);
                 }
             }
@@ -303,6 +307,12 @@ impl LiteMarkApp {
         }
         window.refresh();
         cx.notify();
+    }
+
+    /// Ends a picture resize without changing the note. True when one was
+    /// under way.
+    pub(super) fn cancel_image_drag(&mut self) -> bool {
+        self.image_drag.take().is_some()
     }
 
     /// A press on the handle of the selected picture starts resizing it. The
@@ -338,8 +348,13 @@ impl LiteMarkApp {
         self.field_focus = TextInput::Editor;
         self.selecting = false;
         self.table_drag = None;
+        let tab_id = self
+            .active_tab()
+            .map(|tab| tab.id.clone())
+            .unwrap_or_default();
         self.image_drag = Some(ImageDrag {
             range,
+            tab_id,
             axis,
             start_x: event.position.x,
             start_y: event.position.y,
@@ -707,7 +722,10 @@ impl LiteMarkApp {
             mono_font_family: Theme::FONT_MONO.into(),
             table_hover: self.table_hover.clone(),
             table_drag: self.table_drag.clone(),
-            image_drag: self.image_drag.clone(),
+            image_drag: self
+                .image_drag
+                .clone()
+                .filter(|d| self.active_tab().is_some_and(|tab| tab.id == d.tab_id)),
             pointer_hidden: self.pointer_hidden,
             table_hot: self.table_hot.clone(),
             table_pressed: self.table_pressed,

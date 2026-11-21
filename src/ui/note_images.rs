@@ -274,6 +274,8 @@ pub enum DragAxis {
 pub struct ImageDrag {
     /// Source range of the picture (or the one image of a row) being dragged.
     pub range: std::ops::Range<usize>,
+    /// The tab the picture is in, so a drag never lands in another note.
+    pub tab_id: String,
     pub axis: DragAxis,
     pub start_x: Pixels,
     pub start_y: Pixels,
@@ -514,6 +516,7 @@ mod tests {
         let drag = |axis, had_height| {
             let mut d = ImageDrag {
                 range: 0..0,
+                tab_id: String::new(),
                 axis,
                 start_x: px(0.0),
                 start_y: px(0.0),
