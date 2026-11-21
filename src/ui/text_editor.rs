@@ -2465,8 +2465,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 let muted = self.muted_color;
                                 let surface = self.surface_bg;
                                 let font_size = self.font_size;
-                                let mut element = img(path.clone())
+                                // The picture sits in a box of exactly its size:
+                                // gpui keeps an image's own aspect ratio when
+                                // it lays itself out, which would undo a
+                                // stretch to a different shape.
+                                let picture = img(path.clone())
                                     .id(("note-image", line_idx))
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
                                     .w(picture_size.width)
                                     .h(picture_size.height)
                                     .rounded(IMAGE_RADIUS)
@@ -2482,7 +2489,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                             .text_size(font_size)
                                             .child("Image not found")
                                             .into_any_element()
-                                    })
+                                    });
+                                let mut element = div()
+                                    .relative()
+                                    .w(picture_size.width)
+                                    .h(picture_size.height)
+                                    .child(picture)
                                     .into_any_element();
                                 element.prepaint_as_root(
                                     block_bounds.origin,
@@ -2675,8 +2687,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 let muted = self.muted_color;
                                 let surface = self.surface_bg;
                                 let font_size = self.font_size;
-                                let mut element = img(path.clone())
+                                let picture = img(path.clone())
                                     .id(("note-thumb", line_idx * 4096 + k.min(4095)))
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
                                     .w(w)
                                     .h(h)
                                     .rounded(IMAGE_RADIUS)
@@ -2696,8 +2711,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                             .text_size(font_size)
                                             .child("Image not found")
                                             .into_any_element()
-                                    })
-                                    .into_any_element();
+                                    });
+                                // A box of exactly this size; see the lone picture.
+                                let mut element =
+                                    div().relative().w(w).h(h).child(picture).into_any_element();
                                 element.prepaint_as_root(
                                     bounds.origin,
                                     size(AvailableSpace::Definite(w), AvailableSpace::Definite(h)),
