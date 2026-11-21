@@ -20,7 +20,14 @@ pub struct ImageLine {
 /// other text before or after the image makes it an ordinary paragraph.
 pub fn parse_image_line(line: &str) -> Option<ImageLine> {
     let line = line.trim();
-    let rest = line.strip_prefix("![")?;
+    let (image, len) = parse_image_at(line)?;
+    (len == line.len()).then_some(image)
+}
+
+/// Parses the image at the start of `text` (which must begin with `![`), and
+/// how many bytes it spans, up to its closing parenthesis.
+fn parse_image_at(text: &str) -> Option<(ImageLine, usize)> {
+    let rest = text.strip_prefix("![")?;
     let alt_end = alt_end(rest)?;
     let (alt_raw, width) = split_alt_width(&rest[..alt_end]);
     let alt = unescape(alt_raw);
@@ -85,15 +92,45 @@ pub fn parse_image_line(line: &str) -> Option<ImageLine> {
         }
         _ => return None,
     };
-    if after != ")" {
+    if !after.starts_with(')') {
         return None;
     }
-    Some(ImageLine {
-        alt,
-        target,
-        title,
-        width,
-    })
+    let len = text.len() - after.len() + 1;
+    Some((
+        ImageLine {
+            alt,
+            target,
+            title,
+            width,
+        },
+        len,
+    ))
+}
+
+/// True when `line` is one image or a row of images and nothing else.
+pub fn is_image_block(line: &str) -> bool {
+    parse_image_line(line).is_some() || parse_image_row(line).is_some()
+}
+
+/// Parses `line` as a row of two or more images with only spaces or tabs
+/// between them. Each image comes with its byte range in `line`, which is
+/// kept as written (the range does not skip surrounding whitespace).
+pub fn parse_image_row(line: &str) -> Option<Vec<(std::ops::Range<usize>, ImageLine)>> {
+    let mut images = Vec::new();
+    let mut at = line.len() - line.trim_start().len();
+    let end = line.trim_end().len();
+    while at < end {
+        let (image, len) = parse_image_at(&line[at..end])?;
+        images.push((at..at + len, image));
+        at += len;
+        let gap = line[at..end].len() - line[at..end].trim_start_matches([' ', '\t']).len();
+        // Images must be told apart: one space or tab at least between them.
+        if at < end && gap == 0 {
+            return None;
+        }
+        at += gap;
+    }
+    (images.len() >= 2).then_some(images)
 }
 
 /// Where the alt text of `rest` (the text after `![`) ends: the matching `]`,
@@ -389,6 +426,21 @@ mod tests {
             "![|64](a.png)"
         );
         assert_eq!(set_image_width("not an image", Some(64)), None);
+    }
+
+    #[test]
+    fn rows_need_two_or_more_images_and_only_blanks_between() {
+        let row = parse_image_row("![a|120](x.png)  ![b](<y z.png>)	![c](w.png)").unwrap();
+        let spans: Vec<_> = row.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(spans, vec![0..15, 17..32, 33..44]);
+        assert_eq!(row[0].1.width, Some(120));
+        assert_eq!(row[1].1.target, "y z.png");
+        assert_eq!(parse_image_row("![a](x.png)"), None);
+        assert_eq!(parse_image_row("![a](x.png) text ![b](y.png)"), None);
+        assert_eq!(parse_image_row("![a](x.png) ![b](y.png) tail"), None);
+        assert_eq!(parse_image_row("![a](x.png)![b](y.png)"), None);
+        // A row is not a single-image line.
+        assert!(parse_image_line("![a](x.png) ![b](y.png)").is_none());
     }
 
     #[test]
