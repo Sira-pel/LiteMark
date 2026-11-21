@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use gpui::{px, Pixels};
+use gpui::{point, px, size, Bounds, Pixels};
 
 /// Tallest an image block grows, before zoom.
 pub const MAX_IMAGE_HEIGHT: Pixels = px(480.0);
@@ -223,6 +223,46 @@ pub fn thumbnail_size(
     (px(w), px((nh * w / nw).max(1.0)))
 }
 
+/// Smallest width a picture can be dragged to.
+pub const MIN_DRAG_WIDTH: f32 = 24.0;
+/// Largest width written to a note: the `|width` syntax takes up to 4 digits.
+pub const MAX_WIDTH: f32 = 9999.0;
+/// Side of the square handle drawn on the selected picture's corner.
+pub const HANDLE_SIZE: Pixels = px(10.0);
+/// Side of the area that grabs the handle, larger than what is drawn.
+pub const HANDLE_GRAB: Pixels = px(18.0);
+
+/// A picture being resized by its corner handle. The note is untouched until
+/// the drag ends; `width` is what is drawn meanwhile.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageDrag {
+    /// Source range of the picture (or the one image of a row) being dragged.
+    pub range: std::ops::Range<usize>,
+    pub start_x: Pixels,
+    pub start_width: Pixels,
+    /// Width of the editor column: the most a picture can be dragged to.
+    pub column: Pixels,
+    pub width: Pixels,
+}
+
+/// The width for a handle dragged `dx` from where it was grabbed: at least
+/// `MIN_DRAG_WIDTH`, at most the column and `MAX_WIDTH`, whole pixels.
+pub fn drag_width(start_width: Pixels, dx: Pixels, column: Pixels) -> Pixels {
+    let most = f32::from(column).clamp(MIN_DRAG_WIDTH, MAX_WIDTH);
+    px((f32::from(start_width) + f32::from(dx))
+        .clamp(MIN_DRAG_WIDTH, most)
+        .round())
+}
+
+/// The area of `picture` that grabs its handle: the bottom-right corner.
+pub fn handle_grab_area(picture: Bounds<Pixels>) -> Bounds<Pixels> {
+    let side = HANDLE_GRAB.min(picture.size.width).min(picture.size.height);
+    Bounds::new(
+        point(picture.right() - side, picture.bottom() - side),
+        size(side, side),
+    )
+}
+
 /// Where each thumbnail goes when they flow left to right and wrap to a new
 /// line when the next one would pass `max_width`: each one's top-left corner
 /// (relative to the block) and the block's total height. A line is as tall as
@@ -279,6 +319,34 @@ mod tests {
         let (w, h) = fit_image((1000, 4000), px(700.0), MAX_IMAGE_HEIGHT);
         assert_eq!(f32::from(h), 480.0);
         assert_eq!(f32::from(w), 120.0);
+    }
+
+    #[test]
+    fn dragging_the_handle_clamps_to_the_minimum_the_column_and_four_digits() {
+        let width =
+            |start: f32, dx: f32, column: f32| f32::from(drag_width(px(start), px(dx), px(column)));
+        assert_eq!(width(200.0, 50.0, 700.0), 250.0);
+        assert_eq!(width(200.0, -500.0, 700.0), 24.0);
+        assert_eq!(width(200.0, 900.0, 700.0), 700.0);
+        // A column wider than four digits still stops at 9999.
+        assert_eq!(width(200.0, 20000.0, 30000.0), 9999.0);
+        assert_eq!(width(200.4, 0.2, 700.0), 201.0);
+    }
+
+    #[test]
+    fn the_grab_area_is_the_bottom_right_corner_and_never_bigger_than_the_picture() {
+        let area = handle_grab_area(Bounds::new(
+            point(px(10.0), px(20.0)),
+            size(px(100.0), px(50.0)),
+        ));
+        assert_eq!(f32::from(area.right()), 110.0);
+        assert_eq!(f32::from(area.bottom()), 70.0);
+        assert_eq!(f32::from(area.size.width), 18.0);
+        let tiny = handle_grab_area(Bounds::new(
+            point(px(0.0), px(0.0)),
+            size(px(12.0), px(40.0)),
+        ));
+        assert_eq!(f32::from(tiny.size.width), 12.0);
     }
 
     #[test]

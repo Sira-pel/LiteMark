@@ -275,6 +275,8 @@ pub struct LiteMarkApp {
     pub table_hot: Option<crate::ui::table_chrome::TableHot>,
     pub table_pressed: bool,
     pub table_drag: Option<crate::ui::table_chrome::TableDrag>,
+    /// A picture being resized with its corner handle.
+    pub image_drag: Option<crate::ui::note_images::ImageDrag>,
     /// True while the mouse button that started a table drag is still held.
     /// Survives a modifier cancel of the visual drag so later chords cannot
     /// edit the note until that press ends (mouse-up anywhere, next mouse-down,
@@ -685,6 +687,7 @@ impl LiteMarkApp {
             table_hot: None,
             table_pressed: false,
             table_drag: None,
+            image_drag: None,
             table_drag_press_held: false,
             table_action_anchor: None,
             title_drag_armed: Rc::new(Cell::new(false)),
@@ -835,6 +838,7 @@ impl LiteMarkApp {
             table_hot: None,
             table_pressed: false,
             table_drag: None,
+            image_drag: None,
             table_drag_press_held: false,
             table_action_anchor: None,
             title_drag_armed: Rc::new(Cell::new(false)),

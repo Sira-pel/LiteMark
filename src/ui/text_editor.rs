@@ -27,7 +27,8 @@ use crate::theme::sz;
 
 use super::note_images::{
     ellipsize, fit_image, fit_image_width, flow_thumbnails, placeholder_height, thumbnail_size,
-    ImageSizeCache, IMAGE_MARGIN_Y, IMAGE_RADIUS, MAX_IMAGE_HEIGHT, THUMB_GAP, THUMB_HEIGHT,
+    ImageSizeCache, HANDLE_SIZE, IMAGE_MARGIN_Y, IMAGE_RADIUS, MAX_IMAGE_HEIGHT, THUMB_GAP,
+    THUMB_HEIGHT,
 };
 
 #[derive(Clone)]
@@ -292,6 +293,9 @@ pub struct EditorPaint {
     pub images: ImageSizeCache,
     /// Where each picture block (by source range) was drawn.
     pub pictures: Vec<(Range<usize>, Bounds<Pixels>)>,
+    /// The handle of the selected picture: its source range, where it is
+    /// drawn and the column width, for the app to hit-test a press.
+    pub picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)>,
     /// Length and selection of the content the rows were laid out for, so a
     /// caller can tell whether the geometry matches the current document.
     pub painted_len: usize,
@@ -313,6 +317,7 @@ impl Default for EditorPaint {
             painted_len: 0,
             painted_selection: 0..0,
             pictures: Vec::new(),
+            picture_handle: None,
         }
     }
 }
@@ -1158,6 +1163,8 @@ pub struct EditorElement<V: 'static> {
     pub table_drag: Option<super::table_chrome::TableDrag>,
     pub table_hot: Option<super::table_chrome::TableHot>,
     pub table_pressed: bool,
+    /// A picture being resized by its handle: drawn at the dragged width.
+    pub image_drag: Option<super::note_images::ImageDrag>,
     pub table_hover_fill: Hsla,
     pub table_active_fill: Hsla,
     /// Folder of the note, for relative image paths; `None` for an unsaved note.
@@ -1234,6 +1241,7 @@ pub struct Prepaint {
     /// Pictures to draw, already laid out.
     images: Vec<AnyElement>,
     pictures: Vec<(Range<usize>, Bounds<Pixels>)>,
+    picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)>,
     image_cache: ImageSizeCache,
 }
 
@@ -1612,6 +1620,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 layout_cache,
                 images: Vec::new(),
                 pictures: Vec::new(),
+                picture_handle: None,
                 image_cache: std::mem::take(&mut self.paint.borrow_mut().images),
             };
         }
@@ -1626,6 +1635,25 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut tables: Vec<TableGeom> = Vec::new();
         let mut images: Vec<AnyElement> = Vec::new();
         let mut pictures: Vec<(Range<usize>, Bounds<Pixels>)> = Vec::new();
+        let mut picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)> = None;
+        // Squares drawn on the corner of the selected picture.
+        let handle_quad = |bounds: Bounds<Pixels>| {
+            let side = HANDLE_SIZE;
+            let mut q = fill(
+                Bounds::new(
+                    point(
+                        bounds.right() - side - px(3.0),
+                        bounds.bottom() - side - px(3.0),
+                    ),
+                    size(side, side),
+                ),
+                self.cursor_color,
+            );
+            q.corner_radii = Corners::all(px(2.0));
+            q.border_widths = Edges::all(px(1.5));
+            q.border_color = self.surface_bg;
+            q
+        };
         let mut image_cache = std::mem::take(&mut self.paint.borrow_mut().images);
         let mut image_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         let mut cursor = None;
@@ -2362,7 +2390,13 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         .any(|&a| a + 2 >= line_idx && a <= line_idx + 2);
                     let placeholder_h = placeholder_height(self.font_size);
                     // An explicit `|width` wins over the height limit.
-                    let fit = |natural: (u32, u32)| match image.width {
+                    let dragged = self
+                        .image_drag
+                        .as_ref()
+                        .filter(|d| d.range == src)
+                        .map(|d| f32::from(d.width).round() as u32);
+                    let wanted_width = dragged.or(image.width);
+                    let fit = |natural: (u32, u32)| match wanted_width {
                         Some(w) => fit_image_width(natural, w, content_width),
                         None => fit_image(natural, content_width, MAX_IMAGE_HEIGHT),
                     };
@@ -2390,9 +2424,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let block_size = match &picture {
                         Some((_, picture_size)) => *picture_size,
                         None => size(
-                            image
-                                .width
-                                .map_or(content_width, |w| px(w as f32).min(content_width)),
+                            wanted_width.map_or(content_width, |w| px(w as f32).min(content_width)),
                             placeholder_h,
                         ),
                     };
@@ -2509,6 +2541,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             q.border_widths = Edges::all(px(2.0));
                             q.border_color = self.cursor_color;
                             quads.push(q);
+                            // The handle to drag the whole picture's size.
+                            quads.push(handle_quad(block_bounds));
+                            picture_handle = Some((src.clone(), block_bounds, content_width));
                         }
                         if !self.selection.is_empty()
                             && self.selection.start <= src.end
@@ -2566,8 +2601,17 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             }
                             path = natural.map(|_| p.clone());
                         }
-                        sizes.push(thumbnail_size(natural, image.width, content_width));
                         let abs = range.start + src.start..range.end + src.start;
+                        let dragged = self
+                            .image_drag
+                            .as_ref()
+                            .filter(|d| d.range == abs)
+                            .map(|d| f32::from(d.width).round() as u32);
+                        sizes.push(thumbnail_size(
+                            natural,
+                            dragged.or(image.width),
+                            content_width,
+                        ));
                         thumbs.push((abs, image, target, path));
                     }
                     let (spots, flow_h) = flow_thumbnails(&sizes, content_width, THUMB_GAP);
@@ -2665,6 +2709,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             q.border_widths = Edges::all(px(2.0));
                             q.border_color = self.cursor_color;
                             quads.push(q);
+                        }
+                        // One image selected by itself gets the handle.
+                        if selected_one == Some(k) {
+                            quads.push(handle_quad(bounds));
+                            picture_handle = Some((abs.clone(), bounds, content_width));
                         }
                         if !self.selection.is_empty()
                             && self.selection.start < abs.end
@@ -3128,6 +3177,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             layout_cache,
             images,
             pictures,
+            picture_handle,
             image_cache,
         }
     }
@@ -3228,6 +3278,13 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         if let Some(cursor) = prepaint.cursor.take() {
             window.paint_quad(cursor);
         }
+        // A resize cursor over the picture handle, and all through a drag.
+        let over_handle = prepaint.picture_handle.as_ref().is_some_and(|(_, b, _)| {
+            super::note_images::handle_grab_area(*b).contains(&window.mouse_position())
+        });
+        if over_handle || self.image_drag.is_some() {
+            window.set_window_cursor_style(CursorStyle::ResizeUpLeftDownRight);
+        }
 
         let wrap_changed = self.paint.borrow().wrap_cols != prepaint.wrap_cols;
         {
@@ -3241,6 +3298,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             // deep-copying every shaped line each frame.
             paint.rows = std::mem::take(&mut prepaint.rows);
             paint.pictures = std::mem::take(&mut prepaint.pictures);
+            paint.picture_handle = prepaint.picture_handle.take();
             if self.word_wrap {
                 paint.wrap_cols = prepaint.wrap_cols;
             } else {
@@ -4080,6 +4138,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             pictures: Vec::new(),
+            picture_handle: None,
         };
 
         let mut caret = Caret::default();
@@ -4179,6 +4238,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             pictures: Vec::new(),
+            picture_handle: None,
         };
 
         // Click on Line 0 (y = 10px)
@@ -4253,6 +4313,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             pictures: Vec::new(),
+            picture_handle: None,
         };
 
         let mut caret = Caret::default();
@@ -4352,6 +4413,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             pictures: Vec::new(),
+            picture_handle: None,
         };
 
         // Click in Cell 1 on Line 1 at y = 35px (Line 0 is 0..28px, Line 1 is 28..56px)
@@ -4556,6 +4618,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             pictures: Vec::new(),
+            picture_handle: None,
         };
 
         let mut caret = Caret::default();

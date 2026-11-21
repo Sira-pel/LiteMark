@@ -1,6 +1,7 @@
 //! Editor keyboard and mouse events, including table chrome.
 
 use super::*;
+use crate::ui::note_images::{drag_width, handle_grab_area, ImageDrag};
 
 impl LiteMarkApp {
     pub(super) fn editor_backspace(&mut self, _cx: &mut App) {
@@ -264,6 +265,19 @@ impl LiteMarkApp {
         cx: &mut Context<Self>,
     ) {
         self.clear_table_drag_press();
+        if let Some(drag) = self.image_drag.take() {
+            // The note changes once, when the drag ends, and not at all for
+            // a press on the handle that never moved.
+            if drag.width != drag.start_width {
+                let width = f32::from(drag.width).round() as u32;
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.set_picture_width_at(drag.range, Some(width));
+                }
+            }
+            window.refresh();
+            cx.notify();
+            return;
+        }
         if let Some(drag) = self.table_drag.take() {
             let tables = self.editor_paint.borrow().tables.clone();
             let moved = self
@@ -279,6 +293,46 @@ impl LiteMarkApp {
         }
         window.refresh();
         cx.notify();
+    }
+
+    /// A press on the handle of the selected picture starts resizing it. The
+    /// selection and caret stay as they are, so the picture is still selected
+    /// when the drag ends.
+    fn handle_picture_handle_press(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.effective_view_mode() != ViewMode::Wysiwyg
+            || event.button != MouseButton::Left
+            || event.modifiers.shift
+            || self.active_tab().is_none_or(|tab| tab.is_read_only())
+        {
+            return false;
+        }
+        let Some((range, bounds, column)) = self.editor_paint.borrow().picture_handle.clone()
+        else {
+            return false;
+        };
+        if !handle_grab_area(bounds).contains(&event.position) {
+            return false;
+        }
+        self.focus_handle.focus(window);
+        self.applied_focus = Some(FocusSlot::Editor);
+        self.field_focus = TextInput::Editor;
+        self.selecting = false;
+        self.table_drag = None;
+        self.image_drag = Some(ImageDrag {
+            range,
+            start_x: event.position.x,
+            start_width: bounds.size.width,
+            column,
+            width: bounds.size.width,
+        });
+        window.refresh();
+        cx.notify();
+        true
     }
 
     pub(super) fn editor_mouse_down(
@@ -309,6 +363,9 @@ impl LiteMarkApp {
             self.selected_target = None;
         }
         if self.input_blocked() || window.default_prevented() {
+            return;
+        }
+        if self.handle_picture_handle_press(event, window, cx) {
             return;
         }
         if self.handle_table_chrome_click(event, window, cx) {
@@ -434,7 +491,24 @@ impl LiteMarkApp {
             self.clear_table_drag_press();
             cx.notify();
         }
+        // The same for a picture resize: the release was lost, so the note
+        // stays as it was.
+        if event.pressed_button.is_none() && self.image_drag.take().is_some() {
+            cx.notify();
+        }
         if self.input_blocked() {
+            return;
+        }
+        if let Some(drag) = self.image_drag.as_mut() {
+            let width = drag_width(
+                drag.start_width,
+                event.position.x - drag.start_x,
+                drag.column,
+            );
+            if width != drag.width {
+                drag.width = width;
+                cx.notify();
+            }
             return;
         }
         if self.table_drag.is_some() {
@@ -610,6 +684,7 @@ impl LiteMarkApp {
             mono_font_family: Theme::FONT_MONO.into(),
             table_hover: self.table_hover.clone(),
             table_drag: self.table_drag.clone(),
+            image_drag: self.image_drag.clone(),
             table_hot: self.table_hot.clone(),
             table_pressed: self.table_pressed,
             table_hover_fill: theme.bg_hover.into(),
