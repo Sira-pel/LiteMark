@@ -2452,9 +2452,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                     ImageTarget::Remote(url) => url.clone(),
                                     _ => "Image not found".to_string(),
                                 };
-                                let max_chars =
-                                    ((content_width - px(24.0)) / char_width).floor().max(4.0)
-                                        as usize;
+                                let max_chars = ((block_size.width - px(24.0)) / char_width)
+                                    .floor()
+                                    .max(4.0)
+                                    as usize;
                                 let text_line_h = self.font_size * 1.65;
                                 for (i, (text, color, fs)) in [
                                     (alt, self.text_color, self.font_size),
