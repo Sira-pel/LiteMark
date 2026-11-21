@@ -1625,7 +1625,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 images: Vec::new(),
                 pictures: Vec::new(),
                 picture_handle: None,
-                cursor_hitboxes: Vec::new(),
+                cursor_hitboxes: vec![(
+                    if self.pointer_hidden {
+                        CursorStyle::None
+                    } else {
+                        CursorStyle::IBeam
+                    },
+                    window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                )],
                 image_cache: std::mem::take(&mut self.paint.borrow_mut().images),
             };
         }
