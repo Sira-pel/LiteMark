@@ -496,13 +496,27 @@ impl LiteMarkApp {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let body = match render_export(format, &tab.title, &tab.content) {
-            Ok(body) => body,
-            Err(err) => {
-                self.show_error(err);
-                return;
-            }
-        };
+        // Unsupported formats fail before the file dialog opens.
+        if !matches!(format, "html" | "md" | "markdown" | "txt" | "text") {
+            self.show_error(format!("Unsupported export format: {format}"));
+            return;
+        }
+        let (title, content) = (tab.title.clone(), tab.content.clone());
+        let base_dir = tab
+            .file_path
+            .as_deref()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf);
+        // Images anywhere in the open workspace are embedded; outside it,
+        // only those in the note's own folder.
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from);
+        let scope = export_scope(
+            base_dir.as_deref(),
+            &self.workspace.folder_path,
+            home.as_deref(),
+        );
         let stem = export_stem(&tab.title);
         let ext = match format {
             "markdown" => "md",
@@ -513,16 +527,38 @@ impl LiteMarkApp {
         let Some(dest) = pick_save_file(&default_name, ext) else {
             return;
         };
-        match atomic_save(&dest, &body) {
-            Ok(()) => self.show_toast(
-                format!(
-                    "Exported to {}",
-                    dest.file_name().unwrap_or_default().to_string_lossy()
-                ),
-                cx,
-            ),
-            Err(err) => self.show_file_error(format!("Couldn't export: {err}")),
-        }
+        // Embedding images reads and encodes files: keep that off the UI thread.
+        let task = cx.background_executor().spawn({
+            let dest = dest.clone();
+            async move {
+                let body = render_export(
+                    format,
+                    &title,
+                    &content,
+                    base_dir.as_deref(),
+                    scope.as_deref(),
+                )?;
+                atomic_save(&dest, &body).map_err(|err| format!("Couldn't export: {err}"))
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.show_toast(
+                        format!(
+                            "Exported to {}",
+                            dest.file_name().unwrap_or_default().to_string_lossy()
+                        ),
+                        cx,
+                    ),
+                    Err(err) => this.show_file_error(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn handle_format_cmd(&mut self, cmd: &'static str, _cx: &mut App) {
@@ -1030,4 +1066,41 @@ impl LiteMarkApp {
 pub(super) struct PdfOpenStart {
     pub(super) tab_id: String,
     pub(super) toast_epoch: u64,
+}
+
+/// The folder whose images an HTML export may embed: the workspace when the
+/// note is inside it, but never a workspace as broad as the home folder or a
+/// drive root, where it would reach unrelated pictures.
+fn export_scope(note_dir: Option<&Path>, workspace: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let broad = workspace.parent().is_none() || home.is_some_and(|h| h == workspace);
+    (!broad && note_dir.is_some_and(|dir| dir.starts_with(workspace)))
+        .then(|| workspace.to_path_buf())
+}
+
+#[cfg(test)]
+mod export_scope_tests {
+    use super::*;
+    // `use super::*` brings in gpui's `test` attribute; pin the std one.
+    use ::core::prelude::v1::test as std_test;
+
+    #[std_test]
+    fn the_workspace_widens_the_scope_unless_it_is_home_or_a_root() {
+        let note = Path::new("/home/me/proj/notes");
+        let ws = Path::new("/home/me/proj");
+        assert_eq!(
+            export_scope(Some(note), ws, Some(Path::new("/home/me"))),
+            Some(ws.to_path_buf())
+        );
+        assert_eq!(
+            export_scope(
+                Some(note),
+                Path::new("/home/me"),
+                Some(Path::new("/home/me"))
+            ),
+            None
+        );
+        assert_eq!(export_scope(Some(note), Path::new("/"), None), None);
+        assert_eq!(export_scope(Some(Path::new("/elsewhere")), ws, None), None);
+        assert_eq!(export_scope(None, ws, None), None);
+    }
 }

@@ -650,7 +650,7 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if self.picture_remove(false) {
+        if self.picture_remove(false) || self.picture_guard_join_back() {
             return;
         }
         if !self.caret.range.is_empty() {
