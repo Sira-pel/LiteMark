@@ -952,7 +952,12 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
         return hits;
     }
 
-    let needle = term.to_lowercase();
+    find_matches_lowered(content, &term.to_lowercase())
+}
+
+/// Case-insensitive search for `needle`, which the caller has already
+/// lowercased, so a loop over many lines folds the term once.
+pub fn find_matches_lowered(content: &str, needle: &str) -> Vec<Range<usize>> {
     if needle.is_empty() {
         return Vec::new();
     }
@@ -984,7 +989,7 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
             };
             let pos = start + rel;
             let rest = &content[pos..];
-            if let Some(len) = caseless_match_len(rest, &needle) {
+            if let Some(len) = caseless_match_len(rest, needle) {
                 hits.push(pos..pos + len);
                 start = pos + len;
             } else {
@@ -996,7 +1001,7 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
 
     while start < content.len() {
         let rest = &content[start..];
-        if let Some(len) = caseless_match_len(rest, &needle) {
+        if let Some(len) = caseless_match_len(rest, needle) {
             hits.push(start..start + len);
             start += len;
         } else {
@@ -1049,11 +1054,11 @@ pub fn find_next(hits: &[Range<usize>], cursor: usize, current: Option<usize>) -
         Some(index) if hits.get(index).is_some_and(|hit| hit.start == cursor) => index + 1,
         _ => 0,
     };
-    if let Some(rel) = hits[scan_from.min(hits.len())..]
-        .iter()
-        .position(|hit| hit.start >= cursor)
-    {
-        return Some(scan_from.min(hits.len()) + rel);
+    // Hits are sorted and disjoint, so binary-search the first at/after the cursor.
+    let from = scan_from.min(hits.len());
+    let rel = hits[from..].partition_point(|hit| hit.start < cursor);
+    if from + rel < hits.len() {
+        return Some(from + rel);
     }
     Some(0)
 }
@@ -1079,8 +1084,8 @@ pub fn find_prev(hits: &[Range<usize>], cursor: usize, current: Option<usize>) -
         _ => hits.len(),
     };
     hits[..scan_end]
-        .iter()
-        .rposition(|hit| hit.end < cursor)
+        .partition_point(|hit| hit.end < cursor)
+        .checked_sub(1)
         .or(Some(hits.len() - 1))
 }
 

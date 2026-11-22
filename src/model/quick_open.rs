@@ -317,8 +317,9 @@ type LineMatch = (usize, Range<usize>, String, Vec<Range<usize>>);
 
 fn lines_matching(text: &str, query: &str, max: usize) -> Vec<LineMatch> {
     let mut out = Vec::new();
+    let needle = query.to_lowercase();
     for (index, line) in text.split('\n').enumerate() {
-        let hits = super::text_ops::find_matches(line, query, false);
+        let hits = super::text_ops::find_matches_lowered(line, &needle);
         let Some(first) = hits.first().cloned() else {
             continue;
         };
