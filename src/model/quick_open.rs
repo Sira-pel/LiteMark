@@ -328,11 +328,10 @@ fn snippet(line: &str, hits: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
 /// Line number (1-based), first match in the line, shown text and its highlights.
 type LineMatch = (usize, Range<usize>, String, Vec<Range<usize>>);
 
-fn lines_matching(text: &str, query: &str, max: usize) -> Vec<LineMatch> {
+fn lines_matching(text: &str, needle: &str, max: usize) -> Vec<LineMatch> {
     let mut out = Vec::new();
-    let needle = query.to_lowercase();
     for (index, line) in text.split('\n').enumerate() {
-        let hits = super::text_ops::find_matches_lowered(line, &needle);
+        let hits = super::text_ops::find_matches_lowered(line, needle);
         let Some(first) = hits.first().cloned() else {
             continue;
         };
@@ -356,8 +355,8 @@ pub fn search_contents(
     files: &[PathBuf],
     workspace: &Path,
     query: &str,
-    read: impl Fn(&Path) -> Option<String>,
-    stop: impl Fn() -> bool,
+    read: impl Fn(&Path) -> Option<String> + Sync,
+    stop: impl Fn() -> bool + Sync,
     per_note: usize,
     max_total: usize,
 ) -> Vec<ContentHit> {
@@ -365,30 +364,60 @@ pub fn search_contents(
     if query.is_empty() {
         return out;
     }
-    for path in files {
+    let needle = query.to_lowercase();
+    // Notes are read and searched a batch at a time on scoped threads, then
+    // merged in the order given, so the result is the same as a sequential
+    // search; only the reading and matching overlap.
+    let batch = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8);
+    for chunk in files.chunks(batch) {
         if out.len() >= max_total || stop() {
             break;
         }
-        let Some(text) = read(path) else {
-            continue;
+        let found: Vec<Option<Vec<LineMatch>>> = if chunk.len() == 1 {
+            vec![read(&chunk[0]).map(|text| lines_matching(&text, &needle, per_note))]
+        } else {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|path| {
+                        let (read, needle) = (&read, &needle);
+                        scope.spawn(move || {
+                            read(path).map(|text| lines_matching(&text, needle, per_note))
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap_or(None))
+                    .collect()
+            })
         };
-        let room = per_note.min(max_total - out.len());
-        let found = lines_matching(&text, query, room);
-        if found.is_empty() {
-            continue;
-        }
-        let (name, folder) = recent_note_label(path, workspace);
-        for (line, first, snippet, snippet_hits) in found {
-            out.push(ContentHit {
-                path: path.clone(),
-                name: name.clone(),
-                folder: folder.clone(),
-                line,
-                col: first.start,
-                len: first.end - first.start,
-                snippet,
-                snippet_hits,
-            });
+        for (path, lines) in chunk.iter().zip(found) {
+            if out.len() >= max_total {
+                break;
+            }
+            let Some(mut lines) = lines else {
+                continue;
+            };
+            lines.truncate(per_note.min(max_total - out.len()));
+            if lines.is_empty() {
+                continue;
+            }
+            let (name, folder) = recent_note_label(path, workspace);
+            for (line, first, snippet, snippet_hits) in lines {
+                out.push(ContentHit {
+                    path: path.clone(),
+                    name: name.clone(),
+                    folder: folder.clone(),
+                    line,
+                    col: first.start,
+                    len: first.end - first.start,
+                    snippet,
+                    snippet_hits,
+                });
+            }
         }
     }
     out
@@ -516,6 +545,47 @@ mod tests {
             names(&hits),
             vec!["ab-long.md", "a-b.md", "a-long-name-b.md"]
         );
+    }
+
+    #[test]
+    fn batched_content_search_equals_a_sequential_one() {
+        // 37 notes (not a multiple of any batch size); every third has
+        // several matches, some are unreadable, and the caps bite.
+        let names: Vec<String> = (0..37).map(|i| format!("n{i:02}.md")).collect();
+        let list: Vec<PathBuf> = names.iter().map(|n| root().join(n)).collect();
+        let text_of = |path: &Path| -> Option<String> {
+            let i: usize = path.file_stem()?.to_str()?[1..].parse().ok()?;
+            match i % 5 {
+                4 => None,
+                _ if i % 3 == 0 => Some("Hit one\nx\nhit two\nHIT three\nhit four".into()),
+                _ => Some(format!("line {i}\nno match here")),
+            }
+        };
+        for (per_note, max_total) in [(3, 200), (2, 7), (1, 1), (4, 5), (3, 0)] {
+            let got = search_contents(
+                &list,
+                &root(),
+                "hit",
+                text_of,
+                || false,
+                per_note,
+                max_total,
+            );
+            // Reference: one note at a time, caps applied as notes come.
+            let mut want: Vec<(PathBuf, usize)> = Vec::new();
+            for path in &list {
+                if want.len() >= max_total {
+                    break;
+                }
+                let Some(text) = text_of(path) else { continue };
+                let room = per_note.min(max_total - want.len());
+                for (line, ..) in lines_matching(&text, "hit", room) {
+                    want.push((path.clone(), line));
+                }
+            }
+            let got: Vec<(PathBuf, usize)> = got.into_iter().map(|h| (h.path, h.line)).collect();
+            assert_eq!(got, want, "per_note {per_note} max_total {max_total}");
+        }
     }
 
     #[test]
