@@ -3816,4 +3816,11 @@ fn prepare_for_pulldown_handles_many_unclosed_links_and_backticks() {
         prepare_for_pulldown(&"]([a](foo_*bar)".repeat(500)).as_ref(),
         &"]([a](foo_*bar)".repeat(500)
     );
+    let quoted_title = r#"]( [a](https://example.com "ti)a*`b`*c")"#;
+    assert_eq!(prepare_for_pulldown(quoted_title).as_ref(), quoted_title);
+    let many_unclosed_with_closer = format!("{} )*ok*", "]( ".repeat(2000));
+    assert_eq!(
+        prepare_for_pulldown(&many_unclosed_with_closer).as_ref(),
+        many_unclosed_with_closer
+    );
 }

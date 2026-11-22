@@ -11,21 +11,25 @@ fn ordered_range(range: Range<usize>) -> Range<usize> {
     }
 }
 
+fn line_has_block_prefix(line: &crate::markdown::ParsedLine) -> bool {
+    matches!(
+        line.kind,
+        LineKind::Heading { .. }
+            | LineKind::ListItem { .. }
+            | LineKind::Blockquote
+            | LineKind::CodeLine
+    ) && line.prefix_range.end > line.source.start
+}
+
 fn widen_wysiwyg_wrap_range(
     parsed: &crate::markdown::ParsedDocument,
     mut range: Range<usize>,
-    ch: char,
 ) -> Range<usize> {
     loop {
         let prev = range.clone();
         for line in parsed.lines_overlapping(range.clone()) {
-            if matches!(
-                line.kind,
-                LineKind::Heading { .. }
-                    | LineKind::ListItem { .. }
-                    | LineKind::Blockquote
-                    | LineKind::CodeLine
-            ) && range.start >= line.source.start
+            if line_has_block_prefix(line)
+                && range.start >= line.source.start
                 && range.start < line.prefix_range.end
                 && range.end > line.prefix_range.end
             {
@@ -37,14 +41,26 @@ fn widen_wysiwyg_wrap_range(
                 let inside_inner = range.start >= pair.inner.start && range.end <= pair.inner.end;
                 let encloses =
                     range.start <= pair.open_delim.start && range.end >= pair.close_delim.end;
-                let widen_code = ch == '`' && pair.kind == InlineTagKind::Code && !disjoint;
-                if !(disjoint || inside_inner || encloses) || widen_code {
+                if !(disjoint || inside_inner || encloses) {
                     range.start = range
                         .start
                         .min(pair.group_open_start.min(pair.open_delim.start));
                     range.end = range
                         .end
                         .max(pair.group_close_end.max(pair.close_delim.end));
+                }
+            }
+        }
+        if let Some(end_idx) = parsed.line_index_at(range.end) {
+            if end_idx > 0 {
+                let end_line = &parsed.lines[end_idx];
+                let prev_end = parsed.lines[end_idx - 1].source.end;
+                if line_has_block_prefix(end_line)
+                    && range.start < end_line.source.start
+                    && range.end <= end_line.prefix_range.end
+                    && prev_end >= range.start
+                {
+                    range.end = prev_end;
                 }
             }
         }
@@ -227,7 +243,18 @@ impl EntityInputHandler for LiteMarkApp {
                     if let Some(tab) = self.active_tab_mut() {
                         let wrap_range = if is_wysiwyg {
                             let parsed = tab.parsed();
-                            widen_wysiwyg_wrap_range(&parsed, range.clone(), ch)
+                            if ch == '`'
+                                && parsed.lines_overlapping(range.clone()).iter().any(|line| {
+                                    line.inline_pairs.iter().any(|p| {
+                                        p.kind == InlineTagKind::Code
+                                            && range.start >= p.open_delim.start
+                                            && range.end <= p.close_delim.end
+                                    })
+                                })
+                            {
+                                return;
+                            }
+                            widen_wysiwyg_wrap_range(&parsed, range.clone())
                         } else {
                             range.clone()
                         };

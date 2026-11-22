@@ -1059,19 +1059,26 @@ pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
         }
         if bytes[i] == b']' && bytes.get(i + 1) == Some(&b'(') {
             if !no_close_paren {
-                if let Some((base, ref table)) = paren_matches {
-                    let end = table.get(i + 1 - base).copied().unwrap_or(0);
-                    if end > 0 {
-                        i = end;
+                let table_end = paren_matches
+                    .as_ref()
+                    .and_then(|(base, table)| table.get(i + 1 - *base).copied())
+                    .unwrap_or(0);
+                if paren_matches.is_none() || table_end > 0 {
+                    if let Some(after) = skip_link_destination(bytes, i + 1) {
+                        i = after;
                         continue;
                     }
-                } else if let Some(after) = skip_link_destination(bytes, i + 1) {
-                    i = after;
+                }
+                if table_end > 0 {
+                    i = table_end;
                     continue;
-                } else if memchr::memchr(b')', &bytes[i + 2..]).is_none() {
-                    no_close_paren = true;
-                } else {
-                    paren_matches = Some((i + 1, paren_match_table(bytes, i + 1)));
+                }
+                if paren_matches.is_none() {
+                    if memchr::memchr(b')', &bytes[i + 2..]).is_none() {
+                        no_close_paren = true;
+                    } else {
+                        paren_matches = Some((i + 1, paren_match_table(bytes, i + 1)));
+                    }
                 }
             }
             i += 2;

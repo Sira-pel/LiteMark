@@ -153,6 +153,29 @@ fn wysiwyg_overtype_and_autowrap_do_not_corrupt_hidden_delimiters() {
     });
     let after5 = view5.read_with(&cx5, |app, _| app.active_tab().unwrap().content.clone());
     assert_eq!(after5, "**bold()**");
+
+    // Triple-clicking a list line and wrapping with `(` closes before `\n- `.
+    let list_md = "- a\n- b";
+    let (view6, mut cx6) = cx_new_wysiwyg(list_md, 2);
+    cx6.update(|window, cx| {
+        view6.update(cx, |app, cx| {
+            app.active_tab_mut().unwrap().select_line();
+            app.replace_text_in_range(None, "(", window, cx);
+        });
+    });
+    let after6 = view6.read_with(&cx6, |app, _| app.active_tab().unwrap().content.clone());
+    assert_eq!(after6, "- (a)\n- b");
+
+    // Typing `` ` `` over a selection inside a code span does nothing.
+    let (view7, mut cx7) = cx_new_wysiwyg("`code`", 2);
+    cx7.update(|window, cx| {
+        view7.update(cx, |app, cx| {
+            app.active_tab_mut().unwrap().caret.range = 2..4;
+            app.replace_text_in_range(None, "`", window, cx);
+        });
+    });
+    let after7 = view7.read_with(&cx7, |app, _| app.active_tab().unwrap().content.clone());
+    assert_eq!(after7, "`code`");
 }
 
 #[std_test]
