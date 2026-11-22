@@ -250,8 +250,21 @@ pub fn match_notes(
             ))
         })
         .collect();
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.path.cmp(&b.1.path)));
-    scored.into_iter().take(limit).map(|(_, hit)| hit).collect()
+    let order = |a: &((Tier, usize, usize, String), NoteHit),
+                 b: &((Tier, usize, usize, String), NoteHit)| {
+        a.0.cmp(&b.0).then_with(|| a.1.path.cmp(&b.1.path))
+    };
+    // Only `limit` rows are shown: partition them out in O(n), then sort
+    // just those. The order is total, so the result is the same.
+    if limit == 0 {
+        return Vec::new();
+    }
+    if scored.len() > limit {
+        scored.select_nth_unstable_by(limit - 1, order);
+        scored.truncate(limit);
+    }
+    scored.sort_by(order);
+    scored.into_iter().map(|(_, hit)| hit).collect()
 }
 
 /// A line of a note that contains the query.

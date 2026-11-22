@@ -290,16 +290,22 @@ impl LiteMarkApp {
     /// [`Self::schedule_tab_settings_save`] or [`Self::flush_tab_settings`].
     /// Returns whether anything changed.
     pub(super) fn sync_tab_settings(&mut self) -> bool {
-        let open: Vec<PathBuf> = self
-            .tabs
-            .iter()
-            .filter(|tab| tab.file_type != FileType::Pdf)
-            .filter_map(|tab| tab.file_path.clone())
-            .collect();
+        let open_paths = || {
+            self.tabs
+                .iter()
+                .filter(|tab| tab.file_type != FileType::Pdf)
+                .filter_map(|tab| tab.file_path.as_ref())
+        };
+        // Runs every frame: compare in place and only allocate on a change.
+        let open_changed = !open_paths().eq(self.settings.open_tabs.iter());
+        let new_open: Option<Vec<PathBuf>> = open_changed.then(|| open_paths().cloned().collect());
         let active_path = self.active_tab().and_then(|tab| tab.file_path.clone());
-        let active = active_path.clone().filter(|path| open.contains(path));
+        let active = {
+            let open: &[PathBuf] = new_open.as_deref().unwrap_or(&self.settings.open_tabs);
+            active_path.clone().filter(|path| open.contains(path))
+        };
         let mut changed = false;
-        if open != self.settings.open_tabs {
+        if let Some(open) = new_open {
             self.settings.open_tabs = open;
             changed = true;
         }
