@@ -486,10 +486,14 @@ impl LiteMarkApp {
             }
         }
 
+        let follow_links = (event.modifiers.control || event.modifiers.platform)
+            && self.effective_view_mode() == ViewMode::Wysiwyg;
         let (offset, clicked_link, padded_col) = {
             let paint = self.editor_paint.borrow();
             let off = index_for_position(&paint, event.position);
-            let link = off.and_then(|o| link_for_offset(&paint, o));
+            let link = off
+                .filter(|_| follow_links)
+                .and_then(|o| link_for_offset(&paint, o));
             let col = if self.effective_view_mode() == ViewMode::Wysiwyg
                 && !event.modifiers.shift
                 && event.click_count == 1

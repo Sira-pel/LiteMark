@@ -742,9 +742,23 @@ pub fn padded_table_cell_col(paint: &EditorPaint, position: Point<Pixels>) -> Op
         .then_some(col_idx)
 }
 
+/// The last row starting at or before `offset` (the first row when none
+/// does). Rows are in source order, so this is a binary search.
+pub fn row_at_or_before(rows: &[PaintRow], offset: usize) -> Option<&PaintRow> {
+    let after = rows.partition_point(|row| row.byte_start <= offset);
+    rows.get(after.saturating_sub(1))
+}
+
 pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<String> {
-    for row in &paint.rows {
-        if source_offset >= row.byte_start && source_offset <= row.byte_end {
+    // Rows are in source order, so skip straight to the first that can hold it.
+    let first = paint
+        .rows
+        .partition_point(|row| row.byte_end < source_offset);
+    for row in &paint.rows[first..] {
+        if row.byte_start > source_offset {
+            break;
+        }
+        {
             for (range, url) in row.link_hits.iter() {
                 if source_offset >= range.start && source_offset <= range.end {
                     return Some(url.to_string());
@@ -1083,14 +1097,10 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
         }
         return first.offset_map.display_to_source(0);
     }
-    let mut chosen = 0usize;
-    for (index, row) in paint.rows.iter().enumerate() {
-        if position.y >= row.origin.y {
-            chosen = index;
-        } else {
-            break;
-        }
-    }
+    let chosen = paint
+        .rows
+        .partition_point(|row| position.y >= row.origin.y)
+        .saturating_sub(1);
     let row = &paint.rows[chosen];
     if !row.cells.is_empty() {
         let cell = row
