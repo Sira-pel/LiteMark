@@ -457,7 +457,11 @@ impl DocumentTab {
         if self.file_type.supports_markdown_features() {
             if let Some(block) = self.picture_block_at(target) {
                 if target > block.start && target < block.end {
-                    target = block.start;
+                    target = if origin > block.end {
+                        block.end
+                    } else {
+                        block.start
+                    };
                 }
             }
         }

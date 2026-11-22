@@ -350,7 +350,7 @@ impl LiteMarkApp {
     /// A press on the handle of the selected picture starts resizing it. The
     /// selection and caret stay as they are, so the picture is still selected
     /// when the drag ends.
-    fn handle_picture_handle_press(
+    pub(crate) fn handle_picture_handle_press(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
