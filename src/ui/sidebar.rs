@@ -136,10 +136,19 @@ pub struct SidebarMenu {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarTreeItem {
-    Folder { index: u32, depth: u16 },
-    File { index: u32, depth: u16 },
+    Folder {
+        index: u32,
+        depth: u16,
+    },
+    File {
+        index: u32,
+        depth: u16,
+    },
     /// Inline name editor shown while creating a note or folder.
-    CreateInput { depth: u16, is_folder: bool },
+    CreateInput {
+        depth: u16,
+        is_folder: bool,
+    },
 }
 
 /// [`build_sidebar_tree`] for one workspace generation and pending create
@@ -206,7 +215,12 @@ pub fn build_sidebar_tree(
                 out.push(SidebarTreeItem::Folder { index, depth });
                 // `visited` guards against a parent cycle in hand-built data.
                 if folder.is_open && levels.visited.insert(folder.id.as_ref()) {
-                    collect_level(Some(folder.id.as_ref()), depth.saturating_add(1), levels, out);
+                    collect_level(
+                        Some(folder.id.as_ref()),
+                        depth.saturating_add(1),
+                        levels,
+                        out,
+                    );
                 }
             }
         }

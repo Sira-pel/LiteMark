@@ -590,8 +590,10 @@ impl DocumentTab {
                                         | LineKind::ListItem { .. }
                                 )
                             };
-                            let next_is_block =
-                                parsed.lines.get(pline.line_index as usize + 1).is_some_and(|n| {
+                            let next_is_block = parsed
+                                .lines
+                                .get(pline.line_index as usize + 1)
+                                .is_some_and(|n| {
                                     matches!(
                                         n.kind,
                                         LineKind::Heading { .. }

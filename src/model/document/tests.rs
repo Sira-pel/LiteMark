@@ -993,7 +993,8 @@ fn space_at_span_end_types_outside_the_closer() {
         let parsed = doc.parsed();
         let line = parsed.line_at_offset(0).unwrap();
         assert_eq!(
-            line.display_text(&doc.content), "read ",
+            line.display_text(&doc.content),
+            "read ",
             "{cmd}: raw markers leaked into the display"
         );
 
@@ -1068,7 +1069,11 @@ fn heading_trailing_space_stays_in_display_and_caret() {
     assert_eq!(doc.content, "# my ");
     let parsed = doc.parsed();
     let line = parsed.line_at_offset(0).unwrap();
-    assert_eq!(line.display_text(&doc.content), "my ", "trailing space left the display");
+    assert_eq!(
+        line.display_text(&doc.content),
+        "my ",
+        "trailing space left the display"
+    );
     assert_eq!(doc.cursor_offset(), 5, "caret fell back before the space");
 
     type_keystrokes(&mut doc, "note");
@@ -1154,7 +1159,8 @@ fn assert_clean_display(content: &str, expected: &str) {
     );
     let parsed = parse_document(content);
     assert_eq!(
-        parsed.lines[0].display_text(content), expected,
+        parsed.lines[0].display_text(content),
+        expected,
         "raw markers in display of {content:?}"
     );
     for ch in ['*', '~', '_'] {
@@ -1418,7 +1424,8 @@ fn stacked_typing_keeps_one_span_and_toggles_off_cleanly() {
     let parsed = doc.parsed();
     let line = parsed.line_at_offset(0).unwrap();
     assert_eq!(
-        line.display_text(&doc.content), "Go now ",
+        line.display_text(&doc.content),
+        "Go now ",
         "raw markers leaked into the display"
     );
 
@@ -1527,7 +1534,8 @@ fn extra_spaces_at_span_end_stay_outside_the_closer() {
         let parsed = doc.parsed();
         let line = parsed.line_at_offset(0).unwrap();
         assert_eq!(
-            line.display_text(&doc.content), "a  ",
+            line.display_text(&doc.content),
+            "a  ",
             "{cmd}: raw markers leaked into the display"
         );
         assert!(
@@ -2306,13 +2314,19 @@ fn wrap_escapes_delimiters_lt_and_hides_escape_backslashes() {
     type_keystrokes(&mut doc, "<");
     type_keystrokes(&mut doc, "b");
     assert_eq!(doc.content, "a\\<b", "the `<` was not escaped");
-    assert_eq!(parse_document(&doc.content).lines[0].display_text(&doc.content), "a<b");
+    assert_eq!(
+        parse_document(&doc.content).lines[0].display_text(&doc.content),
+        "a<b"
+    );
 
     let mut doc = DocumentTab::new("w3".into(), "test.md".into(), String::new(), None, None);
     type_keystrokes(&mut doc, "<");
     type_keystrokes(&mut doc, "b");
     assert_eq!(doc.content, "\\<b", "the `<` was not escaped");
-    assert_eq!(parse_document(&doc.content).lines[0].display_text(&doc.content), "<b");
+    assert_eq!(
+        parse_document(&doc.content).lines[0].display_text(&doc.content),
+        "<b"
+    );
 
     // Escape backslashes are hidden in the display and the offsets map.
     let mut doc = DocumentTab::new(
@@ -2946,7 +2960,9 @@ fn crlf_caret(source: &str) -> (usize, usize, String, String, String, String, St
     let mut ended = DocumentTab::new("e".into(), "t.md".into(), source.into(), None, None);
     ended.move_end(false);
     let end_at = ended.cursor_offset();
-    let before_disp = ended.parsed().lines[0].display_text(&ended.content).to_string();
+    let before_disp = ended.parsed().lines[0]
+        .display_text(&ended.content)
+        .to_string();
     ended.move_home_in_mode(false, ViewMode::Wysiwyg);
     let home = ended.cursor_offset();
 
@@ -2955,13 +2971,17 @@ fn crlf_caret(source: &str) -> (usize, usize, String, String, String, String, St
     let at = typed.cursor_offset();
     typed.edit(at..at, "Z");
     let typed_content = typed.content.clone();
-    let typed_disp = typed.parsed().lines[0].display_text(&typed.content).to_string();
+    let typed_disp = typed.parsed().lines[0]
+        .display_text(&typed.content)
+        .to_string();
 
     let mut backspaced = DocumentTab::new("b".into(), "t.md".into(), source.into(), None, None);
     backspaced.move_end(false);
     backspaced.smart_backspace_in_mode(ViewMode::Wysiwyg);
     let bs_content = backspaced.content.clone();
-    let bs_disp = backspaced.parsed().lines[0].display_text(&backspaced.content).to_string();
+    let bs_disp = backspaced.parsed().lines[0]
+        .display_text(&backspaced.content)
+        .to_string();
 
     (
         end_at,
@@ -5267,9 +5287,11 @@ fn test_all_stacked_combos_followed_by_unspaced_text() {
             let parsed = crate::markdown::parse_document(&doc.content);
             let line = parsed.lines.first().unwrap();
             assert_eq!(
-                line.display_text(&doc.content), "wordafter",
+                line.display_text(&doc.content),
+                "wordafter",
                 "Leaked delimiters for combo {:?}. Content was: {:?}",
-                fmts, doc.content
+                fmts,
+                doc.content
             );
 
             let seg_word = line
@@ -5374,9 +5396,11 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             let parsed = crate::markdown::parse_document(&doc.content);
             let line = parsed.lines.first().expect("line not found");
             assert_eq!(
-                line.display_text(&doc.content), "ahi",
+                line.display_text(&doc.content),
+                "ahi",
                 "Leaked delimiters in display text when toggling on combo {:?}. Content was: {:?}",
-                combo, doc.content
+                combo,
+                doc.content
             );
 
             // 'a' must be unstyled
@@ -5448,9 +5472,11 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             let parsed = crate::markdown::parse_document(&doc.content);
             let line = parsed.lines.first().expect("line not found");
             assert_eq!(
-                line.display_text(&doc.content), "hiy",
+                line.display_text(&doc.content),
+                "hiy",
                 "Leaked delimiters in display text when toggling off combo {:?}. Content was: {:?}",
-                combo, doc.content
+                combo,
+                doc.content
             );
 
             // 'h' and 'i' must have the combo formats

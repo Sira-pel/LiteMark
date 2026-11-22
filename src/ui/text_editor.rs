@@ -1710,8 +1710,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     );
                 }
                 let is_last_row = index + 1 == raw_rows.len();
-                let next_is_newline =
-                    matches!(content.as_bytes().get(end), Some(b'\n' | b'\r'));
+                let next_is_newline = matches!(content.as_bytes().get(end), Some(b'\n' | b'\r'));
                 let caret_matches = if is_last_row || next_is_newline {
                     self.selection.start >= start && self.selection.start <= end
                 } else {
@@ -2217,7 +2216,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                             // Off-screen: the shared empty map and links, like
                             // other rows outside the shaping band.
                             offset_map: empty_map.clone(),
-                                link_hits: empty_links.clone(),
+                            link_hits: empty_links.clone(),
                             cells: Vec::new(),
                         });
                         cur_y += height;
@@ -2697,26 +2696,26 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                                         cache.load_sized(&path_for_load, max_dim, window, cx)
                                     })
                                 })
-                                    .id(image_element_id("note-image", line_idx, 0, path, gen))
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .w(picture_size.width)
-                                    .h(picture_size.height)
-                                    .rounded(IMAGE_RADIUS)
-                                    .object_fit(object_fit)
-                                    .with_fallback(move || {
-                                        div()
-                                            .size_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .bg(surface)
-                                            .text_color(muted)
-                                            .text_size(font_size)
-                                            .child("Image not found")
-                                            .into_any_element()
-                                    });
+                                .id(image_element_id("note-image", line_idx, 0, path, gen))
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w(picture_size.width)
+                                .h(picture_size.height)
+                                .rounded(IMAGE_RADIUS)
+                                .object_fit(object_fit)
+                                .with_fallback(move || {
+                                    div()
+                                        .size_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(surface)
+                                        .text_color(muted)
+                                        .text_size(font_size)
+                                        .child("Image not found")
+                                        .into_any_element()
+                                });
                                 let mut element = div()
                                     .relative()
                                     .w(picture_size.width)
@@ -2946,30 +2945,30 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                                         cache.load_sized(&path_for_load, max_dim, window, cx)
                                     })
                                 })
-                                    .id(image_element_id("note-thumb", line_idx, k, path, gen))
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .w(w)
-                                    .h(h)
-                                    .rounded(IMAGE_RADIUS)
-                                    .object_fit(if stretched.get(k).copied().unwrap_or(false) {
-                                        ObjectFit::Fill
-                                    } else {
-                                        ObjectFit::Contain
-                                    })
-                                    .with_fallback(move || {
-                                        div()
-                                            .size_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .bg(surface)
-                                            .text_color(muted)
-                                            .text_size(font_size)
-                                            .child("Image not found")
-                                            .into_any_element()
-                                    });
+                                .id(image_element_id("note-thumb", line_idx, k, path, gen))
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w(w)
+                                .h(h)
+                                .rounded(IMAGE_RADIUS)
+                                .object_fit(if stretched.get(k).copied().unwrap_or(false) {
+                                    ObjectFit::Fill
+                                } else {
+                                    ObjectFit::Contain
+                                })
+                                .with_fallback(move || {
+                                    div()
+                                        .size_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(surface)
+                                        .text_color(muted)
+                                        .text_size(font_size)
+                                        .child("Image not found")
+                                        .into_any_element()
+                                });
                                 // A box of exactly this size; see the lone picture.
                                 let mut element =
                                     div().relative().w(w).h(h).child(picture).into_any_element();
@@ -3161,12 +3160,10 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 prev_byte_end = byte_end;
 
                 let row_origin = point(base_x + indent_x, cur_y);
-                let near_anchor = anchor_lines
-                    .iter()
-                    .any(|&a| {
-                        let idx = parsed_line.line_index as usize;
-                        a + 2 >= idx && a <= idx + 2
-                    });
+                let near_anchor = anchor_lines.iter().any(|&a| {
+                    let idx = parsed_line.line_index as usize;
+                    a + 2 >= idx && a <= idx + 2
+                });
                 if !band.contains(cur_y, row_line_height) && !near_anchor {
                     rows.push(PaintRow {
                         line_index: line_idx,

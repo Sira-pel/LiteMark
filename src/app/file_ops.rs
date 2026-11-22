@@ -601,12 +601,11 @@ impl LiteMarkApp {
         if finished && failed {
             let still_there = match &bulk.prev_selected {
                 Some(SidebarTarget::File(id)) => self.workspace.files.iter().any(|f| &f.id == id),
-                Some(SidebarTarget::Folder(id)) => {
-                    self.workspace
-                        .folders
-                        .iter()
-                        .any(|f| f.id.as_ref() == id.as_str())
-                }
+                Some(SidebarTarget::Folder(id)) => self
+                    .workspace
+                    .folders
+                    .iter()
+                    .any(|f| f.id.as_ref() == id.as_str()),
                 None => false,
             };
             if still_there {

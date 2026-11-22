@@ -153,7 +153,10 @@ fn with_image_widths<'a>(
         if matches!(event, Event::End(TagEnd::Image)) {
             if let Some((at, alt, size)) = open.pop() {
                 let suffix = size.map_or(String::new(), |(w, h)| size_suffix(Some(w), h));
-                let plain = alt.strip_suffix(suffix.as_str()).unwrap_or(&alt).to_string();
+                let plain = alt
+                    .strip_suffix(suffix.as_str())
+                    .unwrap_or(&alt)
+                    .to_string();
                 // The enclosing image's alt text includes this one's.
                 if let Some((_, outer, _)) = open.last_mut() {
                     outer.push_str(&plain);
@@ -207,10 +210,27 @@ fn escape_img_src(url: &str) -> String {
             b'a'..=b'z'
             | b'A'..=b'Z'
             | b'0'..=b'9'
-            | b'-' | b'_' | b'.' | b'~' | b':' | b'/' | b'?' | b'#' | b'@' | b'!' | b'$'
-            | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b'%' | b'[' | b']' => {
-                out.push(b as char)
-            }
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b':'
+            | b'/'
+            | b'?'
+            | b'#'
+            | b'@'
+            | b'!'
+            | b'$'
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'='
+            | b'%'
+            | b'['
+            | b']' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }

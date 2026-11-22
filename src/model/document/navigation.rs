@@ -77,8 +77,10 @@ impl DocumentTab {
                             let target = skip_hidden_left(&parsed, cells[c_idx - 1].end);
                             self.place(target, extend);
                         } else {
-                            let prev_row_cell_end =
-                                parsed.lines[..pline.line_index as usize].iter().rev().find_map(|l| {
+                            let prev_row_cell_end = parsed.lines[..pline.line_index as usize]
+                                .iter()
+                                .rev()
+                                .find_map(|l| {
                                     if let LineKind::TableRow { ref body, .. } = l.kind {
                                         let TableRowBody {
                                             cells: pcells,
@@ -177,8 +179,10 @@ impl DocumentTab {
                             let target = skip_hidden_right(&parsed, next_cell.start);
                             self.place(target, extend);
                         } else {
-                            let next_row_cell_start =
-                                parsed.lines.get(pline.line_index as usize + 1..).and_then(|rest| {
+                            let next_row_cell_start = parsed
+                                .lines
+                                .get(pline.line_index as usize + 1..)
+                                .and_then(|rest| {
                                     rest.iter().find_map(|l| {
                                         if let LineKind::TableRow { ref body, .. } = l.kind {
                                             let TableRowBody {
@@ -344,8 +348,7 @@ impl DocumentTab {
                     return;
                 }
             }
-            let vis_start =
-                skip_hidden_right(&parsed, pline.prefix_end()).min(pline.source.end);
+            let vis_start = skip_hidden_right(&parsed, pline.prefix_end()).min(pline.source.end);
             self.place(vis_start, extend);
         } else {
             self.move_home(extend);

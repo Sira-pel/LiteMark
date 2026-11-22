@@ -168,8 +168,7 @@ pub struct NoteImageCache {
 /// factor) so resizing doesn't re-decode on every pixel while thumbnails stay
 /// small in RAM and VRAM.
 pub fn bucket_max_dim(width: Pixels, height: Pixels, scale_factor: f32) -> u32 {
-    let longest =
-        f32::from(width).max(f32::from(height)).max(1.0) * scale_factor.max(1.0) * 2.0;
+    let longest = f32::from(width).max(f32::from(height)).max(1.0) * scale_factor.max(1.0) * 2.0;
     if longest <= 256.0 {
         256
     } else if longest <= 512.0 {
@@ -311,10 +310,8 @@ impl NoteImageCache {
             cx.background_executor()
                 .spawn(async move { decode_downscaled_raster(&path_owned, max_dim) })
         } else {
-            let fut = AssetLogger::<ImageAssetLoader>::load(
-                Resource::Path(Arc::from(path_owned)),
-                cx,
-            );
+            let fut =
+                AssetLogger::<ImageAssetLoader>::load(Resource::Path(Arc::from(path_owned)), cx);
             cx.background_executor().spawn(fut)
         };
 

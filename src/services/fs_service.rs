@@ -1212,8 +1212,11 @@ fn scan_workspace_dir_limited(
 
     // Per open folder: its remaining children, its id, and how deep they sit
     // (children of the notes folder are at depth 1).
-    let mut stack: Vec<(std::vec::IntoIter<ScanEntry>, Option<std::sync::Arc<str>>, usize)> =
-        vec![(read_scan_entries(dir, show_code_files).into_iter(), None, 1)];
+    let mut stack: Vec<(
+        std::vec::IntoIter<ScanEntry>,
+        Option<std::sync::Arc<str>>,
+        usize,
+    )> = vec![(read_scan_entries(dir, show_code_files).into_iter(), None, 1)];
     'walk: while let Some((children, parent_id, depth)) = stack.last_mut() {
         let Some(entry) = children.next() else {
             stack.pop();
