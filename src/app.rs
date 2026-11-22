@@ -139,6 +139,8 @@ pub struct LiteMarkApp {
     pub workspace: Tracked<WorkspaceDirectory>,
     /// The sidebar tree for a workspace generation and pending create row,
     /// so a render (each keystroke, hover or scroll) doesn't rebuild it.
+    /// Theme colours the input fields were last given.
+    field_colors: Option<[Rgba; 4]>,
     sidebar_tree: RefCell<Option<SidebarTreeCache>>,
     /// Search results for one `(workspace generation, query)`.
     #[allow(clippy::type_complexity)]
@@ -604,6 +606,7 @@ impl LiteMarkApp {
             sidebar_clipboard: Vec::new(),
             sidebar_clipboard_cut: false,
             workspace: workspace.into(),
+            field_colors: None,
             sidebar_tree: RefCell::new(None),
             sidebar_search: RefCell::new(None),
             settings,
@@ -754,6 +757,7 @@ impl LiteMarkApp {
                 scan_truncated: false,
             }
             .into(),
+            field_colors: None,
             sidebar_tree: RefCell::new(None),
             sidebar_search: RefCell::new(None),
             // Never touch the real settings file from a test.

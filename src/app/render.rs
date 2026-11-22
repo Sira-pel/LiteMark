@@ -2194,6 +2194,12 @@ impl LiteMarkApp {
         let placeholder_color = theme.placeholder;
         let field_bg = theme.bg_input;
         let field_border = theme.border_primary;
+        // The colours only change with the theme; skip six entity updates a frame.
+        let colors = [text_color, placeholder_color, field_bg, field_border];
+        if self.field_colors == Some(colors) {
+            return;
+        }
+        self.field_colors = Some(colors);
         // The find panel draws its own input boxes, so the find and replace
         // fields stay transparent.
         self.find_field.update(cx, |field, _cx| {
