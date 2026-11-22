@@ -1149,7 +1149,7 @@ impl DocumentTab {
         );
         self.caret.move_to(caret);
         self.caret.clamp(&self.content);
-        self.refresh_cursor();
+        // The caller snaps the caret and refreshes the cursor once.
     }
 
     fn clamp_range(&self, range: Range<usize>) -> Range<usize> {

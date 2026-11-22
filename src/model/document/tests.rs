@@ -7050,3 +7050,23 @@ fn cursor_line_and_col_follow_every_caret_move_without_a_view_mode_sync() {
         check(&tab, "same mode");
     }
 }
+
+#[test]
+fn undo_and_redo_leave_the_cursor_state_current() {
+    let mut tab = DocumentTab::new("t".into(), "t.md".into(), "one\ntwo\n".into(), None, None);
+    tab.place(8, false);
+    tab.edit(8..8, "three\nfour");
+    tab.edit(0..0, "zero\n");
+    let check = |tab: &DocumentTab, what: &str| {
+        let (line, col) = super::line_col(&tab.content, tab.cursor_offset());
+        assert_eq!((tab.cursor_line, tab.cursor_col), (line, col), "{what}");
+    };
+    for _ in 0..2 {
+        assert!(tab.undo());
+        check(&tab, "undo");
+    }
+    for _ in 0..2 {
+        assert!(tab.redo());
+        check(&tab, "redo");
+    }
+}
