@@ -153,7 +153,10 @@ fn with_image_widths<'a>(
         if matches!(event, Event::End(TagEnd::Image)) {
             if let Some((at, alt, size)) = open.pop() {
                 let suffix = size.map_or(String::new(), |(w, h)| size_suffix(Some(w), h));
-                let plain = alt.strip_suffix(suffix.as_str()).unwrap_or(&alt).to_string();
+                let plain = alt
+                    .strip_suffix(suffix.as_str())
+                    .unwrap_or(&alt)
+                    .to_string();
                 // The enclosing image's alt text includes this one's.
                 if let Some((_, outer, _)) = open.last_mut() {
                     outer.push_str(&plain);
@@ -207,10 +210,27 @@ fn escape_img_src(url: &str) -> String {
             b'a'..=b'z'
             | b'A'..=b'Z'
             | b'0'..=b'9'
-            | b'-' | b'_' | b'.' | b'~' | b':' | b'/' | b'?' | b'#' | b'@' | b'!' | b'$'
-            | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b'%' | b'[' | b']' => {
-                out.push(b as char)
-            }
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b':'
+            | b'/'
+            | b'?'
+            | b'#'
+            | b'@'
+            | b'!'
+            | b'$'
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'='
+            | b'%'
+            | b'['
+            | b']' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -335,7 +355,9 @@ pub fn export_to_plaintext(markdown: &str) -> String {
                     }
                 }
             }
-            pulldown_cmark::Event::Text(t) if !images.is_empty() => {
+            pulldown_cmark::Event::Text(t) | pulldown_cmark::Event::Code(t)
+                if !images.is_empty() =>
+            {
                 if let Some((alt, _)) = images.last_mut() {
                     alt.push_str(&t);
                 }
@@ -651,6 +673,12 @@ mod tests {
     #[test]
     fn html_export_makes_images_responsive() {
         assert!(export_to_html("t", "x").contains("img { max-width: 100%; height: auto; }"));
+    }
+
+    #[test]
+    fn plaintext_export_keeps_inline_code_in_a_caption_in_order() {
+        let text = export_to_plaintext("before ![a `b` c](x.png) after");
+        assert_eq!(text.trim(), "before a b c after");
     }
 
     #[test]
