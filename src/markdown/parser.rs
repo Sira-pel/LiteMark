@@ -978,10 +978,40 @@ fn skip_autolink(bytes: &[u8], lt: usize) -> Option<usize> {
     None
 }
 
+fn paren_match_table(bytes: &[u8], from: usize) -> Vec<usize> {
+    let mut matches = vec![0usize; bytes.len() - from];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut i = from;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if i + 1 < bytes.len() => i += 2,
+            b'(' => {
+                stack.push(i);
+                i += 1;
+            }
+            b')' => {
+                if let Some(open) = stack.pop() {
+                    matches[open - from] = i + 1;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    matches
+}
+
 pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
     let bytes = input.as_bytes();
     let len = bytes.len();
+    if memchr::memchr3(b'*', b'~', b'_', bytes).is_none() {
+        return std::borrow::Cow::Borrowed(input);
+    }
     let mut modified = None;
+    let mut failed_tick_widths: u64 = 0;
+    let mut failed_wide_ticks: Vec<usize> = Vec::new();
+    let mut no_close_paren = false;
+    let mut paren_matches: Option<(usize, Vec<usize>)> = None;
 
     let is_delim = |b: u8| b == b'*' || b == b'~' || b == b'_' || b == b'`';
 
@@ -997,14 +1027,19 @@ pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
                 i += 1;
             }
             let width = i - open;
+            let already_failed = if width < 64 {
+                (failed_tick_widths & (1u64 << width)) != 0
+            } else {
+                failed_wide_ticks.contains(&width)
+            };
+            if already_failed {
+                continue;
+            }
             let mut cursor = i;
             let mut closed_at = None;
-            while cursor < len {
-                if bytes[cursor] != b'`' {
-                    cursor += 1;
-                    continue;
-                }
-                let close = cursor;
+            while let Some(rel) = memchr::memchr(b'`', &bytes[cursor..]) {
+                let close = cursor + rel;
+                cursor = close;
                 while cursor < len && bytes[cursor] == b'`' {
                     cursor += 1;
                 }
@@ -1015,14 +1050,32 @@ pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
             }
             if let Some(end) = closed_at {
                 i = end;
+            } else if width < 64 {
+                failed_tick_widths |= 1u64 << width;
+            } else {
+                failed_wide_ticks.push(width);
             }
             continue;
         }
         if bytes[i] == b']' && bytes.get(i + 1) == Some(&b'(') {
-            if let Some(after) = skip_link_destination(bytes, i + 1) {
-                i = after;
-                continue;
+            if !no_close_paren {
+                if let Some((base, ref table)) = paren_matches {
+                    let end = table.get(i + 1 - base).copied().unwrap_or(0);
+                    if end > 0 {
+                        i = end;
+                        continue;
+                    }
+                } else if let Some(after) = skip_link_destination(bytes, i + 1) {
+                    i = after;
+                    continue;
+                } else if memchr::memchr(b')', &bytes[i + 2..]).is_none() {
+                    no_close_paren = true;
+                } else {
+                    paren_matches = Some((i + 1, paren_match_table(bytes, i + 1)));
+                }
             }
+            i += 2;
+            continue;
         }
         if bytes[i] == b'<' {
             if let Some(after) = skip_autolink(bytes, i) {

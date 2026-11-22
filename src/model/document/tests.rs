@@ -6908,3 +6908,15 @@ fn short_table_row_navigation_and_materialization() {
     assert_eq!(body.cells.len(), 3);
     assert_eq!(doc.selection_range(), body.cells[1]);
 }
+
+#[test]
+fn typing_into_missing_table_cell_groups_into_one_undo() {
+    let md = "| a | b |\n| --- | --- |\n| 1 |";
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), md.into(), None, None);
+    doc.place(md.len(), false);
+    doc.pending_table_col = Some(1);
+    doc.insert_text_in_mode(md.len()..md.len(), "x", ViewMode::Wysiwyg);
+    assert_eq!(doc.content, "| a | b |\n| --- | --- |\n| 1 | x |");
+    assert!(doc.undo());
+    assert_eq!(doc.content, md);
+}

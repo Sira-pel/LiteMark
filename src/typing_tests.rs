@@ -105,7 +105,8 @@ fn wysiwyg_overtype_and_autowrap_do_not_corrupt_hidden_delimiters() {
         );
     });
 
-    // Auto-wrapping a selection spanning `**` must not trap `**` inside `(...)`.
+    // Auto-wrapping a selection spanning `**` widens to cover the whole bold
+    // span and never deletes selected text.
     let md = "**Hello** world";
     let mut cx3 = TestAppContext::single();
     let (view3, cx3) = cx3.add_window_view(|_window, cx| {
@@ -122,7 +123,36 @@ fn wysiwyg_overtype_and_autowrap_do_not_corrupt_hidden_delimiters() {
         });
     });
     let after3 = view3.read_with(&cx3, |app, _| app.active_tab().unwrap().content.clone());
-    assert_eq!(after3, "**He**(rld");
+    assert_eq!(after3, "(**Hello** wo)rld");
+
+    // Auto-wrapping across a newline and bold text also wraps without deleting.
+    let multi = "**Hello**\nworld";
+    let mut cx4 = TestAppContext::single();
+    let (view4, cx4) = cx4.add_window_view(|_window, cx| {
+        let mut app = LiteMarkApp::test_new(multi, cx);
+        app.settings.view_mode = ViewMode::Wysiwyg;
+        let tab = app.active_tab_mut().unwrap();
+        tab.caret.range = 4..multi.len();
+        app
+    });
+    let mut cx4 = cx4.clone();
+    cx4.update(|window, cx| {
+        view4.update(cx, |app, cx| {
+            app.replace_text_in_range(None, "\"", window, cx);
+        });
+    });
+    let after4 = view4.read_with(&cx4, |app, _| app.active_tab().unwrap().content.clone());
+    assert_eq!(after4, "\"**Hello**\nworld\"");
+
+    // `(` at the end of a bold word (`**bold|**`) still auto-pairs `()`.
+    let (view5, mut cx5) = cx_new_wysiwyg("**bold**", 6);
+    cx5.update(|window, cx| {
+        view5.update(cx, |app, cx| {
+            app.replace_text_in_range(None, "(", window, cx);
+        });
+    });
+    let after5 = view5.read_with(&cx5, |app, _| app.active_tab().unwrap().content.clone());
+    assert_eq!(after5, "**bold()**");
 }
 
 #[std_test]

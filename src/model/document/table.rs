@@ -420,6 +420,63 @@ impl DocumentTab {
         }
     }
 
+    /// Inserts `text` into a padded (missing `|` separator) cell `target_col`
+    /// of the short table row at `line_start` as a single undoable edit,
+    /// returning the byte range of the inserted `text` (or `None` if `target_col`
+    /// already exists in the row).
+    pub fn insert_into_padded_table_cell(
+        &mut self,
+        line_start: usize,
+        target_col: usize,
+        text: &str,
+    ) -> Option<Range<usize>> {
+        let (line_end, cols, target) = {
+            let parsed = self.parsed();
+            let pline = parsed.line_at_offset(line_start)?;
+            let LineKind::TableRow { ref body, .. } = pline.kind else {
+                return None;
+            };
+            let cols = body.alignments.len();
+            if cols == 0 {
+                return None;
+            }
+            (pline.source.end, cols, target_col.min(cols - 1))
+        };
+        let line_str = self.content.get(line_start..line_end)?;
+        let real_ranges = crate::markdown::parser::table_cell_ranges(line_str);
+        if target < real_ranges.len() {
+            return None;
+        }
+        let has_trailing_pipe = real_ranges
+            .last()
+            .is_some_and(|last| last.end < line_str.trim_end().len());
+        let mut combined = String::new();
+        if !has_trailing_pipe {
+            combined.push_str(if line_str.ends_with(' ') { "|" } else { " |" });
+        }
+        let mut text_rel: Option<Range<usize>> = None;
+        for col in real_ranges.len()..cols {
+            if col == target {
+                combined.push(' ');
+                let start = combined.len();
+                combined.push_str(text);
+                let end = combined.len();
+                text_rel = Some(start..end);
+                combined.push_str(" |");
+            } else {
+                combined.push_str("  |");
+            }
+        }
+        let rel = text_rel?;
+        let text_range = (line_end + rel.start)..(line_end + rel.end);
+        self.next_redo_caret = Some(text_range.end);
+        self.edit(line_end..line_end, &combined);
+        self.caret
+            .move_to(floor_boundary(&self.content, text_range.end));
+        self.refresh_cursor();
+        Some(text_range)
+    }
+
     pub fn tab_table_cell(&mut self, backwards: bool) -> bool {
         if !self.file_type.supports_markdown_features() {
             return false;

@@ -11,56 +11,48 @@ fn ordered_range(range: Range<usize>) -> Range<usize> {
     }
 }
 
-fn wysiwyg_selection_safe_to_wrap(
+fn widen_wysiwyg_wrap_range(
     parsed: &crate::markdown::ParsedDocument,
-    content: &str,
-    range: &Range<usize>,
+    mut range: Range<usize>,
     ch: char,
-) -> bool {
-    if content
-        .get(range.clone())
-        .is_some_and(|s| s.contains(['\n', '\r']))
-    {
-        return false;
-    }
-    for line in parsed.lines_overlapping(range.clone()) {
-        if matches!(
-            line.kind,
-            LineKind::Heading { .. }
-                | LineKind::ListItem { .. }
-                | LineKind::Blockquote
-                | LineKind::HorizontalRule
-                | LineKind::CodeFence { .. }
-                | LineKind::TableDelimiter
-        ) && line.prefix_range.start < range.end
-            && line.prefix_range.end > range.start
-        {
-            return false;
-        }
-        if let LineKind::TableRow { ref body, .. } = line.kind {
-            if !body
-                .cells
-                .iter()
-                .any(|c| range.start >= c.start && range.end <= c.end)
+) -> Range<usize> {
+    loop {
+        let prev = range.clone();
+        for line in parsed.lines_overlapping(range.clone()) {
+            if matches!(
+                line.kind,
+                LineKind::Heading { .. }
+                    | LineKind::ListItem { .. }
+                    | LineKind::Blockquote
+                    | LineKind::CodeLine
+            ) && range.start >= line.source.start
+                && range.start < line.prefix_range.end
+                && range.end > line.prefix_range.end
             {
-                return false;
+                range.start = line.prefix_range.end;
+            }
+            for pair in &line.inline_pairs {
+                let disjoint =
+                    range.end <= pair.open_delim.start || range.start >= pair.close_delim.end;
+                let inside_inner = range.start >= pair.inner.start && range.end <= pair.inner.end;
+                let encloses =
+                    range.start <= pair.open_delim.start && range.end >= pair.close_delim.end;
+                let widen_code = ch == '`' && pair.kind == InlineTagKind::Code && !disjoint;
+                if !(disjoint || inside_inner || encloses) || widen_code {
+                    range.start = range
+                        .start
+                        .min(pair.group_open_start.min(pair.open_delim.start));
+                    range.end = range
+                        .end
+                        .max(pair.group_close_end.max(pair.close_delim.end));
+                }
             }
         }
-        for pair in &line.inline_pairs {
-            let disjoint =
-                range.end <= pair.open_delim.start || range.start >= pair.close_delim.end;
-            let inside_inner = range.start >= pair.inner.start && range.end <= pair.inner.end;
-            let encloses =
-                range.start <= pair.open_delim.start && range.end >= pair.close_delim.end;
-            if !(disjoint || inside_inner || encloses) {
-                return false;
-            }
-            if ch == '`' && pair.kind == InlineTagKind::Code && inside_inner {
-                return false;
-            }
+        if range == prev {
+            break;
         }
     }
-    true
+    range
 }
 
 impl EntityInputHandler for LiteMarkApp {
@@ -232,73 +224,71 @@ impl EntityInputHandler for LiteMarkApp {
                     _ => code_pair_close(ch),
                 };
                 if let Some(close_ch) = closing {
-                    let safe_wrap = if is_wysiwyg {
-                        self.active_tab_mut().is_none_or(|tab| {
+                    if let Some(tab) = self.active_tab_mut() {
+                        let wrap_range = if is_wysiwyg {
                             let parsed = tab.parsed();
-                            wysiwyg_selection_safe_to_wrap(&parsed, &tab.content, &range, ch)
-                        })
-                    } else {
-                        true
-                    };
-                    if safe_wrap {
-                        if let Some(tab) = self.active_tab_mut() {
-                            if let Some(selected) = tab.content.get(range.clone()) {
-                                let selected_len = selected.len();
-                                let wrapped = format!("{ch}{selected}{close_ch}");
-                                tab.edit(range.clone(), &wrapped);
-                                tab.caret.range =
-                                    (range.start + 1)..(range.start + 1 + selected_len);
-                                tab.caret.reversed = false;
-                                tab.refresh_cursor();
-                            }
+                            widen_wysiwyg_wrap_range(&parsed, range.clone(), ch)
+                        } else {
+                            range.clone()
+                        };
+                        if let Some(selected) = tab.content.get(wrap_range.clone()) {
+                            let selected_len = selected.len();
+                            let wrapped = format!("{ch}{selected}{close_ch}");
+                            tab.edit(wrap_range.clone(), &wrapped);
+                            tab.caret.range =
+                                (wrap_range.start + 1)..(wrap_range.start + 1 + selected_len);
+                            tab.caret.reversed = false;
+                            tab.refresh_cursor();
                         }
-                        self.refresh_find();
-                        window.refresh();
-                        cx.notify();
-                        return;
                     }
+                    self.refresh_find();
+                    window.refresh();
+                    cx.notify();
+                    return;
                 }
             } else {
                 let cursor = range.start;
                 let (
-                    at_hidden_or_closer,
-                    in_code_span,
+                    suppress_overtype,
+                    suppress_autopair,
                     starts_with_ch,
                     ends_with_double_tick,
                     prev_is_alnum,
                 ) = if let Some(tab) = self.active_tab_mut() {
-                    let (at_hidden, in_code) = if is_wysiwyg {
+                    let (overtype_blocked, autopair_blocked) = if is_wysiwyg {
                         let parsed = tab.parsed();
                         parsed
                             .line_at_offset(cursor)
                             .map_or((false, false), |line| {
-                                let hidden = line.hidden_ranges.iter().any(|h| {
-                                    if cursor > h.start && cursor < h.end {
-                                        return true;
-                                    }
-                                    if cursor == h.start {
-                                        let single_tick_closer =
-                                            line.inline_pairs.iter().any(|p| {
-                                                p.kind == InlineTagKind::Code
-                                                    && p.close_delim == *h
-                                                    && h.len() == 1
-                                            });
-                                        return !single_tick_closer;
-                                    }
-                                    false
-                                }) || line.inline_pairs.iter().any(|p| {
-                                    (p.kind == InlineTagKind::Link
-                                        || (p.kind == InlineTagKind::Code
-                                            && p.close_delim.len() > 1))
-                                        && cursor >= p.close_delim.start
-                                        && cursor < p.close_delim.end
-                                });
-                                let code = line.inline_pairs.iter().any(|p| {
+                                let in_hidden_interior = line
+                                    .hidden_ranges
+                                    .iter()
+                                    .any(|h| cursor > h.start && cursor < h.end);
+                                let at_link_or_multi_code_closer =
+                                    line.inline_pairs.iter().any(|p| {
+                                        (p.kind == InlineTagKind::Link
+                                            || (p.kind == InlineTagKind::Code
+                                                && p.close_delim.len() > 1))
+                                            && cursor >= p.close_delim.start
+                                            && cursor < p.close_delim.end
+                                    });
+                                let at_any_link_or_code_closer =
+                                    line.inline_pairs.iter().any(|p| {
+                                        matches!(p.kind, InlineTagKind::Link | InlineTagKind::Code)
+                                            && cursor >= p.close_delim.start
+                                            && cursor < p.close_delim.end
+                                    });
+                                let in_code_span = line.inline_pairs.iter().any(|p| {
                                     p.kind == InlineTagKind::Code
                                         && cursor >= p.inner.start
                                         && cursor <= p.inner.end
                                 });
-                                (hidden, code)
+                                (
+                                    in_hidden_interior || at_link_or_multi_code_closer,
+                                    in_hidden_interior
+                                        || at_any_link_or_code_closer
+                                        || (ch == '`' && in_code_span),
+                                )
                             })
                     } else {
                         (false, false)
@@ -311,14 +301,20 @@ impl EntityInputHandler for LiteMarkApp {
                             .chars()
                             .next_back()
                             .is_some_and(|c| c.is_alphanumeric());
-                    (at_hidden, in_code, starts, double_tick, alnum)
+                    (
+                        overtype_blocked,
+                        autopair_blocked,
+                        starts,
+                        double_tick,
+                        alnum,
+                    )
                 } else {
                     (false, false, false, false, false)
                 };
                 // Over-typing closing bracket or quote
                 let over_types = matches!(ch, ')' | ']' | '}' | '"')
                     || (markdown_tab && matches!(ch, '\'' | '`'));
-                if over_types && !at_hidden_or_closer && starts_with_ch {
+                if over_types && !suppress_overtype && starts_with_ch {
                     if let Some(tab) = self.active_tab_mut() {
                         tab.caret.move_to(cursor + ch.len_utf8());
                         tab.refresh_cursor();
@@ -329,8 +325,7 @@ impl EntityInputHandler for LiteMarkApp {
                 }
 
                 // Auto-closing brackets and backticks
-                let suppress_pair = at_hidden_or_closer || (ch == '`' && in_code_span);
-                let auto_pair = if suppress_pair {
+                let auto_pair = if suppress_autopair {
                     None
                 } else {
                     match ch {
@@ -420,45 +415,58 @@ impl EntityInputHandler for LiteMarkApp {
         } else {
             range
         };
-        let range = if self.effective_view_mode() == ViewMode::Wysiwyg && !new_text.is_empty() {
-            self.active_tab_mut()
-                .and_then(|tab| {
-                    let target_col = tab.pending_table_col.take()?;
-                    if !range.is_empty() || !tab.file_type.supports_markdown_features() {
-                        return None;
+        let mut padded_ime_range: Option<Range<usize>> = None;
+        if self.effective_view_mode() == ViewMode::Wysiwyg && !new_text.is_empty() {
+            if let Some(tab) = self.active_tab_mut() {
+                if let Some(target_col) = tab.pending_table_col.take() {
+                    if range.is_empty() && tab.file_type.supports_markdown_features() {
+                        let row_start = tab
+                            .parsed()
+                            .line_at_offset(range.start)
+                            .filter(|l| {
+                                matches!(l.kind, LineKind::TableRow { .. })
+                                    && range.start == l.source.end
+                            })
+                            .map(|l| l.source.start);
+                        if let Some(row_start) = row_start {
+                            padded_ime_range =
+                                tab.insert_into_padded_table_cell(row_start, target_col, new_text);
+                        }
                     }
-                    let row_start = tab
-                        .parsed()
-                        .line_at_offset(range.start)
-                        .filter(|l| {
-                            matches!(l.kind, LineKind::TableRow { .. })
-                                && range.start == l.source.end
-                        })
-                        .map(|l| l.source.start)?;
-                    tab.materialize_table_row_cell(row_start, target_col)
-                        .map(|c| c.start..c.start)
-                })
-                .unwrap_or(range)
-        } else {
-            range
-        };
-        let start = range.start;
-        if let Some(tab) = self.active_tab_mut() {
-            tab.edit(range, new_text);
-            if new_text.is_empty() {
-                tab.cancel_picture_ime_line();
-                tab.marked_range = None;
-            } else {
-                let end = (start + new_text.len()).min(tab.content.len());
-                tab.marked_range = Some(start..end);
+                }
             }
-            if let Some(selected) = new_selected_range {
-                let relative = ordered_range(range_from_utf16(new_text, &selected));
-                let sel_start = (start + relative.start).min(tab.content.len());
-                let sel_end = (start + relative.end).min(tab.content.len());
-                tab.caret.range = sel_start..sel_end;
-                tab.caret.reversed = false;
-                tab.refresh_cursor();
+        }
+        if let Some(text_range) = padded_ime_range {
+            if let Some(tab) = self.active_tab_mut() {
+                tab.marked_range = Some(text_range.clone());
+                if let Some(selected) = new_selected_range {
+                    let relative = ordered_range(range_from_utf16(new_text, &selected));
+                    let sel_start = (text_range.start + relative.start).min(tab.content.len());
+                    let sel_end = (text_range.start + relative.end).min(tab.content.len());
+                    tab.caret.range = sel_start..sel_end;
+                    tab.caret.reversed = false;
+                    tab.refresh_cursor();
+                }
+            }
+        } else {
+            let start = range.start;
+            if let Some(tab) = self.active_tab_mut() {
+                tab.edit(range, new_text);
+                if new_text.is_empty() {
+                    tab.cancel_picture_ime_line();
+                    tab.marked_range = None;
+                } else {
+                    let end = (start + new_text.len()).min(tab.content.len());
+                    tab.marked_range = Some(start..end);
+                }
+                if let Some(selected) = new_selected_range {
+                    let relative = ordered_range(range_from_utf16(new_text, &selected));
+                    let sel_start = (start + relative.start).min(tab.content.len());
+                    let sel_end = (start + relative.end).min(tab.content.len());
+                    tab.caret.range = sel_start..sel_end;
+                    tab.caret.reversed = false;
+                    tab.refresh_cursor();
+                }
             }
         }
         self.refresh_find();

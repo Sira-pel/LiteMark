@@ -8,7 +8,7 @@ impl DocumentTab {
         pf.bold || pf.italic || pf.underline || pf.strike || pf.code
     }
 
-    pub fn insert_text_in_mode(&mut self, mut range: Range<usize>, text: &str, mode: ViewMode) {
+    pub fn insert_text_in_mode(&mut self, range: Range<usize>, text: &str, mode: ViewMode) {
         if self.is_read_only() {
             return;
         }
@@ -26,10 +26,29 @@ impl DocumentTab {
                             .map(|l| l.source.start)
                     };
                     if let Some(line_start) = row_start {
-                        if let Some(cell_range) =
-                            self.materialize_table_row_cell(line_start, target_col)
+                        let pf = self.pending_formats;
+                        let formatted;
+                        let payload =
+                            if self.has_pending_inline_formats() && !text.trim().is_empty() {
+                                let flags = FormatFlags {
+                                    bold: pf.bold,
+                                    italic: pf.italic,
+                                    underline: pf.underline,
+                                    strike: pf.strike,
+                                    code: pf.code,
+                                };
+                                let (open, close) = wrap_delimiters(&flags);
+                                formatted = format!("{open}{text}{close}");
+                                self.pending_formats = ActiveFormats::default();
+                                formatted.as_str()
+                            } else {
+                                text
+                            };
+                        if self
+                            .insert_into_padded_table_cell(line_start, target_col, payload)
+                            .is_some()
                         {
-                            range = cell_range.start..cell_range.start;
+                            return;
                         }
                     }
                 }

@@ -3799,3 +3799,21 @@ fn slice_bounds_and_slice_display_clamp_expanded_tabs() {
     let sub1 = map.slice_display(2..7);
     assert_eq!((sub1.line_start, sub1.line_end), (s1, e1));
 }
+
+#[test]
+fn prepare_for_pulldown_handles_many_unclosed_links_and_backticks() {
+    let mut line = String::new();
+    for _ in 0..2000 {
+        line.push_str("]( ");
+    }
+    for _ in 0..500 {
+        line.push_str("` `` ``` ");
+    }
+    line.push_str("*ok*");
+    let doc = parse_document(&line);
+    assert!(doc.lines[0].styled_segments.iter().any(|s| s.italic));
+    assert_eq!(
+        prepare_for_pulldown(&"]([a](foo_*bar)".repeat(500)).as_ref(),
+        &"]([a](foo_*bar)".repeat(500)
+    );
+}
