@@ -1731,6 +1731,10 @@ fn synthesize_flanking_pairs(
     styled_segments: &mut Vec<StyledSegment>,
 ) {
     let bytes = input.as_bytes();
+    // Most lines carry no delimiter at all: one SIMD scan skips the rest.
+    if memchr::memchr3(b'*', b'~', b'`', bytes).is_none() {
+        return;
+    }
     // Runs of unescaped emphasis delimiters, in source order.
     let mut runs: Vec<(usize, usize, u8)> = Vec::new();
     let mut i = 0usize;

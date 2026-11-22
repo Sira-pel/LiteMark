@@ -15,6 +15,10 @@ pub enum TableColumnAlign {
 pub(super) fn code_span_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
     let bytes = line.as_bytes();
     let mut ranges = Vec::new();
+    // No backtick, no code span (and no allocation).
+    if memchr::memchr(b'`', bytes).is_none() {
+        return ranges;
+    }
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] != b'`' {
@@ -202,10 +206,11 @@ pub(crate) fn delimiter_alignments(line: &str) -> Option<Vec<TableColumnAlign>> 
 }
 
 pub(super) fn is_empty_table_row(line: &str) -> bool {
-    table_cell_ranges(line).is_empty()
-        || line
-            .bytes()
-            .all(|byte| matches!(byte, b' ' | b'\t' | 0x0b | 0x0c | b'\r'))
+    // The cheap whitespace test first; it often settles the answer without
+    // building the cell ranges.
+    line.bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t' | 0x0b | 0x0c | b'\r'))
+        || table_cell_ranges(line).is_empty()
 }
 
 pub(crate) fn line_breaks_table(line: &str) -> bool {
