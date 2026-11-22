@@ -3,12 +3,17 @@
 //! editor column. The picture itself is drawn by gpui's `img()`.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use gpui::{point, px, size, Bounds, ElementId, Pixels, SharedString};
+use gpui::{
+    point, px, size, App, AppContext, Asset, AssetLogger, Bounds, Context, ElementId, Entity,
+    ImageAssetLoader, ImageCache, ImageCacheError, Pixels, RenderImage, Resource, SharedString,
+    Window,
+};
 
 /// Tallest an image block grows, before zoom.
 pub const MAX_IMAGE_HEIGHT: Pixels = px(480.0);
@@ -112,6 +117,377 @@ impl ImageSizeCache {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+}
+
+/// Default decoded-pixel budget for [`NoteImageCache`] (64 MiB of BGRA frames).
+pub const DEFAULT_IMAGE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CacheKey {
+    path: PathBuf,
+    /// Longest decoded pixel dimension bucket (`0` for animated/SVG/unscaled).
+    max_dim: u32,
+}
+
+enum CacheEntryState {
+    Loading { load_gen: u64 },
+    Loaded(Result<Arc<RenderImage>, ImageCacheError>),
+}
+
+struct CacheEntry {
+    state: CacheEntryState,
+    bytes: usize,
+    last_used: u64,
+}
+
+/// Bounded LRU image cache that downscales large static rasters on a background
+/// thread to `<= 2x` display size and explicitly calls `cx.drop_image` on
+/// eviction, disk replacement, and cache clear/release so GPU atlas memory stays
+/// bounded.
+pub struct NoteImageCache {
+    entries: HashMap<CacheKey, CacheEntry>,
+    total_bytes: usize,
+    budget_bytes: usize,
+    tick: u64,
+    next_load_gen: u64,
+}
+
+/// Coarse pixel-dimension bucket (`<= 2x` display size at the window's scale
+/// factor) so resizing doesn't re-decode on every pixel while thumbnails stay
+/// small in RAM and VRAM.
+pub fn bucket_max_dim(width: Pixels, height: Pixels, scale_factor: f32) -> u32 {
+    let longest =
+        f32::from(width).max(f32::from(height)).max(1.0) * scale_factor.max(1.0) * 2.0;
+    if longest <= 256.0 {
+        256
+    } else if longest <= 512.0 {
+        512
+    } else if longest <= 1024.0 {
+        1024
+    } else {
+        2048
+    }
+}
+
+/// True for formats that are always single-frame static rasters and safe to
+/// decode + downscale with `image`. Animated GIF/WebP and SVG stay on GPUI's
+/// native `ImageAssetLoader`.
+fn is_static_raster_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "bmp"
+            )
+        })
+}
+
+/// Decode a static raster image from `path`, downscaling it to fit inside
+/// `max_dim x max_dim` when larger, and convert RGBA pixels to GPUI's BGRA
+/// layout.
+pub fn decode_downscaled_raster(
+    path: &Path,
+    max_dim: u32,
+) -> Result<Arc<RenderImage>, ImageCacheError> {
+    let reader = image::ImageReader::open(path).map_err(|e| ImageCacheError::Io(Arc::new(e)))?;
+    let reader = reader
+        .with_guessed_format()
+        .map_err(|e| ImageCacheError::Io(Arc::new(e)))?;
+    let mut img = reader.decode().map_err(|e| {
+        ImageCacheError::Io(Arc::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            e.to_string(),
+        )))
+    })?;
+    if max_dim > 0 && (img.width() > max_dim || img.height() > max_dim) {
+        img = img.resize(max_dim, max_dim, image::imageops::FilterType::Triangle);
+    }
+    let mut rgba = img.to_rgba8();
+    // GPUI RenderImage frames use BGRA pixel ordering.
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
+}
+
+fn render_image_bytes(img: &RenderImage) -> usize {
+    (0..img.frame_count())
+        .map(|i| {
+            let sz = img.size(i);
+            (sz.width.0.max(0) as usize)
+                .saturating_mul(sz.height.0.max(0) as usize)
+                .saturating_mul(4)
+        })
+        .sum()
+}
+
+impl NoteImageCache {
+    pub fn new(cx: &mut App) -> Entity<Self> {
+        Self::with_budget(DEFAULT_IMAGE_CACHE_BUDGET_BYTES, cx)
+    }
+
+    pub fn with_budget(budget_bytes: usize, cx: &mut App) -> Entity<Self> {
+        let entity = cx.new(|_cx| Self {
+            entries: HashMap::new(),
+            total_bytes: 0,
+            budget_bytes: budget_bytes.max(1),
+            tick: 0,
+            next_load_gen: 0,
+        });
+        cx.observe_release(&entity, |cache, cx| {
+            cache.clear(None, cx);
+        })
+        .detach();
+        entity
+    }
+
+    fn bump_tick(&mut self) -> u64 {
+        self.tick = self.tick.wrapping_add(1);
+        self.tick
+    }
+
+    /// Load `path` downscaled to at most `max_dim` on the longest edge (for
+    /// static rasters), returning `None` while the background decode is running.
+    pub fn load_sized(
+        &mut self,
+        path: &Path,
+        max_dim: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        let static_raster = is_static_raster_path(path);
+        let key = CacheKey {
+            path: path.to_path_buf(),
+            max_dim: if static_raster { max_dim } else { 0 },
+        };
+        let now = self.bump_tick();
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.last_used = now;
+            return match &entry.state {
+                CacheEntryState::Loading { .. } => None,
+                CacheEntryState::Loaded(res) => Some(res.clone()),
+            };
+        }
+
+        self.next_load_gen = self.next_load_gen.wrapping_add(1);
+        let load_gen = self.next_load_gen;
+        self.entries.insert(
+            key.clone(),
+            CacheEntry {
+                state: CacheEntryState::Loading { load_gen },
+                bytes: 0,
+                last_used: now,
+            },
+        );
+
+        let path_owned = path.to_path_buf();
+        let bg_task = if static_raster {
+            cx.background_executor()
+                .spawn(async move { decode_downscaled_raster(&path_owned, max_dim) })
+        } else {
+            let fut = AssetLogger::<ImageAssetLoader>::load(
+                Resource::Path(Arc::from(path_owned)),
+                cx,
+            );
+            cx.background_executor().spawn(fut)
+        };
+
+        let cache_weak = cx.entity().downgrade();
+        let view = window.current_view();
+        window
+            .spawn(cx, async move |cx| {
+                let result = bg_task.await;
+                let _ = cx.update(|window, cx| {
+                    let _ = cache_weak.update(cx, |cache, cx| {
+                        cache.finish_load(&key, load_gen, result, Some(window), cx);
+                    });
+                    cx.notify(view);
+                });
+            })
+            .detach();
+
+        None
+    }
+
+    fn finish_load(
+        &mut self,
+        key: &CacheKey,
+        load_gen: u64,
+        result: Result<Arc<RenderImage>, ImageCacheError>,
+        window: Option<&mut Window>,
+        cx: &mut App,
+    ) {
+        let now = self.bump_tick();
+        let Some(entry) = self.entries.get_mut(key) else {
+            // Entry was invalidated or cleared while decoding: drop immediately.
+            if let Ok(img) = result {
+                cx.drop_image(img, window);
+            }
+            return;
+        };
+        match entry.state {
+            CacheEntryState::Loading { load_gen: cur } if cur == load_gen => {}
+            _ => {
+                if let Ok(img) = result {
+                    cx.drop_image(img, window);
+                }
+                return;
+            }
+        }
+        let bytes = result
+            .as_ref()
+            .map(|img| render_image_bytes(img))
+            .unwrap_or(0);
+        entry.state = CacheEntryState::Loaded(result);
+        entry.bytes = bytes;
+        entry.last_used = now;
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        self.evict_to_budget(Some(key), window, cx);
+    }
+
+    fn evict_to_budget(
+        &mut self,
+        keep: Option<&CacheKey>,
+        mut window: Option<&mut Window>,
+        cx: &mut App,
+    ) {
+        while self.total_bytes > self.budget_bytes && self.entries.len() > 1 {
+            let victim = self
+                .entries
+                .iter()
+                .filter(|(k, e)| {
+                    keep != Some(*k) && matches!(e.state, CacheEntryState::Loaded(_))
+                })
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| k.clone());
+            let Some(victim_key) = victim else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&victim_key) {
+                self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
+                if let CacheEntryState::Loaded(Ok(img)) = removed.state {
+                    cx.drop_image(img, window.as_deref_mut());
+                }
+            }
+        }
+    }
+
+    /// Drop every cached size bucket for `path` (e.g. after disk replacement)
+    /// and release its GPU textures via `cx.drop_image`.
+    pub fn invalidate_path(&mut self, path: &Path, mut window: Option<&mut Window>, cx: &mut App) {
+        let keys: Vec<CacheKey> = self
+            .entries
+            .keys()
+            .filter(|k| k.path == path)
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(removed) = self.entries.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
+                if let CacheEntryState::Loaded(Ok(img)) = removed.state {
+                    cx.drop_image(img, window.as_deref_mut());
+                }
+            }
+        }
+    }
+
+    /// Drop cached images for paths no longer referenced by the active note when
+    /// cache usage exceeds half the budget.
+    pub fn prune_unreferenced(
+        &mut self,
+        live: &HashSet<PathBuf>,
+        mut window: Option<&mut Window>,
+        cx: &mut App,
+    ) {
+        if self.total_bytes <= self.budget_bytes / 2 {
+            return;
+        }
+        let stale: Vec<CacheKey> = self
+            .entries
+            .keys()
+            .filter(|k| !live.contains(&k.path))
+            .cloned()
+            .collect();
+        for key in stale {
+            if let Some(removed) = self.entries.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
+                if let CacheEntryState::Loaded(Ok(img)) = removed.state {
+                    cx.drop_image(img, window.as_deref_mut());
+                }
+            }
+        }
+    }
+
+    /// Drop every cached image and release its GPU textures.
+    pub fn clear(&mut self, mut window: Option<&mut Window>, cx: &mut App) {
+        for (_, entry) in self.entries.drain() {
+            if let CacheEntryState::Loaded(Ok(img)) = entry.state {
+                cx.drop_image(img, window.as_deref_mut());
+            }
+        }
+        self.total_bytes = 0;
+    }
+
+    #[cfg(test)]
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    #[cfg(test)]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl ImageCache for NoteImageCache {
+    fn load(
+        &mut self,
+        resource: &Resource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        let Resource::Path(path) = resource else {
+            return None;
+        };
+        let key = CacheKey {
+            path: path.to_path_buf(),
+            max_dim: if is_static_raster_path(path) {
+                2048
+            } else {
+                0
+            },
+        };
+        let now = self.bump_tick();
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.last_used = now;
+            return match &entry.state {
+                CacheEntryState::Loading { .. } => None,
+                CacheEntryState::Loaded(res) => Some(res.clone()),
+            };
+        }
+        // Fallback synchronous path if called via generic ImageCache trait.
+        let result = if is_static_raster_path(path) {
+            decode_downscaled_raster(path, 2048)
+        } else {
+            return None;
+        };
+        let bytes = result
+            .as_ref()
+            .map(|img| render_image_bytes(img))
+            .unwrap_or(0);
+        self.entries.insert(
+            key.clone(),
+            CacheEntry {
+                state: CacheEntryState::Loaded(result.clone()),
+                bytes,
+                last_used: now,
+            },
+        );
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        self.evict_to_budget(Some(&key), Some(window), cx);
+        Some(result)
     }
 }
 
@@ -839,6 +1215,116 @@ mod tests {
             id_gif, id_gif_reloaded,
             "disk replacement must rotate ElementId"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bucket_max_dim_rounds_into_coarse_tiers() {
+        assert_eq!(bucket_max_dim(px(100.0), px(80.0), 1.0), 256);
+        assert_eq!(bucket_max_dim(px(160.0), px(120.0), 1.0), 512);
+        assert_eq!(bucket_max_dim(px(160.0), px(120.0), 2.0), 1024);
+        assert_eq!(bucket_max_dim(px(900.0), px(480.0), 2.0), 2048);
+    }
+
+    #[test]
+    fn decode_downscaled_raster_shrinks_oversized_png_and_converts_bgra() {
+        let dir =
+            std::env::temp_dir().join(format!("litemark-img-downscale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("big.png");
+        let img = image::RgbaImage::from_pixel(400, 200, image::Rgba([255, 10, 20, 255]));
+        img.save(&png).unwrap();
+
+        let rendered = decode_downscaled_raster(&png, 100).expect("decode png");
+        let sz = rendered.size(0);
+        assert_eq!(sz.width.0, 100);
+        assert_eq!(sz.height.0, 50);
+        let bytes = rendered.as_bytes(0).expect("frame bytes");
+        // RGBA [255, 10, 20, 255] must be stored as BGRA [20, 10, 255, 255].
+        assert_eq!(&bytes[0..4], &[20, 10, 255, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn note_image_cache_evicts_lru_entries_when_budget_exceeded_and_invalidates_path() {
+        let dir = std::env::temp_dir().join(format!("litemark-img-lru-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("one.png");
+        let p2 = dir.join("two.png");
+        let p3 = dir.join("three.png");
+        for p in [&p1, &p2, &p3] {
+            let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
+            img.save(p).unwrap();
+        }
+        // Each 32x32 BGRA image is 4096 bytes; budget 9000 bytes holds at most 2.
+        let cx = gpui::TestAppContext::single();
+        let cache = cx.update(|cx| NoteImageCache::with_budget(9000, cx));
+        let (k1, k2, k3) = (
+            CacheKey {
+                path: p1.clone(),
+                max_dim: 256,
+            },
+            CacheKey {
+                path: p2.clone(),
+                max_dim: 256,
+            },
+            CacheKey {
+                path: p3.clone(),
+                max_dim: 256,
+            },
+        );
+        let r1 = decode_downscaled_raster(&p1, 256);
+        let r2 = decode_downscaled_raster(&p2, 256);
+        let r3 = decode_downscaled_raster(&p3, 256);
+        cx.update(|cx| {
+            cache.update(cx, |c, cx| {
+                for (k, r) in [(&k1, r1), (&k2, r2)] {
+                    c.next_load_gen += 1;
+                    let g = c.next_load_gen;
+                    let t = c.bump_tick();
+                    c.entries.insert(
+                        k.clone(),
+                        CacheEntry {
+                            state: CacheEntryState::Loading { load_gen: g },
+                            bytes: 0,
+                            last_used: t,
+                        },
+                    );
+                    c.finish_load(k, g, r, None, cx);
+                }
+                assert_eq!(c.entry_count(), 2);
+                assert_eq!(c.total_bytes(), 8192);
+
+                // Touch k1 so k2 becomes the LRU victim.
+                let t = c.bump_tick();
+                c.entries.get_mut(&k1).unwrap().last_used = t;
+
+                c.next_load_gen += 1;
+                let g = c.next_load_gen;
+                let t = c.bump_tick();
+                c.entries.insert(
+                    k3.clone(),
+                    CacheEntry {
+                        state: CacheEntryState::Loading { load_gen: g },
+                        bytes: 0,
+                        last_used: t,
+                    },
+                );
+                c.finish_load(&k3, g, r3, None, cx);
+
+                assert_eq!(c.entry_count(), 2);
+                assert_eq!(c.total_bytes(), 8192);
+                assert!(c.entries.contains_key(&k1));
+                assert!(!c.entries.contains_key(&k2), "LRU entry must be evicted");
+                assert!(c.entries.contains_key(&k3));
+
+                c.invalidate_path(&p1, None, cx);
+                assert_eq!(c.entry_count(), 1);
+                assert_eq!(c.total_bytes(), 4096);
+            });
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

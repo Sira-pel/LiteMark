@@ -590,7 +590,7 @@ impl DocumentTab {
                 // Header-only table at EOF: snap to the header row's first cell.
                 parsed
                     .lines
-                    .get(pline.line_index.saturating_sub(1))
+                    .get((pline.line_index as usize).saturating_sub(1))
                     .map(|prev| {
                         if let LineKind::TableRow { ref body, .. } = prev.kind {
                             body.cells

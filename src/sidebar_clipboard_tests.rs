@@ -32,7 +32,7 @@ fn file_target(app: &LiteMarkApp, path: &Path) -> SidebarTarget {
 
 fn folder_target(app: &LiteMarkApp, path: &Path) -> SidebarTarget {
     let folder = app.workspace.folders.iter().find(|f| f.path == path);
-    SidebarTarget::Folder(folder.expect("listed folder").id.clone())
+    SidebarTarget::Folder(folder.expect("listed folder").id.to_string())
 }
 
 /// Select `target` in the sidebar with the keyboard there, as a click does.

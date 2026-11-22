@@ -16,7 +16,7 @@ fn big_workspace(folders: usize, files_per_folder: usize) -> WorkspaceDirectory 
     ws.folder_name = "Notes".into();
     assert!(ws.folders.is_empty() && ws.files.is_empty());
     for d in 0..folders {
-        let id = format!("folder-{d}");
+        let id: std::sync::Arc<str> = std::sync::Arc::from(format!("folder-{d}"));
         ws.folders.push(crate::model::WorkspaceFolder {
             id: id.clone(),
             name: format!("Folder {d}"),
@@ -75,17 +75,26 @@ fn keyboard_selection_finds_its_row_to_scroll_to() {
     let ws = big_workspace(3, 4);
     let items = crate::ui::sidebar::build_sidebar_tree(&ws.folders, &ws.files, None);
     let file = ws.files.last().unwrap().id.clone();
-    let ix = crate::ui::sidebar::selected_row_index(&items, Some(&file), None).unwrap();
+    let ix =
+        crate::ui::sidebar::selected_row_index(&items, &ws.folders, &ws.files, Some(&file), None)
+            .unwrap();
     assert!(
-        matches!(&items[ix], crate::ui::sidebar::SidebarTreeItem::File { file: f, .. } if f.id == file)
+        matches!(items[ix], crate::ui::sidebar::SidebarTreeItem::File { index, .. } if ws.files[index as usize].id == file)
     );
     let folder = ws.folders[1].id.clone();
-    let ix = crate::ui::sidebar::selected_row_index(&items, None, Some(&folder)).unwrap();
+    let ix = crate::ui::sidebar::selected_row_index(
+        &items,
+        &ws.folders,
+        &ws.files,
+        None,
+        Some(folder.as_ref()),
+    )
+    .unwrap();
     assert!(
-        matches!(&items[ix], crate::ui::sidebar::SidebarTreeItem::Folder { folder: f, .. } if f.id == folder)
+        matches!(items[ix], crate::ui::sidebar::SidebarTreeItem::Folder { index, .. } if ws.folders[index as usize].id == folder)
     );
     assert_eq!(
-        crate::ui::sidebar::selected_row_index(&items, Some("gone"), None),
+        crate::ui::sidebar::selected_row_index(&items, &ws.folders, &ws.files, Some("gone"), None),
         None
     );
 }

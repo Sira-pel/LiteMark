@@ -699,26 +699,6 @@ impl LiteMarkApp {
         cx.notify();
     }
 
-    pub(super) fn active_content(&mut self) -> SharedString {
-        let Some(tab) = self.tabs.iter().find(|t| t.id == self.active_tab_id) else {
-            self.content_snapshot = None;
-            return SharedString::default();
-        };
-        if let Some((id, revision, len, text)) = &self.content_snapshot {
-            if *id == tab.id && *revision == tab.revision && *len == tab.content.len() {
-                return text.clone();
-            }
-        }
-        let text = SharedString::new(tab.content.as_str());
-        self.content_snapshot = Some((
-            tab.id.clone(),
-            tab.revision,
-            tab.content.len(),
-            text.clone(),
-        ));
-        text
-    }
-
     pub(super) fn editor_surface(
         &mut self,
         cx: &mut Context<Self>,
@@ -731,20 +711,24 @@ impl LiteMarkApp {
             .active_tab()
             .is_none_or(|tab| tab.file_type.supports_markdown_features());
         let show_line_numbers = show_line_numbers || !markdown_tab;
-        let content = self.active_content();
         let active_id = self.active_tab_id.clone();
         for tab in self.tabs.iter_mut().filter(|t| t.id != active_id) {
             tab.release_parse_cache();
         }
-        let (parsed, selection, marked) = if let Some(tab) = self.active_tab_mut() {
+        let (content_key, parsed, selection, marked) = if let Some(tab) = self.active_tab_mut() {
             let parsed = if tab.file_type.supports_markdown_features() {
                 tab.parsed()
             } else {
                 empty_parsed_document()
             };
-            (parsed, tab.selection_range(), tab.marked_range.clone())
+            (
+                (tab.id.clone(), tab.revision),
+                parsed,
+                tab.selection_range(),
+                tab.marked_range.clone(),
+            )
         } else {
-            (empty_parsed_document(), 0..0, None)
+            ((String::new(), 0), empty_parsed_document(), 0..0, None)
         };
         let font_family = match view_mode {
             ViewMode::Wysiwyg => Theme::FONT_PROSE.into(),
@@ -754,7 +738,8 @@ impl LiteMarkApp {
             entity: cx.entity(),
             focus: self.focus_handle.clone(),
             paint: self.editor_paint.clone(),
-            content,
+            note_image_cache: self.note_image_cache.clone(),
+            content_key,
             parsed,
             view_mode,
             selection,

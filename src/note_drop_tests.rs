@@ -23,7 +23,7 @@ fn opening_a_copied_note_shows_its_content() {
         let file_id = app.workspace.files[0].id.clone();
         let folder_id = app.workspace.folders[0].id.clone();
 
-        let outcome = app.move_or_copy_note(&file_id, Some(folder_id), true, true);
+        let outcome = app.move_or_copy_note(&file_id, Some(folder_id.to_string()), true, true);
         assert!(matches!(outcome, DropOutcome::Done(_)));
 
         let tab = app.active_tab().expect("copy opened in a tab");

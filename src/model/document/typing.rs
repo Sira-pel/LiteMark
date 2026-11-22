@@ -591,7 +591,7 @@ impl DocumentTab {
                                 )
                             };
                             let next_is_block =
-                                parsed.lines.get(pline.line_index + 1).is_some_and(|n| {
+                                parsed.lines.get(pline.line_index as usize + 1).is_some_and(|n| {
                                     matches!(
                                         n.kind,
                                         LineKind::Heading { .. }

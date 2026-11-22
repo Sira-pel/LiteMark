@@ -199,10 +199,7 @@ pub struct LiteMarkApp {
     pub save_as_tab: Option<String>,
     pub pending_after_save: Option<PendingAfterSave>,
     pub editor_paint: Rc<RefCell<EditorPaint>>,
-    /// The active tab's text as a shared string, keyed by tab id, revision
-    /// and length. Frames and IME queries between edits share this one copy
-    /// instead of cloning the whole document each time.
-    content_snapshot: Option<(String, u64, usize, SharedString)>,
+    pub note_image_cache: Entity<crate::ui::note_images::NoteImageCache>,
     /// Word count of the selection, keyed by tab id, revision and range, so
     /// a frame (caret blink, hover) doesn't rescan a large selection.
     selection_words: Option<(String, u64, Range<usize>, Option<usize>)>,
@@ -639,7 +636,7 @@ impl LiteMarkApp {
             save_as_tab: None,
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
-            content_snapshot: None,
+            note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
@@ -791,7 +788,7 @@ impl LiteMarkApp {
             save_as_tab: None,
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
-            content_snapshot: None,
+            note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
@@ -998,6 +995,14 @@ mod typing_tests;
 #[cfg(test)]
 #[path = "find_panel_tests.rs"]
 mod find_panel_tests;
+
+impl crate::ui::text_editor::EditorContentSource for LiteMarkApp {
+    fn editor_content(&self) -> &str {
+        self.active_tab()
+            .map(|tab| tab.content.as_str())
+            .unwrap_or("")
+    }
+}
 
 #[cfg(test)]
 #[path = "pdf_open_tests.rs"]

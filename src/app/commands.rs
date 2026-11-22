@@ -896,7 +896,12 @@ impl LiteMarkApp {
             self.show_sidebar = true;
         }
         if let Some(pid) = &parent {
-            if let Some(folder) = self.workspace.folders.iter_mut().find(|f| &f.id == pid) {
+            if let Some(folder) = self
+                .workspace
+                .folders
+                .iter_mut()
+                .find(|f| f.id.as_ref() == pid.as_str())
+            {
                 folder.is_open = true;
             }
         }

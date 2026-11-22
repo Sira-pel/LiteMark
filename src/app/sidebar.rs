@@ -7,7 +7,7 @@ impl LiteMarkApp {
         self.workspace
             .folders
             .iter()
-            .map(|folder| (folder.id.clone(), folder.path.clone()))
+            .map(|folder| (folder.id.to_string(), folder.path.clone()))
             .collect()
     }
 
@@ -16,7 +16,7 @@ impl LiteMarkApp {
             .workspace
             .folders
             .iter_mut()
-            .find(|f| f.id == folder_id)
+            .find(|f| f.id.as_ref() == folder_id)
         {
             folder.is_open = !folder.is_open;
         }
@@ -67,7 +67,7 @@ impl LiteMarkApp {
             let folders =
                 sidebar_folder_search_matches(&self.workspace.folders, &self.search_query)
                     .into_iter()
-                    .map(|folder| SidebarTarget::Folder(folder.id.clone()));
+                    .map(|folder| SidebarTarget::Folder(folder.id.to_string()));
             let files = sidebar_search_matches(&self.workspace.files, &self.search_query)
                 .into_iter()
                 .map(|file| SidebarTarget::File(file.id.clone()));
@@ -75,11 +75,17 @@ impl LiteMarkApp {
         }
         self.sidebar_tree()
             .iter()
-            .filter_map(|item| match item {
-                SidebarTreeItem::Folder { folder, .. } => {
-                    Some(SidebarTarget::Folder(folder.id.clone()))
-                }
-                SidebarTreeItem::File { file, .. } => Some(SidebarTarget::File(file.id.clone())),
+            .filter_map(|item| match *item {
+                SidebarTreeItem::Folder { index, .. } => self
+                    .workspace
+                    .folders
+                    .get(index as usize)
+                    .map(|folder| SidebarTarget::Folder(folder.id.to_string())),
+                SidebarTreeItem::File { index, .. } => self
+                    .workspace
+                    .files
+                    .get(index as usize)
+                    .map(|file| SidebarTarget::File(file.id.clone())),
                 SidebarTreeItem::CreateInput { .. } => None,
             })
             .collect()
@@ -168,7 +174,7 @@ impl LiteMarkApp {
                 .workspace
                 .folders
                 .iter()
-                .find(|f| &f.id == id)
+                .find(|f| f.id.as_ref() == id.as_str())
                 .map(|f| f.path.clone()),
             SidebarTarget::File(id) => self
                 .workspace
@@ -190,7 +196,7 @@ impl LiteMarkApp {
                         self.workspace
                             .folders
                             .iter()
-                            .find(|f| &f.id == id)?
+                            .find(|f| f.id.as_ref() == id.as_str())?
                             .path
                             .clone(),
                         true,
@@ -306,7 +312,12 @@ impl LiteMarkApp {
         };
         match target {
             SidebarTarget::Folder(id) => {
-                if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.id == id) {
+                if let Some(folder) = self
+                    .workspace
+                    .folders
+                    .iter_mut()
+                    .find(|f| f.id.as_ref() == id.as_str())
+                {
                     folder.is_open = false;
                 }
                 self.sidebar_keyboard = true;
@@ -317,7 +328,7 @@ impl LiteMarkApp {
                     .files
                     .iter()
                     .find(|f| f.id == id)
-                    .and_then(|f| f.folder_id.clone());
+                    .and_then(|f| f.folder_id.as_deref().map(str::to_string));
                 if let Some(fid) = parent {
                     self.selected_target = Some(SidebarTarget::Folder(fid));
                 }
@@ -334,7 +345,12 @@ impl LiteMarkApp {
         };
         match target {
             SidebarTarget::Folder(id) => {
-                if let Some(folder) = self.workspace.folders.iter_mut().find(|f| f.id == id) {
+                if let Some(folder) = self
+                    .workspace
+                    .folders
+                    .iter_mut()
+                    .find(|f| f.id.as_ref() == id.as_str())
+                {
                     folder.is_open = true;
                 }
                 self.sidebar_keyboard = true;
@@ -373,7 +389,12 @@ impl LiteMarkApp {
         match safe_create_file(&dir, &name, "") {
             Ok(path) => {
                 if let Some(fid) = &folder_id {
-                    if let Some(folder) = self.workspace.folders.iter_mut().find(|f| &f.id == fid) {
+                    if let Some(folder) = self
+                        .workspace
+                        .folders
+                        .iter_mut()
+                        .find(|f| f.id.as_ref() == fid.as_str())
+                    {
                         folder.is_open = true;
                     }
                 }
@@ -409,7 +430,12 @@ impl LiteMarkApp {
         match safe_create_folder(&dir, &name) {
             Ok(path) => {
                 if let Some(pid) = &parent_id {
-                    if let Some(folder) = self.workspace.folders.iter_mut().find(|f| &f.id == pid) {
+                    if let Some(folder) = self
+                        .workspace
+                        .folders
+                        .iter_mut()
+                        .find(|f| f.id.as_ref() == pid.as_str())
+                    {
                         folder.is_open = true;
                     }
                 }

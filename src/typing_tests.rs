@@ -100,7 +100,7 @@ fn wysiwyg_overtype_and_autowrap_do_not_corrupt_hidden_delimiters() {
         let tab = app.active_tab().unwrap();
         assert_ne!(tab.content, "``foo``");
         assert_eq!(
-            crate::markdown::parse_document(&tab.content).lines[0].display_text,
+            crate::markdown::parse_document(&tab.content).lines[0].display_text(&tab.content),
             "foo`"
         );
     });

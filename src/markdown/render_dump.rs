@@ -21,11 +21,12 @@ pub fn render_tree(markdown: &str, wrap_cols: usize) -> String {
     out.push_str(&format!("wrap_cols={wrap_cols}\n"));
 
     for (line_index, line) in doc.lines.iter().enumerate() {
+        let disp = line.display_text(markdown);
         out.push_str(&format!(
             "line[{line_index}] {} source={} display={}\n",
             kind_token(&line.kind),
             range_token(&line.source),
-            quote_token(&line.display_text),
+            quote_token(disp),
         ));
 
         if let LineKind::TableRow { ref body, .. } = &line.kind {
@@ -54,9 +55,9 @@ pub fn render_tree(markdown: &str, wrap_cols: usize) -> String {
             ));
         }
 
-        let rows = visual_rows(&line.display_text, wrap_cols);
+        let rows = visual_rows(disp, wrap_cols);
         for (row_index, (start, end)) in rows.iter().enumerate() {
-            let text = slice_text(&line.display_text, &(*start..*end));
+            let text = slice_text(disp, &(*start..*end));
             out.push_str(&format!(
                 "row[{line_index}][{row_index}] display={start}..{end} text={}\n",
                 quote_token(&text),
@@ -78,11 +79,13 @@ fn kind_token(kind: &LineKind) -> String {
             number,
             task,
             indent_cols,
-            checkbox_source,
+            checkbox_offset,
         } => {
-            let checkbox = match checkbox_source {
-                Some(range) => range_token(range),
-                None => "-".to_string(),
+            let checkbox = if *checkbox_offset != u16::MAX {
+                let start = *checkbox_offset as usize;
+                range_token(&(start..start + 3))
+            } else {
+                "-".to_string()
             };
             format!(
                 "kind=ListItem ordered={ordered} number={number} task={} indent_cols={indent_cols} checkbox={checkbox}",

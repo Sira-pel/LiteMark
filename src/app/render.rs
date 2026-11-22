@@ -29,6 +29,7 @@ impl Render for LiteMarkApp {
 
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.ensure_stats();
+            tab.ensure_cursor_formats();
         }
         let stats_selection = self.selection_word_count();
         // Borrow the tab only for the few fields the chrome reads. Cloning it
@@ -81,6 +82,9 @@ impl Render for LiteMarkApp {
             move |id: String, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.handle_close_tab(id);
+                    this.note_image_cache.update(cx, |cache, cx| {
+                        cache.clear(None, cx);
+                    });
                     cx.notify();
                 });
             }
@@ -1507,6 +1511,7 @@ impl Render for LiteMarkApp {
                             .when(self.show_sidebar, |s| {
                                 let sidebar = render_sidebar(
                                     SidebarProps {
+                                        app: cx.entity(),
                                         workspace: &self.workspace,
                                         tree: self.sidebar_tree(),
                                         width: crate::theme::sidebar_width(window_width),

@@ -319,7 +319,7 @@ impl DocumentTab {
             let mut body = String::with_capacity(block.len());
             for (index, line) in lines.iter().enumerate() {
                 if matches!(line.kind, LineKind::CodeLine) {
-                    body.push_str(&self.content[line.prefix_range.end..line.source.end]);
+                    body.push_str(&self.content[line.prefix_end()..line.source.end]);
                 }
                 if let Some(next) = lines.get(index + 1) {
                     body.push_str(&self.content[line.source.end..next.source.start]);
@@ -588,7 +588,7 @@ fn block_prefix_with<'a>(
                     LineKind::Heading { .. } | LineKind::ListItem { .. } | LineKind::Blockquote
                 )
         })
-        .map_or(0, |l| l.prefix_range.end - l.source.start)
+        .map_or(0, |l| l.prefix_len as usize)
 }
 
 /// Prefix length of the blockquote line starting at `line_start`, as the
@@ -598,5 +598,5 @@ fn blockquote_prefix_in(parsed: &ParsedDocument, line_start: usize) -> Option<us
     parsed
         .line_at_offset(line_start)
         .filter(|l| l.kind == LineKind::Blockquote && l.source.start == line_start)
-        .map(|l| l.prefix_range.end - l.source.start)
+        .map(|l| l.prefix_len as usize)
 }

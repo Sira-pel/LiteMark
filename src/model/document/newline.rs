@@ -208,10 +208,12 @@ impl DocumentTab {
 
                     if is_header {
                         // Header row: find delimiter line and jump to / create first data row
-                        if let Some(delim_line) = parsed.lines.get(pline.line_index + 1) {
+                        if let Some(delim_line) = parsed.lines.get(pline.line_index as usize + 1) {
                             let after_delim = delim_line.source.end;
                             // Check if there is already a body row after delimiter
-                            if let Some(first_body) = parsed.lines.get(pline.line_index + 2) {
+                            if let Some(first_body) =
+                                parsed.lines.get(pline.line_index as usize + 2)
+                            {
                                 if let LineKind::TableRow {
                                     is_header: false,
                                     ref body,
@@ -393,12 +395,12 @@ impl DocumentTab {
                 && parsed
                     .line_at_offset(line_start)
                     .and_then(|line| line.line_index.checked_sub(1))
-                    .and_then(|index| parsed.lines.get(index))
+                    .and_then(|index| parsed.lines.get(index as usize))
                     .is_some_and(|line| is_indented_code(&parsed, line));
             let quote_prefix_len = parsed
                 .line_at_offset(line_start)
                 .filter(|l| l.kind == LineKind::Blockquote)
-                .map(|l| l.prefix_range.end - l.source.start);
+                .map(|l| l.prefix_len as usize);
             let is_hr = parsed
                 .line_at_offset(line_start)
                 .is_some_and(|l| matches!(l.kind, LineKind::HorizontalRule));

@@ -195,7 +195,7 @@ impl LiteMarkApp {
             .workspace
             .folders
             .iter()
-            .find(|folder| folder.id == id)
+            .find(|folder| folder.id.as_ref() == id)
             .cloned()
         else {
             self.show_error("That folder is no longer available.");
@@ -258,7 +258,7 @@ impl LiteMarkApp {
                 .workspace
                 .folders
                 .iter()
-                .find(|folder| &folder.id == id)
+                .find(|folder| folder.id.as_ref() == id.as_str())
                 .map(|folder| folder.name.clone()),
         };
         let Some(name) = name else {
@@ -384,7 +384,7 @@ impl LiteMarkApp {
                 .workspace
                 .folders
                 .iter()
-                .find(|folder| &folder.id == id)
+                .find(|folder| folder.id.as_ref() == id.as_str())
                 .map(|folder| folder.path.clone()),
         };
         let Some(old) = renamed else {
@@ -600,7 +600,10 @@ impl LiteMarkApp {
             let still_there = match &bulk.prev_selected {
                 Some(SidebarTarget::File(id)) => self.workspace.files.iter().any(|f| &f.id == id),
                 Some(SidebarTarget::Folder(id)) => {
-                    self.workspace.folders.iter().any(|f| &f.id == id)
+                    self.workspace
+                        .folders
+                        .iter()
+                        .any(|f| f.id.as_ref() == id.as_str())
                 }
                 None => false,
             };
@@ -638,7 +641,7 @@ impl LiteMarkApp {
             .workspace
             .folders
             .iter()
-            .find(|folder| folder.id == id)
+            .find(|folder| folder.id.as_ref() == id)
             .cloned()
         else {
             self.report_missing("That folder is no longer available.", bulk);
@@ -656,7 +659,11 @@ impl LiteMarkApp {
         // Clear the selection if it pointed into the removed subtree.
         let selection_gone = match &self.selected_target {
             Some(SidebarTarget::File(id)) => self.workspace.files.iter().all(|f| f.id != *id),
-            Some(SidebarTarget::Folder(id)) => self.workspace.folders.iter().all(|f| f.id != *id),
+            Some(SidebarTarget::Folder(id)) => self
+                .workspace
+                .folders
+                .iter()
+                .all(|f| f.id.as_ref() != id.as_str()),
             None => false,
         };
         if selection_gone {

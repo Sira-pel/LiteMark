@@ -402,6 +402,10 @@ pub struct DocumentTab {
     next_undo_sel: Option<SelectionSnap>,
     /// Selection restored by redo of the next edit.
     next_redo_sel: Option<SelectionSnap>,
+    /// Whether `active_formats` has been computed for the current caret.
+    /// Deferred on `DocumentTab::new` so background/restored tabs skip a full
+    /// startup parse until activated or rendered.
+    cursor_formats_ready: bool,
     #[cfg(test)]
     pub(crate) parse_clone_count: usize,
     #[cfg(test)]
@@ -412,14 +416,14 @@ impl DocumentTab {
     pub fn new(
         id: String,
         title: String,
-        content: String,
+        mut content: String,
         file_path: Option<PathBuf>,
         workspace_file_id: Option<String>,
     ) -> Self {
-        let (content, has_bom) = match content.strip_prefix('\u{feff}') {
-            Some(rest) => (rest.to_string(), true),
-            None => (content, false),
-        };
+        let has_bom = content.starts_with('\u{feff}');
+        if has_bom {
+            content.drain(..'\u{feff}'.len_utf8());
+        }
         let file_type = FileType::from_filename(&title);
         let (stats, line_endings) = stats_and_line_endings(&content);
         let default_style = indent_style(&title, file_type);
@@ -429,7 +433,7 @@ impl DocumentTab {
             default_style
         };
 
-        let mut tab = Self {
+        Self {
             id,
             title,
             content,
@@ -473,41 +477,83 @@ impl DocumentTab {
             next_redo_caret: None,
             next_undo_sel: None,
             next_redo_sel: None,
+            cursor_formats_ready: !file_type.supports_markdown_features(),
             #[cfg(test)]
             parse_clone_count: 0,
             #[cfg(test)]
             full_parse_count: 0,
-        };
-        tab.refresh_cursor();
-        tab
+        }
     }
 
     /// Replace the text with a newer version read from disk. Undo history is
     /// dropped (it describes the old text); the view mode and, where it
     /// still fits, the caret are kept. The revision keeps counting up so
     /// caches keyed on it never mistake the new text for the old.
-    pub fn reload(&mut self, content: String) {
-        let mut fresh = DocumentTab::new(
-            self.id.clone(),
-            self.title.clone(),
-            content,
-            self.file_path.clone(),
-            self.workspace_file_id.clone(),
-        );
-        fresh.view_mode = self.view_mode;
-        fresh.pdf_page_count = self.pdf_page_count;
-        fresh.disk_version = self.disk_version.clone();
-        fresh.revision = self.revision + 1;
-        fresh.stats_revision = Some(fresh.revision);
-        if let Some(staged) = &mut fresh.staged_stats {
-            staged.revision = fresh.revision;
+    pub fn reload(&mut self, mut content: String) {
+        let prev_cursor = self.cursor_offset();
+        // Drop old buffers before rebuilding so reload doesn't hold 2x the
+        // document + parse cache + undo history in memory simultaneously.
+        self.content = String::new();
+        self.cached_parse = None;
+        self.last_edit = None;
+        self.history = UndoHistory::default();
+        self.count_anchors = Default::default();
+
+        let has_bom = content.starts_with('\u{feff}');
+        if has_bom {
+            content.drain(..'\u{feff}'.len_utf8());
         }
-        let cursor = floor_boundary(
-            &fresh.content,
-            self.cursor_offset().min(fresh.content.len()),
-        );
-        fresh.caret.move_to(cursor);
-        *self = fresh;
+        let file_type = FileType::from_filename(&self.title);
+        let (stats, line_endings) = stats_and_line_endings(&content);
+        let default_style = indent_style(&self.title, file_type);
+        let indent_style = if file_type.is_code() {
+            detect_indent_style(&content, default_style)
+        } else {
+            default_style
+        };
+
+        let next_revision = self.revision + 1;
+        let cursor = floor_boundary(&content, prev_cursor.min(content.len()));
+
+        self.content = content;
+        self.file_type = file_type;
+        self.is_modified = false;
+        self.has_bom = has_bom;
+        self.word_count = stats.words;
+        self.char_count = stats.chars;
+        self.line_count = stats.lines;
+        self.reading_time_min = stats.reading_time_min;
+        self.cursor_line = 1;
+        self.cursor_col = 1;
+        self.active_formats = ActiveFormats::default();
+        self.pending_formats = ActiveFormats::default();
+        self.caret = Caret::default();
+        self.caret.move_to(cursor);
+        self.indent_style = indent_style;
+        self.force_inline_toggle = None;
+        self.marked_range = None;
+        self.picture_raw_line = None;
+        self.pending_table_col = None;
+        self.ime_opened_line = None;
+        self.revision = next_revision;
+        self.stats_revision = Some(next_revision);
+        self.staged_stats = Some(StagedStats {
+            revision: next_revision,
+            words: stats.words,
+            chars: stats.chars,
+            line_endings,
+        });
+        self.next_edit_opens_span_group = false;
+        self.next_undo_caret = None;
+        self.next_redo_caret = None;
+        self.next_undo_sel = None;
+        self.next_redo_sel = None;
+        self.cursor_formats_ready = !file_type.supports_markdown_features();
+        #[cfg(test)]
+        {
+            self.parse_clone_count = 0;
+            self.full_parse_count = 0;
+        }
         self.refresh_cursor();
     }
 
@@ -720,6 +766,7 @@ impl DocumentTab {
         }
         self.carry_count_anchors_past(&range);
         self.content.replace_range(range, new_text);
+        self.shrink_content_if_bloated();
         let cursor = snap_off_ending_interior(&self.content, cursor_at);
         self.revision = self.revision.wrapping_add(1);
         self.caret.move_to(cursor.min(self.content.len()));
@@ -978,8 +1025,28 @@ impl DocumentTab {
         self.refresh_stats();
     }
 
+    /// Compute `active_formats` if deferred on startup/tab creation.
+    pub fn ensure_cursor_formats(&mut self) {
+        if !self.cursor_formats_ready {
+            self.refresh_cursor();
+        }
+    }
+
+    /// Reclaim excess `String` buffer capacity after a large deletion so a
+    /// cleared multi-MB document doesn't keep its peak allocation forever.
+    fn shrink_content_if_bloated(&mut self) {
+        const MIN_SHRINK_CAP: usize = 64 * 1024;
+        if self.content.capacity() > MIN_SHRINK_CAP
+            && self.content.capacity() > self.content.len().saturating_mul(4)
+        {
+            let target = self.content.len().saturating_mul(2).max(4096);
+            self.content.shrink_to(target);
+        }
+    }
+
     pub fn refresh_cursor(&mut self) {
         self.expire_picture_raw();
+        self.cursor_formats_ready = true;
         let cursor = self.cursor_offset();
         if !self.file_type.supports_markdown_features() {
             // Raw tabs have no Markdown structure: skip the parse.
@@ -1000,6 +1067,7 @@ impl DocumentTab {
         let Some(restore) = self.history.undo(&mut self.content) else {
             return false;
         };
+        self.shrink_content_if_bloated();
         self.last_edit = Some((
             self.revision,
             restore.replaced.0.clone(),
@@ -1018,6 +1086,7 @@ impl DocumentTab {
         let Some(restore) = self.history.redo(&mut self.content) else {
             return false;
         };
+        self.shrink_content_if_bloated();
         self.last_edit = Some((
             self.revision,
             restore.replaced.0.clone(),

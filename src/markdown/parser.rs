@@ -369,13 +369,14 @@ pub enum LineKind {
     Blockquote,
     ListItem {
         ordered: bool,
-        number: usize,
+        number: u32,
         task: Option<bool>, // Some(true) = [x], Some(false) = [ ], None = normal bullet/number
-        indent_cols: usize,
-        checkbox_source: Option<std::ops::Range<usize>>, // byte range of "[ ]" or "[x]"
+        indent_cols: u16,
+        /// Byte offset of `"[ ]"` or `"[x]"` relative to `source.start`, or `u16::MAX` if none.
+        checkbox_offset: u16,
     },
     CodeFence {
-        language: Option<String>,
+        language: Option<Box<str>>,
         opening: bool,
     },
     CodeLine,
@@ -410,7 +411,19 @@ pub struct StyledSegment {
     pub underline: bool,
     pub strike: bool,
     pub code: bool,
-    pub link_url: Option<String>,
+    pub link_url: Option<Arc<str>>,
+}
+
+impl StyledSegment {
+    #[inline]
+    pub fn is_plain(&self) -> bool {
+        !self.bold
+            && !self.italic
+            && !self.underline
+            && !self.strike
+            && !self.code
+            && self.link_url.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -700,35 +713,160 @@ impl RowOffsetMap {
 }
 
 /// Shared empty `link_hits`, so lines without links don't each allocate one.
-fn no_links() -> Arc<Vec<(std::ops::Range<usize>, String)>> {
+fn no_links() -> Arc<Vec<(std::ops::Range<usize>, Arc<str>)>> {
     thread_local! {
-        static EMPTY: Arc<Vec<(std::ops::Range<usize>, String)>> = Arc::default();
+        static EMPTY: Arc<Vec<(std::ops::Range<usize>, Arc<str>)>> = Arc::default();
     }
     EMPTY.with(Arc::clone)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedLine {
-    pub line_index: usize,
+    pub line_index: u32,
     /// Full byte range of the line (excluding `\n`)
     pub source: std::ops::Range<usize>,
     /// Heading content end relative to `source.start` (before any closing-hash
     /// run); `source.len()` for every other line kind.
-    pub content_end: usize,
+    pub content_end: u32,
+    /// Byte length of block prefix hidden in WYSIWYG (e.g. `# `, `- [ ] `, `> `)
+    pub prefix_len: u32,
     pub kind: LineKind,
-    /// Byte range of block prefix hidden in WYSIWYG (e.g. `# `, `- [ ] `, `> `)
-    pub prefix_range: std::ops::Range<usize>,
     /// All byte ranges hidden in WYSIWYG on this line (sorted, non-overlapping)
     pub hidden_ranges: Vec<std::ops::Range<usize>>,
     /// Paired inline delimiter ranges for atomic backspace & smart toggle-off
     pub inline_pairs: Vec<InlinePair>,
-    /// Visible text in WYSIWYG mode (with hidden_ranges stripped)
-    pub display_text: String,
-    pub offset_map: Arc<RowOffsetMap>,
+    /// Visible text in WYSIWYG mode when it differs from `&content[prefix_end()..source.end]`
+    /// (e.g. inline hidden markup). `None` borrows zero-copy from the document.
+    display_text_owned: Option<Box<str>>,
+    /// Explicit offset map when inline hidden markup exists. `None` uses O(1)
+    /// prefix arithmetic (`prefix_end()..source.end`).
+    offset_map_cached: Option<Arc<RowOffsetMap>>,
     pub styled_segments: Vec<StyledSegment>,
     /// Link spans `(source, url)`, filled once when the document is parsed so
     /// painting can share them instead of rebuilding them every frame.
-    pub link_hits: Arc<Vec<(std::ops::Range<usize>, String)>>,
+    pub link_hits: Arc<Vec<(std::ops::Range<usize>, Arc<str>)>>,
+}
+
+impl ParsedLine {
+    /// Byte offset where the hidden block prefix ends.
+    #[inline]
+    pub fn prefix_end(&self) -> usize {
+        self.source.start + self.prefix_len as usize
+    }
+
+    /// Visible text in WYSIWYG mode (with hidden ranges stripped). Borrows
+    /// zero-copy from `content` whenever the line has no inline hidden markup.
+    #[inline]
+    pub fn display_text<'a>(&'a self, content: &'a str) -> &'a str {
+        if let Some(ref owned) = self.display_text_owned {
+            owned
+        } else {
+            let start = self.prefix_end().min(self.source.end);
+            content.get(start..self.source.end).unwrap_or("")
+        }
+    }
+
+    /// Byte length of the visible WYSIWYG display text, in O(1) without
+    /// borrowing the document text.
+    #[inline]
+    pub fn display_len(&self) -> usize {
+        match &self.display_text_owned {
+            Some(owned) => owned.len(),
+            None => self.source.end.saturating_sub(self.prefix_end()),
+        }
+    }
+
+    #[inline]
+    pub fn source_to_display(&self, source_offset: usize) -> usize {
+        if let Some(ref map) = self.offset_map_cached {
+            map.source_to_display(source_offset)
+        } else {
+            let vis = self.prefix_end().min(self.source.end);
+            source_offset
+                .saturating_sub(vis)
+                .min(self.source.end.saturating_sub(vis))
+        }
+    }
+
+    #[inline]
+    pub fn display_to_source(&self, display_offset: usize) -> usize {
+        if let Some(ref map) = self.offset_map_cached {
+            map.display_to_source(display_offset)
+        } else {
+            let vis = self.prefix_end().min(self.source.end);
+            (vis + display_offset).min(self.source.end)
+        }
+    }
+
+    #[inline]
+    pub fn slice_bounds(&self, disp_range: std::ops::Range<usize>) -> (usize, usize) {
+        if let Some(ref map) = self.offset_map_cached {
+            map.slice_bounds(disp_range)
+        } else {
+            (
+                self.display_to_source(disp_range.start),
+                self.display_to_source(disp_range.end),
+            )
+        }
+    }
+
+    pub fn slice_display(&self, disp_range: std::ops::Range<usize>) -> RowOffsetMap {
+        if let Some(ref map) = self.offset_map_cached {
+            map.slice_display(disp_range)
+        } else {
+            let start = self.display_to_source(disp_range.start);
+            let end = self.display_to_source(disp_range.end);
+            RowOffsetMap::identity(start, end)
+        }
+    }
+
+    /// Materialize an `Arc<RowOffsetMap>` (used only for visible shaped rows).
+    pub fn to_offset_map(&self) -> Arc<RowOffsetMap> {
+        if let Some(ref map) = self.offset_map_cached {
+            return Arc::clone(map);
+        }
+        let vis = self.prefix_end().min(self.source.end);
+        let len = self.source.end.saturating_sub(vis);
+        Arc::new(RowOffsetMap {
+            segments: vec![(0..len, vis..self.source.end)],
+            line_start: self.source.start,
+            line_end: self.source.end,
+            visible_start: vis,
+        })
+    }
+
+    /// Byte range of `"[ ]"` or `"[x]"` on a task-list item, if present.
+    #[inline]
+    pub fn checkbox_source(&self) -> Option<std::ops::Range<usize>> {
+        match self.kind {
+            LineKind::ListItem {
+                checkbox_offset, ..
+            } if checkbox_offset != u16::MAX => {
+                let start = self.source.start + checkbox_offset as usize;
+                Some(start..start + 3)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Build `display_text_owned` and `offset_map_cached` only when `hidden`
+/// hides bytes beyond the leading `0..prefix_len` prefix. Otherwise both stay
+/// `None` (zero heap allocations).
+pub(super) fn build_display_and_map(
+    line: &str,
+    line_start: usize,
+    prefix_len: usize,
+    hidden: &[std::ops::Range<usize>],
+) -> (Option<Box<str>>, Option<Arc<RowOffsetMap>>) {
+    let prefix_end = line_start + prefix_len;
+    let only_prefix = (hidden.is_empty() && prefix_len == 0)
+        || (hidden.len() == 1 && hidden[0].start == line_start && hidden[0].end == prefix_end);
+    if only_prefix {
+        return (None, None);
+    }
+    let (display, map) = RowOffsetMap::from_hidden(line, line_start, prefix_end, hidden);
+    (Some(display.into_boxed_str()), Some(Arc::new(map)))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -860,8 +998,8 @@ impl ParsedDocument {
                         ..
                     } = kind
                     {
-                        if clip.start <= line.prefix_range.end {
-                            out.push_str(&" ".repeat(*indent_cols));
+                        if clip.start <= line.prefix_end() {
+                            out.push_str(&" ".repeat(*indent_cols as usize));
                             match (task, ordered) {
                                 (Some(true), _) => out.push_str("☑ "),
                                 (Some(false), _) => out.push_str("☐ "),
@@ -1170,16 +1308,7 @@ fn parse_inline_syntax_inner(input: &str, base: usize, in_table_cell: bool) -> I
         return parse_inline_syntax_inner(body, base + lead, in_table_cell);
     }
     if is_plain_inline(input) {
-        let plain = StyledSegment {
-            source: base..base + input.len(),
-            bold: false,
-            italic: false,
-            underline: false,
-            strike: false,
-            code: false,
-            link_url: None,
-        };
-        return (Vec::new(), Vec::new(), vec![plain]);
+        return (Vec::new(), Vec::new(), Vec::new());
     }
     parse_inline_with_pulldown(input, base, in_table_cell)
 }
@@ -1236,7 +1365,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
     let mut italic_stack: Vec<usize> = Vec::new();
     let mut strike_stack: Vec<usize> = Vec::new();
     let mut underline_stack: Vec<usize> = Vec::new();
-    let mut link_stack: Vec<(usize, String, usize)> = Vec::new(); // (outer_start, url, last_inner_end)
+    let mut link_stack: Vec<(usize, Arc<str>, usize)> = Vec::new(); // (outer_start, url, last_inner_end)
     let mut image_stack: Vec<usize> = Vec::new();
 
     for (event, raw_range) in parser {
@@ -1351,7 +1480,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
                 }
             }
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
-                link_stack.push((abs_start, dest_url.to_string(), abs_start + 1));
+                link_stack.push((abs_start, Arc::from(dest_url.as_ref()), abs_start + 1));
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Link) => {
                 if let Some((open_start, _url, inner_end)) = link_stack.pop() {
@@ -1523,6 +1652,10 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
     }
 
     finalize_pair_groups(&mut inline_pairs);
+    if styled_segments.iter().all(StyledSegment::is_plain) {
+        styled_segments.clear();
+        styled_segments.shrink_to_fit();
+    }
     (raw_hidden, inline_pairs, styled_segments)
 }
 
@@ -2007,12 +2140,11 @@ impl Shift {
     /// Move a line that comes after the edit. Its text is unchanged, so
     /// every position in it moves by the same amount.
     fn parsed_line(self, line: &mut ParsedLine) {
-        line.line_index = self.line(line.line_index);
+        line.line_index = self.line(line.line_index as usize) as u32;
         if self.delta == 0 {
             return;
         }
         self.range(&mut line.source);
-        self.range(&mut line.prefix_range);
         for r in &mut line.hidden_ranges {
             self.range(r);
         }
@@ -2026,26 +2158,21 @@ impl Shift {
         for seg in &mut line.styled_segments {
             self.range(&mut seg.source);
         }
-        match &mut line.kind {
-            LineKind::ListItem {
-                checkbox_source: Some(r),
-                ..
-            } => self.range(r),
-            LineKind::TableRow { body, .. } => {
-                for r in body.cells.iter_mut().chain(body.raw_cells.iter_mut()) {
-                    self.range(r);
-                }
-                self.range(&mut body.table_source);
+        if let LineKind::TableRow { body, .. } = &mut line.kind {
+            for r in body.cells.iter_mut().chain(body.raw_cells.iter_mut()) {
+                self.range(r);
             }
-            _ => {}
+            self.range(&mut body.table_source);
         }
-        let map = Arc::make_mut(&mut line.offset_map);
-        for (_, source) in &mut map.segments {
-            self.range(source);
+        if let Some(ref mut map_arc) = line.offset_map_cached {
+            let map = Arc::make_mut(map_arc);
+            for (_, source) in &mut map.segments {
+                self.range(source);
+            }
+            map.line_start = self.pos(map.line_start);
+            map.line_end = self.pos(map.line_end);
+            map.visible_start = self.pos(map.visible_start);
         }
-        map.line_start = self.pos(map.line_start);
-        map.line_end = self.pos(map.line_end);
-        map.visible_start = self.pos(map.visible_start);
         if !line.link_hits.is_empty() {
             for (r, _) in Arc::make_mut(&mut line.link_hits) {
                 self.range(r);
@@ -2413,7 +2540,7 @@ fn parse_lines(
                 line_source,
                 line,
                 LineKind::CodeFence {
-                    language,
+                    language: language.map(String::into_boxed_str),
                     opening: true,
                 },
             );
@@ -2448,8 +2575,9 @@ fn parse_lines(
             list_walk.note_block(line);
             let lang = trimmed
                 .strip_prefix("```")
-                .map(|info| info.trim().to_string())
-                .filter(|info| !info.is_empty());
+                .map(|info| info.trim())
+                .filter(|info| !info.is_empty())
+                .map(Box::<str>::from);
             *open_fence = Some(OpenFence {
                 strict: false,
                 marker: b'`',
@@ -2476,7 +2604,7 @@ fn parse_lines(
             list_walk.note_block(line);
             let lang = Some(trimmed.trim_start_matches('~').trim())
                 .filter(|info| !info.is_empty())
-                .map(str::to_string);
+                .map(Box::<str>::from);
             *open_fence = Some(OpenFence {
                 strict: false,
                 marker: b'~',
@@ -2500,15 +2628,15 @@ fn parse_lines(
         if trimmed.is_empty() {
             list_walk.note_blank();
             push_line!(ParsedLine {
-                line_index: i,
-                source: line_source.clone(),
-                content_end: line.len(),
+                line_index: i as u32,
+                source: line_source,
+                content_end: line.len() as u32,
+                prefix_len: 0,
                 kind: LineKind::Empty,
-                prefix_range: line_start..line_start,
                 hidden_ranges: Vec::new(),
                 inline_pairs: Vec::new(),
-                display_text: line.to_string(),
-                offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
+                display_text_owned: None,
+                offset_map_cached: None,
                 link_hits: no_links(),
                 styled_segments: Vec::new(),
             });
@@ -2528,18 +2656,16 @@ fn parse_lines(
         if exact_thematic_break(line, list_walk.thematic_parent_col(line)) {
             list_walk.note_block(line);
             let hidden = vec![line_start..line_end];
-            let (display_text, offset_map) =
-                RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
             push_line!(ParsedLine {
-                line_index: i,
+                line_index: i as u32,
                 source: line_source,
-                content_end: line.len(),
+                content_end: line.len() as u32,
+                prefix_len: line.len() as u32,
                 kind: LineKind::HorizontalRule,
-                prefix_range: line_start..line_end,
                 hidden_ranges: hidden,
                 inline_pairs: Vec::new(),
-                display_text,
-                offset_map: Arc::new(offset_map),
+                display_text_owned: None,
+                offset_map_cached: None,
                 link_hits: no_links(),
                 styled_segments: Vec::new(),
             });
@@ -2565,18 +2691,16 @@ fn parse_lines(
             list_walk.note_block(line);
             if i == tbl.delimiter {
                 let hidden = vec![line_start..line_end];
-                let (display_text, offset_map) =
-                    RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
                 push_line!(ParsedLine {
-                    line_index: i,
+                    line_index: i as u32,
                     source: line_source,
-                    content_end: line.len(),
+                    content_end: line.len() as u32,
+                    prefix_len: line.len() as u32,
                     kind: LineKind::TableDelimiter,
-                    prefix_range: line_start..line_end,
                     hidden_ranges: hidden,
                     inline_pairs: Vec::new(),
-                    display_text,
-                    offset_map: Arc::new(offset_map),
+                    display_text_owned: None,
+                    offset_map_cached: None,
                     link_hits: no_links(),
                     styled_segments: Vec::new(),
                 });
@@ -2612,22 +2736,12 @@ fn parse_lines(
                     cells.push(line_end..line_end);
                     raw_cells.push(line_end..line_end);
                 }
-                if row_segments.is_empty() {
-                    row_segments.push(StyledSegment {
-                        source: line_source.clone(),
-                        bold: false,
-                        italic: false,
-                        underline: false,
-                        strike: false,
-                        code: false,
-                        link_url: None,
-                    });
-                }
                 let merged_hidden = merge_ranges(row_hidden);
                 push_line!(ParsedLine {
-                    line_index: i,
-                    source: line_source.clone(),
-                    content_end: line.len(),
+                    line_index: i as u32,
+                    source: line_source,
+                    content_end: line.len() as u32,
+                    prefix_len: 0,
                     kind: LineKind::TableRow {
                         is_header,
                         body: Box::new(TableRowBody {
@@ -2637,11 +2751,10 @@ fn parse_lines(
                             table_source: tbl.source.clone(),
                         }),
                     },
-                    prefix_range: line_start..line_start,
                     hidden_ranges: merged_hidden,
                     inline_pairs: row_pairs,
-                    display_text: line.to_string(),
-                    offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
+                    display_text_owned: None,
+                    offset_map_cached: None,
                     link_hits: no_links(),
                     styled_segments: row_segments,
                 });
@@ -2661,16 +2774,18 @@ fn parse_lines(
         let mut prefix_len = 0usize;
 
         if let Some(item) = list_walk.take_list(line) {
-            let checkbox_source = item.task.as_ref().map(|task| {
-                let start = line_start + task.checkbox_at;
-                start..start + 3
-            });
+            let checkbox_offset = item
+                .task
+                .as_ref()
+                .and_then(|task| u16::try_from(task.checkbox_at).ok())
+                .filter(|&off| off != u16::MAX)
+                .unwrap_or(u16::MAX);
             kind = LineKind::ListItem {
                 ordered: item.ordered,
-                number: item.number,
+                number: item.number.min(u32::MAX as usize) as u32,
                 task: item.task.as_ref().map(|task| task.checked),
-                indent_cols,
-                checkbox_source,
+                indent_cols: indent_cols.min(u16::MAX as usize) as u16,
+                checkbox_offset,
             };
             prefix_len = item.prefix_end();
         } else if after_indent.starts_with('>')
@@ -2692,23 +2807,23 @@ fn parse_lines(
             parse_inline_syntax(body, body_base);
 
         if prefix_len > 0 {
-            inline_hidden.push(prefix_range.clone());
+            inline_hidden.push(prefix_range);
         }
         let merged_hidden = merge_ranges(inline_hidden);
 
-        let (display_text, offset_map) =
-            RowOffsetMap::from_hidden(line, line_start, body_base, &merged_hidden);
+        let (display_text_owned, offset_map_cached) =
+            build_display_and_map(line, line_start, prefix_len, &merged_hidden);
 
         push_line!(ParsedLine {
-            line_index: i,
+            line_index: i as u32,
             source: line_source,
-            content_end: line.len(),
+            content_end: line.len() as u32,
+            prefix_len: prefix_len as u32,
             kind,
-            prefix_range,
             hidden_ranges: merged_hidden,
             inline_pairs,
-            display_text,
-            offset_map: Arc::new(offset_map),
+            display_text_owned,
+            offset_map_cached,
             link_hits: no_links(),
             styled_segments,
         });

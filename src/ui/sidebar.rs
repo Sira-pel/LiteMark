@@ -1,6 +1,5 @@
 use super::line_field::LineField;
 use super::primitives::{icon_button, render_icon, SimpleTooltip};
-use crate::model::{sidebar_folder_search_matches, sidebar_search_matches};
 use crate::model::{WorkspaceDirectory, WorkspaceFile};
 use crate::theme::{sz, Theme};
 use gpui::prelude::*;
@@ -135,22 +134,16 @@ pub struct SidebarMenu {
     pub position: Point<Pixels>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarTreeItem {
-    Folder {
-        folder: crate::model::WorkspaceFolder,
-        depth: usize,
-    },
-    File {
-        file: crate::model::WorkspaceFile,
-        depth: usize,
-    },
+    Folder { index: u32, depth: u16 },
+    File { index: u32, depth: u16 },
     /// Inline name editor shown while creating a note or folder.
-    CreateInput { depth: usize, is_folder: bool },
+    CreateInput { depth: u16, is_folder: bool },
 }
 
 /// [`build_sidebar_tree`] for one workspace generation and pending create
-/// row. Sorting and cloning every row is too much for each render.
+/// row. Sorting and indexing every row is too much for each render.
 pub struct SidebarTreeCache {
     pub generation: u64,
     pub creating: Option<SidebarCreate>,
@@ -165,7 +158,7 @@ pub fn build_sidebar_tree(
     use crate::model::{WorkspaceFile, WorkspaceFolder};
     use std::collections::{HashMap, HashSet};
 
-    let folder_ids: HashSet<&str> = folders.iter().map(|f| f.id.as_str()).collect();
+    let folder_ids: HashSet<&str> = folders.iter().map(|f| f.id.as_ref()).collect();
     // A parent that isn't in the tree puts the item at the root.
     fn level_of<'a>(folder_ids: &HashSet<&str>, parent: Option<&'a str>) -> Option<&'a str> {
         parent.filter(|p| folder_ids.contains(p))
@@ -173,31 +166,31 @@ pub fn build_sidebar_tree(
 
     // Group children by parent once, instead of filtering every item for
     // every folder, which made building the tree O(folders x items).
-    let mut child_folders: HashMap<Option<&str>, Vec<&WorkspaceFolder>> = HashMap::new();
-    for folder in folders {
+    let mut child_folders: HashMap<Option<&str>, Vec<(u32, &WorkspaceFolder)>> = HashMap::new();
+    for (idx, folder) in folders.iter().enumerate() {
         child_folders
             .entry(level_of(&folder_ids, folder.parent_id.as_deref()))
             .or_default()
-            .push(folder);
+            .push((idx as u32, folder));
     }
-    let mut child_files: HashMap<Option<&str>, Vec<&WorkspaceFile>> = HashMap::new();
-    for file in files {
+    let mut child_files: HashMap<Option<&str>, Vec<(u32, &WorkspaceFile)>> = HashMap::new();
+    for (idx, file) in files.iter().enumerate() {
         child_files
             .entry(level_of(&folder_ids, file.folder_id.as_deref()))
             .or_default()
-            .push(file);
+            .push((idx as u32, file));
     }
 
     struct Levels<'a> {
-        folders: HashMap<Option<&'a str>, Vec<&'a WorkspaceFolder>>,
-        files: HashMap<Option<&'a str>, Vec<&'a WorkspaceFile>>,
+        folders: HashMap<Option<&'a str>, Vec<(u32, &'a WorkspaceFolder)>>,
+        files: HashMap<Option<&'a str>, Vec<(u32, &'a WorkspaceFile)>>,
         creating: Option<(Option<&'a str>, bool)>,
         visited: HashSet<&'a str>,
     }
 
     fn collect_level<'a>(
         parent_id: Option<&'a str>,
-        depth: usize,
+        depth: u16,
         levels: &mut Levels<'a>,
         out: &mut Vec<SidebarTreeItem>,
     ) {
@@ -208,24 +201,22 @@ pub fn build_sidebar_tree(
             }
         }
         if let Some(mut level_folders) = levels.folders.remove(&parent_id) {
-            level_folders.sort_by_cached_key(|f| f.name.to_lowercase());
-            for folder in level_folders {
-                out.push(SidebarTreeItem::Folder {
-                    folder: folder.clone(),
-                    depth,
-                });
+            level_folders.sort_by_cached_key(|(_, f)| f.name.to_lowercase());
+            for (index, folder) in level_folders {
+                out.push(SidebarTreeItem::Folder { index, depth });
                 // `visited` guards against a parent cycle in hand-built data.
-                if folder.is_open && levels.visited.insert(folder.id.as_str()) {
-                    collect_level(Some(folder.id.as_str()), depth + 1, levels, out);
+                if folder.is_open && levels.visited.insert(folder.id.as_ref()) {
+                    collect_level(Some(folder.id.as_ref()), depth.saturating_add(1), levels, out);
                 }
             }
         }
         if let Some(mut level_files) = levels.files.remove(&parent_id) {
-            level_files.sort_by_cached_key(|f| f.name.to_lowercase());
-            out.extend(level_files.into_iter().map(|file| SidebarTreeItem::File {
-                file: file.clone(),
-                depth,
-            }));
+            level_files.sort_by_cached_key(|(_, f)| f.name.to_lowercase());
+            out.extend(
+                level_files
+                    .into_iter()
+                    .map(|(index, _)| SidebarTreeItem::File { index, depth }),
+            );
         }
     }
 
@@ -266,6 +257,7 @@ pub struct SidebarProps<
     FToggle: Fn(SidebarTarget, &mut App) + 'static + Clone,
     FBlank: Fn(&mut App) + 'static + Clone,
 {
+    pub app: Entity<crate::app::LiteMarkApp>,
     pub workspace: &'a WorkspaceDirectory,
     /// The folder tree (used when not searching), from the app's cache.
     pub tree: std::rc::Rc<Vec<SidebarTreeItem>>,
@@ -312,13 +304,19 @@ pub struct SidebarProps<
 /// Row of the selected file or folder in `items`, if it is listed.
 pub fn selected_row_index(
     items: &[SidebarTreeItem],
+    folders: &[crate::model::WorkspaceFolder],
+    files: &[crate::model::WorkspaceFile],
     selected_file_id: Option<&str>,
     selected_folder_id: Option<&str>,
 ) -> Option<usize> {
-    items.iter().position(|item| match item {
-        SidebarTreeItem::File { file, .. } => Some(file.id.as_str()) == selected_file_id,
-        SidebarTreeItem::Folder { folder, .. } => Some(folder.id.as_str()) == selected_folder_id,
-        _ => false,
+    items.iter().position(|item| match *item {
+        SidebarTreeItem::File { index, .. } => files
+            .get(index as usize)
+            .is_some_and(|file| Some(file.id.as_str()) == selected_file_id),
+        SidebarTreeItem::Folder { index, .. } => folders
+            .get(index as usize)
+            .is_some_and(|folder| Some(folder.id.as_ref()) == selected_folder_id),
+        SidebarTreeItem::CreateInput { .. } => false,
     })
 }
 
@@ -399,15 +397,32 @@ where
     let total_notes = props.workspace.files.len();
     let is_searching = !props.search_query.trim().is_empty();
 
+    let app_entity = props.app.clone();
     let tree_items: std::rc::Rc<Vec<SidebarTreeItem>> = if is_searching {
-        let folders = sidebar_folder_search_matches(&props.workspace.folders, &props.search_query)
-            .into_iter()
-            .cloned()
-            .map(|folder| SidebarTreeItem::Folder { folder, depth: 0 });
-        let files = sidebar_search_matches(&props.workspace.files, &props.search_query)
-            .into_iter()
-            .cloned()
-            .map(|file| SidebarTreeItem::File { file, depth: 0 });
+        let query = props.search_query.trim().to_lowercase();
+        let folders = props
+            .workspace
+            .folders
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name.to_lowercase().contains(&query))
+            .map(|(index, _)| SidebarTreeItem::Folder {
+                index: index as u32,
+                depth: 0,
+            });
+        let files = props
+            .workspace
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                let stem = f.path.file_stem().and_then(|s| s.to_str());
+                stem.unwrap_or(&f.name).to_lowercase().contains(&query)
+            })
+            .map(|(index, _)| SidebarTreeItem::File {
+                index: index as u32,
+                depth: 0,
+            });
         std::rc::Rc::new(folders.chain(files).collect())
     } else {
         props.tree.clone()
@@ -422,6 +437,8 @@ where
     if let Some(strategy) = props.scroll_to_selected {
         if let Some(ix) = selected_row_index(
             &tree_items,
+            &props.workspace.folders,
+            &props.workspace.files,
             selected_file_id.as_deref(),
             selected_folder_id.as_deref(),
         ) {
@@ -653,14 +670,16 @@ where
                 // with thousands of notes used to lay out every row per frame.
                 .when(row_count > 0, |s| {
                     s.child(
-                        uniform_list("sb-tree", row_count, move |range, _window, _cx| {
+                        uniform_list("sb-tree", row_count, move |range, _window, cx| {
                             let theme = &row_theme;
+                            let workspace = &app_entity.read(cx).workspace;
                             tree_items[range]
                                 .iter()
-                                .cloned()
-                                .map(|item| {
+                                .copied()
+                                .filter_map(|item| {
                                     let row = match item {
                                         SidebarTreeItem::CreateInput { depth, is_folder } => {
+                                            let depth = depth as usize;
                                             let inset = if depth == 0 {
                                                 0.0
                                             } else {
@@ -692,8 +711,10 @@ where
                                                 ))
                                                 .child(create_field.clone())
                                         }
-                                        SidebarTreeItem::Folder { folder, depth } => {
-                                            let folder_id = folder.id.clone();
+                                        SidebarTreeItem::Folder { index, depth } => {
+                                            let folder = workspace.folders.get(index as usize)?;
+                                            let depth = depth as usize;
+                                            let folder_id = folder.id.to_string();
                                             let is_open = folder.is_open;
                                             let in_multi = multi_ids.contains(&folder_id);
                                             let is_cut = cut_paths
@@ -947,7 +968,9 @@ where
                                                         }),
                                                 )
                                         }
-                                        SidebarTreeItem::File { file, depth } => {
+                                        SidebarTreeItem::File { index, depth } => {
+                                            let file = workspace.files.get(index as usize)?;
+                                            let depth = depth as usize;
                                             let in_multi = multi_ids.contains(&file.id);
                                             let is_cut = cut_paths
                                                 .iter()
@@ -1167,7 +1190,7 @@ where
                                     };
                                     // Rows must share one height; the bottom pad is
                                     // the 2px gap the old flex column had.
-                                    div().pb(px(2.0)).child(row)
+                                    Some(div().pb(px(2.0)).child(row))
                                 })
                                 .collect::<Vec<_>>()
                         })

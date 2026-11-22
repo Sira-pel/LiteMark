@@ -19,7 +19,8 @@ impl LiteMarkApp {
                 return items.clone();
             }
         }
-        let items = Arc::new(outline_items(&tab.parsed()));
+        let parsed = tab.parsed();
+        let items = Arc::new(outline_items(&parsed, &tab.content));
         self.outline_cache = Some((key, items.clone()));
         items
     }

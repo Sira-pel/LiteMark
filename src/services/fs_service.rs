@@ -1212,7 +1212,7 @@ fn scan_workspace_dir_limited(
 
     // Per open folder: its remaining children, its id, and how deep they sit
     // (children of the notes folder are at depth 1).
-    let mut stack: Vec<(std::vec::IntoIter<ScanEntry>, Option<String>, usize)> =
+    let mut stack: Vec<(std::vec::IntoIter<ScanEntry>, Option<std::sync::Arc<str>>, usize)> =
         vec![(read_scan_entries(dir, show_code_files).into_iter(), None, 1)];
     'walk: while let Some((children, parent_id, depth)) = stack.last_mut() {
         let Some(entry) = children.next() else {
@@ -1227,7 +1227,8 @@ fn scan_workspace_dir_limited(
         let depth = *depth;
         match entry.kind {
             ScanKind::Folder => {
-                let folder_id = format!("folder-{}", entry.path.display());
+                let folder_id: std::sync::Arc<str> =
+                    std::sync::Arc::from(format!("folder-{}", entry.path.display()));
                 if depth < max_depth {
                     let children = read_scan_entries(&entry.path, show_code_files);
                     stack.push((children.into_iter(), Some(folder_id.clone()), depth + 1));
@@ -1573,10 +1574,10 @@ mod tests {
         let inner = scan.folders.iter().find(|f| f.name == "inner").unwrap();
         assert_eq!(
             inner.parent_id.as_deref(),
-            Some(scan.folders[1].id.as_str())
+            Some(scan.folders[1].id.as_ref())
         );
         let deep = scan.files.iter().find(|f| f.name == "deep.md").unwrap();
-        assert_eq!(deep.folder_id.as_deref(), Some(inner.id.as_str()));
+        assert_eq!(deep.folder_id.as_deref(), Some(inner.id.as_ref()));
         assert!(!scan.scan_truncated);
         let _ = fs::remove_dir_all(&root);
     }
