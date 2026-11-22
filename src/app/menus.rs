@@ -535,18 +535,18 @@ impl LiteMarkApp {
                     this.close_when_saved = true;
                     return false;
                 }
-                if this.allow_window_close {
-                    this.flush_settings_for_exit();
-                    return true;
-                }
-                if this.tabs.iter().any(|tab| tab.is_modified) {
+                if !this.allow_window_close && this.tabs.iter().any(|tab| tab.is_modified) {
                     this.show_prompt(Prompt::CloseWindow);
                     cx.notify();
-                    false
-                } else {
-                    this.flush_settings_for_exit();
-                    true
+                    return false;
                 }
+                if this.flush_settings_for_exit() {
+                    return true;
+                }
+                // The settings write failed: stay open to show why.
+                this.allow_window_close = false;
+                cx.notify();
+                false
             })
             .unwrap_or(true)
         });

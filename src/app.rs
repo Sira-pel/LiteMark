@@ -202,6 +202,9 @@ pub struct LiteMarkApp {
     /// The last settings save failed; the error was shown once already.
     settings_save_failed: bool,
     settings_writer: crate::model::settings::SettingsWriter,
+    /// The window is closing and its last settings write failed: the
+    /// error has been shown, and the next close quits regardless.
+    settings_exit_warned: bool,
     pub prompt: Option<Prompt>,
     pub prompt_focus_handle: FocusHandle,
     pub prompt_selected_ix: usize,
@@ -615,6 +618,8 @@ impl LiteMarkApp {
 
         let initial_selected = initial_tab.workspace_file_id.clone();
 
+        let (settings_writer, settings_written) = crate::model::settings::SettingsWriter::spawn();
+        Self::watch_settings_writes(settings_written, cx);
         let mut app = Self {
             tabs: vec![initial_tab],
             active_tab_id: first_id,
@@ -662,7 +667,8 @@ impl LiteMarkApp {
             tab_ids,
             error_message,
             settings_save_failed,
-            settings_writer: crate::model::settings::SettingsWriter::spawn(),
+            settings_writer,
+            settings_exit_warned: false,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -767,6 +773,8 @@ impl LiteMarkApp {
             None,
             None,
         );
+        let (settings_writer, settings_written) = crate::model::settings::SettingsWriter::spawn();
+        Self::watch_settings_writes(settings_written, cx);
         Self {
             tabs: vec![tab],
             active_tab_id: first_id,
@@ -827,7 +835,8 @@ impl LiteMarkApp {
             tab_ids,
             error_message: None,
             settings_save_failed: true,
-            settings_writer: crate::model::settings::SettingsWriter::spawn(),
+            settings_writer,
+            settings_exit_warned: false,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -957,21 +966,51 @@ impl LiteMarkApp {
             self.settings_save_failed = true;
             return;
         }
-        self.report_settings_result();
+        // The outcome arrives through `watch_settings_writes` once written.
         self.settings_writer.save(&self.settings);
     }
 
-    /// Show the outcome of the last background settings write.
-    pub(crate) fn report_settings_result(&mut self) {
+    /// Report each background settings write as soon as it lands, instead
+    /// of waiting for the next save to look.
+    fn watch_settings_writes(
+        mut written: futures::channel::mpsc::UnboundedReceiver<()>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while written.next().await.is_some() {
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.report_settings_result() {
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Show the outcome of the last background settings write. Returns
+    /// whether an error was newly shown.
+    pub(crate) fn report_settings_result(&mut self) -> bool {
         match self.settings_writer.take_result() {
-            Some(Ok(())) => self.settings_save_failed = false,
+            Some(Ok(())) => {
+                self.settings_save_failed = false;
+                false
+            }
             Some(Err(err)) => {
-                if !self.settings_save_failed {
+                let shown = !self.settings_save_failed;
+                if shown {
                     self.show_error(err);
                 }
                 self.settings_save_failed = true;
+                shown
             }
-            None => {}
+            None => false,
         }
     }
 

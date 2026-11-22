@@ -2106,8 +2106,13 @@ impl LiteMarkApp {
         self.coast_scroll(window);
         self.install_close_hook(window, cx);
         if self.allow_window_close {
-            self.flush_settings_for_exit();
-            window.remove_window();
+            if self.flush_settings_for_exit() {
+                window.remove_window();
+            } else {
+                // The settings write failed: stay open to show why.
+                self.allow_window_close = false;
+                cx.notify();
+            }
         }
         if self.show_find_replace
             && !self.show_replace_row

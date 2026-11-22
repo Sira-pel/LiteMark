@@ -591,10 +591,29 @@ impl LiteMarkApp {
     /// [`Self::flush_tab_settings`], then wait until every queued settings
     /// write is on disk. Only for when the window is closing; the 1 s timer
     /// must never wait on the disk.
-    pub(super) fn flush_settings_for_exit(&mut self) {
+    ///
+    /// Returns whether the window may close. When the last write failed, the
+    /// error is shown in the still-open window and `false` is returned once;
+    /// closing again quits without the settings.
+    pub(super) fn flush_settings_for_exit(&mut self) -> bool {
         self.flush_tab_settings();
         self.settings_writer.flush();
-        self.report_settings_result();
+        match self.settings_writer.take_result() {
+            Some(Err(err)) if !self.settings_exit_warned => {
+                self.settings_exit_warned = true;
+                self.settings_save_failed = true;
+                self.show_error(format!(
+                    "{err}\nClose the window again to quit without saving your settings."
+                ));
+                false
+            }
+            Some(Err(_)) => true,
+            Some(Ok(())) => {
+                self.settings_save_failed = false;
+                true
+            }
+            None => true,
+        }
     }
 
     /// Reopen the notes that were open when the app last closed, skipping
