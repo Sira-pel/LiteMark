@@ -406,20 +406,68 @@ impl LiteMarkApp {
     }
 
     pub fn rescan_workspace(&mut self) {
+        // A scan still running in the background is now out of date.
+        self.scan_generation += 1;
+        self.rescan_requested = false;
+        let scanned =
+            scan_workspace_dir(&self.workspace.folder_path, self.settings.show_code_files);
+        self.apply_scan(scanned);
+    }
+
+    /// Ask for a rescan that doesn't block: for the callers that don't read
+    /// the new tree straight afterwards. It starts at the next frame.
+    pub(super) fn request_rescan(&mut self) {
+        self.rescan_requested = true;
+    }
+
+    /// Start the rescan [`Self::request_rescan`] asked for, on the background
+    /// executor. Only the newest scan is applied.
+    pub(super) fn start_requested_rescan(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.rescan_requested) {
+            return;
+        }
+        self.scan_generation += 1;
+        let generation = self.scan_generation;
+        let folder = self.workspace.folder_path.clone();
+        let show_code_files = self.settings.show_code_files;
+        cx.spawn(async move |this, cx| {
+            let scanned = {
+                let folder = folder.clone();
+                cx.background_executor()
+                    .spawn(async move { scan_workspace_dir(&folder, show_code_files) })
+                    .await
+            };
+            this.update(cx, |this, cx| {
+                // Skip a result that a newer scan, a workspace switch or a
+                // settings change has outdated.
+                if this.scan_generation == generation
+                    && this.workspace.folder_path == folder
+                    && this.settings.show_code_files == show_code_files
+                {
+                    this.apply_scan(scanned);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Replace the tree with `scanned`, keeping the folders the user has
+    /// open or closed *now* (not when the scan started).
+    pub(super) fn apply_scan(&mut self, mut scanned: WorkspaceDirectory) {
         let open_map: std::collections::HashMap<PathBuf, bool> = self
             .workspace
             .folders
             .iter()
             .map(|f| (f.path.clone(), f.is_open))
             .collect();
-        let mut new_workspace =
-            scan_workspace_dir(&self.workspace.folder_path, self.settings.show_code_files);
-        for folder in &mut new_workspace.folders {
+        for folder in &mut scanned.folders {
             if let Some(&open) = open_map.get(&folder.path) {
                 folder.is_open = open;
             }
         }
-        self.workspace = new_workspace.into();
+        self.workspace = scanned.into();
         self.refresh_workspace_ids();
     }
 

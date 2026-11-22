@@ -748,7 +748,7 @@ impl LiteMarkApp {
     pub fn handle_toggle_show_code_files(&mut self) {
         self.settings.show_code_files = !self.settings.show_code_files;
         self.save_settings();
-        self.rescan_workspace();
+        self.request_rescan();
     }
 
     pub fn handle_toggle_sidebar(&mut self) {

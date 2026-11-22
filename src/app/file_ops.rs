@@ -8,7 +8,7 @@ impl LiteMarkApp {
     /// new one before switching; otherwise switch right away.
     pub(super) fn prepare_workspace_switch(&mut self, new_dir: PathBuf) {
         if new_dir == self.workspace.folder_path {
-            self.rescan_workspace();
+            self.request_rescan();
             return;
         }
         if self.migratable_note_path().is_some() {
@@ -578,7 +578,7 @@ impl LiteMarkApp {
             .as_ref()
             .is_none_or(|bulk| bulk.report.borrow().is_last_pending())
         {
-            self.rescan_workspace();
+            self.request_rescan();
         }
         match bulk {
             Some(bulk) => self.record_bulk(&bulk, result, cx),
@@ -640,7 +640,7 @@ impl LiteMarkApp {
                 // Earlier rows skipped their rescan expecting a later row to
                 // do it; a missing last row must not leave the tree stale.
                 if finished {
-                    self.rescan_workspace();
+                    self.request_rescan();
                 }
             }
             None => self.show_error(message),

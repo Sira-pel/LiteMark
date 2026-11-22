@@ -141,6 +141,9 @@ pub struct LiteMarkApp {
     /// so a render (each keystroke, hover or scroll) doesn't rebuild it.
     /// Theme colours the input fields were last given.
     field_colors: Option<[Rgba; 4]>,
+    /// Bumped by every rescan; a background scan applies only if unchanged.
+    scan_generation: u64,
+    rescan_requested: bool,
     sidebar_tree: RefCell<Option<SidebarTreeCache>>,
     /// Search results for one `(workspace generation, query)`.
     #[allow(clippy::type_complexity)]
@@ -607,6 +610,8 @@ impl LiteMarkApp {
             sidebar_clipboard_cut: false,
             workspace: workspace.into(),
             field_colors: None,
+            scan_generation: 0,
+            rescan_requested: false,
             sidebar_tree: RefCell::new(None),
             sidebar_search: RefCell::new(None),
             settings,
@@ -758,6 +763,8 @@ impl LiteMarkApp {
             }
             .into(),
             field_colors: None,
+            scan_generation: 0,
+            rescan_requested: false,
             sidebar_tree: RefCell::new(None),
             sidebar_search: RefCell::new(None),
             // Never touch the real settings file from a test.
@@ -1043,6 +1050,10 @@ impl crate::ui::text_editor::EditorContentSource for LiteMarkApp {
 #[cfg(test)]
 #[path = "pdf_open_tests.rs"]
 mod pdf_open_tests;
+
+#[cfg(test)]
+#[path = "background_scan_tests.rs"]
+mod background_scan_tests;
 
 #[cfg(test)]
 #[path = "sidebar_render_tests.rs"]

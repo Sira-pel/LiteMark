@@ -26,6 +26,7 @@ impl Render for LiteMarkApp {
         self.sync_frame_state(&theme, window, cx);
         self.sync_tab_settings();
         self.schedule_tab_settings_save(cx);
+        self.start_requested_rescan(cx);
 
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.ensure_stats();
