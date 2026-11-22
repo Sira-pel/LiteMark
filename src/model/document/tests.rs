@@ -6987,3 +6987,27 @@ fn huge_deletion_shrinks_content_capacity() {
         doc.content.capacity()
     );
 }
+
+#[test]
+fn window_line_endings_matches_the_buffered_count() {
+    use crate::model::text_ops::count_line_endings;
+    let bytes: [Option<u8>; 4] = [None, Some(b'\r'), Some(b'\n'), Some(b'a')];
+    let mids = [
+        "", "a", "\r", "\n", "\r\n", "\n\r", "a\r", "\ra", "\r\r", "\n\n",
+    ];
+    for before in bytes {
+        for after in bytes {
+            for mid in mids {
+                let mut window = Vec::new();
+                window.extend(before);
+                window.extend_from_slice(mid.as_bytes());
+                window.extend(after);
+                assert_eq!(
+                    super::window_line_endings(before, mid, after),
+                    count_line_endings(&window),
+                    "{before:?} {mid:?} {after:?}"
+                );
+            }
+        }
+    }
+}

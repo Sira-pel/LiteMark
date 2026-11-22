@@ -293,11 +293,22 @@ fn line_total(content: &str, endings: usize) -> usize {
 /// Line endings in `before + mid + after`. CRLF is two bytes, so one byte
 /// of context on each side of an edit catches every ending it joins or splits.
 fn window_line_endings(before: Option<u8>, mid: &str, after: Option<u8>) -> usize {
-    let mut window = Vec::with_capacity(mid.len() + 2);
-    window.extend(before);
-    window.extend_from_slice(mid.as_bytes());
-    window.extend(after);
-    count_line_endings(&window)
+    let bytes = mid.as_bytes();
+    let mut count = count_line_endings(bytes);
+    // `mid` alone counts a trailing CR as an ending; a following LF joins it.
+    if bytes.last() == Some(&b'\r') && after == Some(b'\n') {
+        count -= 1;
+    }
+    match before {
+        Some(b'\n') => count += 1,
+        // A CR counts unless the byte after it is an LF.
+        Some(b'\r') if bytes.first().or(after.as_ref()) != Some(&b'\n') => count += 1,
+        _ => {}
+    }
+    if matches!(after, Some(b'\n' | b'\r')) {
+        count += 1;
+    }
+    count
 }
 
 /// Incrementally maintained stats staged during `DocumentTab::edit` so
