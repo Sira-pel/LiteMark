@@ -236,6 +236,10 @@ pub struct LiteMarkApp {
     pub applied_focus: Option<FocusSlot>,
     pub close_hook_installed: bool,
     pub allow_window_close: bool,
+    /// Notes bigger than this are read on a background thread when opened.
+    async_read_bytes: u64,
+    /// The big note being read in the background, if any.
+    note_loading: Option<PathBuf>,
     /// Tabs whose Ctrl+S is writing on a background thread.
     saves_in_flight: std::collections::HashSet<String>,
     /// Tabs that got another Ctrl+S while saving: write again afterwards.
@@ -676,6 +680,8 @@ impl LiteMarkApp {
             applied_focus: None,
             close_hook_installed: false,
             allow_window_close: false,
+            async_read_bytes: ASYNC_READ_BYTES,
+            note_loading: None,
             saves_in_flight: Default::default(),
             resave_after: Default::default(),
             close_when_saved: false,
@@ -837,6 +843,8 @@ impl LiteMarkApp {
             applied_focus: None,
             close_hook_installed: false,
             allow_window_close: false,
+            async_read_bytes: ASYNC_READ_BYTES,
+            note_loading: None,
             saves_in_flight: Default::default(),
             resave_after: Default::default(),
             close_when_saved: false,
@@ -1062,6 +1070,9 @@ impl crate::ui::text_editor::EditorContentSource for LiteMarkApp {
 #[cfg(test)]
 #[path = "pdf_open_tests.rs"]
 mod pdf_open_tests;
+
+/// Notes above this size (1 MB) are read off the UI thread.
+const ASYNC_READ_BYTES: u64 = 1024 * 1024;
 
 #[cfg(test)]
 #[path = "async_save_tests.rs"]

@@ -48,3 +48,12 @@ deterministic.
 **F. `Rc<ShapedLine>` cache** — deferred: needs profiling on a real machine.
 gpui already caches line layouts between frames; a wrong cache key shows stale
 highlights that no headless test here would catch.
+
+## Status
+
+- A incremental find: done (differential test, 4000 random edits)
+- B parallel Quick Open content search: done (ordered-merge equivalence test)
+- C background workspace scan: done (callers that read the tree right after stay sync; generation-guarded)
+- D async Ctrl+S: done (existing file, same path only; one write per note; close waits)
+- E async read above 1 MB: done (toast + one big read at a time)
+- F `Rc<ShapedLine>` cache: deferred, needs profiling on a real machine

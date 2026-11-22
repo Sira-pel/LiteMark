@@ -66,6 +66,46 @@ impl LiteMarkApp {
         Ok(())
     }
 
+    /// Read a note and hand it to `then`. Small notes are read on the spot
+    /// (under a millisecond); a big one is read on a background thread, with
+    /// a toast, so opening it doesn't freeze the window. One big read at a
+    /// time.
+    pub(super) fn read_note_then(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, Result<String, String>, &mut Context<Self>) + 'static,
+    ) {
+        let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > self.async_read_bytes);
+        if !big {
+            let result = read_note(&path);
+            then(self, result, cx);
+            return;
+        }
+        if self.note_loading.is_some() {
+            self.show_toast("Still opening a note…", cx);
+            return;
+        }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.note_loading = Some(path.clone());
+        self.show_toast(format!("Opening {name}…"), cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { read_note(&path) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.note_loading = None;
+                then(this, result, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Ctrl+S on a note that already has its file: check the file and write
     /// it on a background thread, so the UI never waits on the disk or
     /// `fsync`. Returns `false` when this save needs the synchronous path
@@ -565,18 +605,21 @@ impl LiteMarkApp {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled.md".into());
-        match read_note(&path) {
-            Ok(content) => {
-                let file_id = self
-                    .workspace
-                    .files
-                    .iter()
-                    .find(|file| file.path == path)
-                    .map(|file| file.id.clone());
-                self.open_loaded_tab(name, content, Some(path), file_id);
+        self.read_note_then(path.clone(), cx, move |this, result, cx| {
+            match result {
+                Ok(content) => {
+                    let file_id = this
+                        .workspace
+                        .files
+                        .iter()
+                        .find(|file| file.path == path)
+                        .map(|file| file.id.clone());
+                    this.open_loaded_tab(name, content, Some(path), file_id);
+                }
+                Err(err) => this.show_error(err),
             }
-            Err(err) => self.show_error(err),
-        }
+            cx.notify();
+        });
     }
 
     /// Recent notes that still exist, for the File menu. Missing ones are

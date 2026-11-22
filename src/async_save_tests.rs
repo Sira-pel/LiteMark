@@ -135,3 +135,49 @@ fn closing_the_window_waits_for_the_write() {
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[std_test]
+fn a_small_note_opens_at_once() {
+    let root = fresh_root("readsmall");
+    let path = root.join("n.md");
+    std::fs::write(&path, "small\n").unwrap();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_w, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, cx| {
+        app.open_path(path.clone(), cx);
+        assert_eq!(app.active_tab().unwrap().content, "small\n");
+        assert!(app.note_loading.is_none());
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
+fn a_big_note_opens_in_the_background_and_a_second_click_is_ignored() {
+    let root = fresh_root("readbig");
+    let path = root.join("big.md");
+    let other = root.join("other.md");
+    std::fs::write(&path, "big note\n").unwrap();
+    std::fs::write(&other, "other\n").unwrap();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_w, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, cx| {
+        app.async_read_bytes = 0; // every note counts as big
+        let before = app.tabs.len();
+        app.open_path(path.clone(), cx);
+        assert_eq!(app.tabs.len(), before, "not opened yet");
+        assert_eq!(app.note_loading.as_deref(), Some(path.as_path()));
+        // Clicking another while one loads is refused, not queued.
+        app.open_path(other.clone(), cx);
+        assert_eq!(app.note_loading.as_deref(), Some(path.as_path()));
+    });
+    cx.run_until_parked();
+    view.update(cx, |app, _| {
+        assert!(app.note_loading.is_none());
+        assert_eq!(app.active_tab().unwrap().content, "big note\n");
+        assert!(app
+            .tabs
+            .iter()
+            .all(|t| t.file_path.as_deref() != Some(other.as_path())));
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}

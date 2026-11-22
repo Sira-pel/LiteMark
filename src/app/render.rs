@@ -691,19 +691,21 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |file: WorkspaceFile, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    match read_note(&file.path) {
-                        Ok(content) => this.open_loaded_tab(
-                            file.name.clone(),
-                            content,
-                            Some(file.path.clone()),
-                            Some(file.id.clone()),
-                        ),
-                        Err(err) => this.show_error(err),
-                    }
-                    // A sidebar click keeps arrow navigation in the tree, like
-                    // clicking a folder; clicking the editor hands it back.
-                    this.sidebar_keyboard = true;
-                    cx.notify();
+                    this.read_note_then(file.path.clone(), cx, move |this, result, cx| {
+                        match result {
+                            Ok(content) => this.open_loaded_tab(
+                                file.name.clone(),
+                                content,
+                                Some(file.path.clone()),
+                                Some(file.id.clone()),
+                            ),
+                            Err(err) => this.show_error(err),
+                        }
+                        // A sidebar click keeps arrow navigation in the tree, like
+                        // clicking a folder; clicking the editor hands it back.
+                        this.sidebar_keyboard = true;
+                        cx.notify();
+                    });
                 });
             }
         };

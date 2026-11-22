@@ -333,18 +333,18 @@ impl LiteMarkApp {
                 let Some(file) = self.workspace.files.iter().find(|f| f.id == id).cloned() else {
                     return;
                 };
-                match read_note(&file.path) {
-                    Ok(content) => {
-                        self.open_loaded_tab(
+                self.read_note_then(file.path.clone(), cx, move |this, result, cx| {
+                    match result {
+                        Ok(content) => this.open_loaded_tab(
                             file.name.clone(),
                             content,
                             Some(file.path.clone()),
                             Some(file.id.clone()),
-                        );
+                        ),
+                        Err(err) => this.show_error(err),
                     }
-                    Err(err) => self.show_error(err),
-                }
-                cx.notify();
+                    cx.notify();
+                });
             }
         }
     }

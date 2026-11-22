@@ -451,10 +451,13 @@ impl LiteMarkApp {
             }
             self.open_pdf_in_background(name, path, cx);
         } else {
-            match read_note(&path) {
-                Ok(content) => self.open_loaded_tab(name, content, Some(path), None),
-                Err(err) => self.show_error(err),
-            }
+            self.read_note_then(path.clone(), cx, move |this, result, cx| {
+                match result {
+                    Ok(content) => this.open_loaded_tab(name, content, Some(path), None),
+                    Err(err) => this.show_error(err),
+                }
+                cx.notify();
+            });
         }
     }
 
