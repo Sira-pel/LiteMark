@@ -820,14 +820,20 @@ fn ctrl_left_and_right_jump_cleanly_over_picture_blocks() {
     d.move_word_right(false);
     assert_eq!(d.cursor_offset(), text.len());
 
-    // Backward walk: end -> start of "world" -> start of picture -> 0.
+    // Backward walk: end -> start of "world" -> end of picture -> start of picture -> 0.
     d.move_word_left(false);
     assert_eq!(d.cursor_offset(), world_start);
     d.move_word_left(false);
     assert_eq!(
         d.cursor_offset(),
+        pic_end,
+        "Ctrl+Left from after a picture must stop at its end first"
+    );
+    d.move_word_left(false);
+    assert_eq!(
+        d.cursor_offset(),
         pic_start,
-        "Ctrl+Left must jump before picture"
+        "Ctrl+Left from picture end jumps to its start"
     );
     d.move_word_left(false);
     assert_eq!(d.cursor_offset(), 0);
@@ -847,9 +853,11 @@ fn ctrl_left_and_right_jump_cleanly_over_picture_blocks() {
     assert_eq!(d.selection_range(), 5..pic_end);
     d.place(world_start, false);
     d.move_word_left(true);
+    assert_eq!(d.selection_range(), pic_end..world_start);
+    d.move_word_left(true);
     assert_eq!(d.selection_range(), pic_start..world_start);
 
-    // Consecutive pictures: Ctrl+Right from end of A stops at start of B, then jumps to end of B.
+    // Consecutive pictures: Ctrl+Right stops at start of B, Ctrl+Left stops at end of A.
     let two = "![a](a.png)\n![b](b.png)";
     let a_end = "![a](a.png)".len();
     let b_start = two.find("![b").unwrap();
@@ -867,6 +875,12 @@ fn ctrl_left_and_right_jump_cleanly_over_picture_blocks() {
     assert_eq!(d2.cursor_offset(), two.len());
     d2.move_word_left(false);
     assert_eq!(d2.cursor_offset(), b_start);
+    d2.move_word_left(false);
+    assert_eq!(
+        d2.cursor_offset(),
+        a_end,
+        "Ctrl+Left from start of second picture must stop at end of previous picture"
+    );
     d2.move_word_left(false);
     assert_eq!(d2.cursor_offset(), 0);
 }
@@ -1048,9 +1062,9 @@ fn snap_wysiwyg_table_delimiter_handles_crlf_and_header_only_eof() {
     d2.place(delim_eof, false);
     d2.set_view_mode(ViewMode::Wysiwyg);
     d2.snap_wysiwyg_table_delimiter();
-    assert!(
-        d2.cursor_offset() < header_only.find("\r\n").unwrap(),
-        "header-only table at EOF must snap to header row, got {}",
-        d2.cursor_offset()
+    assert_eq!(
+        d2.cursor_offset(),
+        header_only.find('a').unwrap(),
+        "header-only table at EOF must snap to the first cell"
     );
 }

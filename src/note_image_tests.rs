@@ -426,17 +426,66 @@ fn status_bar_clicks_do_not_hit_scrolled_off_pictures_or_text_underneath() {
         assert!(app.image_drag.is_none());
     });
 
-    // Even a direct editor_mouse_down / editor_right_mouse_down outside the
-    // viewport (e.g. over the selected picture's handle under the status bar)
-    // must be ignored.
+    // Scroll the selected picture so its corner resize handle sits under the
+    // status bar, then verify pressing directly on that handle is ignored.
     view.update(&mut cx, |app, _cx| {
         app.active_tab_mut()
             .expect("tab")
             .select_picture(pic_start..pic_end);
     });
     redraw(&mut cx);
-    let before_sel = view.read_with(&cx, |app, _| {
-        app.active_tab().expect("tab").selection_range()
+    redraw(&mut cx);
+    let scroll_for_handle = view.read_with(&cx, |app, _| {
+        let cur_offset = app.editor_scroll.offset();
+        let handle = app
+            .editor_paint
+            .borrow()
+            .picture_handle
+            .clone()
+            .expect("selected picture handle");
+        let target_bottom = app.editor_scroll.bounds().bottom() + px(12.0);
+        cur_offset.y + (target_bottom - handle.bounds.bottom())
+    });
+    view.update(&mut cx, |app, _cx| {
+        app.editor_scroll
+            .set_offset(point(px(0.0), scroll_for_handle));
+    });
+    redraw(&mut cx);
+    let (before_sel, handle_pos) = view.read_with(&cx, |app, _| {
+        let sel = app.active_tab().expect("tab").selection_range();
+        let handle = app
+            .editor_paint
+            .borrow()
+            .picture_handle
+            .clone()
+            .expect("selected picture handle");
+        let view_b = app.editor_scroll.bounds();
+        assert!(
+            handle.clip.bottom() <= view_b.bottom() + px(1.0),
+            "handle clip {:?} leaked below editor viewport {:?}",
+            handle.clip.bottom(),
+            view_b.bottom()
+        );
+        let pos = point(
+            handle.bounds.right() - px(4.0),
+            handle.bounds.bottom() - px(4.0),
+        );
+        assert!(
+            crate::ui::note_images::handle_at(handle.bounds, &pos).is_some(),
+            "test position {pos:?} must sit on handle {:?}",
+            handle.bounds
+        );
+        assert!(
+            pos.y > view_b.bottom(),
+            "handle pos {pos:?} must sit under status bar below {:?}",
+            view_b.bottom()
+        );
+        assert!(
+            !handle.clip.contains(&pos),
+            "clipped handle {:?} must exclude {pos:?}",
+            handle.clip
+        );
+        (sel, pos)
     });
     cx.update(|window, app_cx| {
         view.update(app_cx, |app, cx| {
@@ -444,6 +493,17 @@ fn status_bar_clicks_do_not_hit_scrolled_off_pictures_or_text_underneath() {
                 &gpui::MouseDownEvent {
                     button: gpui::MouseButton::Left,
                     position: status_pos,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                },
+                window,
+                cx,
+            );
+            app.editor_mouse_down(
+                &gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position: handle_pos,
                     modifiers: gpui::Modifiers::none(),
                     click_count: 1,
                     first_mouse: false,
@@ -461,6 +521,36 @@ fn status_bar_clicks_do_not_hit_scrolled_off_pictures_or_text_underneath() {
                 },
                 window,
                 cx,
+            );
+            // Also verify handle.clip alone rejects a handle press even if the
+            // pointer is inside editor_scroll bounds.
+            let mut clipped = app.editor_paint.borrow().picture_handle.clone().unwrap();
+            clipped.bounds = Bounds::new(
+                point(view_bounds.left() + px(20.0), view_bounds.top() + px(20.0)),
+                size(px(120.0), px(80.0)),
+            );
+            clipped.clip = Bounds::new(
+                point(view_bounds.left() + px(20.0), view_bounds.top() + px(20.0)),
+                size(px(120.0), px(40.0)),
+            );
+            let inner_clipped_pos = point(
+                clipped.bounds.right() - px(4.0),
+                clipped.bounds.bottom() - px(4.0),
+            );
+            app.editor_paint.borrow_mut().picture_handle = Some(clipped);
+            assert!(
+                !app.handle_picture_handle_press(
+                    &gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: inner_clipped_pos,
+                        modifiers: gpui::Modifiers::none(),
+                        click_count: 1,
+                        first_mouse: false,
+                    },
+                    window,
+                    cx,
+                ),
+                "handle.clip must reject press on clipped handle"
             );
         });
     });
@@ -522,7 +612,11 @@ fn mode_and_tab_switches_clear_transient_state_and_invalidate_follow_caret() {
         assert!(!tab.pending_formats.bold);
         assert!(tab.marked_range.is_none());
         assert!(tab.picture_raw_line.is_none());
-        assert_eq!(tab.cursor_offset(), 1, "IME composition committed at range.end");
+        assert_eq!(
+            tab.cursor_offset(),
+            1,
+            "IME composition committed at range.end"
+        );
     });
 
     // Place caret on the table delimiter line in Raw mode, then toggle back to
