@@ -216,6 +216,9 @@ impl LiteMarkApp {
             self.reset_editor_transient_state();
         }
         self.tabs.retain(|tab| tab.id != id);
+        if pos.is_some() {
+            self.release_closed_tab_images = true;
+        }
         let target = next_active
             .filter(|next| self.tabs.iter().any(|tab| &tab.id == next))
             .or_else(|| {
@@ -246,6 +249,7 @@ impl LiteMarkApp {
             let number = new_id.trim_start_matches("tab-");
             let title = format!("Untitled-{number}.md");
             self.tabs.clear();
+            self.release_closed_tab_images = true;
             self.tabs.push(DocumentTab::new(
                 new_id.clone(),
                 title,

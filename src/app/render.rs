@@ -31,6 +31,12 @@ impl Render for LiteMarkApp {
             tab.ensure_stats();
             tab.ensure_cursor_formats();
         }
+        // A tab closed since the last frame: the editor's next paint drops
+        // every cached image the remaining active note doesn't show.
+        if std::mem::take(&mut self.release_closed_tab_images) {
+            self.note_image_cache
+                .update(cx, |cache, _| cache.request_prune());
+        }
         let stats_selection = self.selection_word_count();
         // Borrow the tab only for the few fields the chrome reads. Cloning it
         // here copied its whole text and undo history on every frame.
@@ -82,9 +88,6 @@ impl Render for LiteMarkApp {
             move |id: String, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
                     this.handle_close_tab(id);
-                    this.note_image_cache.update(cx, |cache, cx| {
-                        cache.clear(None, cx);
-                    });
                     cx.notify();
                 });
             }

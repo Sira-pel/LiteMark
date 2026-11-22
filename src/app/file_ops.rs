@@ -438,6 +438,9 @@ impl LiteMarkApp {
             original_ix += 1;
             keep
         });
+        if !removed.is_empty() {
+            self.release_closed_tab_images = true;
+        }
 
         // Keep a valid selection: the tab that took the first closed tab's
         // position, the last remaining tab, or a fresh placeholder when the

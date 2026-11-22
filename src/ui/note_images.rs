@@ -151,6 +151,9 @@ pub struct NoteImageCache {
     budget_bytes: usize,
     tick: u64,
     next_load_gen: u64,
+    /// Set after a tab closes: the next [`Self::prune_unreferenced`] drops
+    /// every image the active note doesn't show, regardless of budget use.
+    force_prune: bool,
 }
 
 /// Coarse pixel-dimension bucket (`<= 2x` display size at the window's scale
@@ -235,6 +238,7 @@ impl NoteImageCache {
             budget_bytes: budget_bytes.max(1),
             tick: 0,
             next_load_gen: 0,
+            force_prune: false,
         });
         cx.observe_release(&entity, |cache, cx| {
             cache.clear(None, cx);
@@ -393,15 +397,22 @@ impl NoteImageCache {
         }
     }
 
+    /// Make the next [`Self::prune_unreferenced`] run even under half the
+    /// budget, so a closed tab's images are released while the images of the
+    /// note that stays open are kept (no re-decode).
+    pub fn request_prune(&mut self) {
+        self.force_prune = true;
+    }
+
     /// Drop cached images for paths no longer referenced by the active note when
-    /// cache usage exceeds half the budget.
+    /// cache usage exceeds half the budget, or once after [`Self::request_prune`].
     pub fn prune_unreferenced(
         &mut self,
         live: &HashSet<PathBuf>,
         mut window: Option<&mut Window>,
         cx: &mut App,
     ) {
-        if self.total_bytes <= self.budget_bytes / 2 {
+        if !std::mem::take(&mut self.force_prune) && self.total_bytes <= self.budget_bytes / 2 {
             return;
         }
         let stale: Vec<CacheKey> = self

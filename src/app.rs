@@ -200,6 +200,10 @@ pub struct LiteMarkApp {
     pub pending_after_save: Option<PendingAfterSave>,
     pub editor_paint: Rc<RefCell<EditorPaint>>,
     pub note_image_cache: Entity<crate::ui::note_images::NoteImageCache>,
+    /// Set when a tab closes (any path: tab strip, Ctrl+W, discard, workspace
+    /// delete/move). The next render asks `note_image_cache` to release images
+    /// the remaining active note doesn't show.
+    pub(crate) release_closed_tab_images: bool,
     /// Word count of the selection, keyed by tab id, revision and range, so
     /// a frame (caret blink, hover) doesn't rescan a large selection.
     selection_words: Option<(String, u64, Range<usize>, Option<usize>)>,
@@ -637,6 +641,7 @@ impl LiteMarkApp {
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
+            release_closed_tab_images: false,
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
@@ -789,6 +794,7 @@ impl LiteMarkApp {
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
+            release_closed_tab_images: false,
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
@@ -998,9 +1004,12 @@ mod find_panel_tests;
 
 impl crate::ui::text_editor::EditorContentSource for LiteMarkApp {
     fn editor_content(&self) -> &str {
+        // With no active tab, render() paints a fallback Welcome tab built
+        // from INITIAL_MARKDOWN; hand the editor that same text so its
+        // zero-copy line slices aren't taken from an empty string.
         self.active_tab()
             .map(|tab| tab.content.as_str())
-            .unwrap_or("")
+            .unwrap_or(INITIAL_MARKDOWN)
     }
 }
 
