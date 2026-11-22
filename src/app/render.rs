@@ -31,11 +31,13 @@ impl Render for LiteMarkApp {
             tab.ensure_stats();
             tab.ensure_cursor_formats();
         }
-        // A tab closed since the last frame: the editor's next paint drops
-        // every cached image the remaining active note doesn't show.
-        if std::mem::take(&mut self.release_closed_tab_images) {
-            self.note_image_cache
-                .update(cx, |cache, _| cache.request_prune());
+        // Tabs closed since the last frame: release the pictures no open tab
+        // references; the open tabs keep theirs.
+        if !self.closed_tab_ids.is_empty() {
+            let closed = std::mem::take(&mut self.closed_tab_ids);
+            self.note_image_cache.update(cx, |cache, cx| {
+                cache.forget_tabs(&closed, Some(window), cx);
+            });
         }
         let stats_selection = self.selection_word_count();
         // Borrow the tab only for the few fields the chrome reads. Cloning it

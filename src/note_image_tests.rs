@@ -708,7 +708,10 @@ fn closing_a_tab_releases_only_its_cached_pictures() {
     redraw(&mut cx);
     view.update(&mut cx, |app, _| {
         assert_eq!(app.active_tab_id, kept_id);
-        assert!(!app.release_closed_tab_images, "render consumed the flag");
+        assert!(
+            app.closed_tab_ids.is_empty(),
+            "render consumed the closed ids"
+        );
     });
     assert_eq!(
         count(&view, &mut cx),

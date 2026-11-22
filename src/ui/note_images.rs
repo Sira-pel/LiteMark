@@ -11,8 +11,7 @@ use std::time::SystemTime;
 
 use gpui::{
     point, px, size, App, AppContext, Asset, AssetLogger, Bounds, Context, ElementId, Entity,
-    ImageAssetLoader, ImageCache, ImageCacheError, Pixels, RenderImage, Resource, SharedString,
-    Window,
+    ImageAssetLoader, ImageCacheError, Pixels, RenderImage, Resource, SharedString, Window,
 };
 
 /// Tallest an image block grows, before zoom.
@@ -139,21 +138,30 @@ struct CacheEntry {
     state: CacheEntryState,
     bytes: usize,
     last_used: u64,
+    /// Editor frame ([`NoteImageCache::record_tab_paths`]) this entry was last
+    /// drawn in. Entries drawn in the current or previous frame are on screen
+    /// and never evicted for budget.
+    last_frame: u64,
 }
 
 /// Bounded LRU image cache that downscales large static rasters on a background
-/// thread to `<= 2x` display size and explicitly calls `cx.drop_image` on
-/// eviction, disk replacement, and cache clear/release so GPU atlas memory stays
-/// bounded.
+/// thread to about 2x display size (coarse buckets, capped at 2048 px) and
+/// explicitly calls `cx.drop_image` on eviction, disk replacement, tab close and
+/// cache release so GPU atlas memory stays bounded.
+///
+/// The budget is soft for pictures on screen: they are never evicted, so a
+/// note whose visible pictures exceed it doesn't reload them in a loop.
 pub struct NoteImageCache {
     entries: HashMap<CacheKey, CacheEntry>,
     total_bytes: usize,
     budget_bytes: usize,
     tick: u64,
     next_load_gen: u64,
-    /// Set after a tab closes: the next [`Self::prune_unreferenced`] drops
-    /// every image the active note doesn't show, regardless of budget use.
-    force_prune: bool,
+    /// Bumped once per editor frame by [`Self::record_tab_paths`].
+    frame: u64,
+    /// Local image paths each open tab's note references, as last painted.
+    /// A cached picture stays while any open tab references it.
+    tab_paths: HashMap<String, HashSet<PathBuf>>,
 }
 
 /// Coarse pixel-dimension bucket (`<= 2x` display size at the window's scale
@@ -238,7 +246,8 @@ impl NoteImageCache {
             budget_bytes: budget_bytes.max(1),
             tick: 0,
             next_load_gen: 0,
-            force_prune: false,
+            frame: 0,
+            tab_paths: HashMap::new(),
         });
         cx.observe_release(&entity, |cache, cx| {
             cache.clear(None, cx);
@@ -252,8 +261,16 @@ impl NoteImageCache {
         self.tick
     }
 
+    /// Drawn in the current or the previous editor frame.
+    fn on_screen(&self, entry: &CacheEntry) -> bool {
+        entry.last_frame.saturating_add(1) >= self.frame
+    }
+
     /// Load `path` downscaled to at most `max_dim` on the longest edge (for
-    /// static rasters), returning `None` while the background decode is running.
+    /// static rasters). While that size decodes in the background, another
+    /// already-decoded size of the same picture is shown instead (resize,
+    /// zoom, monitor change), so the picture never blanks; `None` only when no
+    /// size of it is ready yet.
     pub fn load_sized(
         &mut self,
         path: &Path,
@@ -267,12 +284,14 @@ impl NoteImageCache {
             max_dim: if static_raster { max_dim } else { 0 },
         };
         let now = self.bump_tick();
+        let frame = self.frame;
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.last_used = now;
-            return match &entry.state {
-                CacheEntryState::Loading { .. } => None,
-                CacheEntryState::Loaded(res) => Some(res.clone()),
-            };
+            entry.last_frame = frame;
+            if let CacheEntryState::Loaded(res) = &entry.state {
+                return Some(res.clone());
+            }
+            return self.fallback_size(&key, now);
         }
 
         self.next_load_gen = self.next_load_gen.wrapping_add(1);
@@ -283,6 +302,7 @@ impl NoteImageCache {
                 state: CacheEntryState::Loading { load_gen },
                 bytes: 0,
                 last_used: now,
+                last_frame: frame,
             },
         );
 
@@ -298,6 +318,7 @@ impl NoteImageCache {
             cx.background_executor().spawn(fut)
         };
 
+        let fallback = self.fallback_size(&key, now);
         let cache_weak = cx.entity().downgrade();
         let view = window.current_view();
         window
@@ -312,7 +333,32 @@ impl NoteImageCache {
             })
             .detach();
 
-        None
+        fallback
+    }
+
+    /// The decoded size of `key.path` nearest to `key.max_dim`, marked as
+    /// drawn this frame, to stand in while `key` itself loads.
+    fn fallback_size(
+        &mut self,
+        key: &CacheKey,
+        now: u64,
+    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
+        let frame = self.frame;
+        let (_, entry) = self
+            .entries
+            .iter_mut()
+            .filter(|(k, e)| {
+                k.path == key.path
+                    && k.max_dim != key.max_dim
+                    && matches!(e.state, CacheEntryState::Loaded(Ok(_)))
+            })
+            .min_by_key(|(k, _)| k.max_dim.abs_diff(key.max_dim))?;
+        entry.last_used = now;
+        entry.last_frame = frame;
+        match &entry.state {
+            CacheEntryState::Loaded(res) => Some(res.clone()),
+            CacheEntryState::Loading { .. } => None,
+        }
     }
 
     fn finish_load(
@@ -348,87 +394,113 @@ impl NoteImageCache {
         entry.bytes = bytes;
         entry.last_used = now;
         self.total_bytes = self.total_bytes.saturating_add(bytes);
-        self.evict_to_budget(Some(key), window, cx);
+        self.evict_to_budget(window, cx);
     }
 
-    fn evict_to_budget(
-        &mut self,
-        keep: Option<&CacheKey>,
-        mut window: Option<&mut Window>,
-        cx: &mut App,
-    ) {
-        while self.total_bytes > self.budget_bytes && self.entries.len() > 1 {
+    /// Evict least-recently-used pictures that aren't on screen until the
+    /// budget fits (or only on-screen pictures are left).
+    fn evict_to_budget(&mut self, mut window: Option<&mut Window>, cx: &mut App) {
+        while self.total_bytes > self.budget_bytes {
             let victim = self
                 .entries
                 .iter()
-                .filter(|(k, e)| {
-                    keep != Some(*k) && matches!(e.state, CacheEntryState::Loaded(_))
+                .filter(|(_, e)| {
+                    !self.on_screen(e) && matches!(e.state, CacheEntryState::Loaded(_))
                 })
                 .min_by_key(|(_, e)| e.last_used)
                 .map(|(k, _)| k.clone());
             let Some(victim_key) = victim else {
                 break;
             };
-            if let Some(removed) = self.entries.remove(&victim_key) {
-                self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
-                if let CacheEntryState::Loaded(Ok(img)) = removed.state {
-                    cx.drop_image(img, window.as_deref_mut());
-                }
+            self.remove_entry(&victim_key, window.as_deref_mut(), cx);
+        }
+    }
+
+    fn remove_entry(&mut self, key: &CacheKey, window: Option<&mut Window>, cx: &mut App) {
+        if let Some(removed) = self.entries.remove(key) {
+            self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
+            if let CacheEntryState::Loaded(Ok(img)) = removed.state {
+                cx.drop_image(img, window);
             }
+        }
+    }
+
+    fn remove_where(
+        &mut self,
+        mut pred: impl FnMut(&CacheKey, &CacheEntry) -> bool,
+        mut window: Option<&mut Window>,
+        cx: &mut App,
+    ) {
+        let keys: Vec<CacheKey> = self
+            .entries
+            .iter()
+            .filter(|(k, e)| pred(k, e))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in keys {
+            self.remove_entry(&key, window.as_deref_mut(), cx);
         }
     }
 
     /// Drop every cached size bucket for `path` (e.g. after disk replacement)
     /// and release its GPU textures via `cx.drop_image`.
-    pub fn invalidate_path(&mut self, path: &Path, mut window: Option<&mut Window>, cx: &mut App) {
-        let keys: Vec<CacheKey> = self
-            .entries
-            .keys()
-            .filter(|k| k.path == path)
-            .cloned()
-            .collect();
-        for key in keys {
-            if let Some(removed) = self.entries.remove(&key) {
-                self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
-                if let CacheEntryState::Loaded(Ok(img)) = removed.state {
-                    cx.drop_image(img, window.as_deref_mut());
-                }
-            }
-        }
+    pub fn invalidate_path(&mut self, path: &Path, window: Option<&mut Window>, cx: &mut App) {
+        self.remove_where(|k, _| k.path == path, window, cx);
     }
 
-    /// Make the next [`Self::prune_unreferenced`] run even under half the
-    /// budget, so a closed tab's images are released while the images of the
-    /// note that stays open are kept (no re-decode).
-    pub fn request_prune(&mut self) {
-        self.force_prune = true;
+    fn live_paths(&self) -> HashSet<PathBuf> {
+        self.tab_paths.values().flatten().cloned().collect()
     }
 
-    /// Drop cached images for paths no longer referenced by the active note when
-    /// cache usage exceeds half the budget, or once after [`Self::request_prune`].
-    pub fn prune_unreferenced(
+    /// Called once per editor frame with the local image paths the painted
+    /// tab's note references. Starts a new frame, releases sizes of a picture
+    /// that a newer size replaced on screen, and, once usage passes half the
+    /// budget, drops pictures no open tab references any more.
+    pub fn record_tab_paths(
         &mut self,
-        live: &HashSet<PathBuf>,
+        tab_id: &str,
+        paths: &HashSet<PathBuf>,
         mut window: Option<&mut Window>,
         cx: &mut App,
     ) {
-        if !std::mem::take(&mut self.force_prune) && self.total_bytes <= self.budget_bytes / 2 {
-            return;
+        if self.tab_paths.get(tab_id) != Some(paths) {
+            self.tab_paths.insert(tab_id.to_string(), paths.clone());
         }
-        let stale: Vec<CacheKey> = self
+        self.frame = self.frame.wrapping_add(1);
+
+        // A size not drawn for two frames while another size of the same
+        // picture is on screen was superseded (resize / zoom): release it.
+        let shown: HashSet<PathBuf> = self
             .entries
-            .keys()
-            .filter(|k| !live.contains(&k.path))
-            .cloned()
+            .iter()
+            .filter(|(_, e)| self.on_screen(e))
+            .map(|(k, _)| k.path.clone())
             .collect();
-        for key in stale {
-            if let Some(removed) = self.entries.remove(&key) {
-                self.total_bytes = self.total_bytes.saturating_sub(removed.bytes);
-                if let CacheEntryState::Loaded(Ok(img)) = removed.state {
-                    cx.drop_image(img, window.as_deref_mut());
-                }
-            }
+        let frame = self.frame;
+        self.remove_where(
+            |k, e| {
+                e.last_frame.saturating_add(1) < frame
+                    && matches!(e.state, CacheEntryState::Loaded(_))
+                    && shown.contains(&k.path)
+            },
+            window.as_deref_mut(),
+            cx,
+        );
+
+        if self.total_bytes > self.budget_bytes / 2 {
+            let live = self.live_paths();
+            self.remove_where(|k, _| !live.contains(&k.path), window, cx);
         }
+    }
+
+    /// Forget closed tabs and release every cached picture no remaining open
+    /// tab references. Pictures of the tabs still open are kept.
+    pub fn forget_tabs(&mut self, tab_ids: &[String], window: Option<&mut Window>, cx: &mut App) {
+        for id in tab_ids {
+            self.tab_paths.remove(id);
+        }
+        let live = self.live_paths();
+        self.remove_where(|k, _| !live.contains(&k.path), window, cx);
     }
 
     /// Drop every cached image and release its GPU textures.
@@ -449,56 +521,6 @@ impl NoteImageCache {
     #[cfg(test)]
     pub fn entry_count(&self) -> usize {
         self.entries.len()
-    }
-}
-
-impl ImageCache for NoteImageCache {
-    fn load(
-        &mut self,
-        resource: &Resource,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
-        let Resource::Path(path) = resource else {
-            return None;
-        };
-        let key = CacheKey {
-            path: path.to_path_buf(),
-            max_dim: if is_static_raster_path(path) {
-                2048
-            } else {
-                0
-            },
-        };
-        let now = self.bump_tick();
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.last_used = now;
-            return match &entry.state {
-                CacheEntryState::Loading { .. } => None,
-                CacheEntryState::Loaded(res) => Some(res.clone()),
-            };
-        }
-        // Fallback synchronous path if called via generic ImageCache trait.
-        let result = if is_static_raster_path(path) {
-            decode_downscaled_raster(path, 2048)
-        } else {
-            return None;
-        };
-        let bytes = result
-            .as_ref()
-            .map(|img| render_image_bytes(img))
-            .unwrap_or(0);
-        self.entries.insert(
-            key.clone(),
-            CacheEntry {
-                state: CacheEntryState::Loaded(result.clone()),
-                bytes,
-                last_used: now,
-            },
-        );
-        self.total_bytes = self.total_bytes.saturating_add(bytes);
-        self.evict_to_budget(Some(&key), Some(window), cx);
-        Some(result)
     }
 }
 
@@ -1291,6 +1313,8 @@ mod tests {
         let r3 = decode_downscaled_raster(&p3, 256);
         cx.update(|cx| {
             cache.update(cx, |c, cx| {
+                // Nothing here was drawn recently, so all of it is evictable.
+                c.frame = 10;
                 for (k, r) in [(&k1, r1), (&k2, r2)] {
                     c.next_load_gen += 1;
                     let g = c.next_load_gen;
@@ -1301,6 +1325,7 @@ mod tests {
                             state: CacheEntryState::Loading { load_gen: g },
                             bytes: 0,
                             last_used: t,
+                            last_frame: 0,
                         },
                     );
                     c.finish_load(k, g, r, None, cx);
@@ -1321,6 +1346,7 @@ mod tests {
                         state: CacheEntryState::Loading { load_gen: g },
                         bytes: 0,
                         last_used: t,
+                        last_frame: 0,
                     },
                 );
                 c.finish_load(&k3, g, r3, None, cx);
@@ -1334,6 +1360,162 @@ mod tests {
                 c.invalidate_path(&p1, None, cx);
                 assert_eq!(c.entry_count(), 1);
                 assert_eq!(c.total_bytes(), 4096);
+            });
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Fills `cache` with one decoded 32x32 (4096-byte) entry per key, last
+    /// drawn in `frame`.
+    fn put_loaded(c: &mut NoteImageCache, key: &CacheKey, frame: u64, cx: &mut App) {
+        let r = decode_downscaled_raster(&key.path, 256);
+        c.next_load_gen += 1;
+        let g = c.next_load_gen;
+        let t = c.bump_tick();
+        c.entries.insert(
+            key.clone(),
+            CacheEntry {
+                state: CacheEntryState::Loading { load_gen: g },
+                bytes: 0,
+                last_used: t,
+                last_frame: frame,
+            },
+        );
+        c.finish_load(key, g, r, None, cx);
+    }
+
+    fn png_fixture(tag: &str, names: &[&str]) -> (PathBuf, Vec<PathBuf>) {
+        let dir = std::env::temp_dir().join(format!("litemark-img-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = names
+            .iter()
+            .map(|n| {
+                let p = dir.join(n);
+                image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]))
+                    .save(&p)
+                    .unwrap();
+                p
+            })
+            .collect();
+        (dir, paths)
+    }
+
+    #[test]
+    fn pictures_on_screen_are_never_evicted_even_over_budget() {
+        let (dir, p) = png_fixture("onscreen", &["a.png", "b.png", "c.png"]);
+        let cx = gpui::TestAppContext::single();
+        // Room for two 4096-byte pictures, but three are on screen.
+        let cache = cx.update(|cx| NoteImageCache::with_budget(9000, cx));
+        cx.update(|cx| {
+            cache.update(cx, |c, cx| {
+                c.frame = 5;
+                for path in &p {
+                    let key = CacheKey {
+                        path: path.clone(),
+                        max_dim: 256,
+                    };
+                    put_loaded(c, &key, 5, cx);
+                }
+                assert_eq!(c.entry_count(), 3, "no on-screen picture is evicted");
+                assert_eq!(c.total_bytes(), 3 * 4096);
+
+                // Two frames later nothing was drawn: the budget applies again.
+                c.frame = 7;
+                c.evict_to_budget(None, cx);
+                assert_eq!(c.entry_count(), 2);
+            });
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_size_shows_the_old_size_until_it_loads_then_replaces_it() {
+        let (dir, p) = png_fixture("resize", &["a.png"]);
+        let cx = gpui::TestAppContext::single();
+        let cache = cx.update(|cx| NoteImageCache::with_budget(1 << 20, cx));
+        cx.update(|cx| {
+            cache.update(cx, |c, cx| {
+                let small = CacheKey {
+                    path: p[0].clone(),
+                    max_dim: 256,
+                };
+                let big = CacheKey {
+                    path: p[0].clone(),
+                    max_dim: 1024,
+                };
+                c.frame = 1;
+                put_loaded(c, &small, 1, cx);
+                // The bigger size is still decoding.
+                c.entries.insert(
+                    big.clone(),
+                    CacheEntry {
+                        state: CacheEntryState::Loading { load_gen: 99 },
+                        bytes: 0,
+                        last_used: 0,
+                        last_frame: 1,
+                    },
+                );
+                let t = c.bump_tick();
+                assert!(
+                    matches!(c.fallback_size(&big, t), Some(Ok(_))),
+                    "the loaded small size stands in for the loading big one"
+                );
+
+                // The big size lands and is drawn; the small one stops being
+                // drawn and is released two frames later.
+                let r = decode_downscaled_raster(&big.path, 1024);
+                c.finish_load(&big, 99, r, None, cx);
+                let live: HashSet<PathBuf> = [p[0].clone()].into_iter().collect();
+                for frame in 2..=4 {
+                    c.entries.get_mut(&big).unwrap().last_frame = frame;
+                    c.record_tab_paths("tab-1", &live, None, cx);
+                }
+                assert!(c.entries.contains_key(&big));
+                assert!(!c.entries.contains_key(&small), "superseded size released");
+            });
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_tabs_keep_their_pictures_and_closing_frees_only_unshared_ones() {
+        let (dir, p) = png_fixture("tabs", &["a.png", "b.png", "shared.png"]);
+        let cx = gpui::TestAppContext::single();
+        // Tiny budget: the unreferenced sweep runs on every frame.
+        let cache = cx.update(|cx| NoteImageCache::with_budget(100, cx));
+        cx.update(|cx| {
+            cache.update(cx, |c, cx| {
+                let key = |i: usize| CacheKey {
+                    path: p[i].clone(),
+                    max_dim: 256,
+                };
+                let set = |is: &[usize]| -> HashSet<PathBuf> {
+                    is.iter().map(|&i| p[i].clone()).collect()
+                };
+                // Each tab paints (recording its paths), then its pictures load.
+                c.record_tab_paths("tab-a", &set(&[0, 2]), None, cx);
+                put_loaded(c, &key(0), c.frame, cx);
+                put_loaded(c, &key(2), c.frame, cx);
+                c.record_tab_paths("tab-b", &set(&[1, 2]), None, cx);
+                put_loaded(c, &key(1), c.frame, cx);
+                // Switching back and forth keeps both tabs' pictures.
+                for _ in 0..3 {
+                    c.record_tab_paths("tab-a", &set(&[0, 2]), None, cx);
+                    c.record_tab_paths("tab-b", &set(&[1, 2]), None, cx);
+                }
+                assert_eq!(c.entry_count(), 3);
+
+                c.forget_tabs(&["tab-a".to_string()], None, cx);
+                assert!(
+                    !c.entries.contains_key(&key(0)),
+                    "closed tab's own picture freed"
+                );
+                assert!(c.entries.contains_key(&key(1)));
+                assert!(
+                    c.entries.contains_key(&key(2)),
+                    "picture shared with an open tab kept"
+                );
             });
         });
         let _ = std::fs::remove_dir_all(&dir);

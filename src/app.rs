@@ -200,10 +200,10 @@ pub struct LiteMarkApp {
     pub pending_after_save: Option<PendingAfterSave>,
     pub editor_paint: Rc<RefCell<EditorPaint>>,
     pub note_image_cache: Entity<crate::ui::note_images::NoteImageCache>,
-    /// Set when a tab closes (any path: tab strip, Ctrl+W, discard, workspace
-    /// delete/move). The next render asks `note_image_cache` to release images
-    /// the remaining active note doesn't show.
-    pub(crate) release_closed_tab_images: bool,
+    /// Tabs closed since the last frame (any path: tab strip, Ctrl+W,
+    /// discard, workspace delete/move). The next render tells
+    /// `note_image_cache` to release pictures no open tab references.
+    pub(crate) closed_tab_ids: Vec<String>,
     /// Word count of the selection, keyed by tab id, revision and range, so
     /// a frame (caret blink, hover) doesn't rescan a large selection.
     selection_words: Option<(String, u64, Range<usize>, Option<usize>)>,
@@ -641,7 +641,7 @@ impl LiteMarkApp {
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
-            release_closed_tab_images: false,
+            closed_tab_ids: Vec::new(),
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
@@ -794,7 +794,7 @@ impl LiteMarkApp {
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
-            release_closed_tab_images: false,
+            closed_tab_ids: Vec::new(),
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,

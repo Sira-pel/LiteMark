@@ -3533,7 +3533,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
 
         image_cache.retain_paths(&image_paths);
         self.note_image_cache.update(cx, |cache, cx| {
-            cache.prune_unreferenced(&image_paths, Some(window), cx);
+            cache.record_tab_paths(&self.content_key.0, &image_paths, Some(window), cx);
         });
         let total_height = (cur_y - bounds.top() + px(32.0)).max(px(64.0));
         // The text is an I-beam; a picture is a plain arrow, and its resize
