@@ -874,6 +874,30 @@ impl DocumentTab {
         find_matches(&self.content, term, match_case)
     }
 
+    /// `previous` (the hits found at revision `rev`) brought up to date with
+    /// the current text, when exactly one edit separates the two revisions;
+    /// `None` when it can't be known and the caller must search afresh.
+    pub fn find_hits_after_edit(
+        &self,
+        previous: &[Range<usize>],
+        rev: u64,
+        term: &str,
+        match_case: bool,
+    ) -> Option<Vec<Range<usize>>> {
+        let (edit_rev, range, new_len) = self.last_edit.as_ref()?;
+        if *edit_rev != rev || rev.wrapping_add(1) != self.revision {
+            return None;
+        }
+        Some(super::text_ops::update_matches(
+            previous,
+            &self.content,
+            term,
+            match_case,
+            range.clone(),
+            *new_len,
+        ))
+    }
+
     pub fn select_match_in(
         &mut self,
         hits: &[Range<usize>],

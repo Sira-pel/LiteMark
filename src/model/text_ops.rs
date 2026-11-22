@@ -1011,6 +1011,139 @@ pub fn find_matches_lowered(content: &str, needle: &str) -> Vec<Range<usize>> {
     hits
 }
 
+/// First match of a term at or after a byte position, one at a time, so a
+/// caller can stop scanning as soon as it has what it needs.
+struct Matcher {
+    term: String,
+    needle: String,
+    match_case: bool,
+}
+
+impl Matcher {
+    fn new(term: &str, match_case: bool) -> Option<Self> {
+        let needle = if match_case {
+            String::new()
+        } else {
+            term.to_lowercase()
+        };
+        if term.is_empty() || (!match_case && needle.is_empty()) {
+            return None;
+        }
+        Some(Self {
+            term: term.to_string(),
+            needle,
+            match_case,
+        })
+    }
+
+    /// The longest source text one match can span, in bytes. A caseless
+    /// match can be longer than the needle: Kelvin `K` is 3 bytes and
+    /// lowercases to a 1-byte `k`.
+    fn max_len(&self) -> usize {
+        if self.match_case {
+            self.term.len()
+        } else {
+            self.needle.len() * 3 + 4
+        }
+    }
+
+    fn next(&self, content: &str, from: usize) -> Option<Range<usize>> {
+        if self.match_case {
+            let rel = content.get(from..)?.find(&self.term)?;
+            let start = from + rel;
+            return Some(start..start + self.term.len());
+        }
+        // Same scan as `find_matches_lowered`, stopping at the first hit.
+        let mut start = from;
+        while start < content.len() {
+            let rest = &content[start..];
+            // Skip to a byte that can begin a match when that is cheap.
+            let first = self.needle.chars().next()?;
+            if first.is_ascii() {
+                let lower = first as u8;
+                let upper = lower.to_ascii_uppercase();
+                let extra_lead = match lower {
+                    b'i' => Some(0xC4u8),
+                    b'k' => Some(0xE2u8),
+                    _ => None,
+                };
+                let bytes = rest.as_bytes();
+                let rel = match extra_lead {
+                    Some(lead) => memchr::memchr3(lower, upper, lead, bytes),
+                    None if lower == upper => memchr::memchr(lower, bytes),
+                    None => memchr::memchr2(lower, upper, bytes),
+                }?;
+                start += rel;
+            }
+            let rest = &content[start..];
+            if let Some(len) = caseless_match_len(rest, &self.needle) {
+                return Some(start..start + len);
+            }
+            start += rest.chars().next().map_or(1, char::len_utf8);
+        }
+        None
+    }
+}
+
+/// The matches of `term` in `content` after one edit, given the matches
+/// before it. `edited` is the replaced range in the old text and `new_len`
+/// the length of the text that replaced it. Equal to a fresh
+/// [`find_matches`], but only the neighbourhood of the edit is searched.
+///
+/// Matching is greedy and non-overlapping, so an edit can re-pair the hits
+/// after it (`aa` in `aaaa` shifts by one inserted `a`). The scan therefore
+/// runs forward until a new hit lands exactly on a shifted old one: from
+/// there the greedy state, and every later hit, is the same as before.
+pub fn update_matches(
+    old: &[Range<usize>],
+    content: &str,
+    term: &str,
+    match_case: bool,
+    edited: Range<usize>,
+    new_len: usize,
+) -> Vec<Range<usize>> {
+    let Some(matcher) = Matcher::new(term, match_case) else {
+        return Vec::new();
+    };
+    let (start, old_end) = (edited.start, edited.end);
+    let new_end = start + new_len;
+    // Hits wholly before the edit are untouched; those overlapping it are
+    // gone; those wholly after it are candidates for resync.
+    let kept = old.partition_point(|hit| hit.end <= start);
+    let suffix_from = old.partition_point(|hit| hit.start < old_end);
+    let suffix = &old[suffix_from.max(kept)..];
+    let shift = |at: usize| (at + new_len).wrapping_sub(edited.len());
+    let mut out: Vec<Range<usize>> = old[..kept].to_vec();
+    // No match can begin before the last kept hit's end, and none can begin
+    // so early that it would have ended before the edit (it would be kept).
+    let floor = out.last().map_or(0, |hit| hit.end);
+    let from = floor.max(floor_char_boundary(
+        content,
+        start.saturating_sub(matcher.max_len()),
+    ));
+    let mut pos = from;
+    while let Some(hit) = matcher.next(content, pos) {
+        if hit.start >= new_end {
+            // Old coordinates of this hit, if it is one of the old ones.
+            let old_start = hit.start.wrapping_add(edited.len()).wrapping_sub(new_len);
+            if let Ok(ix) = suffix.binary_search_by(|o| o.start.cmp(&old_start)) {
+                if shift(suffix[ix].end) == hit.end {
+                    out.push(hit);
+                    out.extend(
+                        suffix[ix + 1..]
+                            .iter()
+                            .map(|o| shift(o.start)..shift(o.end)),
+                    );
+                    return out;
+                }
+            }
+        }
+        pos = hit.end;
+        out.push(hit);
+    }
+    out
+}
+
 /// Byte length of the shortest start of `text` whose lowercase is `needle`,
 /// without allocating. The match ends when the needle is used up at a
 /// character boundary, so a character that lowercases to two (`İ` → `i̇`)
@@ -2264,5 +2397,65 @@ mod emptied_group_tests {
         h.push_span_opening(DiffEdit::new(0, String::new(), "ab".into()));
         h.push(DiffEdit::new(0, "ab".into(), String::new()));
         assert_eq!(h.stored_bytes(), 0);
+    }
+}
+
+#[cfg(test)]
+mod update_matches_tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % n
+        }
+    }
+
+    fn random_text(rng: &mut Lcg, len: usize, alphabet: &[&str]) -> String {
+        (0..len)
+            .map(|_| alphabet[rng.next(alphabet.len())])
+            .collect()
+    }
+
+    #[test]
+    fn incremental_matches_equal_a_fresh_search() {
+        let alphabets: [&[&str]; 3] = [
+            &["a", "b", "İ", "\r", "\n"],
+            &["a", "A", "K", "k", "i", "I", "İ"],
+            &["a", "a", "a", "b"],
+        ];
+        let terms = ["aa", "aba", "i", "a", "k", "ab", "İ", "aaa"];
+        let mut rng = Lcg(7);
+        for round in 0..4000 {
+            let alphabet = alphabets[round % alphabets.len()];
+            let len = rng.next(40);
+            let before = random_text(&mut rng, len, alphabet);
+            let term = terms[rng.next(terms.len())];
+            let match_case = rng.next(2) == 0;
+            // A random edit on char boundaries.
+            let bounds: Vec<usize> = before
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain([before.len()])
+                .collect();
+            let a = bounds[rng.next(bounds.len())];
+            let b = bounds[rng.next(bounds.len())];
+            let (a, b) = (a.min(b), a.max(b));
+            let len = rng.next(6);
+            let inserted = random_text(&mut rng, len, alphabet);
+            let mut after = before.clone();
+            after.replace_range(a..b, &inserted);
+            let old = find_matches(&before, term, match_case);
+            let got = update_matches(&old, &after, term, match_case, a..b, inserted.len());
+            assert_eq!(
+                got,
+                find_matches(&after, term, match_case),
+                "{before:?} -> {after:?} edit {a}..{b} {inserted:?} term {term:?} case {match_case}"
+            );
+        }
     }
 }

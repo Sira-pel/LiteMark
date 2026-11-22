@@ -12,11 +12,29 @@ impl LiteMarkApp {
             self.not_found = false;
             return;
         }
-        self.find_hits = self
-            .active_tab()
-            .map(|tab| tab.find_hit_ranges(&self.find_term, self.match_case))
-            .unwrap_or_default()
-            .into();
+        // One edit since the last search: patch the hits instead of
+        // scanning the whole note again.
+        let patched = self.active_tab().and_then(|tab| {
+            let (id, rev, term, case) = self.find_hits_key.as_ref()?;
+            (*id == tab.id && *term == self.find_term && *case == self.match_case)
+                .then(|| {
+                    tab.find_hits_after_edit(
+                        &self.find_hits,
+                        *rev,
+                        &self.find_term,
+                        self.match_case,
+                    )
+                })
+                .flatten()
+        });
+        self.find_hits = match patched {
+            Some(hits) => hits.into(),
+            None => self
+                .active_tab()
+                .map(|tab| tab.find_hit_ranges(&self.find_term, self.match_case))
+                .unwrap_or_default()
+                .into(),
+        };
         self.find_hits_key = self.active_tab().map(|tab| {
             (
                 tab.id.clone(),
