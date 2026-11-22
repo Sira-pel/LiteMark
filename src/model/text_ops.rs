@@ -1242,9 +1242,7 @@ pub fn visual_row_count_measured(
         count += if fits_one_row(content, start, end, wrap_cols, tab_width, widths) {
             1
         } else {
-            let mut rows = Vec::new();
-            push_wrapped(&mut rows, content, start, end, wrap_cols, tab_width, widths);
-            rows.len()
+            count_wrapped(content, start, end, wrap_cols, tab_width, widths)
         };
     };
     while let Some(rel) = memchr::memchr2(b'\n', b'\r', &bytes[line_start..]) {
@@ -1397,76 +1395,105 @@ fn push_wrapped(
     tab_width: usize,
     widths: &CharWidths,
 ) {
+    for_each_wrapped(content, start, end, wrap_cols, tab_width, widths, |row| {
+        rows.push(row)
+    });
+}
+
+/// Number of rows `push_wrapped` would produce, without building them.
+fn count_wrapped(
+    content: &str,
+    start: usize,
+    end: usize,
+    wrap_cols: usize,
+    tab_width: usize,
+    widths: &CharWidths,
+) -> usize {
+    let mut count = 0usize;
+    for_each_wrapped(content, start, end, wrap_cols, tab_width, widths, |_| {
+        count += 1
+    });
+    count
+}
+
+/// Streams the wrapped rows of `content[start..end]` to `emit` using byte
+/// positions only, so wrapping a long line allocates nothing.
+fn for_each_wrapped(
+    content: &str,
+    start: usize,
+    end: usize,
+    wrap_cols: usize,
+    tab_width: usize,
+    widths: &CharWidths,
+    mut emit: impl FnMut((usize, usize)),
+) {
     if wrap_cols == 0
         || wrap_cols == usize::MAX
         || start >= end
         || fits_one_row(content, start, end, wrap_cols, tab_width, widths)
     {
-        rows.push((start, end));
+        emit((start, end));
         return;
     }
-    let chars: Vec<(usize, char)> = content[start..end]
-        .char_indices()
-        .map(|(index, ch)| (start + index, ch))
-        .collect();
-    let mut index = 0usize;
-    while index < chars.len() {
-        let row_start = chars[index].0;
+    let mut pos = start;
+    while pos < end {
+        let row_start = pos;
         // The furthest char that still fits in `wrap_cols` columns; a row
         // always takes at least one char.
         let mut col = 0usize;
-        let mut max_next = index;
-        while max_next < chars.len() {
-            let prev = (max_next > index).then(|| chars[max_next - 1].1);
-            let width = if tab_width > 0 && chars[max_next].1 == '\t' {
+        let mut max_next = pos;
+        let mut prev: Option<char> = None;
+        for ch in content[pos..end].chars() {
+            let width = if tab_width > 0 && ch == '\t' {
                 let stop = tab_width * widths.unit;
                 stop - col % stop
             } else {
-                widths.width_after(prev, chars[max_next].1)
+                widths.width_after(prev, ch)
             };
-            if col + width > wrap_cols && max_next > index {
+            if col + width > wrap_cols && max_next > pos {
                 break;
             }
             col += width;
-            max_next += 1;
+            max_next += ch.len_utf8();
+            prev = Some(ch);
         }
-        if max_next == chars.len() {
-            rows.push((row_start, end));
+        if max_next == end {
+            emit((row_start, end));
             break;
         }
 
-        // Look for a break opportunity (whitespace or punctuation) between index and max_next
-        let mut break_idx = None;
-        for i in (index + 1..=max_next).rev() {
-            let (_, ch) = chars[i - 1];
-            if ch.is_whitespace() {
-                break_idx = Some(i);
-                break;
-            }
-        }
+        // Look for a break opportunity (whitespace) between pos and max_next.
+        let break_at = content[pos..max_next]
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(off, ch)| pos + off + ch.len_utf8());
 
-        let mut next = if let Some(b) = break_idx { b } else { max_next };
+        let mut next = break_at.unwrap_or(max_next);
         // Never split a letter from the vowel, sign or subscript that
         // belongs to it: back up to the start of its cluster, unless that
         // would leave the row empty.
-        if break_idx.is_none() {
+        if break_at.is_none() {
+            let first_len = content[pos..].chars().next().map_or(1, char::len_utf8);
             let mut at = next;
-            while at > index + 1 && at < chars.len() && joins_previous(chars[at - 1].1, chars[at].1)
-            {
-                at -= 1;
+            while at > pos + first_len && at < end {
+                let Some(before) = content[..at].chars().next_back() else {
+                    break;
+                };
+                let Some(here) = content[at..].chars().next() else {
+                    break;
+                };
+                if !joins_previous(before, here) {
+                    break;
+                }
+                at -= before.len_utf8();
             }
-            if at > index {
+            if at > pos {
                 next = at;
             }
         }
-
-        let row_end = if next < chars.len() {
-            chars[next].0
-        } else {
-            end
-        };
-        rows.push((row_start, row_end));
-        index = next;
+        emit((row_start, next));
+        pos = next;
     }
 }
 
