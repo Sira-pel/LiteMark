@@ -510,11 +510,12 @@ impl EntityInputHandler for LiteMarkApp {
     ) -> Option<Bounds<Pixels>> {
         let range = ordered_range(self.active_tab()?.range_from_utf16(&range_utf16));
         let paint = self.editor_paint.borrow();
-        let row = paint
+        // Rows are in source order: binary-search the last one starting at or
+        // before the range (none when the range precedes every row).
+        let after = paint
             .rows
-            .iter()
-            .rev()
-            .find(|row| row.byte_start <= range.start)?;
+            .partition_point(|row| row.byte_start <= range.start);
+        let row = paint.rows.get(after.checked_sub(1)?)?;
         if !row.cells.is_empty() {
             if let Some(cell) = row
                 .cells
