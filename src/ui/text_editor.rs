@@ -4431,6 +4431,29 @@ fn paint_ranges_mapped(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gutter_line_count_is_status_lines_plus_a_trailing_ending() {
+        for text in [
+            "",
+            "a",
+            "a\n",
+            "a\r\n",
+            "\n",
+            "\r",
+            "a\n\r",
+            "a\nb",
+            "a\r\nb\r\n",
+        ] {
+            let status = crate::model::document::compute_stats(text).lines;
+            let adjusted = status + usize::from(text.ends_with(['\n', '\r']));
+            assert_eq!(
+                adjusted,
+                super::logical_line_number(text, text.len()),
+                "{text:?}"
+            );
+        }
+    }
+
     use super::{
         compute_table_column_widths, editor_end_visual, editor_home_visual, index_in_rows,
         move_vertical_visual, wrap_cell_text, CellLine, EditorPaint, PaintCell, PaintRow,

@@ -630,8 +630,17 @@ impl LiteMarkApp {
     pub(super) fn report_missing(&mut self, message: &str, bulk: Option<BulkReport>) {
         match bulk {
             Some(bulk) => {
-                if let Some(message) = bulk.report.borrow_mut().record(Err(message.into())) {
+                let (message, finished) = {
+                    let mut report = bulk.report.borrow_mut();
+                    (report.record(Err(message.into())), report.is_finished())
+                };
+                if let Some(message) = message {
                     self.show_error(message);
+                }
+                // Earlier rows skipped their rescan expecting a later row to
+                // do it; a missing last row must not leave the tree stale.
+                if finished {
+                    self.rescan_workspace();
                 }
             }
             None => self.show_error(message),
