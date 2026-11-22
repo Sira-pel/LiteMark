@@ -39,7 +39,6 @@ impl DocumentTab {
                                 };
                                 let (open, close) = wrap_delimiters(&flags);
                                 formatted = format!("{open}{text}{close}");
-                                self.pending_formats = ActiveFormats::default();
                                 formatted.as_str()
                             } else {
                                 text
@@ -48,6 +47,10 @@ impl DocumentTab {
                             .insert_into_padded_table_cell(line_start, target_col, payload)
                             .is_some()
                         {
+                            // Only a successful insert uses up the pending formats.
+                            if payload.len() != text.len() {
+                                self.pending_formats = ActiveFormats::default();
+                            }
                             return;
                         }
                     }
