@@ -270,6 +270,36 @@ fn a_tab_closed_mid_save_closes_after_the_write_lands() {
 }
 
 #[std_test]
+fn a_tab_closed_mid_save_still_closes_after_a_second_ctrl_s() {
+    let root = fresh_root("closeresave");
+    let path = root.join("n.md");
+    let other = root.join("o.md");
+    std::fs::write(&path, "a\n").unwrap();
+    std::fs::write(&other, "o\n").unwrap();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_w, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, cx| {
+        open(app, &root, &other);
+        open(app, &root, &path);
+        app.active_tab_mut().unwrap().edit(0..0, "x ");
+        app.handle_save(cx);
+        let id = app.active_tab_id.clone();
+        app.handle_close_tab(id);
+        app.handle_save(cx);
+    });
+    cx.run_until_parked();
+    view.update(cx, |app, _| {
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x a\n");
+        assert!(app
+            .tabs
+            .iter()
+            .all(|t| t.file_path.as_deref() != Some(path.as_path())));
+        assert!(app.close_after_save.is_empty());
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
 fn a_tab_closed_mid_save_stays_open_when_the_save_conflicts() {
     let root = fresh_root("closeconflict");
     let path = root.join("n.md");

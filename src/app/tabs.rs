@@ -271,12 +271,12 @@ impl LiteMarkApp {
         }
         // A tab closed mid-write closes now if the write landed; on a
         // conflict or failure it stays open with its text.
-        if self.close_after_save.remove(id) && saved && !self.resave_after.contains(id) {
+        // A re-save queued meanwhile keeps the close pending until it lands.
+        let resave = self.resave_after.remove(id) && still_there && saved;
+        if resave && self.start_async_save(id, cx) {
+            // Its own finish decides the close.
+        } else if self.close_after_save.remove(id) && saved {
             self.handle_close_tab(id.to_string());
-        }
-        if self.resave_after.remove(id) && still_there && !self.start_async_save(id, cx) {
-            // Nothing left to write asynchronously (say the file was removed).
-            self.resave_after.remove(id);
         }
         if self.close_when_saved && self.saves_in_flight.is_empty() {
             self.close_when_saved = false;
