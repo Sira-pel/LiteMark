@@ -138,52 +138,81 @@ fn with_image_widths<'a>(
 ) -> Vec<Event<'a>> {
     let mut out: Vec<Event<'a>> = Vec::new();
     type Size = Option<(u32, Option<u32>)>;
-    let mut open: Option<(usize, String, Size)> = None;
+    // One entry per image being read; images can nest in another's alt text.
+    let mut open: Vec<(usize, String, Size)> = Vec::new();
     for (event, range) in events {
         if matches!(event, Event::Start(Tag::Image { .. })) {
-            open = Some((out.len(), String::new(), written_size(markdown, &range)));
-        } else if let Some((_, alt, _)) = open.as_mut() {
+            open.push((out.len(), String::new(), written_size(markdown, &range)));
+        } else if let Some((_, alt, _)) = open.last_mut() {
             match &event {
                 Event::Text(t) | Event::Code(t) => alt.push_str(t),
                 Event::SoftBreak | Event::HardBreak => alt.push(' '),
                 _ => {}
             }
         }
-        if let (Event::End(TagEnd::Image), Some((at, alt, size))) = (&event, &open) {
-            let at = *at;
-            let suffix = size.map_or(String::new(), |(w, h)| size_suffix(Some(w), h));
-            let plain = alt.strip_suffix(suffix.as_str()).unwrap_or(alt);
-            if let (
-                Some((width, height)),
-                Event::Start(Tag::Image {
-                    dest_url, title, ..
-                }),
-            ) = (size, &out[at])
-            {
-                let mut tag = format!(
-                    "<img src=\"{}\" alt=\"{}\"",
-                    escape_html_text(dest_url),
-                    escape_html_text(plain)
-                );
-                if !title.is_empty() {
-                    tag.push_str(&format!(" title=\"{}\"", escape_html_text(title)));
+        if matches!(event, Event::End(TagEnd::Image)) {
+            if let Some((at, alt, size)) = open.pop() {
+                let suffix = size.map_or(String::new(), |(w, h)| size_suffix(Some(w), h));
+                let plain = alt.strip_suffix(suffix.as_str()).unwrap_or(&alt).to_string();
+                // The enclosing image's alt text includes this one's.
+                if let Some((_, outer, _)) = open.last_mut() {
+                    outer.push_str(&plain);
                 }
-                match height {
-                    // Both sizes stretch the picture; the ratio holds when the
-                    // page is narrower than the width.
-                    Some(height) => tag.push_str(&format!(
-                        " width=\"{width}\" height=\"{height}\" style=\"height: auto; aspect-ratio: {width} / {height}\" />"
-                    )),
-                    None => tag.push_str(&format!(" width=\"{width}\" />")),
+                if let (
+                    Some((width, height)),
+                    Event::Start(Tag::Image {
+                        dest_url, title, ..
+                    }),
+                ) = (size, &out[at])
+                {
+                    let mut tag = format!(
+                        "<img src=\"{}\" alt=\"{}\"",
+                        escape_img_src(dest_url),
+                        escape_html_text(&plain)
+                    );
+                    if !title.is_empty() {
+                        tag.push_str(&format!(" title=\"{}\"", escape_html_text(title)));
+                    }
+                    match height {
+                        // Both sizes stretch the picture; the ratio holds when the
+                        // page is narrower than the width.
+                        Some(height) => tag.push_str(&format!(
+                            " width=\"{width}\" height=\"{height}\" style=\"height: auto; aspect-ratio: {width} / {height}\" />"
+                        )),
+                        None => tag.push_str(&format!(" width=\"{width}\" />")),
+                    }
+                    out.truncate(at);
+                    out.push(Event::Html(CowStr::from(tag)));
+                    continue;
                 }
-                out.truncate(at);
-                out.push(Event::Html(CowStr::from(tag)));
-                open = None;
-                continue;
             }
-            open = None;
         }
         out.push(event);
+    }
+    out
+}
+
+/// An image URL for an HTML attribute. `data:` URIs pass through; anything
+/// else is percent-encoded the way the parser's own `<img>` output is, so a
+/// path with spaces or quotes stays one valid URL.
+fn escape_img_src(url: &str) -> String {
+    if url.starts_with("data:") {
+        return escape_html_text(url);
+    }
+    let mut out = String::with_capacity(url.len());
+    for b in url.bytes() {
+        match b {
+            b'&' => out.push_str("&amp;"),
+            b'\'' => out.push_str("&#x27;"),
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'~' | b':' | b'/' | b'?' | b'#' | b'@' | b'!' | b'$'
+            | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b'%' | b'[' | b']' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
     }
     out
 }
@@ -246,6 +275,7 @@ pub fn export_to_html_in(
     table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
     th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
     th {{ background: #f8f8f8; font-weight: 600; }}
+    img {{ max-width: 100%; height: auto; }}
     ul.contains-task-list {{ list-style-type: none; padding-left: 0; }}
     li.task-list-item {{ display: flex; align-items: center; gap: 8px; }}
   </style>
@@ -283,26 +313,32 @@ pub fn export_to_plaintext(markdown: &str) -> String {
     let mut text_output = String::new();
     let mut list_stack: Vec<Option<u64>> = Vec::new();
     let mut first_cell_in_row = false;
-    // The `|200` to cut from the alt text of the image being read.
-    let mut width_suffix: Option<String> = None;
-    let mut in_image = false;
+    // One entry per image being read: its alt text so far and the `|200` to
+    // cut from it once the image ends.
+    let mut images: Vec<(String, Option<String>)> = Vec::new();
 
     for (event, range) in parser {
         match event {
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { .. }) => {
-                in_image = true;
-                width_suffix = written_size(markdown, &range).map(|(w, h)| size_suffix(Some(w), h));
+                let suffix = written_size(markdown, &range).map(|(w, h)| size_suffix(Some(w), h));
+                images.push((String::new(), suffix));
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Image) => {
-                in_image = false;
-                width_suffix = None;
+                if let Some((alt, suffix)) = images.pop() {
+                    let text = suffix
+                        .as_deref()
+                        .and_then(|suffix| alt.strip_suffix(suffix))
+                        .unwrap_or(&alt);
+                    match images.last_mut() {
+                        Some((outer, _)) => outer.push_str(text),
+                        None => text_output.push_str(text),
+                    }
+                }
             }
-            pulldown_cmark::Event::Text(t) if in_image => {
-                let text = width_suffix
-                    .as_deref()
-                    .and_then(|suffix| t.strip_suffix(suffix))
-                    .unwrap_or(&t);
-                text_output.push_str(text);
+            pulldown_cmark::Event::Text(t) if !images.is_empty() => {
+                if let Some((alt, _)) = images.last_mut() {
+                    alt.push_str(&t);
+                }
             }
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::List(start)) => {
                 if !list_stack.is_empty() && !text_output.ends_with('\n') {
@@ -594,5 +630,32 @@ mod tests {
         assert!(!markdown_to_html_body_in(md, Some(&note), None).contains("data:"));
         assert!(markdown_to_html_body_in(md, Some(&note), Some(&root)).contains("data:image/png"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sized_image_src_is_percent_encoded() {
+        let html = markdown_to_html_body_in("![a|100](<my pic \"x\".png>)", None, None);
+        assert!(html.contains(r#"src="my%20pic%20%22x%22.png""#), "{html}");
+        assert!(html.contains(r#"width="100""#), "{html}");
+    }
+
+    #[test]
+    fn nested_sized_image_alt_excludes_inner_width() {
+        let html = markdown_to_html_body_in("![a ![b|50](in.png) c|200](out.png)", None, None);
+        assert!(
+            html.contains(r#"<img src="out.png" alt="a b c" width="200" />"#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn html_export_makes_images_responsive() {
+        assert!(export_to_html("t", "x").contains("img { max-width: 100%; height: auto; }"));
+    }
+
+    #[test]
+    fn plaintext_export_strips_the_width_once_from_split_alt_text() {
+        assert_eq!(export_to_plaintext("![a *b*|200](c.png)").trim(), "a b");
+        assert_eq!(export_to_plaintext("![x|y|200](c.png)").trim(), "x|y");
     }
 }
