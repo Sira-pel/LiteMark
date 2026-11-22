@@ -224,7 +224,7 @@ fn moving_or_trashing_a_note_that_is_still_saving_is_refused() {
             .id
             .clone();
         let dest_id = app.workspace.folders[0].id.clone();
-        let outcome = app.move_or_copy_note(&file_id, Some(dest_id), false, false);
+        let outcome = app.move_or_copy_note(&file_id, Some(dest_id.to_string()), false, false);
         assert!(matches!(outcome, DropOutcome::Failed(_)), "move must wait");
         app.trash_file(&file_id, cx);
         // Still listed and open: the trash was refused, not started.
