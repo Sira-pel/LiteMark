@@ -85,11 +85,10 @@ impl LiteMarkApp {
     ) {
         // A note already open with unsaved edits keeps them: opening it only
         // switches to it, so its file is not read at all.
-        if self
-            .tabs
-            .iter()
-            .any(|tab| tab.is_modified && tab.file_path.as_deref() == Some(path.as_path()))
-        {
+        if self.tabs.iter().any(|tab| {
+            (tab.is_modified || self.saves_in_flight.contains(&tab.id))
+                && tab.file_path.as_deref() == Some(path.as_path())
+        }) {
             then(self, Ok(String::new()), cx);
             return;
         }
@@ -117,10 +116,22 @@ impl LiteMarkApp {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { read_note(&path) })
+                .spawn({
+                    let path = path.clone();
+                    async move { read_note(&path) }
+                })
                 .await;
             this.update(cx, |this, cx| {
                 this.note_loading = None;
+                // Renamed or trashed while it loaded: opening it would point
+                // a tab at a path that is gone, and saving would recreate it.
+                let result = result.and_then(|text| {
+                    if path.exists() {
+                        Ok(text)
+                    } else {
+                        Err(format!("{} no longer exists.", path.display()))
+                    }
+                });
                 then(this, result, cx);
                 if let Some(next) = this.read_queue.pop_front() {
                     this.start_big_read(next, cx);
@@ -222,6 +233,7 @@ impl LiteMarkApp {
         cx: &mut Context<Self>,
     ) {
         self.saves_in_flight.remove(id);
+        let saved = matches!(outcome, AsyncSave::Saved(_));
         // The note may have been closed or renamed meanwhile; the write
         // itself still happened, so only update a tab that is still that file.
         let still_there = self
@@ -255,6 +267,13 @@ impl LiteMarkApp {
                 }
                 self.show_file_error(err);
                 self.resave_after.remove(id);
+            }
+        }
+        // A tab closed mid-write closes now if the write landed; on a
+        // conflict or failure it stays open with its text.
+        if self.close_after_save.remove(id) {
+            if saved && !self.resave_after.contains(id) {
+                self.handle_close_tab(id.to_string());
             }
         }
         if self.resave_after.remove(id) && still_there && !self.start_async_save(id, cx) {
@@ -393,7 +412,9 @@ impl LiteMarkApp {
                 // shows it if it is newer; a tab with edits keeps them, and
                 // its next save asks because the file changed.
                 let tab = &mut self.tabs[index];
-                if !tab.is_modified {
+                // (A note still being saved counts as modified: the file is
+                // about to be overwritten, so what's on disk is the old text.)
+                if !tab.is_modified && !self.saves_in_flight.contains(&id) {
                     // `content` is the raw file, BOM included.
                     if tab.file_text_ref() != content.as_str() {
                         tab.reload(content);

@@ -246,6 +246,8 @@ pub struct LiteMarkApp {
     saves_in_flight: std::collections::HashSet<String>,
     /// Tabs that got another Ctrl+S while saving: write again afterwards.
     resave_after: std::collections::HashSet<String>,
+    /// Tabs to close as soon as their save has landed (closed mid-write).
+    close_after_save: std::collections::HashSet<String>,
     /// The user asked to close while a save was still writing.
     close_when_saved: bool,
     pub selecting: bool,
@@ -687,6 +689,7 @@ impl LiteMarkApp {
             read_queue: Default::default(),
             saves_in_flight: Default::default(),
             resave_after: Default::default(),
+            close_after_save: Default::default(),
             close_when_saved: false,
             selecting: false,
             zoom_epoch: 0,
@@ -851,6 +854,7 @@ impl LiteMarkApp {
             read_queue: Default::default(),
             saves_in_flight: Default::default(),
             resave_after: Default::default(),
+            close_after_save: Default::default(),
             close_when_saved: false,
             selecting: false,
             zoom_epoch: 0,

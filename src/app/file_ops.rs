@@ -543,6 +543,8 @@ impl LiteMarkApp {
         // background. On failure the closed tabs are restored and the
         // rescan brings the note back — trashing is a rename, so a failed
         // trash loses nothing.
+        // A scan that started before this is out of date: it would list the note again.
+        self.scan_generation += 1;
         self.workspace.files.retain(|f| f.path != file.path);
         let closed = self.optimistic_close_tabs(|path| path == file.path.as_path());
         // The selection pointed at the removed note — clear it (restored on
@@ -678,6 +680,7 @@ impl LiteMarkApp {
         }
         // Same optimistic removal as trash_file, for the whole subtree.
         let prefix = folder.path.clone();
+        self.scan_generation += 1;
         self.workspace
             .folders
             .retain(|f| !f.path.starts_with(&prefix));

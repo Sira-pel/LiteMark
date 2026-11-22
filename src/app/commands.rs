@@ -371,6 +371,12 @@ impl LiteMarkApp {
     }
 
     pub fn handle_close_tab(&mut self, id: String) {
+        // Its Ctrl+S is still writing: close once the write has landed, so a
+        // failed write leaves the note (and its text) open.
+        if self.saves_in_flight.contains(&id) {
+            self.close_after_save.insert(id);
+            return;
+        }
         let snaps: Vec<TabSnap<'_>> = self
             .tabs
             .iter()
