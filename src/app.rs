@@ -140,6 +140,9 @@ pub struct LiteMarkApp {
     /// The sidebar tree for a workspace generation and pending create row,
     /// so a render (each keystroke, hover or scroll) doesn't rebuild it.
     sidebar_tree: RefCell<Option<SidebarTreeCache>>,
+    /// Search results for one `(workspace generation, query)`.
+    #[allow(clippy::type_complexity)]
+    sidebar_search: RefCell<Option<(u64, String, std::rc::Rc<Vec<SidebarTreeItem>>)>>,
     pub settings: EditorSettings,
     pub show_sidebar: bool,
     pub show_find_replace: bool,
@@ -602,6 +605,7 @@ impl LiteMarkApp {
             sidebar_clipboard_cut: false,
             workspace: workspace.into(),
             sidebar_tree: RefCell::new(None),
+            sidebar_search: RefCell::new(None),
             settings,
             show_sidebar,
             show_find_replace: false,
@@ -751,6 +755,7 @@ impl LiteMarkApp {
             }
             .into(),
             sidebar_tree: RefCell::new(None),
+            sidebar_search: RefCell::new(None),
             // Never touch the real settings file from a test.
             settings: EditorSettings {
                 check_for_updates: false,

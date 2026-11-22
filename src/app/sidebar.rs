@@ -61,6 +61,51 @@ impl LiteMarkApp {
         items
     }
 
+    /// What the sidebar lists: the folder tree, or the search matches when a
+    /// query is typed. Search results are cached per workspace generation
+    /// and query, so a redraw doesn't filter every note again.
+    pub(super) fn sidebar_rows(&self) -> std::rc::Rc<Vec<SidebarTreeItem>> {
+        let query = self.search_query.trim();
+        if query.is_empty() {
+            return self.sidebar_tree();
+        }
+        let generation = self.workspace.generation();
+        let mut cache = self.sidebar_search.borrow_mut();
+        if let Some((cached_gen, cached_query, items)) = cache.as_ref() {
+            if *cached_gen == generation && cached_query == &self.search_query {
+                return items.clone();
+            }
+        }
+        // Same matching the sidebar used to do on every frame, as row indices.
+        let query = query.to_lowercase();
+        let folders = self
+            .workspace
+            .folders
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name.to_lowercase().contains(&query))
+            .map(|(index, _)| SidebarTreeItem::Folder {
+                index: index as u32,
+                depth: 0,
+            });
+        let files = self
+            .workspace
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                let stem = f.path.file_stem().and_then(|s| s.to_str());
+                stem.unwrap_or(&f.name).to_lowercase().contains(&query)
+            })
+            .map(|(index, _)| SidebarTreeItem::File {
+                index: index as u32,
+                depth: 0,
+            });
+        let items = std::rc::Rc::new(folders.chain(files).collect::<Vec<_>>());
+        *cache = Some((generation, self.search_query.clone(), items.clone()));
+        items
+    }
+
     /// Flatten the visible sidebar tree into selection targets, in row order.
     pub(super) fn sidebar_visible_targets(&self) -> Vec<SidebarTarget> {
         if !self.search_query.trim().is_empty() {

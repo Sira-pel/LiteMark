@@ -26,7 +26,7 @@ type OpenFn = Box<dyn Fn(&mut Window, &mut App)>;
 type JumpFn = std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 pub struct OutlineProps {
-    pub items: Vec<OutlineItem>,
+    pub items: std::sync::Arc<Vec<OutlineItem>>,
     pub current: Option<usize>,
     /// Open card (hovered or pinned) instead of the strip.
     pub expanded: bool,
@@ -74,7 +74,6 @@ fn strip_width(level: u8) -> f32 {
 pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
     let area = f32::from(props.area_height);
     let area_w = f32::from(props.area_width);
-    let card_w = card_width(area_w, &props.items);
     let on_hover = props.on_hover;
     let on_close = props.on_close;
     let root = div()
@@ -85,6 +84,7 @@ pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
         .top(px(OUTLINE_EDGE))
         .on_hover(move |hovered, window, cx| on_hover(*hovered, window, cx));
     if props.expanded {
+        let card_w = card_width(area_w, &props.items);
         let max_h = (area - 2.0 * OUTLINE_EDGE).max(80.0);
         let rows = props.items.iter().enumerate().map(|(i, item)| {
             let offset = item.offset;
