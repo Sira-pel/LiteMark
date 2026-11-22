@@ -152,7 +152,7 @@ fn a_small_note_opens_at_once() {
 }
 
 #[std_test]
-fn a_big_note_opens_in_the_background_and_a_second_click_is_ignored() {
+fn big_notes_open_in_the_background_one_after_another() {
     let root = fresh_root("readbig");
     let path = root.join("big.md");
     let other = root.join("other.md");
@@ -166,18 +166,38 @@ fn a_big_note_opens_in_the_background_and_a_second_click_is_ignored() {
         app.open_path(path.clone(), cx);
         assert_eq!(app.tabs.len(), before, "not opened yet");
         assert_eq!(app.note_loading.as_deref(), Some(path.as_path()));
-        // Clicking another while one loads is refused, not queued.
+        // A second note arriving meanwhile waits its turn; it isn't dropped.
         app.open_path(other.clone(), cx);
-        assert_eq!(app.note_loading.as_deref(), Some(path.as_path()));
+        assert_eq!(app.read_queue.len(), 1);
     });
     cx.run_until_parked();
     view.update(cx, |app, _| {
-        assert!(app.note_loading.is_none());
-        assert_eq!(app.active_tab().unwrap().content, "big note\n");
-        assert!(app
+        assert!(app.note_loading.is_none() && app.read_queue.is_empty());
+        let open: Vec<_> = app
             .tabs
             .iter()
-            .all(|t| t.file_path.as_deref() != Some(other.as_path())));
+            .filter_map(|t| t.file_path.clone())
+            .collect();
+        assert!(open.contains(&path) && open.contains(&other), "{open:?}");
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
+fn reopening_a_modified_note_does_not_read_its_file() {
+    let root = fresh_root("readmod");
+    let path = root.join("n.md");
+    std::fs::write(&path, "disk\n").unwrap();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_w, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, cx| {
+        app.open_path(path.clone(), cx);
+        app.active_tab_mut().unwrap().edit(0..0, "mine ");
+        app.async_read_bytes = 0;
+        app.open_path(path.clone(), cx);
+        // No background read, and the unsaved edit is kept.
+        assert!(app.note_loading.is_none());
+        assert_eq!(app.active_tab().unwrap().content, "mine disk\n");
     });
     let _ = std::fs::remove_dir_all(&root);
 }

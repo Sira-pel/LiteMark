@@ -5,6 +5,12 @@ use super::*;
 /// How long after a tab switch the tab list is written to settings.json.
 const TAB_SETTINGS_SAVE_DELAY_MS: u64 = 1000;
 
+/// A big note waiting for its turn to be read in the background.
+pub(super) type PendingRead = (
+    PathBuf,
+    Box<dyn FnOnce(&mut LiteMarkApp, Result<String, String>, &mut Context<LiteMarkApp>)>,
+);
+
 /// How a background save of one note ended.
 pub(super) enum AsyncSave {
     Saved(Option<DiskVersion>),
@@ -68,24 +74,40 @@ impl LiteMarkApp {
 
     /// Read a note and hand it to `then`. Small notes are read on the spot
     /// (under a millisecond); a big one is read on a background thread, with
-    /// a toast, so opening it doesn't freeze the window. One big read at a
-    /// time.
+    /// a toast, so opening it doesn't freeze the window. Big reads run one
+    /// at a time and wait their turn, so several notes opened together all
+    /// open.
     pub(super) fn read_note_then(
         &mut self,
         path: PathBuf,
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Self, Result<String, String>, &mut Context<Self>) + 'static,
     ) {
+        // A note already open with unsaved edits keeps them: opening it only
+        // switches to it, so its file is not read at all.
+        if self
+            .tabs
+            .iter()
+            .any(|tab| tab.is_modified && tab.file_path.as_deref() == Some(path.as_path()))
+        {
+            then(self, Ok(String::new()), cx);
+            return;
+        }
         let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > self.async_read_bytes);
         if !big {
             let result = read_note(&path);
             then(self, result, cx);
             return;
         }
+        let job: PendingRead = (path, Box::new(then));
         if self.note_loading.is_some() {
-            self.show_toast("Still opening a note…", cx);
+            self.read_queue.push_back(job);
             return;
         }
+        self.start_big_read(job, cx);
+    }
+
+    fn start_big_read(&mut self, (path, then): PendingRead, cx: &mut Context<Self>) {
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -100,6 +122,9 @@ impl LiteMarkApp {
             this.update(cx, |this, cx| {
                 this.note_loading = None;
                 then(this, result, cx);
+                if let Some(next) = this.read_queue.pop_front() {
+                    this.start_big_read(next, cx);
+                }
             })
             .ok();
         })

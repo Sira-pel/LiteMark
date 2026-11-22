@@ -240,6 +240,8 @@ pub struct LiteMarkApp {
     async_read_bytes: u64,
     /// The big note being read in the background, if any.
     note_loading: Option<PathBuf>,
+    /// Big notes waiting for the one being read.
+    read_queue: std::collections::VecDeque<tabs::PendingRead>,
     /// Tabs whose Ctrl+S is writing on a background thread.
     saves_in_flight: std::collections::HashSet<String>,
     /// Tabs that got another Ctrl+S while saving: write again afterwards.
@@ -682,6 +684,7 @@ impl LiteMarkApp {
             allow_window_close: false,
             async_read_bytes: ASYNC_READ_BYTES,
             note_loading: None,
+            read_queue: Default::default(),
             saves_in_flight: Default::default(),
             resave_after: Default::default(),
             close_when_saved: false,
@@ -845,6 +848,7 @@ impl LiteMarkApp {
             allow_window_close: false,
             async_read_bytes: ASYNC_READ_BYTES,
             note_loading: None,
+            read_queue: Default::default(),
             saves_in_flight: Default::default(),
             resave_after: Default::default(),
             close_when_saved: false,

@@ -2185,7 +2185,6 @@ fn gfm_table_columns_follow_the_delimiter() {
             r#"line[1] Paragraph display="| c | d |" code=[]"#,
         ],
     );
-    drop(check);
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
@@ -3405,7 +3404,6 @@ fn table_membership_kinds_and_cells() {
         ],
         false,
     );
-    drop(check);
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
