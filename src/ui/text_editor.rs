@@ -252,6 +252,8 @@ pub struct LayoutCache {
     mono_widths: Rc<CharWidths>,
     /// The fonts and size the widths were measured for.
     widths_key: Option<(SharedString, SharedString, u32)>,
+    /// Width of a `0` in the prose font, by `(font family, size bits)`.
+    char_width: Option<(SharedString, u32, Pixels)>,
     /// WYSIWYG: each table's width-cache key, for a parse generation and a
     /// font key (the same hash of an empty table).
     table_keys: Option<(u64, u64, Rc<TableKeys>)>,
@@ -1484,20 +1486,43 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
     ) -> Self::PrepaintState {
         let base_font = font(self.font_family.clone());
         let mono_font = font(self.mono_font_family.clone());
-        let sample = window.text_system().shape_line(
-            "0".into(),
-            self.font_size,
-            &[TextRun {
-                len: 1,
-                font: base_font.clone(),
-                color: self.text_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        );
-        let char_width = sample.width.max(px(1.0));
+        let char_width = {
+            let cached = self
+                .paint
+                .borrow()
+                .layout_cache
+                .char_width
+                .as_ref()
+                .filter(|(family, size, _)| {
+                    *family == self.font_family && *size == f32::from(self.font_size).to_bits()
+                })
+                .map(|(_, _, width)| *width);
+            match cached {
+                Some(width) => width,
+                None => {
+                    let sample = window.text_system().shape_line(
+                        "0".into(),
+                        self.font_size,
+                        &[TextRun {
+                            len: 1,
+                            font: base_font.clone(),
+                            color: self.text_color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    );
+                    let width = sample.width.max(px(1.0));
+                    self.paint.borrow_mut().layout_cache.char_width = Some((
+                        self.font_family.clone(),
+                        f32::from(self.font_size).to_bits(),
+                        width,
+                    ));
+                    width
+                }
+            }
+        };
         let font_size = self.font_size;
         let measure = |window: &mut Window| {
             // Widths round up, so a long row never comes out wider than the
