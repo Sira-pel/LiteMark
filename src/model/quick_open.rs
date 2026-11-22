@@ -557,7 +557,7 @@ mod tests {
             let i: usize = path.file_stem()?.to_str()?[1..].parse().ok()?;
             match i % 5 {
                 4 => None,
-                _ if i % 3 == 0 => Some("Hit one\nx\nhit two\nHIT three\nhit four".into()),
+                _ if i.is_multiple_of(3) => Some("Hit one\nx\nhit two\nHIT three\nhit four".into()),
                 _ => Some(format!("line {i}\nno match here")),
             }
         };
