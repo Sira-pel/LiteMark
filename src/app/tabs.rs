@@ -131,19 +131,14 @@ impl LiteMarkApp {
         }
         self.record_disk_version(id);
         // Re-saving a file the sidebar already lists changes nothing in the
-        // tree, so update its timestamp instead of rescanning the whole
-        // workspace on the UI thread on every Ctrl+S.
-        let listed = (previous_path.as_ref() == Some(&saved_path))
-            .then(|| {
-                self.workspace
-                    .files
-                    .iter_mut()
-                    .find(|file| file.path == saved_path)
-            })
-            .flatten();
-        if let Some(file) = listed {
-            file.updated_at = modified_secs(&saved_path).unwrap_or(file.updated_at);
-        } else {
+        // tree, so skip rescanning the workspace on every Ctrl+S.
+        let listed = previous_path.as_ref() == Some(&saved_path)
+            && self
+                .workspace
+                .files
+                .iter()
+                .any(|file| file.path == saved_path);
+        if !listed {
             self.rescan_workspace();
         }
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {

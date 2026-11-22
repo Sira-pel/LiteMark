@@ -278,6 +278,9 @@ impl DocumentTab {
     }
 
     pub fn set_view_mode(&mut self, mode: ViewMode) {
+        if self.view_mode == mode {
+            return;
+        }
         self.view_mode = mode;
         self.snap_caret_to_visible_line_end();
         self.refresh_cursor();

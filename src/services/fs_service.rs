@@ -1071,15 +1071,6 @@ fn has_binary_extension(name: &str) -> bool {
 /// Folders the scan never descends into: VCS metadata and build output.
 const SKIPPED_ENTRIES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store", "node_modules", "target"];
 
-/// Modification time of `path` in Unix seconds, as the sidebar stores it.
-pub fn modified_secs(path: &Path) -> Option<u64> {
-    let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
-    modified
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
-}
-
 /// Folders nested deeper than this below the notes folder are not listed.
 pub const MAX_SCAN_DEPTH: usize = 64;
 /// The scan stops after listing this many folders and notes.
@@ -1103,10 +1094,7 @@ struct ScanEntry {
 
 enum ScanKind {
     Folder,
-    File {
-        file_type: FileType,
-        updated_at: u64,
-    },
+    File { file_type: FileType },
 }
 
 /// The listed children of `dir`, sorted by name. Unreadable folders are
@@ -1154,17 +1142,7 @@ fn listed_entry(entry: fs::DirEntry, show_code_files: bool) -> Option<ScanEntry>
         if !listed {
             return None;
         }
-        let updated_at = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        ScanKind::File {
-            file_type,
-            updated_at,
-        }
+        ScanKind::File { file_type }
     } else {
         return None;
     };
@@ -1246,16 +1224,12 @@ fn scan_workspace_dir_limited(
                     is_open: true,
                 });
             }
-            ScanKind::File {
-                file_type,
-                updated_at,
-            } => files.push(WorkspaceFile {
+            ScanKind::File { file_type } => files.push(WorkspaceFile {
                 id: format!("file-{}", entry.path.display()),
                 name: entry.name,
                 folder_id: parent_id,
                 path: entry.path,
                 file_type,
-                updated_at,
             }),
         }
     }

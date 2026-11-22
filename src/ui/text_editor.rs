@@ -1246,6 +1246,10 @@ pub struct EditorElement<V: 'static> {
     pub view_mode: ViewMode,
     pub selection: Range<usize>,
     pub marked: Option<Range<usize>>,
+    /// Line count and caret line the tab already tracks; saves a full-file
+    /// scan per frame in Raw mode. `None` falls back to scanning.
+    pub line_count: Option<usize>,
+    pub cursor_line: Option<usize>,
     pub find_hits: Rc<[Range<usize>]>,
     pub active_find: Option<usize>,
     pub show_line_numbers: bool,
@@ -1535,11 +1539,13 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             )
         };
         // The parse is cached per revision, so this is O(1) per redraw.
-        let line_count = if self.parsed.lines.is_empty() {
+        let line_count = if !self.parsed.lines.is_empty() {
+            self.parsed.lines.len()
+        } else if let Some(count) = self.line_count {
+            count
+        } else {
             let content = self.entity.read(cx).editor_content();
             logical_line_number(content, content.len())
-        } else {
-            self.parsed.lines.len()
         };
         let inset = gutter_pad(bounds.size.width);
         let (gutter_box, gutter) = self.gutter(char_width, line_count, inset);
@@ -1620,8 +1626,10 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             let mut quads = Vec::new();
             let mut cursor = None;
             let mut line_number = 0usize;
-            let caret_line = (self.numbered() && self.selection.is_empty())
-                .then(|| logical_line_number(content, self.selection.start));
+            let caret_line = (self.numbered() && self.selection.is_empty()).then(|| {
+                self.cursor_line
+                    .unwrap_or_else(|| logical_line_number(content, self.selection.start))
+            });
             let current_line_color = Hsla {
                 a: self.selection_color.a * 0.35,
                 ..self.selection_color
@@ -3730,7 +3738,15 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 table.viewport = Some(bounds);
             }
         }
-        let occupied = super::table_chrome::occupied_content(&self.paint.borrow().rows);
+        let occupied = {
+            let paint = self.paint.borrow();
+            // Only the hover pills consult occupied content.
+            if paint.tables.is_empty() || self.table_hover.is_none() {
+                Vec::new()
+            } else {
+                super::table_chrome::occupied_content(&paint.rows)
+            }
+        };
         super::table_chrome::paint(
             window,
             &self.paint.borrow().tables,

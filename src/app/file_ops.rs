@@ -573,7 +573,13 @@ impl LiteMarkApp {
             // the rows finish in no set order.
             self.restore_optimistic_close(closed, bulk.is_none(), cx);
         }
-        self.rescan_workspace();
+        // A bulk trash rescans once, after its last row, not once per row.
+        if bulk
+            .as_ref()
+            .is_none_or(|bulk| bulk.report.borrow().is_last_pending())
+        {
+            self.rescan_workspace();
+        }
         match bulk {
             Some(bulk) => self.record_bulk(&bulk, result, cx),
             None => {

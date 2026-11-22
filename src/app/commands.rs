@@ -408,7 +408,8 @@ impl LiteMarkApp {
                 return;
             }
         }
-        match self.save_tab(&id) {
+        // Just verified `Unchanged`; don't hash the file a second time.
+        match self.overwrite_tab(&id) {
             Ok(title) => self.show_toast(format!("Saved {title}"), cx),
             Err(err) => self.show_file_error(err),
         }

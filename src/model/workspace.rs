@@ -37,7 +37,6 @@ pub struct WorkspaceFile {
     pub folder_id: Option<Arc<str>>,
     pub path: PathBuf,
     pub file_type: FileType,
-    pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,7 +162,6 @@ mod tests {
             folder_id: folder_id.map(Arc::from),
             path: PathBuf::from(format!("/tmp/{}", name)),
             file_type: FileType::Markdown,
-            updated_at: 0,
         }
     }
 

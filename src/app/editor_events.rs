@@ -152,7 +152,11 @@ impl LiteMarkApp {
         }
         let hit = {
             let paint = self.editor_paint.borrow();
-            let occupied = occupied_content(&paint.rows);
+            let occupied = if paint.tables.is_empty() {
+                Vec::new()
+            } else {
+                occupied_content(&paint.rows)
+            };
             hit_test_occupied(&paint.tables, event.position, &occupied)
         };
         let Some(hit) = hit else {
@@ -257,7 +261,11 @@ impl LiteMarkApp {
         let previous = self.table_hover.clone();
         let (hover, hot) = {
             let paint = self.editor_paint.borrow();
-            let occupied = occupied_content(&paint.rows);
+            let occupied = if paint.tables.is_empty() {
+                Vec::new()
+            } else {
+                occupied_content(&paint.rows)
+            };
             let hit = hit_test_occupied(&paint.tables, at, &occupied);
             let hover = hover_from_hit(&paint.tables, at, previous.as_ref(), hit.as_ref());
             (hover, hit.as_ref().map(TableHot::from))
@@ -715,21 +723,34 @@ impl LiteMarkApp {
         for tab in self.tabs.iter_mut().filter(|t| t.id != active_id) {
             tab.release_parse_cache();
         }
-        let (content_key, parsed, selection, marked) = if let Some(tab) = self.active_tab_mut() {
-            let parsed = if tab.file_type.supports_markdown_features() {
-                tab.parsed()
+        let (content_key, parsed, selection, marked, line_count, cursor_line) =
+            if let Some(tab) = self.active_tab_mut() {
+                tab.ensure_stats();
+                let parsed = if tab.file_type.supports_markdown_features() {
+                    tab.parsed()
+                } else {
+                    empty_parsed_document()
+                };
+                (
+                    (tab.id.clone(), tab.revision),
+                    parsed,
+                    tab.selection_range(),
+                    tab.marked_range.clone(),
+                    // The gutter counts the empty line after a final line
+                    // ending; `line_count` (the status bar's) does not.
+                    Some(tab.line_count + usize::from(tab.content.ends_with(['\n', '\r']))),
+                    Some(tab.cursor_line),
+                )
             } else {
-                empty_parsed_document()
+                (
+                    (String::new(), 0),
+                    empty_parsed_document(),
+                    0..0,
+                    None,
+                    None,
+                    None,
+                )
             };
-            (
-                (tab.id.clone(), tab.revision),
-                parsed,
-                tab.selection_range(),
-                tab.marked_range.clone(),
-            )
-        } else {
-            ((String::new(), 0), empty_parsed_document(), 0..0, None)
-        };
         let font_family = match view_mode {
             ViewMode::Wysiwyg => Theme::FONT_PROSE.into(),
             ViewMode::Raw => Theme::FONT_MONO.into(),
@@ -744,6 +765,8 @@ impl LiteMarkApp {
             view_mode,
             selection,
             marked,
+            line_count,
+            cursor_line,
             find_hits: self.find_hits.clone(),
             active_find: self.find_index,
             show_line_numbers,
