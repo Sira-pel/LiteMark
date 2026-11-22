@@ -3587,7 +3587,12 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             text_cursor,
             window.insert_hitbox(bounds, HitboxBehavior::Normal),
         )];
-        for (_, b) in &pictures {
+        // Pictures wholly above or below the viewport can't be hovered.
+        let viewport = window.content_mask().bounds;
+        for (_, b) in pictures
+            .iter()
+            .filter(|(_, b)| b.bottom() >= viewport.top() && b.top() <= viewport.bottom())
+        {
             cursor_hitboxes.push((
                 CursorStyle::Arrow,
                 window.insert_hitbox(*b, HitboxBehavior::Normal),
