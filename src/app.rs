@@ -236,6 +236,12 @@ pub struct LiteMarkApp {
     pub applied_focus: Option<FocusSlot>,
     pub close_hook_installed: bool,
     pub allow_window_close: bool,
+    /// Tabs whose Ctrl+S is writing on a background thread.
+    saves_in_flight: std::collections::HashSet<String>,
+    /// Tabs that got another Ctrl+S while saving: write again afterwards.
+    resave_after: std::collections::HashSet<String>,
+    /// The user asked to close while a save was still writing.
+    close_when_saved: bool,
     pub selecting: bool,
     pub zoom_epoch: u64,
     pub toast_epoch: u64,
@@ -670,6 +676,9 @@ impl LiteMarkApp {
             applied_focus: None,
             close_hook_installed: false,
             allow_window_close: false,
+            saves_in_flight: Default::default(),
+            resave_after: Default::default(),
+            close_when_saved: false,
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
@@ -828,6 +837,9 @@ impl LiteMarkApp {
             applied_focus: None,
             close_hook_installed: false,
             allow_window_close: false,
+            saves_in_flight: Default::default(),
+            resave_after: Default::default(),
+            close_when_saved: false,
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
@@ -1050,6 +1062,10 @@ impl crate::ui::text_editor::EditorContentSource for LiteMarkApp {
 #[cfg(test)]
 #[path = "pdf_open_tests.rs"]
 mod pdf_open_tests;
+
+#[cfg(test)]
+#[path = "async_save_tests.rs"]
+mod async_save_tests;
 
 #[cfg(test)]
 #[path = "background_scan_tests.rs"]

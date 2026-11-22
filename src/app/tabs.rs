@@ -5,6 +5,14 @@ use super::*;
 /// How long after a tab switch the tab list is written to settings.json.
 const TAB_SETTINGS_SAVE_DELAY_MS: u64 = 1000;
 
+/// How a background save of one note ended.
+pub(super) enum AsyncSave {
+    Saved(Option<DiskVersion>),
+    /// The file changed (or, with `true`, was deleted) since the note last saw it.
+    Conflict(bool),
+    Failed(String),
+}
+
 impl LiteMarkApp {
     /// Save a tab. Refuses, with an error, when another program changed or
     /// deleted the file since the tab last read or wrote it; `handle_save`
@@ -58,7 +66,134 @@ impl LiteMarkApp {
         Ok(())
     }
 
+    /// Ctrl+S on a note that already has its file: check the file and write
+    /// it on a background thread, so the UI never waits on the disk or
+    /// `fsync`. Returns `false` when this save needs the synchronous path
+    /// (an untitled note, a rename, a new file), which the caller then runs.
+    ///
+    /// The note shows as saved at once. A later edit marks it modified again;
+    /// a conflict or a failed write marks it modified and says so.
+    pub(super) fn start_async_save(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        if self.saves_in_flight.contains(id) {
+            // One write per note at a time, so an older write can't land last.
+            self.resave_after.insert(id.to_string());
+            return true;
+        }
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return false;
+        };
+        let Some(path) = tab.file_path.clone() else {
+            return false;
+        };
+        let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let same_file = plan_save(
+            tab.file_type,
+            tab.file_path.as_deref(),
+            &tab.title,
+            &folder,
+            |name| folder.join(name).exists(),
+        )
+        .is_ok_and(|planned| planned.path == path && path.exists());
+        if !same_file {
+            return false;
+        }
+        let text = tab.file_text();
+        let seen = tab.disk_version.clone();
+        let title = tab.title.clone();
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            tab.is_modified = false;
+        }
+        self.saves_in_flight.insert(id.to_string());
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let job = {
+                let path = path.clone();
+                cx.background_executor().spawn(async move {
+                    if let Some(seen) = &seen {
+                        match disk_change(&path, seen) {
+                            DiskChange::Unchanged => {}
+                            change => return AsyncSave::Conflict(change == DiskChange::Deleted),
+                        }
+                    }
+                    match atomic_save(&path, &text) {
+                        // The version is the text that was written, not
+                        // whatever the tab holds by the time this finishes.
+                        Ok(()) => AsyncSave::Saved(disk_version(&path, &text)),
+                        Err(err) => {
+                            AsyncSave::Failed(format!("Couldn't save {}: {err}", path.display()))
+                        }
+                    }
+                })
+            };
+            let outcome = job.await;
+            this.update(cx, |this, cx| {
+                this.finish_async_save(&id, &path, &title, outcome, cx)
+            })
+            .ok();
+        })
+        .detach();
+        true
+    }
+
+    fn finish_async_save(
+        &mut self,
+        id: &str,
+        path: &Path,
+        title: &str,
+        outcome: AsyncSave,
+        cx: &mut Context<Self>,
+    ) {
+        self.saves_in_flight.remove(id);
+        // The note may have been closed or renamed meanwhile; the write
+        // itself still happened, so only update a tab that is still that file.
+        let still_there = self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == id && tab.file_path.as_deref() == Some(path));
+        match outcome {
+            AsyncSave::Saved(version) => {
+                if still_there {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                        tab.disk_version = version;
+                    }
+                    self.show_toast(format!("Saved {title}"), cx);
+                }
+            }
+            AsyncSave::Conflict(deleted) => {
+                if still_there {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                        tab.is_modified = true;
+                    }
+                    self.show_prompt(Prompt::ExternalChange {
+                        id: id.to_string(),
+                        deleted,
+                    });
+                }
+                self.resave_after.remove(id);
+            }
+            AsyncSave::Failed(err) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                    tab.is_modified = true;
+                }
+                self.show_file_error(err);
+                self.resave_after.remove(id);
+            }
+        }
+        if self.resave_after.remove(id) && still_there && !self.start_async_save(id, cx) {
+            // Nothing left to write asynchronously (say the file was removed).
+            self.resave_after.remove(id);
+        }
+        if self.close_when_saved && self.saves_in_flight.is_empty() {
+            self.close_when_saved = false;
+            self.request_close_window();
+        }
+        cx.notify();
+    }
+
     fn save_tab_with(&mut self, id: &str, overwrite: bool) -> Result<String, String> {
+        if self.saves_in_flight.contains(id) {
+            return Err("Still saving this note. Try again in a moment.".into());
+        }
         if !overwrite {
             let change = self.disk_change_for(id);
             if change != DiskChange::Unchanged {

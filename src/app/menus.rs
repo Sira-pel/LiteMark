@@ -495,6 +495,11 @@ impl LiteMarkApp {
     }
 
     pub(super) fn request_close_window(&mut self) {
+        // Closing now could cut a note's write short: wait for it.
+        if !self.saves_in_flight.is_empty() {
+            self.close_when_saved = true;
+            return;
+        }
         if self.tabs.iter().any(|tab| tab.is_modified) {
             self.show_prompt(Prompt::CloseWindow);
         } else {
@@ -526,6 +531,10 @@ impl LiteMarkApp {
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |_window, cx| {
             view.update(cx, |this, cx| {
+                if !this.saves_in_flight.is_empty() {
+                    this.close_when_saved = true;
+                    return false;
+                }
                 if this.allow_window_close {
                     this.flush_tab_settings();
                     return true;

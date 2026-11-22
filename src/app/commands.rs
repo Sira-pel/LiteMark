@@ -398,6 +398,9 @@ impl LiteMarkApp {
             self.begin_save_naming(&id, cx);
             return;
         }
+        if self.start_async_save(&id, cx) {
+            return;
+        }
         match self.disk_change_for(&id) {
             DiskChange::Unchanged => {}
             change => {
