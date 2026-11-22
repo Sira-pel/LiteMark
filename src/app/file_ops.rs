@@ -391,6 +391,11 @@ impl LiteMarkApp {
             self.show_error("That item is no longer in the folder.");
             return;
         };
+        if self.is_saving_under(&old) {
+            self.show_error("Still saving a note there. Try again in a moment.");
+            self.rename_target = Some(target);
+            return;
+        }
         match safe_rename(&old, &name) {
             Ok(new_path) => {
                 self.rename_value.clear();
@@ -529,6 +534,10 @@ impl LiteMarkApp {
             self.report_missing("That note is no longer in the folder.", bulk);
             return;
         };
+        if self.is_saving_under(&file.path) {
+            self.report_missing("Still saving a note there. Try again in a moment.", bulk);
+            return;
+        }
         // Optimistic removal: the note vanishes and its tabs close the same
         // frame, while the (slow, portal-backed) trash runs in the
         // background. On failure the closed tabs are restored and the
@@ -663,6 +672,10 @@ impl LiteMarkApp {
             self.report_missing("That folder is no longer available.", bulk);
             return;
         };
+        if self.is_saving_under(&folder.path) {
+            self.report_missing("Still saving a note there. Try again in a moment.", bulk);
+            return;
+        }
         // Same optimistic removal as trash_file, for the whole subtree.
         let prefix = folder.path.clone();
         self.workspace

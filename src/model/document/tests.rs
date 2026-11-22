@@ -7011,3 +7011,42 @@ fn window_line_endings_matches_the_buffered_count() {
         }
     }
 }
+
+#[test]
+fn cursor_line_and_col_follow_every_caret_move_without_a_view_mode_sync() {
+    // `set_view_mode` no longer re-syncs the cursor on every call, so each
+    // caret-moving method must leave Ln/Col (and the gutter line) current.
+    for (name, file) in [
+        ("a.txt", "one\ntwo two two\nthree\n"),
+        ("a.md", "one\ntwo two two\nthree\n"),
+    ] {
+        let mut tab = DocumentTab::new("t".into(), name.into(), file.into(), None, None);
+        tab.set_view_mode(ViewMode::Raw);
+        let check = |tab: &DocumentTab, what: &str| {
+            let (line, col) = super::line_col(&tab.content, tab.cursor_offset());
+            assert_eq!(
+                (tab.cursor_line, tab.cursor_col),
+                (line, col),
+                "{name}: {what}"
+            );
+        };
+        tab.place(6, false);
+        check(&tab, "place");
+        tab.place(14, true);
+        check(&tab, "extend");
+        tab.select_word();
+        check(&tab, "select_word");
+        tab.select_line();
+        check(&tab, "select_line");
+        tab.select_all();
+        check(&tab, "select_all");
+        tab.place(0, false);
+        tab.move_down(false);
+        check(&tab, "down");
+        tab.move_up(false);
+        check(&tab, "up");
+        // Switching to the same mode again is a no-op and must not matter.
+        tab.set_view_mode(ViewMode::Raw);
+        check(&tab, "same mode");
+    }
+}

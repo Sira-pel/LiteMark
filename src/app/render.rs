@@ -2106,7 +2106,7 @@ impl LiteMarkApp {
         self.coast_scroll(window);
         self.install_close_hook(window, cx);
         if self.allow_window_close {
-            self.flush_tab_settings();
+            self.flush_settings_for_exit();
             window.remove_window();
         }
         if self.show_find_replace

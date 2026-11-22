@@ -192,6 +192,11 @@ impl LiteMarkApp {
                 Err(err) => DropOutcome::Failed(format!("Couldn't copy note: {err}")),
             }
         } else {
+            if self.is_saving_under(&file.path) {
+                return DropOutcome::Failed(
+                    "Still saving a note there. Try again in a moment.".into(),
+                );
+            }
             match move_note(&file.path, &dest_path) {
                 Ok(new_path) if new_path != file.path => {
                     self.retarget_open_tabs(&file.path, &new_path);
@@ -259,6 +264,11 @@ impl LiteMarkApp {
                 Err(err) => DropOutcome::Failed(format!("Couldn't copy folder: {err}")),
             }
         } else {
+            if self.is_saving_under(&src) {
+                return DropOutcome::Failed(
+                    "Still saving a note there. Try again in a moment.".into(),
+                );
+            }
             match move_folder(&src, &dest_path) {
                 Ok(new_path) if new_path != src => {
                     self.retarget_open_tabs(&src, &new_path);

@@ -181,3 +181,38 @@ fn a_big_note_opens_in_the_background_and_a_second_click_is_ignored() {
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[std_test]
+fn moving_or_trashing_a_note_that_is_still_saving_is_refused() {
+    let root = fresh_root("busy");
+    std::fs::create_dir_all(root.join("dest")).unwrap();
+    let path = root.join("n.md");
+    std::fs::write(&path, "a\n").unwrap();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_w, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, cx| {
+        open(app, &root, &path);
+        app.refresh_workspace_ids();
+        app.active_tab_mut().unwrap().edit(0..0, "x ");
+        app.handle_save(cx);
+        let file_id = app
+            .workspace
+            .files
+            .iter()
+            .find(|f| f.path == path)
+            .unwrap()
+            .id
+            .clone();
+        let dest_id = app.workspace.folders[0].id.clone();
+        let outcome = app.move_or_copy_note(&file_id, Some(dest_id), false, false);
+        assert!(matches!(outcome, DropOutcome::Failed(_)), "move must wait");
+        app.trash_file(&file_id, cx);
+        // Still listed and open: the trash was refused, not started.
+        assert!(app.workspace.files.iter().any(|f| f.path == path));
+    });
+    cx.run_until_parked();
+    // The save landed at the original path and nothing recreated or moved it.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "x a\n");
+    assert!(!root.join("dest").join("n.md").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}

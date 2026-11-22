@@ -148,6 +148,11 @@ impl LiteMarkApp {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| src.display().to_string());
+            if verb.0 == "move" && self.is_saving_under(src) {
+                errors.push(format!("{name}: still saving, try again in a moment"));
+                failed.push(src.clone());
+                continue;
+            }
             match op(self, src, dir) {
                 Ok(path) => created.push(path),
                 Err(_) if fs_entry_missing(src) => errors.push(format!("{name} no longer exists")),

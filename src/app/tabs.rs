@@ -106,6 +106,19 @@ impl LiteMarkApp {
         .detach();
     }
 
+    /// A note at or under `path` is being written by a background save.
+    /// Renaming, moving or trashing it now would let the write bring the old
+    /// path back, so those wait.
+    pub(super) fn is_saving_under(&self, path: &Path) -> bool {
+        self.tabs.iter().any(|tab| {
+            self.saves_in_flight.contains(&tab.id)
+                && tab
+                    .file_path
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with(path))
+        })
+    }
+
     /// Ctrl+S on a note that already has its file: check the file and write
     /// it on a background thread, so the UI never waits on the disk or
     /// `fsync`. Returns `false` when this save needs the synchronous path
@@ -529,7 +542,13 @@ impl LiteMarkApp {
         if self.tab_settings_dirty {
             self.save_settings();
         }
-        // The window is closing: make sure queued writes reach the disk.
+    }
+
+    /// [`Self::flush_tab_settings`], then wait until every queued settings
+    /// write is on disk. Only for when the window is closing; the 1 s timer
+    /// must never wait on the disk.
+    pub(super) fn flush_settings_for_exit(&mut self) {
+        self.flush_tab_settings();
         self.settings_writer.flush();
         self.report_settings_result();
     }

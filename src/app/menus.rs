@@ -536,7 +536,7 @@ impl LiteMarkApp {
                     return false;
                 }
                 if this.allow_window_close {
-                    this.flush_tab_settings();
+                    this.flush_settings_for_exit();
                     return true;
                 }
                 if this.tabs.iter().any(|tab| tab.is_modified) {
@@ -544,7 +544,7 @@ impl LiteMarkApp {
                     cx.notify();
                     false
                 } else {
-                    this.flush_tab_settings();
+                    this.flush_settings_for_exit();
                     true
                 }
             })
