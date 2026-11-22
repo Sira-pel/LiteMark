@@ -321,6 +321,71 @@ impl EditorSettings {
     }
 }
 
+/// Writes settings on a background thread so `fsync` never blocks the UI.
+/// Snapshots sent while a write runs are coalesced: only the newest is saved.
+pub struct SettingsWriter {
+    tx: std::sync::mpsc::Sender<WriterMsg>,
+    result: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+}
+
+enum WriterMsg {
+    Save(Box<EditorSettings>),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+impl SettingsWriter {
+    pub fn spawn() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<WriterMsg>();
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let shared = result.clone();
+        let spawned = std::thread::Builder::new()
+            .name("settings-writer".into())
+            .spawn(move || {
+                while let Ok(first) = rx.recv() {
+                    let mut latest = None;
+                    let mut acks = Vec::new();
+                    let mut next = Some(first);
+                    while let Some(msg) = next.take().or_else(|| rx.try_recv().ok()) {
+                        match msg {
+                            WriterMsg::Save(settings) => latest = Some(settings),
+                            WriterMsg::Flush(ack) => acks.push(ack),
+                        }
+                    }
+                    if let Some(settings) = latest {
+                        if let Ok(mut slot) = shared.lock() {
+                            *slot = Some(settings.save());
+                        }
+                    }
+                    for ack in acks {
+                        let _ = ack.send(());
+                    }
+                }
+            });
+        if spawned.is_err() {
+            eprintln!("litemark: could not start the settings writer thread");
+        }
+        Self { tx, result }
+    }
+
+    /// Queue `settings` for writing.
+    pub fn save(&self, settings: &EditorSettings) {
+        let _ = self.tx.send(WriterMsg::Save(Box::new(settings.clone())));
+    }
+
+    /// The outcome of the latest finished write, once.
+    pub fn take_result(&self) -> Option<Result<(), String>> {
+        self.result.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// Wait until every queued write has reached the disk.
+    pub fn flush(&self) {
+        let (ack, done) = std::sync::mpsc::channel();
+        if self.tx.send(WriterMsg::Flush(ack)).is_ok() {
+            let _ = done.recv_timeout(std::time::Duration::from_secs(5));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

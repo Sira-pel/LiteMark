@@ -193,6 +193,7 @@ pub struct LiteMarkApp {
     pub error_message: Option<String>,
     /// The last settings save failed; the error was shown once already.
     settings_save_failed: bool,
+    settings_writer: crate::model::settings::SettingsWriter,
     pub prompt: Option<Prompt>,
     pub prompt_focus_handle: FocusHandle,
     pub prompt_selected_ix: usize,
@@ -635,6 +636,7 @@ impl LiteMarkApp {
             tab_ids,
             error_message,
             settings_save_failed,
+            settings_writer: crate::model::settings::SettingsWriter::spawn(),
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -788,6 +790,7 @@ impl LiteMarkApp {
             tab_ids,
             error_message: None,
             settings_save_failed: true,
+            settings_writer: crate::model::settings::SettingsWriter::spawn(),
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -902,14 +905,29 @@ impl LiteMarkApp {
     fn save_settings(&mut self) {
         // Every write includes the tab settings, so none are pending after it.
         self.tab_settings_dirty = false;
-        match self.settings.save() {
-            Ok(()) => self.settings_save_failed = false,
-            Err(err) => {
+        // A blocked save fails at once without touching the disk.
+        if let Some(reason) = self.settings.save_blocked.clone() {
+            if !self.settings_save_failed {
+                self.show_error(reason);
+            }
+            self.settings_save_failed = true;
+            return;
+        }
+        self.report_settings_result();
+        self.settings_writer.save(&self.settings);
+    }
+
+    /// Show the outcome of the last background settings write.
+    pub(crate) fn report_settings_result(&mut self) {
+        match self.settings_writer.take_result() {
+            Some(Ok(())) => self.settings_save_failed = false,
+            Some(Err(err)) => {
                 if !self.settings_save_failed {
                     self.show_error(err);
                 }
                 self.settings_save_failed = true;
             }
+            None => {}
         }
     }
 

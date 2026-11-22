@@ -348,6 +348,9 @@ impl LiteMarkApp {
         if self.tab_settings_dirty {
             self.save_settings();
         }
+        // The window is closing: make sure queued writes reach the disk.
+        self.settings_writer.flush();
+        self.report_settings_result();
     }
 
     /// Reopen the notes that were open when the app last closed, skipping
