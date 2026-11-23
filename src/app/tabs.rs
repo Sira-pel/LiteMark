@@ -436,11 +436,24 @@ impl LiteMarkApp {
         self.refresh_find();
     }
 
+    /// Free what the editor kept for the tab on screen (laid-out rows, the
+    /// raw-row cache keyed by its id, table geometry), so a closed note's
+    /// text-sized buffers do not wait for the next frame to be replaced.
+    fn drop_painted_document_data(&mut self) {
+        let mut paint = self.editor_paint.borrow_mut();
+        paint.layout_cache = Default::default();
+        paint.rows = Vec::new();
+        paint.tables = Vec::new();
+        paint.painted_len = 0;
+        paint.painted_selection = 0..0;
+    }
+
     pub(super) fn remove_tab(&mut self, id: &str, next_active: Option<String>) {
         let pos = self.tabs.iter().position(|tab| tab.id == id);
         let removing_active = self.active_tab_id == id;
         if removing_active {
             self.reset_editor_transient_state();
+            self.drop_painted_document_data();
         }
         self.tabs.retain(|tab| tab.id != id);
         if pos.is_some() {
@@ -472,6 +485,7 @@ impl LiteMarkApp {
         let only = self.tabs.len() <= 1 && self.tabs.iter().any(|tab| tab.id == id);
         if only {
             self.reset_editor_transient_state();
+            self.drop_painted_document_data();
             let new_id = self.tab_ids.alloc();
             let number = new_id.trim_start_matches("tab-");
             let title = format!("Untitled-{number}.md");
