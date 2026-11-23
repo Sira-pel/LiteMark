@@ -473,8 +473,12 @@ fn bench_large_note_redraw() {
     for mode in [ViewMode::Wysiwyg, ViewMode::Raw] {
         for lines in [3_000usize, 100_000] {
             let doc: String = (0..lines)
-                .map(|i| format!("line {i} of a reasonably long plain paragraph of text, with **bold** bits
-"))
+                .map(|i| {
+                    format!(
+                        "line {i} of a reasonably long plain paragraph of text, with **bold** bits
+"
+                    )
+                })
                 .collect();
             let (view, mut cx) = harness(&doc, mode);
             let idle = (0..10)
@@ -498,7 +502,9 @@ fn bench_large_note_redraw() {
                 })
                 .min()
                 .unwrap();
-            eprintln!("{mode:?} {lines:>7} lines: idle redraw {idle:?}, redraw after edit {edit:?}");
+            eprintln!(
+                "{mode:?} {lines:>7} lines: idle redraw {idle:?}, redraw after edit {edit:?}"
+            );
         }
     }
 }

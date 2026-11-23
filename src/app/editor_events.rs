@@ -727,7 +727,7 @@ impl LiteMarkApp {
         for tab in self.tabs.iter_mut().filter(|t| t.id != active_id) {
             tab.release_parse_cache();
         }
-        let (content_key, parsed, selection, marked, line_count, cursor_line) =
+        let (content_key, last_edit, parsed, selection, marked, line_count, cursor_line) =
             if let Some(tab) = self.active_tab_mut() {
                 tab.ensure_stats();
                 let parsed = if tab.file_type.supports_markdown_features() {
@@ -737,6 +737,7 @@ impl LiteMarkApp {
                 };
                 (
                     (tab.id.clone(), tab.revision),
+                    tab.last_edit(),
                     parsed,
                     tab.selection_range(),
                     tab.marked_range.clone(),
@@ -748,6 +749,7 @@ impl LiteMarkApp {
             } else {
                 (
                     (String::new(), 0),
+                    None,
                     empty_parsed_document(),
                     0..0,
                     None,
@@ -765,6 +767,7 @@ impl LiteMarkApp {
             paint: self.editor_paint.clone(),
             note_image_cache: self.note_image_cache.clone(),
             content_key,
+            last_edit,
             parsed,
             view_mode,
             selection,

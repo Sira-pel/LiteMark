@@ -1357,6 +1357,111 @@ pub fn visual_rows_measured(
     rows
 }
 
+/// Start of the line holding the byte at `at` (CRLF counts as one ending).
+fn line_start_at(content: &str, at: usize) -> usize {
+    let bytes = content.as_bytes();
+    let mut at = at.min(bytes.len());
+    if at < bytes.len() && bytes[at] == b'\n' && at > 0 && bytes[at - 1] == b'\r' {
+        at -= 1;
+    }
+    bytes[..at]
+        .iter()
+        .rposition(|&b| b == b'\n' || b == b'\r')
+        .map_or(0, |i| i + 1)
+}
+
+/// `rows` (the rows of the text before an edit) brought up to date after
+/// `old_range` of it was replaced by `new_len` bytes, giving the rows
+/// `visual_rows_measured(content, ..)` would. Only the lines around the edit
+/// are wrapped again; rows before it are kept and rows after it just shift.
+/// `None` when the old rows don't line up with the edit (the caller then
+/// rebuilds them all).
+pub fn patch_visual_rows_measured(
+    rows: &mut Vec<(usize, usize)>,
+    content: &str,
+    old_range: Range<usize>,
+    new_len: usize,
+    wrap_cols: usize,
+    tab_width: usize,
+    widths: &CharWidths,
+) -> Option<()> {
+    let bytes = content.as_bytes();
+    let delta = new_len as isize - (old_range.end - old_range.start) as isize;
+    let edit_end = old_range.start + new_len;
+    if edit_end > bytes.len() || old_range.start > old_range.end {
+        return None;
+    }
+    // Start two lines back: the edit can change how the line before it ends
+    // (a CR followed by an inserted LF).
+    let first = match old_range.start {
+        0 => 0,
+        at => match line_start_at(content, at - 1) {
+            0 => 0,
+            line => line_start_at(content, line - 1),
+        },
+    };
+    let keep = rows.partition_point(|row| row.0 < first);
+
+    let mut fresh = Vec::new();
+    let mut line_start = first;
+    let resume = loop {
+        match memchr::memchr2(b'\n', b'\r', &bytes[line_start..]) {
+            Some(rel) => {
+                let line_end = line_start + rel;
+                push_wrapped(
+                    &mut fresh, content, line_start, line_end, wrap_cols, tab_width, widths,
+                );
+                line_start = if bytes[line_end] == b'\r' && bytes.get(line_end + 1) == Some(&b'\n')
+                {
+                    line_end + 2
+                } else {
+                    line_end + 1
+                };
+                if line_start >= edit_end {
+                    break Some(line_start);
+                }
+            }
+            None => {
+                push_wrapped(
+                    &mut fresh,
+                    content,
+                    line_start,
+                    bytes.len(),
+                    wrap_cols,
+                    tab_width,
+                    widths,
+                );
+                break None;
+            }
+        }
+    };
+
+    let resume_old = match resume {
+        None => rows.len(),
+        Some(at) => {
+            let old_at = usize::try_from(at as isize - delta).ok()?;
+            let index = rows.partition_point(|row| row.0 < old_at);
+            // It must be the start of a line, not of a wrapped row inside
+            // one: rows of a wrapped line touch, lines are a line ending apart.
+            let starts_line = index > 0 && rows[index - 1].1 < old_at;
+            if rows.get(index)?.0 != old_at || index < keep || !starts_line {
+                return None;
+            }
+            index
+        }
+    };
+    let tail = keep + fresh.len();
+    rows.splice(keep..resume_old, fresh);
+    for row in &mut rows[tail..] {
+        row.0 = (row.0 as isize + delta) as usize;
+        row.1 = (row.1 as isize + delta) as usize;
+    }
+    if rows.is_empty() {
+        rows.push((0, 0));
+    }
+    Some(())
+}
+
 /// Number of rows `visual_rows` would return, without building the list for
 /// content that fits on one row (the common case).
 #[cfg(test)]
@@ -1649,6 +1754,71 @@ pub fn wysiwyg_list_row_height(font_px: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn patched_visual_rows_match_a_full_rebuild() {
+        let alphabet: Vec<&str> = vec![
+            "a", "b", "c", "d", " ", " ", "\n", "\r", "\r\n", "\t", "é", "ក", "long", "word",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |n: usize| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as usize) % n.max(1)
+        };
+        let widths = CharWidths::uniform();
+        let (mut patched_count, mut total) = (0usize, 0usize);
+        for round in 0..400 {
+            let wrap_cols = [4usize, 9, 30, usize::MAX][round % 4];
+            let tab_width = [0usize, 4][round % 2];
+            let mut text = String::new();
+            for _ in 0..next(60) {
+                text.push_str(alphabet[next(alphabet.len())]);
+            }
+            let mut rows = visual_rows_measured(&text, wrap_cols, tab_width, &widths);
+            for _ in 0..40 {
+                let bounds: Vec<usize> = (0..=text.len())
+                    .filter(|&i| text.is_char_boundary(i))
+                    .collect();
+                let a = bounds[next(bounds.len())];
+                let b = bounds[next(bounds.len())];
+                let (start, end) = (a.min(b), a.max(b));
+                let mut insert = String::new();
+                for _ in 0..next(4) {
+                    insert.push_str(alphabet[next(alphabet.len())]);
+                }
+                text.replace_range(start..end, &insert);
+                total += 1;
+                let mut candidate = rows.clone();
+                if patch_visual_rows_measured(
+                    &mut candidate,
+                    &text,
+                    start..end,
+                    insert.len(),
+                    wrap_cols,
+                    tab_width,
+                    &widths,
+                )
+                .is_some()
+                {
+                    patched_count += 1;
+                    let full = visual_rows_measured(&text, wrap_cols, tab_width, &widths);
+                    assert_eq!(
+                        candidate, full,
+                        "text {text:?} edit {start}..{end} -> {insert:?}"
+                    );
+                    rows = candidate;
+                } else {
+                    rows = visual_rows_measured(&text, wrap_cols, tab_width, &widths);
+                }
+            }
+        }
+        assert!(
+            patched_count * 2 > total,
+            "{patched_count}/{total} edits patched"
+        );
+    }
+
     /// The original whole-document scan, kept to check the local version.
     fn line_span_at_reference(content: &str, offset: usize) -> TextLine {
         let bytes = content.as_bytes();

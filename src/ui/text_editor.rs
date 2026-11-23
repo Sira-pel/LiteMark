@@ -20,7 +20,8 @@ use crate::markdown::{
 };
 use crate::model::document::visible_line_end;
 use crate::model::text_ops::{
-    count_line_endings, visual_row_count_measured, visual_rows_measured, Caret, CharWidths,
+    count_line_endings, patch_visual_rows_measured, visual_row_count_measured,
+    visual_rows_measured, Caret, CharWidths,
 };
 use crate::model::ViewMode;
 use crate::theme::sz;
@@ -370,7 +371,6 @@ impl LayoutCache {
             }
         }
         self.generation = meta.generation;
-        self.raw_rows = None;
     }
 
     /// Use `widths` (measured for `key`), dropping every row split with other
@@ -399,6 +399,7 @@ impl LayoutCache {
     fn raw_rows_for(
         &mut self,
         content_key: &(String, u64),
+        last_edit: Option<&(u64, Range<usize>, usize)>,
         content: &str,
         wrap_cols: usize,
         tab_width: usize,
@@ -406,6 +407,32 @@ impl LayoutCache {
         if let Some((key, cols, tab, rows)) = &self.raw_rows {
             if *cols == wrap_cols && *tab == tab_width && key == content_key {
                 return rows.clone();
+            }
+        }
+        // One known edit since the cached rows: wrap only the lines around it.
+        if let (Some((key, cols, tab, _)), Some((edit_rev, range, new_len))) =
+            (&self.raw_rows, last_edit)
+        {
+            if *cols == wrap_cols
+                && *tab == tab_width
+                && key.0 == content_key.0
+                && key.1 == *edit_rev
+                && edit_rev.wrapping_add(1) == content_key.1
+            {
+                let (_, cols, tab, mut rows) = self.raw_rows.take().expect("raw rows");
+                let patched = patch_visual_rows_measured(
+                    Rc::make_mut(&mut rows),
+                    content,
+                    range.clone(),
+                    *new_len,
+                    wrap_cols,
+                    tab_width,
+                    &self.widths,
+                );
+                if patched.is_some() {
+                    self.raw_rows = Some((content_key.clone(), cols, tab, rows.clone()));
+                    return rows;
+                }
             }
         }
         let rows = Rc::new(visual_rows_measured(
@@ -1323,6 +1350,8 @@ pub struct EditorElement<V: 'static> {
     pub paint: Rc<RefCell<EditorPaint>>,
     pub note_image_cache: Entity<NoteImageCache>,
     pub content_key: (String, u64),
+    /// The edit that made `content_key`'s revision from the one before it.
+    pub last_edit: Option<(u64, Range<usize>, usize)>,
     pub parsed: Arc<ParsedDocument>,
     pub view_mode: ViewMode,
     pub selection: Range<usize>,
@@ -1486,6 +1515,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
         };
         paint_borrow.layout_cache.keep_for(&self.parsed);
         let estimated_height = if self.view_mode == ViewMode::Wysiwyg {
+            paint_borrow.layout_cache.raw_rows = None;
             let content = self.entity.read(cx).editor_content();
             let cache = &mut paint_borrow.layout_cache;
             let key = (wrap_cols, f32::from(self.font_size).to_bits());
@@ -1529,7 +1559,13 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             let content = self.entity.read(cx).editor_content();
             let rows = paint_borrow
                 .layout_cache
-                .raw_rows_for(&self.content_key, content, wrap_cols, self.tab_width)
+                .raw_rows_for(
+                    &self.content_key,
+                    self.last_edit.as_ref(),
+                    content,
+                    wrap_cols,
+                    self.tab_width,
+                )
                 .len();
             let line_height = self.font_size * 1.65;
             line_height * rows as f32 + px(32.0)
@@ -1712,8 +1748,13 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
 
         if self.view_mode == ViewMode::Raw {
             let content = self.entity.read(cx).editor_content();
-            let raw_rows =
-                layout_cache.raw_rows_for(&self.content_key, content, wrap_cols, self.tab_width);
+            let raw_rows = layout_cache.raw_rows_for(
+                &self.content_key,
+                self.last_edit.as_ref(),
+                content,
+                wrap_cols,
+                self.tab_width,
+            );
             let anchor_rows: Vec<usize> = anchors
                 .iter()
                 .map(|&offset| {

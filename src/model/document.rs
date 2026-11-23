@@ -653,6 +653,12 @@ impl DocumentTab {
         floor_boundary(&self.content, self.caret.cursor())
     }
 
+    /// The edit that made the current revision from the one before it:
+    /// `(that earlier revision, replaced range in its text, new text length)`.
+    pub fn last_edit(&self) -> Option<(u64, Range<usize>, usize)> {
+        self.last_edit.clone()
+    }
+
     pub fn selection_range(&self) -> Range<usize> {
         let start = floor_boundary(&self.content, self.caret.range.start);
         let end = floor_boundary(&self.content, self.caret.range.end);
