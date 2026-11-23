@@ -97,6 +97,20 @@ Each step is one commit with a regression test, plus a before and after number f
 **C1. Benchmark `mimalloc` RSS** (the item PR 104 left open)
 - Rerun the real-app table above with `--features mimalloc`, adding the scenario of closing the large tab and measuring again.
 - Make it the default if idle and after-close private bytes drop with no startup cost. That is the fix for the 1 GB peak that doesn't come back down.
+- **Result: measured, not adopted. `mimalloc` stays opt-in** (it used more private bytes in every scenario).
+  - Setup: real release binaries on Windows, Wysiwyg view, fresh settings (no tab restore), 3 runs per cell, median shown, sampled 8 s after each step. Notes: 3.6 MB (20,000 blocks) and 14.7 MB (80,000 blocks). Scenario 3 opens the big note, then hands off the small one so the big one becomes the inactive tab.
+  - Private bytes in MB (working set in brackets); peak working set in the last column:
+
+    | Scenario | default | mimalloc | delta private | peak WS default / mimalloc |
+    |---|---|---|---|---|
+    | 1. empty start | 102.8 (127.4) | 123.8 (128.7) | +21.0 | 196 / 197 |
+    | 2. 3.6 MB note | 168.6 (191.8) | 212.6 (210.1) | +44.0 | 261 / 279 |
+    | 3. 14.7 MB note, then 3.6 MB note | 191.0 (214.9) | 504.8 (476.3) | +313.8 | 471 / 524 |
+
+  - Binary size: default 15,927,808 bytes, mimalloc 15,909,888 bytes (18 KB smaller, so size was not the problem).
+  - Scenario 4 (close the big tab and drop caches in a test harness) was skipped: mimalloc already loses in scenarios 1–3, and the RSS probe needs a new `windows-sys` feature plus a gpui test.
+  - Reading: mimalloc's private bytes include memory it keeps committed after frees (scenario 3 shows the biggest gap), the opposite of what C1 needed. Not tried: tuning `MIMALLOC_PURGE_DELAY` or `mi_collect`, which would add runtime config for an unproven gain.
+  - Caveat: the default build's inactive-tab case (191 MB) is already far below the 1 GB seen earlier in the real session, which is consistent with the A1/A2/B1/C2 reductions landing since then.
 
 **C2. Shrink after release**
 - After `release_parse_cache` or a tab close, call `shrink_to_fit` on the tab's `content` when its capacity is far above its length.
