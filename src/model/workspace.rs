@@ -1,5 +1,5 @@
 use super::document::FileType;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,6 +9,8 @@ use std::sync::Arc;
 /// deleted the file in between.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskVersion {
+    /// Byte length. A file of another size changed without being read.
+    pub len: u64,
     /// Hash of the bytes. A save reads the file and compares, so a `touch`
     /// or a copy that kept the text doesn't count as a change, and a
     /// same-size edit that kept the timestamp still does.
@@ -25,9 +27,29 @@ pub enum DiskChange {
 
 /// Stable within one run of the app, which is all a tab needs.
 pub fn content_hash(bytes: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
+    let mut hasher = ContentHasher::new(bytes.len() as u64);
+    hasher.update(bytes);
     hasher.finish()
+}
+
+/// [`content_hash`] fed in pieces, so a file can be hashed while it is read.
+/// The result depends only on the bytes, not on how they were split.
+pub struct ContentHasher(std::collections::hash_map::DefaultHasher);
+
+impl ContentHasher {
+    pub fn new(len: u64) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write_u64(len);
+        Self(hasher)
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+
+    pub fn finish(&self) -> u64 {
+        self.0.finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
