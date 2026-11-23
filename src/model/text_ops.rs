@@ -3,6 +3,7 @@
 //! Undo stores each change as a diff (deleted bytes + inserted bytes) and drops
 //! the oldest diffs once the stored text exceeds [`UNDO_BYTE_BUDGET`].
 
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
@@ -81,7 +82,7 @@ impl DiffEdit {
 
 #[derive(Debug, Clone, Default)]
 pub struct UndoHistory {
-    undo: Vec<DiffEdit>,
+    undo: VecDeque<DiffEdit>,
     redo: Vec<DiffEdit>,
     undo_bytes: usize,
     redo_bytes: usize,
@@ -163,7 +164,7 @@ impl UndoHistory {
         }
         if self.span_group_open {
             let mut resized = None;
-            let absorbed = match self.undo.last_mut() {
+            let absorbed = match self.undo.back_mut() {
                 Some(previous) => {
                     let before = previous.cost();
                     let ok = absorb_into_span_group(previous, &edit);
@@ -180,10 +181,10 @@ impl UndoHistory {
                 // taken back) is no undo step at all.
                 if self
                     .undo
-                    .last()
+                    .back()
                     .is_some_and(|p| p.deleted.is_empty() && p.inserted.is_empty())
                 {
-                    self.undo.pop();
+                    self.undo.pop_back();
                     self.span_group_open = false;
                 }
                 self.redo.clear();
@@ -199,20 +200,22 @@ impl UndoHistory {
             .unwrap_or(u64::MAX);
         let merge = self
             .undo
-            .last()
+            .back()
             .is_some_and(|previous| coalesce_typing(previous, &edit, elapsed));
         if merge {
-            if let Some(previous) = self.undo.last_mut() {
+            if let Some(previous) = self.undo.back_mut() {
                 previous.inserted.push_str(&edit.inserted);
                 previous.redo_caret = previous.start + previous.inserted.len();
             }
             self.undo_bytes += edit.cost();
         } else {
             self.undo_bytes += edit.cost();
-            self.undo.push(edit);
+            self.undo.push_back(edit);
         }
         while self.undo_bytes > UNDO_BYTE_BUDGET && self.undo.len() > 1 {
-            let dropped = self.undo.remove(0);
+            let Some(dropped) = self.undo.pop_front() else {
+                break;
+            };
             self.undo_bytes = self.undo_bytes.saturating_sub(dropped.cost());
         }
         self.redo.clear();
@@ -226,7 +229,7 @@ impl UndoHistory {
     /// restored (previously deleted) text. A stored selection is returned with
     /// it and is not snapped by this function.
     pub fn undo(&mut self, content: &mut String) -> Option<HistoryRestore> {
-        let edit = self.undo.pop()?;
+        let edit = self.undo.pop_back()?;
         self.last_edit = None;
         self.span_group_open = false;
         self.undo_bytes = self.undo_bytes.saturating_sub(edit.cost());
@@ -285,7 +288,7 @@ impl UndoHistory {
             redo_sel: edit.undo_sel,
         };
         self.undo_bytes += inverse.cost();
-        self.undo.push(inverse);
+        self.undo.push_back(inverse);
         Some(HistoryRestore {
             caret,
             selection,
@@ -2187,6 +2190,30 @@ mod tests {
         assert_ne!(content, before);
         assert!(history.redo(&mut content).is_some());
         assert_eq!(content, before);
+    }
+
+    #[test]
+    fn eviction_drops_the_oldest_entries_and_keeps_the_accounting() {
+        let mut history = UndoHistory::default();
+        let chunk = UNDO_BYTE_BUDGET / 8;
+        let total = 40;
+        for index in 0..total {
+            // Distinct, non-adjacent starts so nothing coalesces.
+            let edit = DiffEdit::new(index * 10_000_000, String::new(), "x".repeat(chunk));
+            history.push(edit);
+        }
+        assert!(history.undo.len() < total);
+        assert!(history.undo_bytes <= UNDO_BYTE_BUDGET);
+        let sum: usize = history.undo.iter().map(DiffEdit::cost).sum();
+        assert_eq!(history.undo_bytes, sum);
+        // The newest entry survives at the back, the oldest kept one is later than 0.
+        assert_eq!(
+            history.undo.back().map(|e| e.start),
+            Some((total - 1) * 10_000_000)
+        );
+        let oldest = history.undo.front().map(|e| e.start).unwrap();
+        assert!(oldest > 0);
+        assert_eq!(oldest, (total - history.undo.len()) * 10_000_000);
     }
 
     #[test]
