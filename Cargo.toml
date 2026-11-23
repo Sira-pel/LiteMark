@@ -9,6 +9,8 @@ license = "MIT"
 [features]
 # Opt-in: benchmark RSS before making this the default.
 mimalloc = ["dep:mimalloc"]
+# Test-only: count live heap bytes for `memory_bench_tests` (one atomic per call).
+heap-count = []
 
 [dependencies]
 mimalloc = { version = "0.1", optional = true }

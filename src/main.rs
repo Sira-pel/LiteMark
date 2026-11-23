@@ -23,6 +23,64 @@ use app::LiteMarkApp;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Test builds count live heap bytes so memory benchmarks can report what a
+/// note costs. One relaxed atomic per call; release builds never see it.
+#[cfg(all(test, feature = "heap-count", not(feature = "mimalloc")))]
+pub(crate) mod heap_counter {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    static LIVE: AtomicIsize = AtomicIsize::new(0);
+    static COUNT: AtomicIsize = AtomicIsize::new(0);
+
+    pub struct Counting;
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = System.alloc(layout);
+            if !ptr.is_null() {
+                LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
+                COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+            ptr
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let ptr = System.alloc_zeroed(layout);
+            if !ptr.is_null() {
+                LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
+                COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+            ptr
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout);
+            LIVE.fetch_sub(layout.size() as isize, Ordering::Relaxed);
+            COUNT.fetch_sub(1, Ordering::Relaxed);
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let new = System.realloc(ptr, layout, new_size);
+            if !new.is_null() {
+                LIVE.fetch_add(new_size as isize - layout.size() as isize, Ordering::Relaxed);
+            }
+            new
+        }
+    }
+
+    /// Bytes currently allocated by the whole process (all threads).
+    pub fn live_bytes() -> isize {
+        LIVE.load(Ordering::Relaxed)
+    }
+
+    /// Live allocations; each costs a heap header on top of its bytes.
+    pub fn live_allocs() -> isize {
+        COUNT.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(all(test, feature = "heap-count", not(feature = "mimalloc")))]
+#[global_allocator]
+static GLOBAL: heap_counter::Counting = heap_counter::Counting;
+
 #[derive(RustEmbed)]
 #[folder = "assets"]
 #[exclude = "icons/hicolor/*"]

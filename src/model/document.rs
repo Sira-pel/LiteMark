@@ -635,6 +635,11 @@ impl DocumentTab {
         }
     }
 
+    #[cfg(all(test, feature = "heap-count"))]
+    pub fn has_parse_cache_for_bench(&self) -> bool {
+        self.cached_parse.is_some()
+    }
+
     /// Re-detect the type after Save As or a rename. A change drops the parse cache,
     /// which was built for the old type. Returns whether the type changed.
     pub fn set_file_type(&mut self, file_type: FileType) -> bool {

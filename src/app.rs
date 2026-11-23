@@ -1090,6 +1090,10 @@ mod table_drag_handler_tests;
 #[path = "viewport_culling_tests.rs"]
 mod viewport_culling_tests;
 
+#[cfg(all(test, feature = "heap-count", not(feature = "mimalloc")))]
+#[path = "memory_bench_tests.rs"]
+mod memory_bench_tests;
+
 #[cfg(test)]
 #[path = "outline_tests.rs"]
 mod outline_tests;

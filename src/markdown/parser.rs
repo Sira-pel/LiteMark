@@ -783,6 +783,21 @@ impl LineInline {
 }
 
 impl ParsedLine {
+    #[cfg(all(test, feature = "heap-count"))]
+    pub fn offset_map_for_bench(&self) -> Option<&RowOffsetMap> {
+        self.offset_map_cached().map(|m| &**m)
+    }
+
+    #[cfg(all(test, feature = "heap-count"))]
+    pub fn display_owned_len_for_bench(&self) -> usize {
+        self.display_text_owned().map_or(0, |s| s.len())
+    }
+
+    #[cfg(all(test, feature = "heap-count"))]
+    pub fn has_inline_for_bench(&self) -> bool {
+        self.inline.is_some()
+    }
+
     /// Paired inline delimiter ranges for atomic backspace & smart toggle-off.
     #[inline]
     pub fn inline_pairs(&self) -> &[InlinePair] {
