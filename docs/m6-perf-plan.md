@@ -155,3 +155,39 @@ Each step is one commit with a regression test, plus a before and after number f
   - `bench_note_heap`: per-structure breakdown and per-line histogram.
   - `bench_two_large_tabs`: live heap across opening a second note and switching tabs.
 - Two `#[cfg(test)]` accessors (`parser.rs`, `document.rs`) that the benchmarks read.
+
+## 5. Final checks (`e5a706d`)
+
+### Heap (`bench_note_heap`, `bench_two_large_tabs`)
+
+| | Before (`14f8b0e`) | Now |
+|---|---|---|
+| Dense 3.1 MB, parse cache | 52.9 MiB | 32.7 MiB |
+| Dense 3.1 MB, paint rows (WYSIWYG) | 20.3 MiB | 8.7 MiB |
+| Dense 3.1 MB, tab total (WYSIWYG) | 79.5 MiB | 47.8 MiB |
+| 12.8 MB note alone, live | 288 MiB in 1.09 M allocs | 194 MiB in 1.01 M allocs |
+| Big tab closed | n/a | 36.3 MiB |
+
+### Real app (release, private bytes 8-9 s after launch, median of 3)
+
+| Scenario | Before | Now |
+|---|---|---|
+| Clean session, no note | 104 MB | 115 MB (one run 103) |
+| Clean session, 3.2 MB note | 197 MB | 173 MB |
+| Saved session (12.7 MB note restored) | 338 MB | 267-279 MB |
+| Saved session + 3.2 MB note | 1014 MB | **bimodal: 984-1127 MB in 8 of 17 runs, 173-174 MB in 9** |
+| Binary size | 15.93 MB | 14.64 MB |
+
+The last row is **not fixed**. The heap benchmark of the same two notes stays near 200 MiB, so the real app does something the benchmark doesn't, probably a startup race between restoring the 12.7 MB tab and opening the file passed on the command line. Next step: find what builds about 800 MB in that path.
+
+### Speed (interleaved, 4 rounds, `ec6f034` pre-A2 vs `e5a706d`, best of 10 per run)
+
+| Benchmark | `ec6f034` | `e5a706d` |
+|---|---|---|
+| WYSIWYG 100k idle redraw | 13.8-14.6 ms | 16.5-16.7 ms (**+20 %, every round**) |
+| WYSIWYG 3k idle redraw | 0.88-1.07 ms | 1.01-1.11 ms |
+| Raw 100k idle redraw | 6.6-7.3 ms | 6.1-7.3 ms |
+| apply_edit at top, styled 100k | 5.25-5.47 ms | 3.91-4.16 ms (-25 %) |
+| apply_edit at top, plain 100k | 585-682 us | 524-557 us |
+
+The WYSIWYG regression on a 100k-line note where every line has bold text is real (about 2.8 ms). Candidates: A2 (inline box hop), B1, A4 (offset maps rebuilt on demand) and E3. Not yet bisected.
