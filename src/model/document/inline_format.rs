@@ -1193,7 +1193,7 @@ pub(super) fn indented_code_block_at(
 pub(super) fn line_pair_refs(parsed: &ParsedDocument, offset: usize) -> &[InlinePair] {
     parsed
         .line_at_offset(offset)
-        .map(|l| l.inline_pairs.as_slice())
+        .map(|l| &*l.inline_pairs)
         .unwrap_or(&[])
 }
 

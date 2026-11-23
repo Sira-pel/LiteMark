@@ -150,12 +150,12 @@ fn test_in_list_or_quote_tracker_exhaustive() {
                 content_end: 0,
                 prefix_len: 0,
                 kind: kind.clone(),
-                hidden_ranges: Vec::new(),
-                inline_pairs: Vec::new(),
+                hidden_ranges: Box::default(),
+                inline_pairs: Box::default(),
                 display_text_owned: None,
                 offset_map_cached: None,
                 link_hits: no_links(),
-                styled_segments: Vec::new(),
+                styled_segments: Box::default(),
             });
             check_all(kinds, seq, next_tracker, depth + 1);
             seq.pop();

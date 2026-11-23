@@ -324,12 +324,12 @@ pub(super) fn fence_marker_line(
         content_end: line.len() as u32,
         prefix_len: line.len() as u32,
         kind,
-        hidden_ranges: hidden,
-        inline_pairs: Vec::new(),
+        hidden_ranges: hidden.into(),
+        inline_pairs: Box::default(),
         display_text_owned: None,
         offset_map_cached: None,
         link_hits: no_links(),
-        styled_segments: Vec::new(),
+        styled_segments: Box::default(),
     }
 }
 
@@ -348,12 +348,12 @@ pub(super) fn code_content_line(
             content_end: line.len() as u32,
             prefix_len: 0,
             kind: LineKind::CodeLine,
-            hidden_ranges: Vec::new(),
-            inline_pairs: Vec::new(),
+            hidden_ranges: Box::default(),
+            inline_pairs: Box::default(),
             display_text_owned: None,
             offset_map_cached: None,
             link_hits: no_links(),
-            styled_segments: Vec::new(),
+            styled_segments: Box::default(),
         };
     }
     let content_start = line_start + strip;
@@ -364,12 +364,12 @@ pub(super) fn code_content_line(
         content_end: line.len() as u32,
         prefix_len: strip as u32,
         kind: LineKind::CodeLine,
-        hidden_ranges: hidden,
-        inline_pairs: Vec::new(),
+        hidden_ranges: hidden.into(),
+        inline_pairs: Box::default(),
         display_text_owned: None,
         offset_map_cached: None,
         link_hits: no_links(),
-        styled_segments: Vec::new(),
+        styled_segments: Box::default(),
     }
 }
 
@@ -407,12 +407,12 @@ pub(super) fn atx_line(
         content_end: content.end as u32,
         prefix_len: content.start as u32,
         kind: LineKind::Heading { level },
-        hidden_ranges: hidden,
-        inline_pairs,
+        hidden_ranges: hidden.into(),
+        inline_pairs: inline_pairs.into(),
         display_text_owned,
         offset_map_cached,
         link_hits: no_links(),
-        styled_segments,
+        styled_segments: styled_segments.into(),
     }
 }
 

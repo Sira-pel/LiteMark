@@ -732,16 +732,16 @@ pub struct ParsedLine {
     pub prefix_len: u32,
     pub kind: LineKind,
     /// All byte ranges hidden in WYSIWYG on this line (sorted, non-overlapping)
-    pub hidden_ranges: Vec<std::ops::Range<usize>>,
+    pub hidden_ranges: Box<[std::ops::Range<usize>]>,
     /// Paired inline delimiter ranges for atomic backspace & smart toggle-off
-    pub inline_pairs: Vec<InlinePair>,
+    pub inline_pairs: Box<[InlinePair]>,
     /// Visible text in WYSIWYG mode when it differs from `&content[prefix_end()..source.end]`
     /// (e.g. inline hidden markup). `None` borrows zero-copy from the document.
     display_text_owned: Option<Box<str>>,
     /// Explicit offset map when inline hidden markup exists. `None` uses O(1)
     /// prefix arithmetic (`prefix_end()..source.end`).
     offset_map_cached: Option<Arc<RowOffsetMap>>,
-    pub styled_segments: Vec<StyledSegment>,
+    pub styled_segments: Box<[StyledSegment]>,
     /// Link spans `(source, url)`, filled once when the document is parsed so
     /// painting can share them instead of rebuilding them every frame.
     pub link_hits: Arc<Vec<(std::ops::Range<usize>, Arc<str>)>>,
@@ -2659,12 +2659,12 @@ fn parse_lines(
                 content_end: line.len() as u32,
                 prefix_len: 0,
                 kind: LineKind::Empty,
-                hidden_ranges: Vec::new(),
-                inline_pairs: Vec::new(),
+                hidden_ranges: Box::default(),
+                inline_pairs: Box::default(),
                 display_text_owned: None,
                 offset_map_cached: None,
                 link_hits: no_links(),
-                styled_segments: Vec::new(),
+                styled_segments: Box::default(),
             });
             continue;
         }
@@ -2688,12 +2688,12 @@ fn parse_lines(
                 content_end: line.len() as u32,
                 prefix_len: line.len() as u32,
                 kind: LineKind::HorizontalRule,
-                hidden_ranges: hidden,
-                inline_pairs: Vec::new(),
+                hidden_ranges: hidden.into(),
+                inline_pairs: Box::default(),
                 display_text_owned: None,
                 offset_map_cached: None,
                 link_hits: no_links(),
-                styled_segments: Vec::new(),
+                styled_segments: Box::default(),
             });
             continue;
         }
@@ -2723,12 +2723,12 @@ fn parse_lines(
                     content_end: line.len() as u32,
                     prefix_len: line.len() as u32,
                     kind: LineKind::TableDelimiter,
-                    hidden_ranges: hidden,
-                    inline_pairs: Vec::new(),
+                    hidden_ranges: hidden.into(),
+                    inline_pairs: Box::default(),
                     display_text_owned: None,
                     offset_map_cached: None,
                     link_hits: no_links(),
-                    styled_segments: Vec::new(),
+                    styled_segments: Box::default(),
                 });
                 continue;
             } else {
@@ -2777,12 +2777,12 @@ fn parse_lines(
                             table_source: tbl.source.clone(),
                         }),
                     },
-                    hidden_ranges: merged_hidden,
-                    inline_pairs: row_pairs,
+                    hidden_ranges: merged_hidden.into(),
+                    inline_pairs: row_pairs.into(),
                     display_text_owned: None,
                     offset_map_cached: None,
                     link_hits: no_links(),
-                    styled_segments: row_segments,
+                    styled_segments: row_segments.into(),
                 });
                 continue;
             }
@@ -2846,12 +2846,12 @@ fn parse_lines(
             content_end: line.len() as u32,
             prefix_len: prefix_len as u32,
             kind,
-            hidden_ranges: merged_hidden,
-            inline_pairs,
+            hidden_ranges: merged_hidden.into(),
+            inline_pairs: inline_pairs.into(),
             display_text_owned,
             offset_map_cached,
             link_hits: no_links(),
-            styled_segments,
+            styled_segments: styled_segments.into(),
         });
     }
     None
