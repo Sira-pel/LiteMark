@@ -462,3 +462,43 @@ fn layout_after_edits_matches_a_fresh_layout() {
         );
     }
 }
+
+/// Manual benchmark: cost of a redraw (idle and after an edit) on a ~5 MB,
+/// 100k-line note. Run with
+/// `cargo test --release bench_large_note_redraw -- --ignored --nocapture`.
+#[ignore]
+#[std_test]
+fn bench_large_note_redraw() {
+    use std::time::Instant;
+    for mode in [ViewMode::Wysiwyg, ViewMode::Raw] {
+        for lines in [3_000usize, 100_000] {
+            let doc: String = (0..lines)
+                .map(|i| format!("line {i} of a reasonably long plain paragraph of text, with **bold** bits
+"))
+                .collect();
+            let (view, mut cx) = harness(&doc, mode);
+            let idle = (0..10)
+                .map(|_| {
+                    let t = Instant::now();
+                    redraw(&mut cx);
+                    t.elapsed()
+                })
+                .min()
+                .unwrap();
+            let edit = (0..10)
+                .map(|k| {
+                    view.update(&mut cx, |app, _cx| {
+                        let tab = app.active_tab_mut().expect("tab");
+                        tab.place(10 + k, false);
+                        tab.insert_text_in_mode(10 + k..10 + k, "x", mode);
+                    });
+                    let t = Instant::now();
+                    redraw(&mut cx);
+                    t.elapsed()
+                })
+                .min()
+                .unwrap();
+            eprintln!("{mode:?} {lines:>7} lines: idle redraw {idle:?}, redraw after edit {edit:?}");
+        }
+    }
+}
