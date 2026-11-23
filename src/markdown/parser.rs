@@ -2341,7 +2341,7 @@ fn all_source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
 }
 
 /// Lines between checkpoints of the parser state.
-pub(crate) const CHECKPOINT_EVERY: usize = 64;
+pub(crate) const CHECKPOINT_EVERY: usize = 16;
 
 /// What `parse_lines` does with the next line.
 pub(crate) enum Step {
