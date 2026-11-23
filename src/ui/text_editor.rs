@@ -230,8 +230,9 @@ enum CachedRows {
 /// so the total is an exact integer sum that never drifts across splices.
 #[derive(Clone, Default)]
 struct HeightEstimates {
-    /// Estimated height per parsed line in px (`f32::NAN` = not computed yet).
-    slots: Vec<f32>,
+    /// Estimated height per parsed line in 1/1024 px (`UNSET` = not computed
+    /// yet). Kept as integers so a very tall line can't lose precision.
+    slots: Vec<i64>,
     /// Sum of the computed slots, in 1/1024 px.
     sum_q: i64,
     /// Slots that may still be uncomputed (a superset; `None` = all computed).
@@ -240,10 +241,10 @@ struct HeightEstimates {
 
 impl HeightEstimates {
     const SCALE: f32 = 1024.0;
+    const UNSET: i64 = i64::MIN;
 
-    fn quantize(px: f32) -> (f32, i64) {
-        let q = (px * Self::SCALE).round() as i64;
-        (q as f32 / Self::SCALE, q)
+    fn quantize(px: f32) -> i64 {
+        (px * Self::SCALE).round() as i64
     }
 
     fn len(&self) -> usize {
@@ -253,7 +254,7 @@ impl HeightEstimates {
     /// Forget everything and size for `n` lines.
     fn reset(&mut self, n: usize) {
         self.slots.clear();
-        self.slots.resize(n, f32::NAN);
+        self.slots.resize(n, Self::UNSET);
         self.sum_q = 0;
         self.stale = Some(0..n);
     }
@@ -261,14 +262,14 @@ impl HeightEstimates {
     /// Mirror a parse splice: drop `removed` slots at `start`, add `inserted`
     /// uncomputed ones.
     fn splice(&mut self, start: usize, removed: usize, inserted: usize) {
-        for slot in &self.slots[start..start + removed] {
-            if !slot.is_nan() {
-                self.sum_q -= Self::quantize(*slot).1;
+        for &slot in &self.slots[start..start + removed] {
+            if slot != Self::UNSET {
+                self.sum_q -= slot;
             }
         }
         self.slots.splice(
             start..start + removed,
-            std::iter::repeat_n(f32::NAN, inserted),
+            std::iter::repeat_n(Self::UNSET, inserted),
         );
         // A pending range from before the splice would have shifted; keep it simple.
         self.stale = match self.stale {
@@ -283,9 +284,9 @@ impl HeightEstimates {
             return;
         };
         for i in range.start..range.end.min(self.slots.len()) {
-            if self.slots[i].is_nan() {
-                let (slot, q) = Self::quantize(estimate(i));
-                self.slots[i] = slot;
+            if self.slots[i] == Self::UNSET {
+                let q = Self::quantize(estimate(i));
+                self.slots[i] = q;
                 self.sum_q += q;
             }
         }
@@ -4552,13 +4553,17 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             ((state >> 33) as usize) % n.max(1)
         };
-        let height = |i: usize| 17.0 + (i % 7) as f32 * 3.3 + 0.1234;
+        let height = |i: usize| {
+            // Every 11th line is far taller than f32 holds to 1/1024 px.
+            let tall = if i.is_multiple_of(11) { 3_000_000.0 } else { 0.0 };
+            17.0 + (i % 7) as f32 * 3.3 + 0.1234 + tall
+        };
         let mut est = HeightEstimates::default();
         est.reset(50);
         est.fill_stale(height);
         // A shadow of the values each slot should hold.
-        let mut shadow: Vec<f32> = (0..50)
-            .map(|i| HeightEstimates::quantize(height(i)).0)
+        let mut shadow: Vec<i64> = (0..50)
+            .map(|i| HeightEstimates::quantize(height(i)))
             .collect();
         for step in 0..2000 {
             match next(4) {
@@ -4569,17 +4574,17 @@ mod tests {
                     est.splice(start, removed, inserted);
                     shadow.splice(
                         start..start + removed,
-                        std::iter::repeat_n(f32::NAN, inserted),
+                        std::iter::repeat_n(HeightEstimates::UNSET, inserted),
                     );
                     // Occasionally splice again before filling.
                     if next(5) == 0 {
                         est.splice(0, 0, 1);
-                        shadow.insert(0, f32::NAN);
+                        shadow.insert(0, HeightEstimates::UNSET);
                     }
                     est.fill_stale(|i| height(i + step));
                     for (i, v) in shadow.iter_mut().enumerate() {
-                        if v.is_nan() {
-                            *v = HeightEstimates::quantize(height(i + step)).0;
+                        if *v == HeightEstimates::UNSET {
+                            *v = HeightEstimates::quantize(height(i + step));
                         }
                     }
                 }
@@ -4588,19 +4593,18 @@ mod tests {
                     est.reset(n);
                     est.fill_stale(|i| height(i + step));
                     shadow = (0..n)
-                        .map(|i| HeightEstimates::quantize(height(i + step)).0)
+                        .map(|i| HeightEstimates::quantize(height(i + step)))
                         .collect();
                 }
                 _ => est.fill_stale(height),
             }
             assert_eq!(est.slots, shadow, "step {step}");
-            let naive: i64 = est
-                .slots
-                .iter()
-                .map(|v| HeightEstimates::quantize(*v).1)
-                .sum();
+            let naive: i64 = est.slots.iter().copied().sum();
             assert_eq!(est.sum_q, naive, "step {step}");
-            assert!(est.slots.iter().all(|v| !v.is_nan()), "step {step}");
+            assert!(
+                est.slots.iter().all(|&v| v != HeightEstimates::UNSET),
+                "step {step}"
+            );
         }
     }
     #[test]

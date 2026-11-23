@@ -2146,6 +2146,10 @@ impl Shift {
     /// shared maps are scattered on the heap, so the walk is memory-bound.
     fn parsed_lines(self, lines: &mut [ParsedLine]) {
         const PER_THREAD: usize = 8192;
+        // Same length and same line count: nothing moves.
+        if self.delta == 0 && self.line_delta == 0 {
+            return;
+        }
         let threads = std::thread::available_parallelism()
             .map_or(1, |n| n.get())
             .min(lines.len() / PER_THREAD);
