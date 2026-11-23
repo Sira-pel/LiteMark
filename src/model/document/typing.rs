@@ -329,7 +329,7 @@ impl DocumentTab {
             let segs: Vec<&StyledSegment> = parsed
                 .lines_overlapping(replace_start..replace_end)
                 .iter()
-                .flat_map(|l| l.styled_segments.iter())
+                .flat_map(|l| l.styled_segments().iter())
                 .collect();
             let local_pairs = nearby_pair_refs(&parsed, replace_start..replace_end);
             let slices = collect_rewrite_slices(

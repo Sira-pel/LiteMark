@@ -447,7 +447,7 @@ impl DocumentTab {
                                 let segs: Vec<&StyledSegment> = parsed
                                     .lines_overlapping(replace_start..replace_end)
                                     .iter()
-                                    .flat_map(|l| l.styled_segments.iter())
+                                    .flat_map(|l| l.styled_segments().iter())
                                     .collect();
                                 let local_pairs =
                                     nearby_pair_refs(&parsed, replace_start..replace_end);
@@ -507,7 +507,7 @@ impl DocumentTab {
                         let Some(pline) = parsed.line_at_offset(p_range.start) else {
                             return false;
                         };
-                        let mut segs = pline.styled_segments.iter().filter(|s| {
+                        let mut segs = pline.styled_segments().iter().filter(|s| {
                             s.source.start < p_range.end
                                 && s.source.end > p_range.start
                                 && !self.content[s.source.clone()].trim().is_empty()
@@ -864,7 +864,7 @@ impl DocumentTab {
     pub(super) fn range_has_format(&mut self, range: &Range<usize>, kind: InlineTagKind) -> bool {
         let parsed = self.parsed();
         parsed.lines_overlapping(range.clone()).iter().any(|line| {
-            line.styled_segments.iter().any(|seg| {
+            line.styled_segments().iter().any(|seg| {
                 seg.source.start < range.end
                     && seg.source.end > range.start
                     && match kind {
@@ -1017,7 +1017,7 @@ pub(super) fn covering_span(
     seg: &StyledSegment,
 ) -> (usize, usize) {
     let overlapping: Vec<&InlinePair> = pline
-        .inline_pairs
+        .inline_pairs()
         .iter()
         .filter(|p| {
             p.kind != InlineTagKind::Link
@@ -1058,7 +1058,7 @@ pub(super) fn expand_replace_to_matching_neighbors(
     let p_start = p_range.start;
     let p_end = p_range.end;
     let overlapping: Vec<&StyledSegment> = pline
-        .styled_segments
+        .styled_segments()
         .iter()
         .filter(|s| s.source.start < p_end && s.source.end > p_start)
         .collect();
@@ -1088,7 +1088,7 @@ pub(super) fn expand_replace_to_matching_neighbors(
     let mut right_front = p_end;
     loop {
         let mut changed = false;
-        for seg in &pline.styled_segments {
+        for seg in pline.styled_segments() {
             if segment_flags(seg) != target {
                 continue;
             }
@@ -1144,7 +1144,7 @@ pub(super) fn nearby_pair_refs(parsed: &ParsedDocument, range: Range<usize>) -> 
     parsed
         .lines_near(range)
         .iter()
-        .flat_map(|l| l.inline_pairs.iter())
+        .flat_map(|l| l.inline_pairs().iter())
         .collect()
 }
 
@@ -1193,7 +1193,7 @@ pub(super) fn indented_code_block_at(
 pub(super) fn line_pair_refs(parsed: &ParsedDocument, offset: usize) -> &[InlinePair] {
     parsed
         .line_at_offset(offset)
-        .map(|l| &*l.inline_pairs)
+        .map(|l| l.inline_pairs())
         .unwrap_or(&[])
 }
 
@@ -1212,7 +1212,7 @@ pub(super) fn expand_line_group_pairs<'a>(
     seen: &mut HashSet<(usize, usize, InlineTagKind)>,
 ) {
     let mut cands: Vec<&InlinePair> = line
-        .inline_pairs
+        .inline_pairs()
         .iter()
         .filter(|p| p.kind != InlineTagKind::Link)
         .collect();
@@ -1253,7 +1253,7 @@ pub(super) fn collect_group_pairs(
     range: Range<usize>,
 ) -> Vec<&InlinePair> {
     let lines = parsed.lines_near(range.clone());
-    let mut group_pairs = Vec::with_capacity(lines.iter().map(|l| l.inline_pairs.len()).sum());
+    let mut group_pairs = Vec::with_capacity(lines.iter().map(|l| l.inline_pairs().len()).sum());
     let mut seen = HashSet::with_capacity(group_pairs.capacity());
     for line in lines {
         expand_line_group_pairs(line, parsed, range.clone(), &mut group_pairs, &mut seen);
@@ -1269,7 +1269,7 @@ pub(super) fn add_contained_pairs<'a>(
     let mut seen: HashSet<(usize, usize, InlineTagKind)> =
         group_pairs.iter().copied().map(pair_id).collect();
     for line in parsed.lines_near(replace.clone()) {
-        for p in &line.inline_pairs {
+        for p in line.inline_pairs() {
             if p.kind == InlineTagKind::Link {
                 continue;
             }

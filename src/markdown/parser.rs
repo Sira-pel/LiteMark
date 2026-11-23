@@ -713,11 +713,11 @@ impl RowOffsetMap {
 }
 
 /// Shared empty `link_hits`, so lines without links don't each allocate one.
-fn no_links() -> Arc<Vec<(std::ops::Range<usize>, Arc<str>)>> {
-    thread_local! {
-        static EMPTY: Arc<Vec<(std::ops::Range<usize>, Arc<str>)>> = Arc::default();
-    }
-    EMPTY.with(Arc::clone)
+type LinkHits = Arc<Vec<(std::ops::Range<usize>, Arc<str>)>>;
+
+fn no_links() -> &'static LinkHits {
+    static EMPTY: std::sync::OnceLock<LinkHits> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Arc::default)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -733,6 +733,15 @@ pub struct ParsedLine {
     pub kind: LineKind,
     /// All byte ranges hidden in WYSIWYG on this line (sorted, non-overlapping)
     pub hidden_ranges: Box<[std::ops::Range<usize>]>,
+    /// Inline markup data; `None` for lines that carry none (blank, heading,
+    /// list, code and plain-text lines), so they cost no extra allocation.
+    inline: Option<Box<LineInline>>,
+}
+
+/// The inline data of a line that has any: styled text, links or hidden
+/// inline markup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineInline {
     /// Paired inline delimiter ranges for atomic backspace & smart toggle-off
     pub inline_pairs: Box<[InlinePair]>,
     /// Visible text in WYSIWYG mode when it differs from `&content[prefix_end()..source.end]`
@@ -747,7 +756,70 @@ pub struct ParsedLine {
     pub link_hits: Arc<Vec<(std::ops::Range<usize>, Arc<str>)>>,
 }
 
+impl LineInline {
+    /// The inline data for a line, or `None` when it is all empty (so equal
+    /// parses always agree on whether a line has a box).
+    pub(super) fn boxed(
+        inline_pairs: Box<[InlinePair]>,
+        styled_segments: Box<[StyledSegment]>,
+        display_text_owned: Option<Box<str>>,
+        offset_map_cached: Option<Arc<RowOffsetMap>>,
+    ) -> Option<Box<Self>> {
+        if inline_pairs.is_empty()
+            && styled_segments.is_empty()
+            && display_text_owned.is_none()
+            && offset_map_cached.is_none()
+        {
+            return None;
+        }
+        Some(Box::new(Self {
+            inline_pairs,
+            display_text_owned,
+            offset_map_cached,
+            styled_segments,
+            link_hits: Arc::clone(no_links()),
+        }))
+    }
+}
+
 impl ParsedLine {
+    /// Paired inline delimiter ranges for atomic backspace & smart toggle-off.
+    #[inline]
+    pub fn inline_pairs(&self) -> &[InlinePair] {
+        self.inline.as_deref().map_or(&[], |i| &i.inline_pairs)
+    }
+
+    #[inline]
+    pub fn styled_segments(&self) -> &[StyledSegment] {
+        self.inline.as_deref().map_or(&[], |i| &i.styled_segments)
+    }
+
+    /// Link spans `(source, url)`; the shared empty value for lines without any.
+    #[inline]
+    pub fn link_hits(&self) -> &Arc<Vec<(std::ops::Range<usize>, Arc<str>)>> {
+        match self.inline.as_deref() {
+            Some(i) => &i.link_hits,
+            None => no_links(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn display_text_owned(&self) -> Option<&str> {
+        self.inline.as_deref()?.display_text_owned.as_deref()
+    }
+
+    #[inline]
+    pub(crate) fn offset_map_cached(&self) -> Option<&Arc<RowOffsetMap>> {
+        self.inline.as_deref()?.offset_map_cached.as_ref()
+    }
+
+    /// Mutable inline data, if the line has any. Only the parser's builders
+    /// and the tail shift of `apply_edit` mutate it.
+    #[inline]
+    pub(super) fn inline_mut(&mut self) -> Option<&mut LineInline> {
+        self.inline.as_deref_mut()
+    }
+
     /// Byte offset where the hidden block prefix ends.
     #[inline]
     pub fn prefix_end(&self) -> usize {
@@ -758,7 +830,7 @@ impl ParsedLine {
     /// zero-copy from `content` whenever the line has no inline hidden markup.
     #[inline]
     pub fn display_text<'a>(&'a self, content: &'a str) -> &'a str {
-        if let Some(ref owned) = self.display_text_owned {
+        if let Some(owned) = self.display_text_owned() {
             owned
         } else {
             let start = self.prefix_end().min(self.source.end);
@@ -770,7 +842,7 @@ impl ParsedLine {
     /// borrowing the document text.
     #[inline]
     pub fn display_len(&self) -> usize {
-        match &self.display_text_owned {
+        match self.display_text_owned() {
             Some(owned) => owned.len(),
             None => self.source.end.saturating_sub(self.prefix_end()),
         }
@@ -778,7 +850,7 @@ impl ParsedLine {
 
     #[inline]
     pub fn source_to_display(&self, source_offset: usize) -> usize {
-        if let Some(ref map) = self.offset_map_cached {
+        if let Some(map) = self.offset_map_cached() {
             map.source_to_display(source_offset)
         } else {
             let vis = self.prefix_end().min(self.source.end);
@@ -790,7 +862,7 @@ impl ParsedLine {
 
     #[inline]
     pub fn display_to_source(&self, display_offset: usize) -> usize {
-        if let Some(ref map) = self.offset_map_cached {
+        if let Some(map) = self.offset_map_cached() {
             map.display_to_source(display_offset)
         } else {
             let vis = self.prefix_end().min(self.source.end);
@@ -800,7 +872,7 @@ impl ParsedLine {
 
     #[inline]
     pub fn slice_bounds(&self, disp_range: std::ops::Range<usize>) -> (usize, usize) {
-        if let Some(ref map) = self.offset_map_cached {
+        if let Some(map) = self.offset_map_cached() {
             map.slice_bounds(disp_range)
         } else {
             (
@@ -811,7 +883,7 @@ impl ParsedLine {
     }
 
     pub fn slice_display(&self, disp_range: std::ops::Range<usize>) -> RowOffsetMap {
-        if let Some(ref map) = self.offset_map_cached {
+        if let Some(map) = self.offset_map_cached() {
             map.slice_display(disp_range)
         } else {
             let start = self.display_to_source(disp_range.start);
@@ -822,7 +894,7 @@ impl ParsedLine {
 
     /// Materialize an `Arc<RowOffsetMap>` (used only for visible shaped rows).
     pub fn to_offset_map(&self) -> Arc<RowOffsetMap> {
-        if let Some(ref map) = self.offset_map_cached {
+        if let Some(map) = self.offset_map_cached() {
             return Arc::clone(map);
         }
         let vis = self.prefix_end().min(self.source.end);
@@ -906,7 +978,7 @@ impl ParsedDocument {
     /// tests want the flat view; the editor looks pairs up by line.
     #[cfg(test)]
     pub fn all_inline_pairs(&self) -> impl Iterator<Item = &InlinePair> {
-        self.lines.iter().flat_map(|l| l.inline_pairs.iter())
+        self.lines.iter().flat_map(|l| l.inline_pairs().iter())
     }
 
     /// Index of the line whose source range contains `offset` (inclusive end,
@@ -2176,35 +2248,37 @@ impl Shift {
         for r in &mut line.hidden_ranges {
             self.range(r);
         }
-        for pair in &mut line.inline_pairs {
-            self.range(&mut pair.open_delim);
-            self.range(&mut pair.inner);
-            self.range(&mut pair.close_delim);
-            pair.group_open_start = self.pos(pair.group_open_start);
-            pair.group_close_end = self.pos(pair.group_close_end);
-        }
-        for seg in &mut line.styled_segments {
-            self.range(&mut seg.source);
+        if let Some(inline) = line.inline_mut() {
+            for pair in &mut inline.inline_pairs {
+                self.range(&mut pair.open_delim);
+                self.range(&mut pair.inner);
+                self.range(&mut pair.close_delim);
+                pair.group_open_start = self.pos(pair.group_open_start);
+                pair.group_close_end = self.pos(pair.group_close_end);
+            }
+            for seg in &mut inline.styled_segments {
+                self.range(&mut seg.source);
+            }
+            if let Some(ref mut map_arc) = inline.offset_map_cached {
+                let map = Arc::make_mut(map_arc);
+                for (_, source) in &mut map.segments {
+                    self.range(source);
+                }
+                map.line_start = self.pos(map.line_start);
+                map.line_end = self.pos(map.line_end);
+                map.visible_start = self.pos(map.visible_start);
+            }
+            if !inline.link_hits.is_empty() {
+                for (r, _) in Arc::make_mut(&mut inline.link_hits) {
+                    self.range(r);
+                }
+            }
         }
         if let LineKind::TableRow { body, .. } = &mut line.kind {
             for r in body.cells.iter_mut().chain(body.raw_cells.iter_mut()) {
                 self.range(r);
             }
             self.range(&mut body.table_source);
-        }
-        if let Some(ref mut map_arc) = line.offset_map_cached {
-            let map = Arc::make_mut(map_arc);
-            for (_, source) in &mut map.segments {
-                self.range(source);
-            }
-            map.line_start = self.pos(map.line_start);
-            map.line_end = self.pos(map.line_end);
-            map.visible_start = self.pos(map.visible_start);
-        }
-        if !line.link_hits.is_empty() {
-            for (r, _) in Arc::make_mut(&mut line.link_hits) {
-                self.range(r);
-            }
         }
     }
 }
@@ -2406,7 +2480,10 @@ fn next_generation() -> u64 {
 }
 
 fn fill_link_hits(line: &mut ParsedLine) {
-    let links: Vec<_> = line
+    let Some(inline) = line.inline_mut() else {
+        return;
+    };
+    let links: Vec<_> = inline
         .styled_segments
         .iter()
         .filter_map(|seg| match &seg.link_url {
@@ -2417,7 +2494,7 @@ fn fill_link_hits(line: &mut ParsedLine) {
         })
         .collect();
     if !links.is_empty() {
-        line.link_hits = Arc::new(links);
+        inline.link_hits = Arc::new(links);
     }
 }
 
@@ -2660,11 +2737,7 @@ fn parse_lines(
                 prefix_len: 0,
                 kind: LineKind::Empty,
                 hidden_ranges: Box::default(),
-                inline_pairs: Box::default(),
-                display_text_owned: None,
-                offset_map_cached: None,
-                link_hits: no_links(),
-                styled_segments: Box::default(),
+                inline: None,
             });
             continue;
         }
@@ -2689,11 +2762,7 @@ fn parse_lines(
                 prefix_len: line.len() as u32,
                 kind: LineKind::HorizontalRule,
                 hidden_ranges: hidden.into(),
-                inline_pairs: Box::default(),
-                display_text_owned: None,
-                offset_map_cached: None,
-                link_hits: no_links(),
-                styled_segments: Box::default(),
+                inline: None,
             });
             continue;
         }
@@ -2724,11 +2793,7 @@ fn parse_lines(
                     prefix_len: line.len() as u32,
                     kind: LineKind::TableDelimiter,
                     hidden_ranges: hidden.into(),
-                    inline_pairs: Box::default(),
-                    display_text_owned: None,
-                    offset_map_cached: None,
-                    link_hits: no_links(),
-                    styled_segments: Box::default(),
+                    inline: None,
                 });
                 continue;
             } else {
@@ -2778,11 +2843,7 @@ fn parse_lines(
                         }),
                     },
                     hidden_ranges: merged_hidden.into(),
-                    inline_pairs: row_pairs.into(),
-                    display_text_owned: None,
-                    offset_map_cached: None,
-                    link_hits: no_links(),
-                    styled_segments: row_segments.into(),
+                    inline: LineInline::boxed(row_pairs.into(), row_segments.into(), None, None),
                 });
                 continue;
             }
@@ -2847,11 +2908,12 @@ fn parse_lines(
             prefix_len: prefix_len as u32,
             kind,
             hidden_ranges: merged_hidden.into(),
-            inline_pairs: inline_pairs.into(),
-            display_text_owned,
-            offset_map_cached,
-            link_hits: no_links(),
-            styled_segments: styled_segments.into(),
+            inline: LineInline::boxed(
+                inline_pairs.into(),
+                styled_segments.into(),
+                display_text_owned,
+                offset_map_cached,
+            ),
         });
     }
     None

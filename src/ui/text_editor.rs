@@ -2128,8 +2128,6 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 wysiwyg_line_metrics(&parsed_line.kind, self.font_size);
             cur_y += top_gap;
 
-            let link_hits = parsed_line.link_hits.clone();
-
             if let LineKind::TableRow {
                 is_header,
                 ref body,
@@ -2596,7 +2594,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         }
 
                         // Strikethrough inside cell
-                        for seg in &parsed_line.styled_segments {
+                        for seg in parsed_line.styled_segments() {
                             if !seg.strike
                                 || seg.source.end <= sub_map.line_start
                                 || seg.source.start >= sub_map.line_end
@@ -2727,7 +2725,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     line_height: row_height,
                     shaped: unshaped.clone(),
                     offset_map: parsed_line.to_offset_map(),
-                    link_hits,
+                    link_hits: parsed_line.link_hits().clone(),
                     cells: paint_cells,
                 });
                 cur_y += row_height;
@@ -3250,7 +3248,9 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             };
 
             let row_wrap_key = row_wrap_cols.min(u32::MAX as usize) as u32;
-            let single_span = [(0usize, parsed_line.display_len())];
+            // End of a single-row line is filled in once the row is known to be
+            // shaped (`display_len` reads the line's inline box).
+            let single_span = [(0usize, 0usize)];
             let wrapped_rows: Option<Rc<LineRows>> = match layout_cache.lines.get(line_idx) {
                 Some(CachedRows::Single { wrap_cols }) if *wrap_cols == row_wrap_key => None,
                 Some(CachedRows::Wrapped(cached)) if cached.wrap_cols == row_wrap_cols => {
@@ -3333,6 +3333,11 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     cur_y += row_line_height;
                     continue;
                 }
+                let d_end = if single_row {
+                    parsed_line.display_len()
+                } else {
+                    d_end
+                };
                 let sub_map = if single_row {
                     parsed_line.to_offset_map()
                 } else {
@@ -3566,7 +3571,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 }
 
                 // Strikethrough lines (bright, solid, and slightly extended past the words)
-                for seg in &parsed_line.styled_segments {
+                for seg in parsed_line.styled_segments() {
                     if !seg.strike {
                         continue;
                     }
@@ -3665,7 +3670,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     line_height: row_line_height,
                     shaped: Rc::new(shaped),
                     offset_map: sub_map,
-                    link_hits: link_hits.clone(),
+                    link_hits: parsed_line.link_hits().clone(),
                     cells: Vec::new(),
                 });
 
@@ -4114,7 +4119,7 @@ fn wysiwyg_slice_runs(
     let mut runs: Vec<TextRun> = Vec::new();
     let mut covered = display_slice.start;
 
-    for seg in &parsed_line.styled_segments {
+    for seg in parsed_line.styled_segments() {
         let seg_disp_start = parsed_line.source_to_display(seg.source.start);
         let seg_disp_end = parsed_line.source_to_display(seg.source.end);
         if seg_disp_end <= display_slice.start || seg_disp_start >= display_slice.end {
@@ -4221,7 +4226,7 @@ fn wysiwyg_cell_runs(
     let mut runs: Vec<TextRun> = Vec::new();
     let mut covered = 0usize;
 
-    for seg in &parsed_line.styled_segments {
+    for seg in parsed_line.styled_segments() {
         if seg.source.end <= cell_map.line_start || seg.source.start >= cell_map.line_end {
             continue;
         }

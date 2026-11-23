@@ -850,7 +850,7 @@ pub(super) fn verify_inline_rewrites(
             }
             let mut any = false;
             let all_match = new_line
-                .styled_segments
+                .styled_segments()
                 .iter()
                 .filter(|s| {
                     s.source.start < sel.end
@@ -1395,7 +1395,7 @@ pub(super) fn splice_for_anchor(
     let pline = parsed.line_at_offset(range_start);
     let existing_segs: Vec<&StyledSegment> = pline
         .map(|l| {
-            l.styled_segments
+            l.styled_segments()
                 .iter()
                 .filter(|s| s.source.start >= range_start && s.source.end <= seg_end_limit)
                 .collect()
@@ -1505,7 +1505,7 @@ pub(super) fn compute_active_formats(
             LineKind::TableRow { .. } | LineKind::TableDelimiter => fmt.table = true,
             _ => {}
         }
-        for pair in &line.inline_pairs {
+        for pair in line.inline_pairs() {
             if cursor >= pair.open_delim.start && cursor <= pair.close_delim.end {
                 match pair.kind {
                     InlineTagKind::Bold => fmt.bold = true,
