@@ -387,8 +387,8 @@ pub(super) fn atx_line(
     };
     hidden.extend(inline_hidden);
     let hidden = merge_ranges(hidden);
-    let (display_text_owned, offset_map_cached) =
-        build_display_and_map(line, line_start, content.start, &hidden);
+    let display_text_owned =
+        build_display(line, line_start, content.start, &hidden);
     ParsedLine {
         line_index: index as u32,
         source,
@@ -400,7 +400,6 @@ pub(super) fn atx_line(
             inline_pairs.into(),
             styled_segments.into(),
             display_text_owned,
-            offset_map_cached,
         ),
     }
 }

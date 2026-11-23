@@ -489,6 +489,47 @@ impl RowOffsetMap {
         }
     }
 
+    /// The map `from_hidden` builds, without the display string: only the
+    /// line's byte range and its hidden ranges are needed, so it can be
+    /// rebuilt on demand instead of being kept for every line.
+    pub fn from_hidden_ranges(
+        line_start: usize,
+        line_end: usize,
+        visible_start: usize,
+        hidden: &[std::ops::Range<usize>],
+    ) -> Self {
+        let mut segments = Vec::with_capacity(hidden.len() + 1);
+        let mut disp = 0usize;
+        let mut push = |src: std::ops::Range<usize>| {
+            let start = disp;
+            disp += src.len();
+            segments.push((start..disp, src));
+        };
+        let mut cursor = line_start;
+        for h in hidden {
+            let h_start = h.start.clamp(line_start, line_end);
+            let h_end = h.end.clamp(line_start, line_end);
+            if h_start > cursor {
+                push(cursor..h_start);
+            }
+            cursor = cursor.max(h_end);
+        }
+        if cursor < line_end {
+            push(cursor..line_end);
+        }
+        let visible_start = visible_start.clamp(line_start, line_end);
+        if segments.is_empty() {
+            let anchor = visible_start;
+            segments.push((0..0, anchor..anchor));
+        }
+        Self {
+            segments,
+            line_start,
+            line_end,
+            visible_start,
+        }
+    }
+
     pub fn from_hidden(
         line_text: &str,
         line_start: usize,
@@ -747,9 +788,6 @@ pub struct LineInline {
     /// Visible text in WYSIWYG mode when it differs from `&content[prefix_end()..source.end]`
     /// (e.g. inline hidden markup). `None` borrows zero-copy from the document.
     display_text_owned: Option<Box<str>>,
-    /// Explicit offset map when inline hidden markup exists. `None` uses O(1)
-    /// prefix arithmetic (`prefix_end()..source.end`).
-    offset_map_cached: Option<Arc<RowOffsetMap>>,
     pub styled_segments: Box<[StyledSegment]>,
     /// Link spans `(source, url)`, filled once when the document is parsed so
     /// painting can share them instead of rebuilding them every frame.
@@ -763,19 +801,13 @@ impl LineInline {
         inline_pairs: Box<[InlinePair]>,
         styled_segments: Box<[StyledSegment]>,
         display_text_owned: Option<Box<str>>,
-        offset_map_cached: Option<Arc<RowOffsetMap>>,
     ) -> Option<Box<Self>> {
-        if inline_pairs.is_empty()
-            && styled_segments.is_empty()
-            && display_text_owned.is_none()
-            && offset_map_cached.is_none()
-        {
+        if inline_pairs.is_empty() && styled_segments.is_empty() && display_text_owned.is_none() {
             return None;
         }
         Some(Box::new(Self {
             inline_pairs,
             display_text_owned,
-            offset_map_cached,
             styled_segments,
             link_hits: Arc::clone(no_links()),
         }))
@@ -785,7 +817,7 @@ impl LineInline {
 impl ParsedLine {
     #[cfg(all(test, feature = "heap-count"))]
     pub fn offset_map_for_bench(&self) -> Option<&RowOffsetMap> {
-        self.offset_map_cached().map(|m| &**m)
+        None
     }
 
     #[cfg(all(test, feature = "heap-count"))]
@@ -823,9 +855,18 @@ impl ParsedLine {
         self.inline.as_deref()?.display_text_owned.as_deref()
     }
 
-    #[inline]
-    pub(crate) fn offset_map_cached(&self) -> Option<&Arc<RowOffsetMap>> {
-        self.inline.as_deref()?.offset_map_cached.as_ref()
+    /// The explicit offset map of a line with inline hidden markup, rebuilt
+    /// from its hidden ranges. `None` means the O(1) prefix arithmetic
+    /// (`prefix_end()..source.end`) applies. Not stored: it costs a little to
+    /// build, so callers should reuse the result across several lookups.
+    pub(crate) fn offset_map_cached(&self) -> Option<RowOffsetMap> {
+        self.display_text_owned()?;
+        Some(RowOffsetMap::from_hidden_ranges(
+            self.source.start,
+            self.source.end,
+            self.prefix_end(),
+            &self.hidden_ranges,
+        ))
     }
 
     /// Mutable inline data, if the line has any. Only the parser's builders
@@ -910,7 +951,7 @@ impl ParsedLine {
     /// Materialize an `Arc<RowOffsetMap>` (used only for visible shaped rows).
     pub fn to_offset_map(&self) -> Arc<RowOffsetMap> {
         if let Some(map) = self.offset_map_cached() {
-            return Arc::clone(map);
+            return Arc::new(map);
         }
         let vis = self.prefix_end().min(self.source.end);
         let len = self.source.end.saturating_sub(vis);
@@ -937,23 +978,23 @@ impl ParsedLine {
     }
 }
 
-/// Build `display_text_owned` and `offset_map_cached` only when `hidden`
-/// hides bytes beyond the leading `0..prefix_len` prefix. Otherwise both stay
-/// `None` (zero heap allocations).
-pub(super) fn build_display_and_map(
+/// Build `display_text_owned` only when `hidden` hides bytes beyond the
+/// leading `0..prefix_len` prefix. Otherwise it stays `None` (zero heap
+/// allocations). The offset map is rebuilt from `hidden` when needed.
+pub(super) fn build_display(
     line: &str,
     line_start: usize,
     prefix_len: usize,
     hidden: &[std::ops::Range<usize>],
-) -> (Option<Box<str>>, Option<Arc<RowOffsetMap>>) {
+) -> Option<Box<str>> {
     let prefix_end = line_start + prefix_len;
     let only_prefix = (hidden.is_empty() && prefix_len == 0)
         || (hidden.len() == 1 && hidden[0].start == line_start && hidden[0].end == prefix_end);
     if only_prefix {
-        return (None, None);
+        return None;
     }
-    let (display, map) = RowOffsetMap::from_hidden(line, line_start, prefix_end, hidden);
-    (Some(display.into_boxed_str()), Some(Arc::new(map)))
+    let (display, _) = RowOffsetMap::from_hidden(line, line_start, prefix_end, hidden);
+    Some(display.into_boxed_str())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2274,15 +2315,6 @@ impl Shift {
             for seg in &mut inline.styled_segments {
                 self.range(&mut seg.source);
             }
-            if let Some(ref mut map_arc) = inline.offset_map_cached {
-                let map = Arc::make_mut(map_arc);
-                for (_, source) in &mut map.segments {
-                    self.range(source);
-                }
-                map.line_start = self.pos(map.line_start);
-                map.line_end = self.pos(map.line_end);
-                map.visible_start = self.pos(map.visible_start);
-            }
             if !inline.link_hits.is_empty() {
                 for (r, _) in Arc::make_mut(&mut inline.link_hits) {
                     self.range(r);
@@ -2858,7 +2890,7 @@ fn parse_lines(
                         }),
                     },
                     hidden_ranges: merged_hidden.into(),
-                    inline: LineInline::boxed(row_pairs.into(), row_segments.into(), None, None),
+                    inline: LineInline::boxed(row_pairs.into(), row_segments.into(), None),
                 });
                 continue;
             }
@@ -2913,8 +2945,8 @@ fn parse_lines(
         }
         let merged_hidden = merge_ranges(inline_hidden);
 
-        let (display_text_owned, offset_map_cached) =
-            build_display_and_map(line, line_start, prefix_len, &merged_hidden);
+        let display_text_owned =
+            build_display(line, line_start, prefix_len, &merged_hidden);
 
         push_line!(ParsedLine {
             line_index: i as u32,
@@ -2927,7 +2959,6 @@ fn parse_lines(
                 inline_pairs.into(),
                 styled_segments.into(),
                 display_text_owned,
-                offset_map_cached,
             ),
         });
     }

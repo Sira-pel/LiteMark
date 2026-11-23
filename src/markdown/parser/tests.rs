@@ -3846,7 +3846,7 @@ fn parsed_line_and_line_kind_stay_compact_with_zero_alloc_plain_lines() {
             line.display_text(md)
         );
         assert!(
-            line.offset_map_cached().is_none(),
+            line.display_text_owned().is_none(),
             "plain line {:?} should not allocate RowOffsetMap",
             line.display_text(md)
         );
@@ -3856,4 +3856,29 @@ fn parsed_line_and_line_kind_stay_compact_with_zero_alloc_plain_lines() {
             line.display_text(md)
         );
     }
+}
+
+/// The offset map is no longer stored per line; rebuilding it from the hidden
+/// ranges must give exactly what `from_hidden` builds from the line's text.
+#[test]
+fn rebuilt_offset_map_matches_from_hidden() {
+    let md = "# **Head** `x`\n\nplain *em* and **bold** ~~gone~~ [l](http://u)\n> quote **b**\n- item *i*\n  1. [ ] **t** x\n\n**all**\n\u{1F600}*é*ក\n";
+    let doc = parse_document(md);
+    let mut seen = 0;
+    for line in &doc.lines {
+        let Some(map) = line.offset_map_cached() else {
+            continue;
+        };
+        let text = &md[line.source.clone()];
+        let (display, expected) = RowOffsetMap::from_hidden(
+            text,
+            line.source.start,
+            line.prefix_end(),
+            &line.hidden_ranges,
+        );
+        assert_eq!(map, expected, "{text:?}");
+        assert_eq!(line.display_text(md), display);
+        seen += 1;
+    }
+    assert!(seen >= 5, "only {seen} lines had maps");
 }
