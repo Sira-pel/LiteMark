@@ -252,7 +252,10 @@ fn slice_bounds_match_slice_display() {
 fn bench_apply_edit_at_top_of_a_large_note() {
     use std::time::Instant;
     for (name, line) in [
-        ("plain", "just a plain paragraph of text, nothing special here\n"),
+        (
+            "plain",
+            "just a plain paragraph of text, nothing special here\n",
+        ),
         (
             "styled",
             "a **bold** and *italic* [link](https://example.com/x) with `code` bits\n",
@@ -278,6 +281,9 @@ fn bench_apply_edit_at_top_of_a_large_note() {
             same_len = same_len.min(start.elapsed());
         }
         eprintln!("{name}: same-length edit = {same_len:?}");
-        eprintln!("{name}: best apply_edit at top of 100k lines = {best:?} (total {:?})", t.elapsed());
+        eprintln!(
+            "{name}: best apply_edit at top of 100k lines = {best:?} (total {:?})",
+            t.elapsed()
+        );
     }
 }
