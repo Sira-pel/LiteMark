@@ -228,7 +228,7 @@ fn wrapped_wysiwyg_sub_maps_include_leading_trailing_and_split_delimiters() {
         let rows: Vec<_> = paint.rows.iter().filter(|r| r.line_index == 0).collect();
         assert!(rows.len() >= 2, "expected wrapped heading rows");
         assert_eq!(rows.first().unwrap().byte_start, 0);
-        assert_eq!(rows.last().unwrap().byte_end, md.len());
+        assert_eq!(rows.last().unwrap().byte_end(), md.len());
         for pair in rows.windows(2) {
             assert_eq!(pair[0].byte_end, pair[1].byte_start);
         }

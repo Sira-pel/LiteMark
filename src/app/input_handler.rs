@@ -514,7 +514,7 @@ impl EntityInputHandler for LiteMarkApp {
         // before the range (none when the range precedes every row).
         let after = paint
             .rows
-            .partition_point(|row| row.byte_start <= range.start);
+            .partition_point(|row| row.byte_start() <= range.start);
         let row = paint.rows.get(after.checked_sub(1)?)?;
         if !row.cells.is_empty() {
             if let Some(cell) = row

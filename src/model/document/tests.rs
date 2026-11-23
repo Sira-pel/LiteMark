@@ -3718,14 +3718,14 @@ fn down_on_the_last_painted_row_snaps_before_the_closing_hash() {
         total_height: px(28.0),
         rows: vec![PaintRow {
             line_index: 0,
-            byte_start,
-            byte_end,
+            byte_start: crate::ui::text_editor::row_u32(byte_start),
+            byte_end: crate::ui::text_editor::row_u32(byte_end),
             origin: point(px(0.0), px(0.0)),
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map,
             link_hits: Arc::default(),
-            cells: Vec::new(),
+            cells: Box::default(),
         }],
         bounds: None,
         ..EditorPaint::default()
@@ -4168,15 +4168,15 @@ fn paint_rows(doc: &mut DocumentTab) -> EditorPaint {
         .iter()
         .enumerate()
         .map(|(ix, line)| PaintRow {
-            line_index: ix,
-            byte_start: line.source.start,
-            byte_end: line.source.end,
+            line_index: crate::ui::text_editor::row_u32(ix),
+            byte_start: crate::ui::text_editor::row_u32(line.source.start),
+            byte_end: crate::ui::text_editor::row_u32(line.source.end),
             origin: point(px(0.0), px(28.0 * ix as f32)),
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: line.to_offset_map(),
             link_hits: Arc::default(),
-            cells: Vec::new(),
+            cells: Box::default(),
         })
         .collect();
     let n = parsed.lines.len() as f32;
