@@ -8,7 +8,7 @@ use gpui::*;
 use unicode_segmentation::UnicodeSegmentation;
 
 type FieldChange = Arc<dyn Fn(&str, &mut App) + 'static>;
-type FieldSubmit = Arc<dyn Fn(&str, bool, &mut App) + 'static>;
+pub type FieldSubmit = Arc<dyn Fn(&str, bool, &mut App) + 'static>;
 type FieldFocus = Arc<dyn Fn(&mut App) + 'static>;
 
 pub struct LineField {
@@ -372,6 +372,15 @@ impl LineField {
             ));
             self.replace_text_in_range(None, "", window, cx);
         }
+    }
+
+    /// Press Enter, as the key binding does: the submit callback runs
+    /// inside this field's update.
+    #[cfg(test)]
+    pub fn submit_for_test(&mut self, cx: &mut Context<Self>) {
+        let text = self.content.to_string();
+        let callback = self.on_submit.clone();
+        callback(&text, false, cx);
     }
 
     fn submit(

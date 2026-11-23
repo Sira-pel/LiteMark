@@ -358,3 +358,51 @@ fn a_bom_note_is_neither_reloaded_nor_reported_changed() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Closing the window with two untitled notes: Enter in the name box saves
+/// the first and opens the box again for the second. That second open writes
+/// into the field Enter came from; done inside the field's update it
+/// panicked ("cannot update LineField while it is already being updated"),
+/// which aborts a release build and loses the second note.
+#[std_test]
+fn naming_the_first_of_two_untitled_notes_on_close_does_not_panic() {
+    let root = fresh_root("twountitled");
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("first", cx));
+    view.update(cx, |app, cx| {
+        app.workspace = scan_workspace_dir(&root, true).into();
+        // The real Enter handler, not the test stub.
+        let handle = cx.weak_entity();
+        app.rename_field = cx.new(|cx| {
+            LineField::new(
+                cx,
+                "rename-field",
+                "",
+                Arc::new(|_, _| {}),
+                LiteMarkApp::rename_field_submit(handle),
+                Arc::new(|_| {}),
+            )
+        });
+        app.active_tab_mut().unwrap().is_modified = true;
+        app.handle_new_tab();
+        let tab = app.active_tab_mut().unwrap();
+        tab.edit(0..0, "second");
+        tab.is_modified = true;
+        app.request_close_window();
+        app.answer_prompt("Save", cx);
+        assert!(app.save_as_tab.is_some(), "asks for the first note's name");
+    });
+    let field = view.read_with(cx, |app, _| app.rename_field.clone());
+    field.update(cx, |field, cx| {
+        field.set_text("one");
+        field.submit_for_test(cx);
+    });
+    cx.run_until_parked();
+    view.update(cx, |app, _cx| {
+        assert!(root.join("one.md").exists(), "first note saved");
+        let second = app.save_as_tab.clone().expect("asks for the second name");
+        let tab = app.tabs.iter().find(|t| t.id == second).unwrap();
+        assert!(tab.file_path.is_none() && tab.is_modified, "second note kept");
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
