@@ -6,7 +6,12 @@ authors = ["LiteMark Contributors"]
 description = "Native Markdown and text editor"
 license = "MIT"
 
+[features]
+# Opt-in: benchmark RSS before making this the default.
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
+mimalloc = { version = "0.1", optional = true }
 gpui = { version = "=0.2.2" }
 rust-embed = "8.5"
 rfd = "0.15"
