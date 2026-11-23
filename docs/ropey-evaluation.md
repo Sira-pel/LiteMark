@@ -26,9 +26,8 @@ char, so a single edit is about half of the figure.
   `memchr` scans, row wrapping, `display_text` borrowing zero-copy slices of
   the note). A rope only gives chunks, so each of those needs a rewrite or a
   flatten, and flattening costs more than the edit it saved (5.7 ms at 5 MB).
-- **Cheaper snapshots are already available.** The undo history and the async
-  save path are where full copies happened, and both were already reduced in
-  earlier milestones.
+- **Snapshots are not the pain point today.** Saves already run on a
+  background thread (milestone 4), so the full-text copy no longer blocks the UI.
 
 ## When to revisit
 
