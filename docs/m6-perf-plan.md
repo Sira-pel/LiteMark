@@ -130,6 +130,16 @@ Each step is one commit with a regression test, plus a before and after number f
 - **E1.** Exclude `icons/hicolor/*` and `windows/*` from `RustEmbed`; they are used only by packaging and `build.rs`. This needs rust-embed's `include-exclude` feature. Saves about 60 KB; grep `build.rs` and `scripts/` first.
 - **E2.** Keep the fonts (2.4 MB): removing a weight changes rendering.
 - **E3.** Optional: measure `opt-level = "s"` for the binary size versus the redraw benchmarks. Adopt it only if frame times don't move.
+  - **Result: adopted `[profile.release.package."*"] opt-level = "z"`, with `gpui`, `pulldown-cmark`, `memchr` and `unicode-segmentation` kept at 3.** The app crate stays at 3 because `"*"` skips workspace members. Binary 15.93 MB to 14.64 MB (-8.1%).
+  - Sizes (`litemark.exe`, bytes): base 15,927,808; `s` 14,093,824 (-11.5%); `z` 13,076,992 (-17.9%); `lto = "fat"` 15,191,552 (-4.6%, under the 5% bar, not benchmarked); deps `s` + hot at 3: 14,754,304 (-7.4%); deps `z` + hot at 3: 14,642,176 (-8.1%).
+  - Speed: interleaved A/B, 3 rounds, baseline run before every candidate run (12 baseline runs, 3 per candidate). Medians in us, baseline / `s` / `z` / deps-`z`+hot-3:
+    - Wysiwyg 100k idle redraw: 18297 / 17448 / 24353 / 17592
+    - Raw 3k idle redraw: 824 / 933 / 1231 / 834
+    - Raw 100k edit redraw: 7907 / 8225 / 9115 / 7938
+    - apply_edit at top, styled: 4506 / 4581 / 4657 / 4588
+    - same-length edit, styled: 180 / 201 / 217 / 174
+  - Whole-crate `s` is 5-20% slower on Raw redraw and `z` is 25-35% slower on Wysiwyg redraw, so both are rejected. Deps-`z` with the hot crates at 3 is within noise on every number (best runs: Wysiwyg 100k idle 16911 vs 16245 us, styled top 4262 vs 4577 us).
+  - Not measured: startup time (skipped as too noisy to resolve) and typing latency beyond the redraw-after-edit benchmark. Revert by deleting the `[profile.release.package.*]` sections in `Cargo.toml`.
 
 ## 3. Done means
 
