@@ -25,6 +25,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
+#[exclude = "icons/hicolor/*"]
+#[exclude = "windows/*"]
 struct Assets;
 
 struct EmbeddedAssets;
