@@ -1,6 +1,7 @@
 use super::document::FileType;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// What a tab's file looked like on disk the last time LiteMark read or
 /// wrote it. A save compares it with the file now on disk to notice that
@@ -33,7 +34,7 @@ pub fn content_hash(bytes: &[u8]) -> u64 {
 pub struct WorkspaceFile {
     pub id: String,
     pub name: String,
-    pub folder_id: Option<String>,
+    pub folder_id: Option<Arc<str>>,
     pub path: PathBuf,
     pub file_type: FileType,
     pub updated_at: u64,
@@ -41,9 +42,9 @@ pub struct WorkspaceFile {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceFolder {
-    pub id: String,
+    pub id: Arc<str>,
     pub name: String,
-    pub parent_id: Option<String>,
+    pub parent_id: Option<Arc<str>>,
     pub path: PathBuf,
     pub is_open: bool,
 }
@@ -147,9 +148,9 @@ mod tests {
         is_open: bool,
     ) -> WorkspaceFolder {
         WorkspaceFolder {
-            id: id.to_string(),
+            id: Arc::from(id),
             name: name.to_string(),
-            parent_id: parent_id.map(String::from),
+            parent_id: parent_id.map(Arc::from),
             path: PathBuf::from(format!("/tmp/{}", name)),
             is_open,
         }
@@ -159,7 +160,7 @@ mod tests {
         WorkspaceFile {
             id: id.to_string(),
             name: name.to_string(),
-            folder_id: folder_id.map(String::from),
+            folder_id: folder_id.map(Arc::from),
             path: PathBuf::from(format!("/tmp/{}", name)),
             file_type: FileType::Markdown,
             updated_at: 0,
@@ -174,11 +175,11 @@ mod tests {
     ) -> Vec<SidebarTreeItem> {
         let mut items = Vec::new();
         let folder_ids: std::collections::HashSet<&str> =
-            folders.iter().map(|f| f.id.as_str()).collect();
+            folders.iter().map(|f| f.id.as_ref()).collect();
 
         fn collect_level(
             parent_id: Option<&str>,
-            depth: usize,
+            depth: u16,
             folders: &[WorkspaceFolder],
             files: &[WorkspaceFile],
             folder_ids: &std::collections::HashSet<&str>,
@@ -191,9 +192,10 @@ mod tests {
                     out.push(SidebarTreeItem::CreateInput { depth, is_folder });
                 }
             }
-            let mut level_folders: Vec<&WorkspaceFolder> = folders
+            let mut level_folders: Vec<(u32, &WorkspaceFolder)> = folders
                 .iter()
-                .filter(|f| {
+                .enumerate()
+                .filter(|(_, f)| {
                     if let Some(pid) = parent_id {
                         f.parent_id.as_deref() == Some(pid)
                     } else {
@@ -203,20 +205,18 @@ mod tests {
                                 .is_some_and(|p| !folder_ids.contains(p))
                     }
                 })
+                .map(|(idx, f)| (idx as u32, f))
                 .collect();
-            level_folders.sort_by_cached_key(|a| a.name.to_lowercase());
+            level_folders.sort_by_cached_key(|(_, a)| a.name.to_lowercase());
 
-            for folder in level_folders {
+            for (index, folder) in level_folders {
                 let is_open = folder.is_open;
                 let fid = folder.id.clone();
-                out.push(SidebarTreeItem::Folder {
-                    folder: folder.clone(),
-                    depth,
-                });
+                out.push(SidebarTreeItem::Folder { index, depth });
                 if is_open {
                     collect_level(
-                        Some(&fid),
-                        depth + 1,
+                        Some(fid.as_ref()),
+                        depth.saturating_add(1),
                         folders,
                         files,
                         folder_ids,
@@ -226,9 +226,10 @@ mod tests {
                 }
             }
 
-            let mut level_files: Vec<&WorkspaceFile> = files
+            let mut level_files: Vec<(u32, &WorkspaceFile)> = files
                 .iter()
-                .filter(|f| {
+                .enumerate()
+                .filter(|(_, f)| {
                     if let Some(pid) = parent_id {
                         f.folder_id.as_deref() == Some(pid)
                     } else {
@@ -238,14 +239,12 @@ mod tests {
                                 .is_some_and(|p| !folder_ids.contains(p))
                     }
                 })
+                .map(|(idx, f)| (idx as u32, f))
                 .collect();
-            level_files.sort_by_cached_key(|a| a.name.to_lowercase());
+            level_files.sort_by_cached_key(|(_, a)| a.name.to_lowercase());
 
-            for file in level_files {
-                out.push(SidebarTreeItem::File {
-                    file: file.clone(),
-                    depth,
-                });
+            for (index, _) in level_files {
+                out.push(SidebarTreeItem::File { index, depth });
             }
         }
 
@@ -344,10 +343,10 @@ mod tests {
         let folders = vec![make_folder("f1", "New Folder", None, true)];
         let tree = build_sidebar_tree(&folders, &[], None);
         assert_eq!(tree.len(), 1);
-        match &tree[0] {
-            SidebarTreeItem::Folder { folder, depth } => {
-                assert_eq!(folder.name, "New Folder");
-                assert_eq!(*depth, 0);
+        match tree[0] {
+            SidebarTreeItem::Folder { index, depth } => {
+                assert_eq!(folders[index as usize].name, "New Folder");
+                assert_eq!(depth, 0);
             }
             _ => panic!("Expected folder item"),
         }
@@ -374,38 +373,38 @@ mod tests {
         // 5. Welcome.md (depth 0)
         assert_eq!(tree.len(), 5);
 
-        match &tree[0] {
-            SidebarTreeItem::Folder { folder, depth } => {
-                assert_eq!(folder.id, "f_root");
-                assert_eq!(*depth, 0);
+        match tree[0] {
+            SidebarTreeItem::Folder { index, depth } => {
+                assert_eq!(folders[index as usize].id.as_ref(), "f_root");
+                assert_eq!(depth, 0);
             }
             _ => panic!("Expected root folder"),
         }
-        match &tree[1] {
-            SidebarTreeItem::Folder { folder, depth } => {
-                assert_eq!(folder.id, "f_sub");
-                assert_eq!(*depth, 1);
+        match tree[1] {
+            SidebarTreeItem::Folder { index, depth } => {
+                assert_eq!(folders[index as usize].id.as_ref(), "f_sub");
+                assert_eq!(depth, 1);
             }
             _ => panic!("Expected sub folder"),
         }
-        match &tree[2] {
-            SidebarTreeItem::File { file, depth } => {
-                assert_eq!(file.id, "doc1");
-                assert_eq!(*depth, 2);
+        match tree[2] {
+            SidebarTreeItem::File { index, depth } => {
+                assert_eq!(files[index as usize].id, "doc1");
+                assert_eq!(depth, 2);
             }
             _ => panic!("Expected Setup.md inside Guides"),
         }
-        match &tree[3] {
-            SidebarTreeItem::File { file, depth } => {
-                assert_eq!(file.id, "doc2");
-                assert_eq!(*depth, 1);
+        match tree[3] {
+            SidebarTreeItem::File { index, depth } => {
+                assert_eq!(files[index as usize].id, "doc2");
+                assert_eq!(depth, 1);
             }
             _ => panic!("Expected Intro.md inside Docs"),
         }
-        match &tree[4] {
-            SidebarTreeItem::File { file, depth } => {
-                assert_eq!(file.id, "doc3");
-                assert_eq!(*depth, 0);
+        match tree[4] {
+            SidebarTreeItem::File { index, depth } => {
+                assert_eq!(files[index as usize].id, "doc3");
+                assert_eq!(depth, 0);
             }
             _ => panic!("Expected Welcome.md at root"),
         }
@@ -417,17 +416,17 @@ mod tests {
 
         // Only Docs (depth 0) and Welcome.md (depth 0) should be visible!
         assert_eq!(tree_closed.len(), 2);
-        match &tree_closed[0] {
-            SidebarTreeItem::Folder { folder, depth } => {
-                assert_eq!(folder.id, "f_root");
-                assert_eq!(*depth, 0);
+        match tree_closed[0] {
+            SidebarTreeItem::Folder { index, depth } => {
+                assert_eq!(folders_closed[index as usize].id.as_ref(), "f_root");
+                assert_eq!(depth, 0);
             }
             _ => panic!("Expected root folder"),
         }
-        match &tree_closed[1] {
-            SidebarTreeItem::File { file, depth } => {
-                assert_eq!(file.id, "doc3");
-                assert_eq!(*depth, 0);
+        match tree_closed[1] {
+            SidebarTreeItem::File { index, depth } => {
+                assert_eq!(files[index as usize].id, "doc3");
+                assert_eq!(depth, 0);
             }
             _ => panic!("Expected Welcome.md at root"),
         }
@@ -485,5 +484,14 @@ mod tests {
         let tree = build_sidebar_tree(&folders, &[], Some(&creating));
         assert_eq!(tree.len(), 1);
         assert!(matches!(&tree[0], SidebarTreeItem::Folder { .. }));
+    }
+
+    #[test]
+    fn sidebar_tree_item_stays_compact() {
+        assert!(
+            std::mem::size_of::<SidebarTreeItem>() <= 12,
+            "SidebarTreeItem grew to {} bytes",
+            std::mem::size_of::<SidebarTreeItem>()
+        );
     }
 }

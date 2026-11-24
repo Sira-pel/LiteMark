@@ -15,14 +15,14 @@ pub struct OutlineItem {
 }
 
 /// Every heading of `parsed`, in document order.
-pub fn outline_items(parsed: &ParsedDocument) -> Vec<OutlineItem> {
+pub fn outline_items(parsed: &ParsedDocument, content: &str) -> Vec<OutlineItem> {
     parsed
         .lines
         .iter()
         .filter_map(|line| match line.kind {
             LineKind::Heading { level } => Some(OutlineItem {
                 level,
-                text: line.display_text.trim().to_string(),
+                text: line.display_text(content).trim().to_string(),
                 offset: line.source.start,
             }),
             _ => None,
@@ -66,7 +66,7 @@ mod tests {
     use crate::markdown::parse_document;
 
     fn items(text: &str) -> Vec<OutlineItem> {
-        outline_items(&parse_document(text))
+        outline_items(&parse_document(text), text)
     }
 
     #[test]

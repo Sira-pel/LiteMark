@@ -207,7 +207,7 @@ impl LiteMarkApp {
             .folders
             .iter()
             .find(|folder| folder.path == path)
-            .map(|folder| SidebarTarget::Folder(folder.id.clone()))
+            .map(|folder| SidebarTarget::Folder(folder.id.to_string()))
             .or_else(|| {
                 self.workspace
                     .files

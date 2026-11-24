@@ -226,18 +226,19 @@ fn typing_into_a_large_document_reparses_a_few_lines() {
 fn slice_bounds_match_slice_display() {
     let mut rng = Lcg(0x51ce_b0d5);
     for _ in 0..40 {
-        let doc = parse_document(&random_doc(&mut rng));
+        let text = random_doc(&mut rng);
+        let doc = parse_document(&text);
         for line in &doc.lines {
-            let len = line.display_text.len();
+            let len = line.display_len();
             for _ in 0..4 {
                 let a = rng.next(len + 1);
                 let b = a + rng.next(len + 1 - a);
-                let sliced = line.offset_map.slice_display(a..b);
+                let sliced = line.slice_display(a..b);
                 assert_eq!(
-                    line.offset_map.slice_bounds(a..b),
+                    line.slice_bounds(a..b),
                     (sliced.line_start, sliced.line_end),
                     "{:?} {a}..{b}",
-                    line.display_text
+                    line.display_text(&text)
                 );
             }
         }

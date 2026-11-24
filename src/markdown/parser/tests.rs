@@ -110,7 +110,7 @@ fn test_in_list_or_quote_tracker_exhaustive() {
             number: 1,
             task: None,
             indent_cols: 0,
-            checkbox_source: None,
+            checkbox_offset: u16::MAX,
         },
         LineKind::Blockquote,
         LineKind::TableRow {
@@ -145,15 +145,15 @@ fn test_in_list_or_quote_tracker_exhaustive() {
             let mut next_tracker = tracker;
             next_tracker.push(kind);
             seq.push(ParsedLine {
-                line_index: depth,
+                line_index: depth as u32,
                 source: 0..0,
                 content_end: 0,
+                prefix_len: 0,
                 kind: kind.clone(),
-                prefix_range: 0..0,
                 hidden_ranges: Vec::new(),
                 inline_pairs: Vec::new(),
-                display_text: String::new(),
-                offset_map: Arc::new(RowOffsetMap::identity(0, 0)),
+                display_text_owned: None,
+                offset_map_cached: None,
                 link_hits: no_links(),
                 styled_segments: Vec::new(),
             });
@@ -228,7 +228,7 @@ fn test_spans_formatting() {
 fn test_link_hits_precomputed_per_line() {
     let doc = parse_document("see [site](https://a.example) now\nplain");
     assert_eq!(doc.lines[0].link_hits.len(), 1);
-    assert_eq!(doc.lines[0].link_hits[0].1, "https://a.example");
+    assert_eq!(doc.lines[0].link_hits[0].1.as_ref(), "https://a.example");
     assert!(doc.lines[1].link_hits.is_empty());
 }
 
@@ -238,7 +238,7 @@ fn test_styled_segments_bold() {
     let doc = parse_document(input);
     assert_eq!(doc.lines.len(), 1);
     let line = &doc.lines[0];
-    println!("display: {:?}", line.display_text);
+    println!("display: {:?}", line.display_text(input));
     println!("segments: {:?}", line.styled_segments);
     let bold_seg = line.styled_segments.iter().find(|s| s.bold);
     assert!(bold_seg.is_some(), "Expected bold styled segment");
@@ -327,20 +327,20 @@ fn test_parse_document_table() {
             ..
         }
     ));
-    assert_eq!(doc.lines[0].display_text, "| **Col 1** | Col 2 |");
-    // Verify Col 1 is bold (via **), but Col 2 is not forced bold
+    assert_eq!(doc.lines[0].display_text(md), "| **Col 1** | Col 2 |");
+    // Verify Col 1 is bold (via **), and Col 2 is not forced bold
     let bold_segs: Vec<_> = doc.lines[0]
         .styled_segments
         .iter()
         .filter(|s| s.bold)
         .collect();
     assert!(!bold_segs.is_empty());
-    let normal_segs: Vec<_> = doc.lines[0]
+    let col2_start = md.find("Col 2").unwrap();
+    let col2_bold = doc.lines[0]
         .styled_segments
         .iter()
-        .filter(|s| !s.bold)
-        .collect();
-    assert!(!normal_segs.is_empty());
+        .any(|s| s.bold && s.source.start < col2_start + 5 && s.source.end > col2_start);
+    assert!(!col2_bold);
 }
 
 #[test]
@@ -348,7 +348,7 @@ fn rendered_click_maps_to_source_and_strike_is_marked() {
     let md = "# Hi\n\n~~gone~~";
     let doc = parse_document(md);
     // Display column 1 of the heading ("Hi" without "# ") is the "i".
-    let offset = doc.lines[0].offset_map.display_to_source(1);
+    let offset = doc.lines[0].display_to_source(1);
     assert_eq!(&md[offset..offset + 1], "i");
     let strike = doc.lines[2]
         .styled_segments
@@ -357,7 +357,7 @@ fn rendered_click_maps_to_source_and_strike_is_marked() {
     assert!(strike.unwrap().strike);
 
     let bullet_doc = parse_document("- alpha");
-    let bullet = bullet_doc.lines[0].offset_map.display_to_source(0);
+    let bullet = bullet_doc.lines[0].display_to_source(0);
     assert_eq!(&"- alpha"[bullet..bullet + 1], "a");
 }
 
@@ -367,26 +367,26 @@ fn test_row_offset_map_roundtrip_and_multibyte() {
     let parsed = parse_document(md);
     assert_eq!(parsed.lines.len(), 1);
     let line = &parsed.lines[0];
-    assert_eq!(line.display_text, "Hello world and LiteMark 😀កខ");
+    assert_eq!(line.display_text(md), "Hello world and LiteMark 😀កខ");
 
     // Display offset 0 -> 'H' at source byte 2 (after "# ")
-    assert_eq!(line.offset_map.display_to_source(0), 2);
-    assert_eq!(line.offset_map.source_to_display(2), 0);
+    assert_eq!(line.display_to_source(0), 2);
+    assert_eq!(line.source_to_display(2), 0);
 
     // Display offset 6 -> 'w' in "**world**" (source byte 10)
-    assert_eq!(line.offset_map.display_to_source(6), 10);
-    assert_eq!(line.offset_map.source_to_display(10), 6);
+    assert_eq!(line.display_to_source(6), 10);
+    assert_eq!(line.source_to_display(10), 6);
 
     // Display offset 16 -> 'L' in "[LiteMark]" (source byte 23)
-    assert_eq!(line.offset_map.display_to_source(16), 23);
-    assert_eq!(line.offset_map.source_to_display(23), 16);
+    assert_eq!(line.display_to_source(16), 23);
+    assert_eq!(line.source_to_display(23), 16);
 
     // Check every char boundary in display_text maps to a valid char boundary in md
-    for (disp_idx, ch) in line.display_text.char_indices() {
-        let src_idx = line.offset_map.display_to_source(disp_idx);
+    for (disp_idx, ch) in line.display_text(md).char_indices() {
+        let src_idx = line.display_to_source(disp_idx);
         assert!(md.is_char_boundary(src_idx));
         assert_eq!(md[src_idx..].chars().next(), Some(ch));
-        assert_eq!(line.offset_map.source_to_display(src_idx), disp_idx);
+        assert_eq!(line.source_to_display(src_idx), disp_idx);
     }
 }
 
@@ -477,17 +477,21 @@ fn leaf_dump(md: &str) -> Result<String, String> {
     let doc = parse_document(md);
     let mut out = String::new();
     for line in &doc.lines {
-        for (idx, ch) in line.display_text.char_indices() {
-            let src = line.offset_map.display_to_source(idx);
+        for (idx, ch) in line.display_text(md).char_indices() {
+            let src = line.display_to_source(idx);
             if !md.is_char_boundary(src) || !md[src..].starts_with(ch) {
                 return Err(format!(
                     "map display {ch:?} at {idx} -> source {src} in {:?}",
-                    line.display_text
+                    line.display_text(md)
                 ));
             }
         }
         let mut marks = Vec::new();
         let mut links = Vec::new();
+        let disp = line.display_text(md);
+        if matches!(line.kind, LineKind::CodeLine) && !disp.is_empty() {
+            marks.push(format!("C:{disp}"));
+        }
         for segment in &line.styled_segments {
             let mut flags = String::new();
             if segment.bold {
@@ -524,7 +528,7 @@ fn leaf_dump(md: &str) -> Result<String, String> {
         out.push_str(&format!(
             "{}\tdisplay={:?}\tsource={:?}\tmarks={marks}\tlinks={links}\n",
             leaf_kind_token(&line.kind),
-            line.display_text,
+            line.display_text(md),
             source,
         ));
     }
@@ -1282,8 +1286,8 @@ fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
     ]
 }
 
-fn kind_report(md: &str, kind: &LineKind) -> String {
-    match kind {
+fn kind_report(md: &str, line: &ParsedLine) -> String {
+    match &line.kind {
         LineKind::Empty => "Empty".to_string(),
         LineKind::Paragraph => "Paragraph".to_string(),
         LineKind::Heading { level } => format!("Heading level={level}"),
@@ -1293,16 +1297,18 @@ fn kind_report(md: &str, kind: &LineKind) -> String {
             number,
             task,
             indent_cols,
-            checkbox_source,
+            checkbox_offset,
         } => {
             let task = match task {
                 None => "none",
                 Some(false) => "unchecked",
                 Some(true) => "checked",
             };
-            let checkbox = match checkbox_source {
-                Some(range) => format!("{:?}", &md[range.clone()]),
-                None => "-".to_string(),
+            let checkbox = if *checkbox_offset != u16::MAX {
+                let start = line.source.start + *checkbox_offset as usize;
+                format!("{:?}", &md[start..start + 3])
+            } else {
+                "-".to_string()
             };
             format!(
                 "ListItem ordered={ordered} number={number} task={task} indent={indent_cols} checkbox={checkbox}"
@@ -1351,8 +1357,8 @@ fn link_report(line: &ParsedLine) -> String {
 }
 
 fn map_status(md: &str, line: &ParsedLine) -> String {
-    for (idx, ch) in line.display_text.char_indices() {
-        let src = line.offset_map.display_to_source(idx);
+    for (idx, ch) in line.display_text(md).char_indices() {
+        let src = line.display_to_source(idx);
         if !md.is_char_boundary(src) {
             return format!("fail boundary {src}");
         }
@@ -1371,8 +1377,8 @@ fn observe_line(md: &str, index: usize) -> String {
     let line = &doc.lines[index];
     format!(
         "{} display={:?} strike={} link={} map={}",
-        kind_report(md, &line.kind),
-        line.display_text,
+        kind_report(md, line),
+        line.display_text(md),
         strike_report(md, line),
         link_report(line),
         map_status(md, line),
@@ -1699,11 +1705,7 @@ nest[2] Empty display=\"\" strike=- link=- map=ok"
 fn checkbox_click_ticks_tab_vt_ff_and_unticks() {
     fn click(source: &str) -> String {
         let doc = parse_document(source);
-        let LineKind::ListItem {
-            checkbox_source: Some(range),
-            ..
-        } = &doc.lines[0].kind
-        else {
+        let Some(range) = doc.lines[0].checkbox_source() else {
             panic!("no checkbox in {source:?}");
         };
         let replacement = checkbox_click_replacement(&source[range.clone()]);
@@ -1841,12 +1843,12 @@ fn extended_rules_inside_html_stay_visible_text() {
     let outside_src = "Foo\n****\n";
     let outside = parse_document(outside_src);
     assert!(matches!(outside.lines[1].kind, LineKind::HorizontalRule));
-    assert_eq!(outside.lines[1].display_text, "");
+    assert_eq!(outside.lines[1].display_text(outside_src), "");
     assert_eq!(&outside_src[outside.lines[1].source.clone()], "****");
     let kept = "- item\n<br>\n---\n";
     let list_rule = parse_document(kept);
     assert!(matches!(list_rule.lines[2].kind, LineKind::HorizontalRule));
-    assert_eq!(list_rule.lines[2].display_text, "");
+    assert_eq!(list_rule.lines[2].display_text(kept), "");
     assert_eq!(&kept[list_rule.lines[2].source.clone()], "---");
     let indented = "- item\n  <div>\n---\n";
     let indented_rule = parse_document(indented);
@@ -1854,17 +1856,17 @@ fn extended_rules_inside_html_stay_visible_text() {
         indented_rule.lines[2].kind,
         LineKind::HorizontalRule
     ));
-    assert_eq!(indented_rule.lines[2].display_text, "");
+    assert_eq!(indented_rule.lines[2].display_text(indented), "");
     assert_eq!(&indented[indented_rule.lines[2].source.clone()], "---");
     let indented_blank = "- item\n\n  <div>\n---\n";
     let blank_rule = parse_document(indented_blank);
     assert!(matches!(blank_rule.lines[3].kind, LineKind::HorizontalRule));
-    assert_eq!(blank_rule.lines[3].display_text, "");
+    assert_eq!(blank_rule.lines[3].display_text(indented_blank), "");
     assert_eq!(&indented_blank[blank_rule.lines[3].source.clone()], "---");
     let div_rule = "<div>\n---\n";
     let div_doc = parse_document(div_rule);
     assert_eq!(&div_rule[div_doc.lines[1].source.clone()], "---");
-    assert_eq!(div_doc.lines[1].display_text, "");
+    assert_eq!(div_doc.lines[1].display_text(div_rule), "");
     assert!(matches!(div_doc.lines[1].kind, LineKind::HorizontalRule));
 
     let cases = [
@@ -1886,7 +1888,7 @@ fn extended_rules_inside_html_stay_visible_text() {
         let doc = parse_document(src);
         let line = &doc.lines[index];
         assert_eq!(&src[line.source.clone()], raw, "{src:?}");
-        assert_eq!(line.display_text, "", "{src:?}");
+        assert_eq!(line.display_text(src), "", "{src:?}");
         assert!(
             matches!(line.kind, LineKind::HorizontalRule),
             "{src:?} kind {:?}",
@@ -1909,10 +1911,10 @@ fn four_space_dash_rule_after_bare_cr_is_code() {
         doc.lines[0].kind
     );
     assert!(matches!(doc.lines[0].kind, LineKind::CodeLine));
-    assert_eq!(doc.lines[0].display_text, "---");
+    assert_eq!(doc.lines[0].display_text(src), "---");
     assert_eq!(&src[doc.lines[0].source.clone()], "    ---");
     assert!(matches!(doc.lines[1].kind, LineKind::Paragraph));
-    assert_eq!(doc.lines[1].display_text, "next");
+    assert_eq!(doc.lines[1].display_text(src), "next");
     assert_eq!(&src[doc.lines[1].source.clone()], "next");
 }
 
@@ -1955,7 +1957,7 @@ fn four_space_rule_inside_an_open_list_is_a_rule() {
     let top = "    ---\nnext\n";
     let top_doc = parse_document(top);
     assert!(matches!(top_doc.lines[0].kind, LineKind::CodeLine));
-    assert_eq!(top_doc.lines[0].display_text, "---");
+    assert_eq!(top_doc.lines[0].display_text(top), "---");
 
     let cases = [
         ("- item\n\n    ---\n", 2),
@@ -1973,7 +1975,7 @@ fn four_space_rule_inside_an_open_list_is_a_rule() {
             "{src:?} kind {:?}",
             doc.lines[index].kind
         );
-        assert_eq!(doc.lines[index].display_text, "", "{src:?}");
+        assert_eq!(doc.lines[index].display_text(src), "", "{src:?}");
         assert_eq!(&src[doc.lines[index].source.clone()], "    ---", "{src:?}");
     }
 }
@@ -1986,7 +1988,7 @@ fn tab_rule_inside_an_open_list_is_a_rule() {
     let top = "\t---\n";
     let top_doc = parse_document(top);
     assert!(matches!(top_doc.lines[0].kind, LineKind::CodeLine));
-    assert_eq!(top_doc.lines[0].display_text, "---");
+    assert_eq!(top_doc.lines[0].display_text(top), "---");
     assert_eq!(&top[top_doc.lines[0].source.clone()], "\t---");
 
     let cases = [
@@ -2001,7 +2003,7 @@ fn tab_rule_inside_an_open_list_is_a_rule() {
             "{src:?} kind {:?}",
             doc.lines[index].kind
         );
-        assert_eq!(doc.lines[index].display_text, "", "{src:?}");
+        assert_eq!(doc.lines[index].display_text(src), "", "{src:?}");
         assert_eq!(&src[doc.lines[index].source.clone()], source, "{src:?}");
     }
 }
@@ -2009,39 +2011,49 @@ fn tab_rule_inside_an_open_list_is_a_rule() {
 /// CommonMark allows tabs before and after a closing ATX hash run.
 #[test]
 fn tab_after_a_closing_hash_stays_in_the_heading_text() {
-    let doc = parse_document("# foo #\t");
+    let s1 = "# foo #\t";
+    let doc = parse_document(s1);
     assert!(matches!(doc.lines[0].kind, LineKind::Heading { level: 1 }));
-    assert_eq!(doc.lines[0].display_text, "foo");
+    assert_eq!(doc.lines[0].display_text(s1), "foo");
 
-    let kept = parse_document("# foo\t#");
-    assert_eq!(kept.lines[0].display_text, "foo");
+    let s2 = "# foo\t#";
+    let kept = parse_document(s2);
+    assert_eq!(kept.lines[0].display_text(s2), "foo");
 
-    let trailed = parse_document("# foo\t");
-    assert_eq!(trailed.lines[0].display_text, "foo\t");
+    let s3 = "# foo\t";
+    let trailed = parse_document(s3);
+    assert_eq!(trailed.lines[0].display_text(s3), "foo\t");
 
-    let spaces = parse_document("# foo #   ");
-    assert_eq!(spaces.lines[0].display_text, "foo");
+    let s4 = "# foo #   ";
+    let spaces = parse_document(s4);
+    assert_eq!(spaces.lines[0].display_text(s4), "foo");
 
-    let empty = parse_document("### ###");
-    assert_eq!(empty.lines[0].display_text, "");
+    let s5 = "### ###";
+    let empty = parse_document(s5);
+    assert_eq!(empty.lines[0].display_text(s5), "");
 
-    let tab_hash = parse_document("#\t#");
+    let s6 = "#\t#";
+    let tab_hash = parse_document(s6);
     assert!(matches!(
         tab_hash.lines[0].kind,
         LineKind::Heading { level: 1 }
     ));
-    assert_eq!(tab_hash.lines[0].display_text, "");
+    assert_eq!(tab_hash.lines[0].display_text(s6), "");
 }
 fn shape_of(markdown: &str) -> String {
     let doc = parse_document(markdown);
     let mut out = String::new();
     for (index, line) in doc.lines.iter().enumerate() {
-        let code = line
+        let mut code = line
             .styled_segments
             .iter()
             .filter(|segment| segment.code)
             .map(|segment| markdown[segment.source.clone()].to_string())
             .collect::<Vec<_>>();
+        let disp = line.display_text(markdown);
+        if matches!(line.kind, LineKind::CodeLine) && !disp.is_empty() {
+            code.push(disp.to_string());
+        }
         let body = match &line.kind {
             LineKind::Empty => "Empty".to_string(),
             LineKind::Paragraph => "Paragraph".to_string(),
@@ -2079,7 +2091,7 @@ fn shape_of(markdown: &str) -> String {
         };
         out.push_str(&format!(
             "line[{index}] {body} display={:?} code={code:?}\n",
-            line.display_text
+            line.display_text(markdown)
         ));
     }
     out
@@ -3420,21 +3432,14 @@ fn word_style(md: &str, word: &str) -> (bool, bool, bool, bool, bool) {
         .flat_map(|line| line.styled_segments.iter())
         .filter(|s| s.source.start < end && s.source.end > start)
         .collect();
-    assert!(
-        !segs.is_empty(),
-        "word {word:?} missing in {md:?} segs={:?}",
-        doc.lines
-            .iter()
-            .flat_map(|line| line.styled_segments.iter())
-            .map(|s| md.get(s.source.clone()).unwrap_or("?"))
-            .collect::<Vec<_>>()
-    );
-    let s = segs[0];
+    let Some(s) = segs.first() else {
+        return (false, false, false, false, false);
+    };
     (s.bold, s.italic, s.underline, s.strike, s.code)
 }
 
 fn display_of(md: &str, line: usize) -> String {
-    parse_document(md).lines[line].display_text.clone()
+    parse_document(md).lines[line].display_text(md).to_string()
 }
 
 /// Already-parsed pairs must not be re-synthesized when `base > 0`.
@@ -3483,12 +3488,12 @@ fn synthesize_skips_closer_preceded_by_whitespace() {
         let line = doc
             .lines
             .iter()
-            .find(|l| l.display_text.contains("foo"))
+            .find(|l| l.display_text(&md).contains("foo"))
             .unwrap_or(&doc.lines[0]);
         assert!(
-            line.display_text.contains('*'),
+            line.display_text(&md).contains('*'),
             "{label}: asterisks were hidden in {:?} of {md:?}",
-            line.display_text
+            line.display_text(&md)
         );
     }
     assert_eq!(display_of("x*foo *bar", 0), "x*foo *bar");
@@ -3527,9 +3532,9 @@ fn synthesize_ors_style_onto_nested_segments() {
                 })
                 .unwrap_or(&doc.lines[0]);
             assert!(
-                !line.display_text.contains('*'),
+                !line.display_text(&md).contains('*'),
                 "{label}: raw markers in {:?} of {md:?}",
-                line.display_text
+                line.display_text(&md)
             );
         }
     }
@@ -3603,15 +3608,16 @@ fn tab_indented_list_items_count_tab_stop_columns() {
 
 #[test]
 fn blockquotes_accept_optional_space_tab_eol_and_max_three_cols() {
-    let doc = parse_document(">foo\n>\tbar\n>\n   > baz\n\n    > code\npara\n\t> text");
+    let src = ">foo\n>\tbar\n>\n   > baz\n\n    > code\npara\n\t> text";
+    let doc = parse_document(src);
     assert_eq!(doc.lines[0].kind, LineKind::Blockquote);
-    assert_eq!(doc.lines[0].display_text, "foo");
+    assert_eq!(doc.lines[0].display_text(src), "foo");
     assert_eq!(doc.lines[1].kind, LineKind::Blockquote);
-    assert_eq!(doc.lines[1].display_text, "bar");
+    assert_eq!(doc.lines[1].display_text(src), "bar");
     assert_eq!(doc.lines[2].kind, LineKind::Blockquote);
-    assert_eq!(doc.lines[2].display_text, "");
+    assert_eq!(doc.lines[2].display_text(src), "");
     assert_eq!(doc.lines[3].kind, LineKind::Blockquote);
-    assert_eq!(doc.lines[3].display_text, "baz");
+    assert_eq!(doc.lines[3].display_text(src), "baz");
     assert_eq!(doc.lines[5].kind, LineKind::CodeLine);
     assert_eq!(doc.lines[7].kind, LineKind::Paragraph);
 }
@@ -3697,7 +3703,7 @@ fn prepare_for_pulldown_preserves_link_destinations() {
     let mut urls: Vec<&str> = doc.lines[0]
         .link_hits
         .iter()
-        .map(|(_, url)| url.as_str())
+        .map(|(_, url)| url.as_ref())
         .collect();
     urls.dedup();
     assert_eq!(
@@ -3823,4 +3829,37 @@ fn prepare_for_pulldown_handles_many_unclosed_links_and_backticks() {
         prepare_for_pulldown(&many_unclosed_with_closer).as_ref(),
         many_unclosed_with_closer
     );
+}
+
+#[test]
+fn parsed_line_and_line_kind_stay_compact_with_zero_alloc_plain_lines() {
+    assert!(
+        std::mem::size_of::<LineKind>() <= 24,
+        "LineKind grew to {} bytes",
+        std::mem::size_of::<LineKind>()
+    );
+    assert!(
+        std::mem::size_of::<ParsedLine>() <= 168,
+        "ParsedLine grew to {} bytes",
+        std::mem::size_of::<ParsedLine>()
+    );
+    let md = "hello world\n# Heading\n- item\n```\ncode line\n```";
+    let doc = parse_document(md);
+    for line in &doc.lines {
+        assert!(
+            line.display_text_owned.is_none(),
+            "plain line {:?} should borrow display_text zero-copy",
+            line.display_text(md)
+        );
+        assert!(
+            line.offset_map_cached.is_none(),
+            "plain line {:?} should not allocate RowOffsetMap",
+            line.display_text(md)
+        );
+        assert!(
+            line.styled_segments.is_empty(),
+            "unstyled/code line {:?} should leave styled_segments empty",
+            line.display_text(md)
+        );
+    }
 }

@@ -63,7 +63,7 @@ fn observe(content: &str) -> Observed {
     let mut display_len = 0usize;
     let mut flags = String::new();
     for (li, line) in parsed.lines.iter().enumerate() {
-        display_len += line.display_text.len();
+        display_len += line.display_len();
         for seg in &line.styled_segments {
             let text = content.get(seg.source.start..seg.source.end).unwrap_or("");
             let link = seg.link_url.as_deref().unwrap_or("-");

@@ -26,7 +26,7 @@ impl LiteMarkApp {
                 .workspace
                 .folders
                 .iter()
-                .find(|f| &f.id == id)
+                .find(|f| f.id.as_ref() == id.as_str())
                 .map(|f| f.path.clone()),
             SidebarTarget::File(id) => self
                 .workspace
@@ -63,7 +63,7 @@ impl LiteMarkApp {
                 .workspace
                 .folders
                 .iter()
-                .find(|f| &f.id == id)
+                .find(|f| f.id.as_ref() == id.as_str())
                 .map(|f| f.name.clone()),
             None => self
                 .workspace
@@ -137,7 +137,7 @@ impl LiteMarkApp {
                 .workspace
                 .folders
                 .iter()
-                .find(|f| f.id == dest_id)
+                .find(|f| f.id.as_ref() == dest_id.as_str())
                 .map(|f| (f.name.clone(), f.path.clone()))
             else {
                 return DropOutcome::Failed("That folder is no longer available.".into());
@@ -214,7 +214,7 @@ impl LiteMarkApp {
             .workspace
             .folders
             .iter()
-            .find(|f| f.id == folder_id)
+            .find(|f| f.id.as_ref() == folder_id)
             .map(|f| (f.name.clone(), f.path.clone()))
         else {
             return DropOutcome::Failed("That folder is no longer available.".into());
@@ -227,7 +227,7 @@ impl LiteMarkApp {
                 .workspace
                 .folders
                 .iter()
-                .find(|f| f.id == dest_id)
+                .find(|f| f.id.as_ref() == dest_id.as_str())
                 .map(|f| (f.name.clone(), f.path.clone()))
             else {
                 return DropOutcome::Failed("That folder is no longer available.".into());

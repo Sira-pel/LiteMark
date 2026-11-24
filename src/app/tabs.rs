@@ -216,6 +216,9 @@ impl LiteMarkApp {
             self.reset_editor_transient_state();
         }
         self.tabs.retain(|tab| tab.id != id);
+        if pos.is_some() {
+            self.closed_tab_ids.push(id.to_string());
+        }
         let target = next_active
             .filter(|next| self.tabs.iter().any(|tab| &tab.id == next))
             .or_else(|| {
@@ -245,7 +248,8 @@ impl LiteMarkApp {
             let new_id = self.tab_ids.alloc();
             let number = new_id.trim_start_matches("tab-");
             let title = format!("Untitled-{number}.md");
-            self.tabs.clear();
+            self.closed_tab_ids
+                .extend(self.tabs.drain(..).map(|tab| tab.id));
             self.tabs.push(DocumentTab::new(
                 new_id.clone(),
                 title,

@@ -77,8 +77,10 @@ impl DocumentTab {
                             let target = skip_hidden_left(&parsed, cells[c_idx - 1].end);
                             self.place(target, extend);
                         } else {
-                            let prev_row_cell_end =
-                                parsed.lines[..pline.line_index].iter().rev().find_map(|l| {
+                            let prev_row_cell_end = parsed.lines[..pline.line_index as usize]
+                                .iter()
+                                .rev()
+                                .find_map(|l| {
                                     if let LineKind::TableRow { ref body, .. } = l.kind {
                                         let TableRowBody {
                                             cells: pcells,
@@ -107,7 +109,7 @@ impl DocumentTab {
                     }
                 }
             }
-            if pos <= pline.prefix_range.end && pos >= pline.source.start {
+            if pos <= pline.prefix_end() && pos >= pline.source.start {
                 if pline.source.start > 0 {
                     let prev = pline.source.start
                         - line_ending_len_before(&self.content, pline.source.start);
@@ -128,8 +130,8 @@ impl DocumentTab {
         };
         pos = skip_hidden_interior_left(&parsed, pos);
         if let Some(pline) = parsed.line_at_offset(pos) {
-            if pos < pline.prefix_range.end {
-                pos = pline.prefix_range.end;
+            if pos < pline.prefix_end() {
+                pos = pline.prefix_end();
             }
         }
         self.place(pos, extend);
@@ -177,8 +179,10 @@ impl DocumentTab {
                             let target = skip_hidden_right(&parsed, next_cell.start);
                             self.place(target, extend);
                         } else {
-                            let next_row_cell_start =
-                                parsed.lines.get(pline.line_index + 1..).and_then(|rest| {
+                            let next_row_cell_start = parsed
+                                .lines
+                                .get(pline.line_index as usize + 1..)
+                                .and_then(|rest| {
                                     rest.iter().find_map(|l| {
                                         if let LineKind::TableRow { ref body, .. } = l.kind {
                                             let TableRowBody {
@@ -201,7 +205,7 @@ impl DocumentTab {
                                 let after = (table_source.end + break_len).min(self.content.len());
                                 let target = if break_len > 0 {
                                     parsed.line_at_offset(after).map_or(after, |nline| {
-                                        skip_hidden_right(&parsed, nline.prefix_range.end)
+                                        skip_hidden_right(&parsed, nline.prefix_end())
                                     })
                                 } else {
                                     after
@@ -213,8 +217,8 @@ impl DocumentTab {
                     }
                 }
             }
-            if pos < pline.prefix_range.end {
-                pos = pline.prefix_range.end;
+            if pos < pline.prefix_end() {
+                pos = pline.prefix_end();
             }
             let vend = visible_line_end(pline, self.view_mode);
             let source_end = pline.source.end;
@@ -227,7 +231,7 @@ impl DocumentTab {
                     let next_line_start = source_end + break_len;
                     let prefix_end = parsed
                         .line_at_offset(next_line_start)
-                        .map(|nline| nline.prefix_range.end);
+                        .map(|nline| nline.prefix_end());
                     if let Some(prefix_end) = prefix_end {
                         let target = skip_hidden_right(&parsed, prefix_end);
                         self.place(target, extend);
@@ -247,7 +251,7 @@ impl DocumentTab {
         if break_len > 0 {
             let next_line_start = pos + break_len;
             if let Some(nline) = parsed.line_at_offset(next_line_start) {
-                let target = skip_hidden_right(&parsed, nline.prefix_range.end);
+                let target = skip_hidden_right(&parsed, nline.prefix_end());
                 self.place(target, extend);
                 return;
             }
@@ -344,8 +348,7 @@ impl DocumentTab {
                     return;
                 }
             }
-            let vis_start =
-                skip_hidden_right(&parsed, pline.prefix_range.end).min(pline.source.end);
+            let vis_start = skip_hidden_right(&parsed, pline.prefix_end()).min(pline.source.end);
             self.place(vis_start, extend);
         } else {
             self.move_home(extend);
@@ -608,7 +611,7 @@ pub(super) fn skip_hidden_interior_left(parsed: &ParsedDocument, mut pos: usize)
 /// the source, and every other line keeps the source end.
 pub(crate) fn visible_line_end(line: &ParsedLine, mode: ViewMode) -> usize {
     if mode != ViewMode::Raw && matches!(line.kind, LineKind::Heading { .. }) {
-        line.source.start + line.content_end
+        line.source.start + line.content_end as usize
     } else {
         line.source.end
     }

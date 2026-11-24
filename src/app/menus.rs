@@ -212,7 +212,7 @@ impl LiteMarkApp {
                     .workspace
                     .folders
                     .iter()
-                    .find(|folder| &folder.id == id)
+                    .find(|folder| folder.id.as_ref() == id.as_str())
                     .map(|folder| folder.name.clone())
                     .unwrap_or_else(|| "this folder".into());
                 (
@@ -240,7 +240,7 @@ impl LiteMarkApp {
                     .workspace
                     .folders
                     .iter()
-                    .find(|folder| &folder.id == id)
+                    .find(|folder| folder.id.as_ref() == id.as_str())
                     .map(|folder| folder.name.clone())
                     .unwrap_or_else(|| "this folder".into());
                 (
@@ -386,7 +386,7 @@ impl LiteMarkApp {
                         .workspace
                         .folders
                         .iter()
-                        .find(|folder| folder.id == id)
+                        .find(|folder| folder.id.as_ref() == id.as_str())
                         .map(|folder| folder.path.clone());
                     let Some(prefix) = prefix else {
                         self.show_error("That folder is no longer available.");

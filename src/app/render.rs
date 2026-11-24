@@ -29,6 +29,15 @@ impl Render for LiteMarkApp {
 
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.ensure_stats();
+            tab.ensure_cursor_formats();
+        }
+        // Tabs closed since the last frame: release the pictures no open tab
+        // references; the open tabs keep theirs.
+        if !self.closed_tab_ids.is_empty() {
+            let closed = std::mem::take(&mut self.closed_tab_ids);
+            self.note_image_cache.update(cx, |cache, cx| {
+                cache.forget_tabs(&closed, Some(window), cx);
+            });
         }
         let stats_selection = self.selection_word_count();
         // Borrow the tab only for the few fields the chrome reads. Cloning it
@@ -1507,6 +1516,7 @@ impl Render for LiteMarkApp {
                             .when(self.show_sidebar, |s| {
                                 let sidebar = render_sidebar(
                                     SidebarProps {
+                                        app: cx.entity(),
                                         workspace: &self.workspace,
                                         tree: self.sidebar_tree(),
                                         width: crate::theme::sidebar_width(window_width),

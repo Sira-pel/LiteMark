@@ -26,16 +26,16 @@ use crate::model::ViewMode;
 use crate::theme::sz;
 
 use super::note_images::{
-    ellipsize, fit_image, fit_image_size, flow_thumbnails, image_element_id, placeholder_height,
-    thumbnail_size, ImageSizeCache, HANDLE_SIZE, IMAGE_MARGIN_Y, IMAGE_RADIUS, MAX_IMAGE_HEIGHT,
-    THUMB_GAP, THUMB_HEIGHT,
+    bucket_max_dim, ellipsize, fit_image, fit_image_size, flow_thumbnails, image_element_id,
+    placeholder_height, thumbnail_size, ImageSizeCache, NoteImageCache, HANDLE_SIZE,
+    IMAGE_MARGIN_Y, IMAGE_RADIUS, MAX_IMAGE_HEIGHT, THUMB_GAP, THUMB_HEIGHT,
 };
 
 #[derive(Clone)]
 pub struct CellLine {
     pub text_origin: Point<Pixels>,
     pub line_height: Pixels,
-    pub shaped: ShapedLine,
+    pub shaped: Rc<ShapedLine>,
     pub offset_map: RowOffsetMap,
 }
 
@@ -45,8 +45,6 @@ pub struct PaintCell {
     pub inner_range: Range<usize>,
     pub box_bounds: Bounds<Pixels>,
     pub text_origin: Point<Pixels>,
-    pub shaped: ShapedLine,
-    pub offset_map: RowOffsetMap,
     pub lines: Vec<CellLine>,
 }
 
@@ -61,8 +59,7 @@ pub struct PaintRow {
     /// inline (about 3 KB), and every off-screen row shares one empty line.
     pub shaped: Rc<ShapedLine>,
     pub offset_map: Arc<RowOffsetMap>,
-    pub checkbox_hit: Option<(Bounds<Pixels>, Range<usize>)>,
-    pub link_hits: Arc<Vec<(Range<usize>, String)>>,
+    pub link_hits: Arc<Vec<(Range<usize>, Arc<str>)>>,
     pub cells: Vec<PaintCell>,
 }
 
@@ -104,6 +101,23 @@ pub struct TableWidthCache {
     /// widths it was wrapped to). Lets rows away from the caret and outside
     /// the shaping band skip shaping even right after an edit.
     pub row_heights: std::collections::HashMap<u64, Pixels>,
+}
+
+impl TableWidthCache {
+    pub fn clear_and_shrink(&mut self) {
+        if !self.entries.is_empty() || self.entries.capacity() > 0 {
+            self.entries.clear();
+            self.entries.shrink_to_fit();
+        }
+        if !self.cell_widths.is_empty() || self.cell_widths.capacity() > 0 {
+            self.cell_widths.clear();
+            self.cell_widths.shrink_to_fit();
+        }
+        if !self.row_heights.is_empty() || self.row_heights.capacity() > 0 {
+            self.row_heights.clear();
+            self.row_heights.shrink_to_fit();
+        }
+    }
 }
 
 /// Key for one cell's measured width: its text, the hidden markup inside it
@@ -198,6 +212,18 @@ pub struct LineRows {
     rows: Vec<(usize, usize)>,
 }
 
+/// Cached visual-row split for a single parsed line. Single-row lines (the
+/// common case) store only the wrap budget with zero heap allocations.
+#[derive(Clone, Default)]
+enum CachedRows {
+    #[default]
+    Uncached,
+    Single {
+        wrap_cols: u32,
+    },
+    Wrapped(Rc<LineRows>),
+}
+
 /// Layout work that depends only on the parse and the wrap width, kept
 /// between frames so an idle redraw doesn't re-wrap every line of the
 /// document, and kept across an edit for every line the edit didn't touch.
@@ -206,10 +232,10 @@ pub struct LayoutCache {
     /// `ParseMeta::generation` of the parse these entries belong to.
     generation: u64,
     /// WYSIWYG: per parsed line, its rows at the last wrap width used.
-    lines: Vec<Option<Rc<LineRows>>>,
-    /// Per parsed line, its share of `request_layout`'s height estimate, for
-    /// the wrap columns and font size in `estimate_key`.
-    estimate: Vec<Option<Pixels>>,
+    lines: Vec<CachedRows>,
+    /// Per parsed line, its share of `request_layout`'s height estimate in px
+    /// (`f32::NAN` = uncached), for the wrap columns and font size in `estimate_key`.
+    estimate: Vec<f32>,
     estimate_key: (usize, u32),
     /// The last WYSIWYG height estimate, before it is raised to the painted
     /// total: what the layout height should be once the total is known.
@@ -217,8 +243,8 @@ pub struct LayoutCache {
     /// The height an extra redraw was last asked for, so each new height
     /// gets one redraw and never a loop.
     redrawn_for: Option<Pixels>,
-    /// Raw mode: content snapshot, wrap columns, tab width, and every row's byte range.
-    raw_rows: Option<(SharedString, usize, usize, Rc<RawRows>)>,
+    /// Raw mode: `(tab_id, revision)`, wrap columns, tab width, and every row's byte range.
+    raw_rows: Option<CachedRawRows>,
     /// How wide each char is, so wrapping packs rows by real text width. The
     /// wrap budget is in these units (`WIDTH_UNITS_PER_PX` to a pixel).
     widths: Rc<CharWidths>,
@@ -236,6 +262,8 @@ type TableKeys = std::collections::HashMap<Range<usize>, u64>;
 
 /// Raw mode rows: `(byte_start, byte_end)` of each visual row.
 type RawRows = Vec<(usize, usize)>;
+/// Cached raw-mode rows keyed by `((tab_id, revision), wrap_cols, tab_width)`.
+type CachedRawRows = ((String, u64), usize, usize, Rc<RawRows>);
 
 impl LayoutCache {
     /// Line up the cache with `doc`: keep it for the same parse, follow an
@@ -252,18 +280,22 @@ impl LayoutCache {
                     && start + removed <= self.lines.len()
                     && self.lines.len() - removed + inserted == doc.lines.len() =>
             {
-                self.lines
-                    .splice(start..start + removed, std::iter::repeat_n(None, inserted));
+                self.lines.splice(
+                    start..start + removed,
+                    std::iter::repeat_n(CachedRows::Uncached, inserted),
+                );
                 if self.estimate.len() == self.lines.len() - inserted + removed {
-                    self.estimate
-                        .splice(start..start + removed, std::iter::repeat_n(None, inserted));
+                    self.estimate.splice(
+                        start..start + removed,
+                        std::iter::repeat_n(f32::NAN, inserted),
+                    );
                 } else {
-                    self.estimate = vec![None; doc.lines.len()];
+                    self.estimate = vec![f32::NAN; doc.lines.len()];
                 }
             }
             _ => {
-                self.lines = vec![None; doc.lines.len()];
-                self.estimate = vec![None; doc.lines.len()];
+                self.lines = vec![CachedRows::Uncached; doc.lines.len()];
+                self.estimate = vec![f32::NAN; doc.lines.len()];
             }
         }
         self.generation = meta.generation;
@@ -284,21 +316,24 @@ impl LayoutCache {
         self.widths = Rc::new(text);
         self.mono_widths = Rc::new(mono);
         self.widths_key = Some(key);
-        self.lines.iter_mut().for_each(|line| *line = None);
-        self.estimate.iter_mut().for_each(|slot| *slot = None);
+        self.lines
+            .iter_mut()
+            .for_each(|line| *line = CachedRows::Uncached);
+        self.estimate.iter_mut().for_each(|slot| *slot = f32::NAN);
         self.raw_rows = None;
     }
 
     /// Raw mode rows of `content`, from the cache when it was built for the
-    /// same text, wrap columns and tab width.
+    /// same `(tab_id, revision)`, wrap columns and tab width.
     fn raw_rows_for(
         &mut self,
-        content: &SharedString,
+        content_key: &(String, u64),
+        content: &str,
         wrap_cols: usize,
         tab_width: usize,
     ) -> Rc<RawRows> {
-        if let Some((text, cols, tab, rows)) = &self.raw_rows {
-            if *cols == wrap_cols && *tab == tab_width && same_text(text, content) {
+        if let Some((key, cols, tab, rows)) = &self.raw_rows {
+            if *cols == wrap_cols && *tab == tab_width && key == content_key {
                 return rows.clone();
             }
         }
@@ -308,7 +343,7 @@ impl LayoutCache {
             tab_width,
             &self.widths,
         ));
-        self.raw_rows = Some((content.clone(), wrap_cols, tab_width, rows.clone()));
+        self.raw_rows = Some((content_key.clone(), wrap_cols, tab_width, rows.clone()));
         rows
     }
 }
@@ -332,6 +367,8 @@ pub struct EditorPaint {
     pub line_height: Pixels,
     pub total_height: Pixels,
     pub rows: Vec<PaintRow>,
+    /// Visible task-list checkboxes `(hit_bounds, source_bracket_range)`.
+    pub checkbox_hits: Vec<(Bounds<Pixels>, Range<usize>)>,
     pub bounds: Option<Bounds<Pixels>>,
     pub table_width_cache: TableWidthCache,
     pub tables: Vec<TableGeom>,
@@ -354,6 +391,7 @@ impl EditorPaint {
     pub fn reset_for_switch(&mut self) {
         self.total_height = px(0.0);
         self.layout_cache.redrawn_for = None;
+        self.checkbox_hits.clear();
         self.pictures.clear();
         self.picture_handle = None;
     }
@@ -367,6 +405,7 @@ impl Default for EditorPaint {
             line_height: px(28.0),
             total_height: px(0.0),
             rows: Vec::new(),
+            checkbox_hits: Vec::new(),
             bounds: None,
             table_width_cache: TableWidthCache::default(),
             tables: Vec::new(),
@@ -670,11 +709,9 @@ pub fn checkbox_for_position(paint: &EditorPaint, position: Point<Pixels>) -> Op
     if !bounds.contains(&position) {
         return None;
     }
-    for row in &paint.rows {
-        if let Some((ref box_bounds, ref range)) = row.checkbox_hit {
-            if box_bounds.contains(&position) {
-                return Some(range.clone());
-            }
+    for (box_bounds, range) in &paint.checkbox_hits {
+        if box_bounds.contains(&position) {
+            return Some(range.clone());
         }
     }
     None
@@ -710,7 +747,7 @@ pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<Stri
         if source_offset >= row.byte_start && source_offset <= row.byte_end {
             for (range, url) in row.link_hits.iter() {
                 if source_offset >= range.start && source_offset <= range.end {
-                    return Some(url.clone());
+                    return Some(url.to_string());
                 }
             }
         }
@@ -898,10 +935,7 @@ fn move_vertical_rows(
             );
             (tx, Some((cell, sub_ix)))
         } else {
-            let clamped = cursor.clamp(cell.inner_range.start, cell.inner_range.end);
-            let display_idx = cell.offset_map.source_to_display(clamped);
-            let x_in_cell = cell.shaped.x_for_index(display_idx);
-            let tx = (cell.text_origin.x + x_in_cell).clamp(
+            let tx = cell.text_origin.x.clamp(
                 cell.box_bounds.left() + px(1.0),
                 (cell.box_bounds.right() - px(1.0)).max(cell.box_bounds.left() + px(1.0)),
             );
@@ -1014,12 +1048,7 @@ fn move_vertical_rows(
                 .clamp(cell.inner_range.start, cell.inner_range.end)
                 .min(content.len())
         } else {
-            let local_x = (target_screen_x - cell.text_origin.x).max(px(0.0));
-            let target_display = cell.shaped.closest_index_for_x(local_x);
-            cell.offset_map
-                .display_to_source(target_display)
-                .clamp(cell.inner_range.start, cell.inner_range.end)
-                .min(content.len())
+            cell.inner_range.start.min(content.len())
         }
     } else {
         let local_x = (target_screen_x - target_row.origin.x).max(px(0.0));
@@ -1101,12 +1130,7 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
                 .display_to_source(display_idx)
                 .clamp(cell.inner_range.start, cell.inner_range.end);
         } else {
-            let local_x = (position.x - cell.text_origin.x).max(px(0.0));
-            let display_idx = cell.shaped.closest_index_for_x(local_x);
-            return cell
-                .offset_map
-                .display_to_source(display_idx)
-                .clamp(cell.inner_range.start, cell.inner_range.end);
+            return cell.inner_range.start;
         }
     }
     let local_x = position.x - row.origin.x;
@@ -1206,11 +1230,18 @@ pub fn editor_end_visual(paint: &EditorPaint, caret: &mut Caret, extend: bool) -
     false
 }
 
+/// Provides direct read access to the active document's text without cloning
+/// it into a `SharedString` on every keystroke.
+pub trait EditorContentSource {
+    fn editor_content(&self) -> &str;
+}
+
 pub struct EditorElement<V: 'static> {
     pub entity: Entity<V>,
     pub focus: FocusHandle,
     pub paint: Rc<RefCell<EditorPaint>>,
-    pub content: SharedString,
+    pub note_image_cache: Entity<NoteImageCache>,
+    pub content_key: (String, u64),
     pub parsed: Arc<ParsedDocument>,
     pub view_mode: ViewMode,
     pub selection: Range<usize>,
@@ -1306,6 +1337,7 @@ impl<V: 'static> EditorElement<V> {
 
 pub struct Prepaint {
     rows: Vec<PaintRow>,
+    checkbox_hits: Vec<(Bounds<Pixels>, Range<usize>)>,
     numbers: Vec<(Point<Pixels>, Pixels, ShapedLine)>,
     decor_lines: Vec<(Point<Pixels>, Pixels, ShapedLine)>,
     /// Checkmarks painted over checked task boxes: bounds and color.
@@ -1342,7 +1374,7 @@ fn gutter_pad(editor_width: Pixels) -> Pixels {
     }
 }
 
-impl<V: EntityInputHandler> Element for EditorElement<V> {
+impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
     type RequestLayoutState = ();
     type PrepaintState = Prepaint;
 
@@ -1369,31 +1401,39 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         };
         paint_borrow.layout_cache.keep_for(&self.parsed);
         let estimated_height = if self.view_mode == ViewMode::Wysiwyg {
+            let content = self.entity.read(cx).editor_content();
             let cache = &mut paint_borrow.layout_cache;
             let key = (wrap_cols, f32::from(self.font_size).to_bits());
             if cache.estimate_key != key || cache.estimate.len() != self.parsed.lines.len() {
-                cache.estimate = vec![None; self.parsed.lines.len()];
+                cache.estimate = vec![f32::NAN; self.parsed.lines.len()];
                 cache.estimate_key = key;
             }
             let mut h = px(32.0);
             for (line, slot) in self.parsed.lines.iter().zip(cache.estimate.iter_mut()) {
-                h += *slot.get_or_insert_with(|| {
-                    if matches!(line.kind, LineKind::TableDelimiter) {
-                        return px(0.0);
-                    }
-                    let (_, line_h, top_gap, _) = wysiwyg_line_metrics(&line.kind, self.font_size);
-                    let wrapped = if line.display_text.is_empty() {
-                        1
+                if !slot.is_nan() {
+                    h += px(*slot);
+                } else {
+                    let val = if matches!(line.kind, LineKind::TableDelimiter) {
+                        px(0.0)
                     } else {
-                        let widths = if matches!(line.kind, LineKind::CodeLine) {
-                            &cache.mono_widths
+                        let (_, line_h, top_gap, _) =
+                            wysiwyg_line_metrics(&line.kind, self.font_size);
+                        let disp = line.display_text(content);
+                        let wrapped = if disp.is_empty() {
+                            1
                         } else {
-                            &cache.widths
+                            let widths = if matches!(line.kind, LineKind::CodeLine) {
+                                &cache.mono_widths
+                            } else {
+                                &cache.widths
+                            };
+                            visual_row_count_measured(disp, wrap_cols, 0, widths).max(1)
                         };
-                        visual_row_count_measured(&line.display_text, wrap_cols, 0, widths).max(1)
+                        top_gap + line_h * wrapped as f32
                     };
-                    top_gap + line_h * wrapped as f32
-                });
+                    *slot = f32::from(val);
+                    h += val;
+                }
             }
             cache.estimated_height = h;
             h.max(paint_borrow.total_height)
@@ -1401,9 +1441,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             // Build the rows here, not just count them: prepaint reuses them
             // when the wrap width is unchanged, so an edit splits the
             // document into rows once instead of twice.
+            let content = self.entity.read(cx).editor_content();
             let rows = paint_borrow
                 .layout_cache
-                .raw_rows_for(&self.content, wrap_cols, self.tab_width)
+                .raw_rows_for(&self.content_key, content, wrap_cols, self.tab_width)
                 .len();
             let line_height = self.font_size * 1.65;
             line_height * rows as f32 + px(32.0)
@@ -1495,7 +1536,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         };
         // The parse is cached per revision, so this is O(1) per redraw.
         let line_count = if self.parsed.lines.is_empty() {
-            logical_line_number(&self.content, self.content.len())
+            let content = self.entity.read(cx).editor_content();
+            logical_line_number(content, content.len())
         } else {
             self.parsed.lines.len()
         };
@@ -1553,10 +1595,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         // place, without copying maps that last frame's rows still hold.
         // Code reading an off-screen row clamps to its byte range.
         let empty_map = Arc::new(RowOffsetMap::default());
-        let empty_links: Arc<Vec<(Range<usize>, String)>> = Arc::default();
+        let empty_links: Arc<Vec<(Range<usize>, Arc<str>)>> = Arc::default();
+
+        let mut rows = std::mem::take(&mut self.paint.borrow_mut().rows);
+        rows.clear();
 
         if self.view_mode == ViewMode::Raw {
-            let raw_rows = layout_cache.raw_rows_for(&self.content, wrap_cols, self.tab_width);
+            let content = self.entity.read(cx).editor_content();
+            let raw_rows =
+                layout_cache.raw_rows_for(&self.content_key, content, wrap_cols, self.tab_width);
             let anchor_rows: Vec<usize> = anchors
                 .iter()
                 .map(|&offset| {
@@ -1565,14 +1612,16 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         .saturating_sub(1)
                 })
                 .collect();
-            let mut rows = Vec::with_capacity(raw_rows.len());
+            if rows.capacity() < raw_rows.len() {
+                rows.reserve(raw_rows.len() - rows.capacity());
+            }
             let mut numbers = Vec::new();
             let mut bg_quads = Vec::new();
             let mut quads = Vec::new();
             let mut cursor = None;
             let mut line_number = 0usize;
             let caret_line = (self.numbered() && self.selection.is_empty())
-                .then(|| logical_line_number(&self.content, self.selection.start));
+                .then(|| logical_line_number(content, self.selection.start));
             let current_line_color = Hsla {
                 a: self.selection_color.a * 0.35,
                 ..self.selection_color
@@ -1581,7 +1630,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             for (index, (start, end)) in raw_rows.iter().copied().enumerate() {
                 let at_line_start = index == 0
                     || matches!(
-                        self.content.as_bytes().get(start.wrapping_sub(1)),
+                        content.as_bytes().get(start.wrapping_sub(1)),
                         Some(b'\n' | b'\r')
                     );
                 if at_line_start {
@@ -1601,13 +1650,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         line_height: base_line_height,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
-                        checkbox_hit: None,
                         link_hits: empty_links.clone(),
                         cells: Vec::new(),
                     });
                     continue;
                 }
-                let row_text = &self.content[start..end];
+                let row_text = &content[start..end];
                 let tabbed = RowOffsetMap::expand_tabs(row_text, start, self.tab_width);
                 let (slice, offset_map) = match tabbed {
                     Some((display, map)) => (SharedString::from(display), map),
@@ -1662,8 +1710,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     );
                 }
                 let is_last_row = index + 1 == raw_rows.len();
-                let next_is_newline =
-                    matches!(self.content.as_bytes().get(end), Some(b'\n' | b'\r'));
+                let next_is_newline = matches!(content.as_bytes().get(end), Some(b'\n' | b'\r'));
                 let caret_matches = if is_last_row || next_is_newline {
                     self.selection.start >= start && self.selection.start <= end
                 } else {
@@ -1736,17 +1783,20 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     line_height: base_line_height,
                     shaped: Rc::new(shaped),
                     offset_map: Arc::new(offset_map),
-                    checkbox_hit: None,
                     link_hits: empty_links.clone(),
                     cells: Vec::new(),
                 });
             }
 
             let total_height = base_line_height * rows.len() as f32 + px(32.0);
-            // Raw mode only carries the cache through to the next frame.
-            let table_width_cache = std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
+            // Raw mode doesn't render tables: release any retained table caches.
+            let mut table_width_cache =
+                std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
+            table_width_cache.clear_and_shrink();
+            layout_cache.table_keys = None;
             return Prepaint {
                 rows,
+                checkbox_hits: Vec::new(),
                 numbers,
                 decor_lines: Vec::new(),
                 check_icons: Vec::new(),
@@ -1778,7 +1828,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
 
         // WYSIWYG mode prepaint
-        let mut rows = Vec::with_capacity(self.parsed.lines.len());
+        if rows.capacity() < self.parsed.lines.len() {
+            rows.reserve(self.parsed.lines.len() - rows.capacity());
+        }
+        let mut checkbox_hits: Vec<(Bounds<Pixels>, Range<usize>)> = Vec::new();
         let mut decor_lines = Vec::new();
         let mut check_icons: Vec<(Bounds<Pixels>, Hsla)> = Vec::new();
         let mut bg_quads = Vec::new();
@@ -1838,12 +1891,13 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 keys.clone()
             }
             _ => {
+                let content = self.entity.read(cx).editor_content();
                 let keys: Rc<TableKeys> = Rc::new(
                     table_rows
                         .keys()
                         .map(|source| {
                             let key = table_width_key(
-                                self.content.get(source.clone()).unwrap_or(""),
+                                content.get(source.clone()).unwrap_or(""),
                                 &self.font_family,
                                 &self.mono_font_family,
                                 self.font_size,
@@ -1858,10 +1912,15 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             }
         };
         let mut table_width_cache = std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
-        let live_keys: std::collections::HashSet<u64> = table_keys.values().copied().collect();
-        table_width_cache
-            .entries
-            .retain(|k, _| live_keys.contains(k));
+        if table_rows.is_empty() {
+            table_width_cache.clear_and_shrink();
+            layout_cache.table_keys = None;
+        } else {
+            let live_keys: std::collections::HashSet<u64> = table_keys.values().copied().collect();
+            table_width_cache
+                .entries
+                .retain(|k, _| live_keys.contains(k));
+        }
         // Cell and row entries are kept across frames (an idle frame measures
         // nothing, and the next keystroke still needs them) and cleared only
         // when they outgrow the document's tables several times over.
@@ -1949,8 +2008,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let extent = lines.iter().zip(heights).fold(px(0.0), |acc, (line, h)| {
                         acc + wysiwyg_line_metrics(&line.kind, self.font_size).2 + *h
                     });
-                    let first = lines.first().map_or(line_idx, |l| l.line_index);
-                    let last = lines.last().map_or(line_idx, |l| l.line_index);
+                    let first = lines.first().map_or(line_idx, |l| l.line_index as usize);
+                    let last = lines.last().map_or(line_idx, |l| l.line_index as usize);
                     band.contains(cur_y, extent)
                         || anchor_lines
                             .iter()
@@ -1972,7 +2031,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         line_height: row_height,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
-                        checkbox_hit: None,
                         link_hits: empty_links.clone(),
                         cells: Vec::new(),
                     });
@@ -1997,7 +2055,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 |pline: &ParsedLine, cell_range: &Range<usize>| -> Pixels {
                                     let (row_fs, _, _, _) =
                                         wysiwyg_line_metrics(&pline.kind, self.font_size);
-                                    let raw = self.content.get(cell_range.clone()).unwrap_or("");
+                                    let raw = self
+                                        .entity
+                                        .read(cx)
+                                        .editor_content()
+                                        .get(cell_range.clone())
+                                        .unwrap_or("");
                                     let key = table_cell_key(
                                         raw,
                                         cell_range.start,
@@ -2062,9 +2125,10 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 // row whose height is known, that is outside the shaping band
                 // and not next to the caret, keeps only its geometry. Before,
                 // a caret anywhere in a table shaped every row of it.
+                let content = self.entity.read(cx).editor_content();
                 let row_ix_in_table = table_heights.get(table_source).map_or(0, Vec::len);
                 let row_key = table_row_key(
-                    self.content.get(parsed_line.source.clone()).unwrap_or(""),
+                    content.get(parsed_line.source.clone()).unwrap_or(""),
                     parsed_line.source.start,
                     &parsed_line.hidden_ranges,
                     col_widths,
@@ -2078,7 +2142,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let fits_one_line = || -> Option<Pixels> {
                     for col_idx in 0..num_cols {
                         let cell_range = cells.get(col_idx)?;
-                        let raw = self.content.get(cell_range.clone()).unwrap_or("");
+                        let raw = content.get(cell_range.clone()).unwrap_or("");
                         let key = table_cell_key(
                             raw,
                             cell_range.start,
@@ -2152,7 +2216,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             // Off-screen: the shared empty map and links, like
                             // other rows outside the shaping band.
                             offset_map: empty_map.clone(),
-                            checkbox_hit: None,
                             link_hits: empty_links.clone(),
                             cells: Vec::new(),
                         });
@@ -2167,8 +2230,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     cell_x: Pixels,
                     col_w: Pixels,
                     lines: Vec<(usize, usize, RowOffsetMap, ShapedLine, Pixels)>,
-                    default_shaped: ShapedLine,
-                    default_map: RowOffsetMap,
                 }
 
                 let mut cell_preps = Vec::with_capacity(num_cols);
@@ -2190,7 +2251,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let cell_x = base_x + col_x_offsets.get(col_idx).copied().unwrap_or(px(0.0));
                     let avail_inner = (col_w - pad_x * 2.0).max(px(0.0));
 
-                    let cell_raw_str = self.content.get(cell_range.clone()).unwrap_or("");
+                    let cell_raw_str = self
+                        .entity
+                        .read(cx)
+                        .editor_content()
+                        .get(cell_range.clone())
+                        .unwrap_or("");
                     let (cell_display, cell_map) = RowOffsetMap::from_hidden(
                         cell_raw_str,
                         cell_range.start,
@@ -2290,8 +2356,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         cell_x,
                         col_w,
                         lines,
-                        default_shaped: full_shaped,
-                        default_map: cell_map,
                     });
                 }
 
@@ -2420,7 +2484,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         cell_lines.push(CellLine {
                             text_origin: line_origin,
                             line_height: row_line_height,
-                            shaped: shaped_sub,
+                            shaped: Rc::new(shaped_sub),
                             offset_map: sub_map,
                         });
                     }
@@ -2479,30 +2543,16 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         .first()
                         .map(|l| l.text_origin)
                         .unwrap_or(point(prep.cell_x + pad_x, cur_y));
-                    let default_map = cell_lines
-                        .first()
-                        .map(|l| l.offset_map.clone())
-                        .unwrap_or(prep.default_map);
-                    let default_shaped = cell_lines
-                        .first()
-                        .map(|l| l.shaped.clone())
-                        .unwrap_or(prep.default_shaped);
 
                     paint_cells.push(PaintCell {
                         raw_range: prep.raw_range,
                         inner_range: prep.cell_range,
                         box_bounds,
                         text_origin: default_origin,
-                        shaped: default_shaped,
-                        offset_map: default_map,
                         lines: cell_lines,
                     });
                 }
 
-                let dummy_shaped = paint_cells
-                    .first()
-                    .map(|c| c.shaped.clone())
-                    .unwrap_or_else(|| sample.clone());
                 let cell_geoms: Vec<(usize, Bounds<Pixels>)> = paint_cells
                     .iter()
                     .map(|cell| (cell.raw_range.start, cell.box_bounds))
@@ -2521,9 +2571,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     byte_end: parsed_line.source.end,
                     origin: point(base_x, cur_y),
                     line_height: row_height,
-                    shaped: Rc::new(dummy_shaped),
-                    offset_map: parsed_line.offset_map.clone(),
-                    checkbox_hit: None,
+                    shaped: unshaped.clone(),
+                    offset_map: parsed_line.to_offset_map(),
                     link_hits,
                     cells: paint_cells,
                 });
@@ -2535,7 +2584,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             // the caret is on it (the block is outlined then).
             if matches!(parsed_line.kind, LineKind::Paragraph) {
                 let src = parsed_line.source.clone();
-                let line_text = self.content.get(src.clone()).unwrap_or("");
                 // The outline shows only while the whole picture is selected.
                 let caret_on_line = !self.selection.is_empty()
                     && self.selection.start == src.start
@@ -2545,10 +2593,18 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 let editing_raw = self.raw_picture_line == Some(src.start)
                     && self.selection.start >= src.start
                     && self.selection.end <= src.end;
-                let image = if !editing_raw && line_text.trim_start().starts_with("![") {
-                    parse_image_line(line_text)
-                } else {
-                    None
+                let image = {
+                    let line_text = self
+                        .entity
+                        .read(cx)
+                        .editor_content()
+                        .get(src.clone())
+                        .unwrap_or("");
+                    if !editing_raw && line_text.trim_start().starts_with("![") {
+                        parse_image_line(line_text)
+                    } else {
+                        None
+                    }
                 };
                 if let Some(image) = image {
                     let target = resolve_image_target(&image.target, self.base_dir.as_deref());
@@ -2588,10 +2644,12 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         if band.contains(cur_y, guess + IMAGE_MARGIN_Y * 2.0) || near_anchor {
                             let (checked, changed) = image_cache.size_checked(path, true);
                             natural = checked;
-                            // gpui keeps decoded pictures by path: a file
-                            // replaced on disk would keep showing the old one.
+                            // Evict the old decoded texture so a file replaced
+                            // on disk reloads cleanly and drops GPU memory.
                             if changed {
-                                ImageSource::from(path.clone()).remove_asset(cx);
+                                self.note_image_cache.update(cx, |cache, cx| {
+                                    cache.invalidate_path(path, Some(window), cx);
+                                });
                             }
                         }
                         picture = natural.map(|n| {
@@ -2628,27 +2686,36 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 // gpui keeps an image's own aspect ratio when
                                 // it lays itself out, which would undo a
                                 // stretch to a different shape.
-                                let picture = img(path.clone())
-                                    .id(image_element_id("note-image", line_idx, 0, path, gen))
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .w(picture_size.width)
-                                    .h(picture_size.height)
-                                    .rounded(IMAGE_RADIUS)
-                                    .object_fit(object_fit)
-                                    .with_fallback(move || {
-                                        div()
-                                            .size_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .bg(surface)
-                                            .text_color(muted)
-                                            .text_size(font_size)
-                                            .child("Image not found")
-                                            .into_any_element()
-                                    });
+                                let scale = window.scale_factor();
+                                let max_dim =
+                                    bucket_max_dim(picture_size.width, picture_size.height, scale);
+                                let cache_handle = self.note_image_cache.clone();
+                                let path_for_load = path.clone();
+                                let picture = img(move |window: &mut Window, cx: &mut App| {
+                                    cache_handle.update(cx, |cache, cx| {
+                                        cache.load_sized(&path_for_load, max_dim, window, cx)
+                                    })
+                                })
+                                .id(image_element_id("note-image", line_idx, 0, path, gen))
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w(picture_size.width)
+                                .h(picture_size.height)
+                                .rounded(IMAGE_RADIUS)
+                                .object_fit(object_fit)
+                                .with_fallback(move || {
+                                    div()
+                                        .size_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(surface)
+                                        .text_color(muted)
+                                        .text_size(font_size)
+                                        .child("Image not found")
+                                        .into_any_element()
+                                });
                                 let mut element = div()
                                     .relative()
                                     .w(picture_size.width)
@@ -2769,7 +2836,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         line_height: row_h,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
-                        checkbox_hit: None,
                         link_hits: empty_links.clone(),
                         cells: Vec::new(),
                     });
@@ -2779,10 +2845,18 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 // Two or more images on one line are a row of thumbnails: one
                 // block for the caret and the line, but each image can be
                 // selected, resized and deleted by itself.
-                let row = if !editing_raw && line_text.trim_start().starts_with("![") {
-                    parse_image_row(line_text)
-                } else {
-                    None
+                let row = {
+                    let line_text = self
+                        .entity
+                        .read(cx)
+                        .editor_content()
+                        .get(src.clone())
+                        .unwrap_or("");
+                    if !editing_raw && line_text.trim_start().starts_with("![") {
+                        parse_image_row(line_text)
+                    } else {
+                        None
+                    }
                 };
                 if let Some(row) = row {
                     let near_anchor = anchor_lines
@@ -2805,7 +2879,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 let (checked, changed) = image_cache.size_checked(p, true);
                                 natural = checked;
                                 if changed {
-                                    ImageSource::from(p.clone()).remove_asset(cx);
+                                    self.note_image_cache.update(cx, |cache, cx| {
+                                        cache.invalidate_path(p, Some(window), cx);
+                                    });
                                 }
                             }
                             path = natural.map(|_| p.clone());
@@ -2860,31 +2936,39 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 let surface = self.surface_bg;
                                 let font_size = self.font_size;
                                 let gen = image_cache.generation(path);
-                                let picture = img(path.clone())
-                                    .id(image_element_id("note-thumb", line_idx, k, path, gen))
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .w(w)
-                                    .h(h)
-                                    .rounded(IMAGE_RADIUS)
-                                    .object_fit(if stretched.get(k).copied().unwrap_or(false) {
-                                        ObjectFit::Fill
-                                    } else {
-                                        ObjectFit::Contain
+                                let scale = window.scale_factor();
+                                let max_dim = bucket_max_dim(w, h, scale);
+                                let cache_handle = self.note_image_cache.clone();
+                                let path_for_load = path.clone();
+                                let picture = img(move |window: &mut Window, cx: &mut App| {
+                                    cache_handle.update(cx, |cache, cx| {
+                                        cache.load_sized(&path_for_load, max_dim, window, cx)
                                     })
-                                    .with_fallback(move || {
-                                        div()
-                                            .size_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .bg(surface)
-                                            .text_color(muted)
-                                            .text_size(font_size)
-                                            .child("Image not found")
-                                            .into_any_element()
-                                    });
+                                })
+                                .id(image_element_id("note-thumb", line_idx, k, path, gen))
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .w(w)
+                                .h(h)
+                                .rounded(IMAGE_RADIUS)
+                                .object_fit(if stretched.get(k).copied().unwrap_or(false) {
+                                    ObjectFit::Fill
+                                } else {
+                                    ObjectFit::Contain
+                                })
+                                .with_fallback(move || {
+                                    div()
+                                        .size_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(surface)
+                                        .text_color(muted)
+                                        .text_size(font_size)
+                                        .child("Image not found")
+                                        .into_any_element()
+                                });
                                 // A box of exactly this size; see the lone picture.
                                 let mut element =
                                     div().relative().w(w).h(h).child(picture).into_any_element();
@@ -2991,7 +3075,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         line_height: row_h,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
-                        checkbox_hit: None,
                         link_hits: empty_links.clone(),
                         cells: Vec::new(),
                     });
@@ -3012,38 +3095,55 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 usize::MAX
             };
 
-            let line_rows = match layout_cache.lines.get(line_idx) {
-                Some(Some(cached)) if cached.wrap_cols == row_wrap_cols => cached.clone(),
+            let row_wrap_key = row_wrap_cols.min(u32::MAX as usize) as u32;
+            let single_span = [(0usize, parsed_line.display_len())];
+            let wrapped_rows: Option<Rc<LineRows>> = match layout_cache.lines.get(line_idx) {
+                Some(CachedRows::Single { wrap_cols }) if *wrap_cols == row_wrap_key => None,
+                Some(CachedRows::Wrapped(cached)) if cached.wrap_cols == row_wrap_cols => {
+                    Some(cached.clone())
+                }
                 _ => {
-                    let built = Rc::new(LineRows {
-                        wrap_cols: row_wrap_cols,
-                        rows: visual_rows_measured(
-                            &parsed_line.display_text,
-                            row_wrap_cols,
-                            0,
-                            if matches!(parsed_line.kind, LineKind::CodeLine) {
-                                &layout_cache.mono_widths
-                            } else {
-                                &layout_cache.widths
-                            },
-                        ),
-                    });
-                    if let Some(slot) = layout_cache.lines.get_mut(line_idx) {
-                        *slot = Some(built.clone());
+                    let content = self.entity.read(cx).editor_content();
+                    let computed = visual_rows_measured(
+                        parsed_line.display_text(content),
+                        row_wrap_cols,
+                        0,
+                        if matches!(parsed_line.kind, LineKind::CodeLine) {
+                            &layout_cache.mono_widths
+                        } else {
+                            &layout_cache.widths
+                        },
+                    );
+                    if computed.len() <= 1 {
+                        if let Some(slot) = layout_cache.lines.get_mut(line_idx) {
+                            *slot = CachedRows::Single {
+                                wrap_cols: row_wrap_key,
+                            };
+                        }
+                        None
+                    } else {
+                        let built = Rc::new(LineRows {
+                            wrap_cols: row_wrap_cols,
+                            rows: computed,
+                        });
+                        if let Some(slot) = layout_cache.lines.get_mut(line_idx) {
+                            *slot = CachedRows::Wrapped(built.clone());
+                        }
+                        Some(built)
                     }
-                    built
                 }
             };
-            let single_row = line_rows.rows.len() == 1;
+            let row_slices: &[(usize, usize)] = match &wrapped_rows {
+                Some(built) => &built.rows,
+                None => &single_span,
+            };
+            let single_row = row_slices.len() == 1;
 
             let mut prev_byte_end = parsed_line.source.start;
-            for (sub_idx, &(d_start, d_end)) in line_rows.rows.iter().enumerate() {
-                let is_last_sub = sub_idx + 1 == line_rows.rows.len();
+            for (sub_idx, &(d_start, d_end)) in row_slices.iter().enumerate() {
+                let is_last_sub = sub_idx + 1 == row_slices.len();
                 let (byte_start, byte_end) = if single_row {
-                    (
-                        parsed_line.offset_map.line_start,
-                        parsed_line.offset_map.line_end,
-                    )
+                    (parsed_line.source.start, parsed_line.source.end)
                 } else {
                     let s = if sub_idx == 0 {
                         parsed_line.source.start
@@ -3053,16 +3153,17 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let e = if is_last_sub {
                         parsed_line.source.end
                     } else {
-                        parsed_line.offset_map.slice_bounds(d_start..d_end).1.max(s)
+                        parsed_line.slice_bounds(d_start..d_end).1.max(s)
                     };
                     (s, e)
                 };
                 prev_byte_end = byte_end;
 
                 let row_origin = point(base_x + indent_x, cur_y);
-                let near_anchor = anchor_lines
-                    .iter()
-                    .any(|&a| a + 2 >= parsed_line.line_index && a <= parsed_line.line_index + 2);
+                let near_anchor = anchor_lines.iter().any(|&a| {
+                    let idx = parsed_line.line_index as usize;
+                    a + 2 >= idx && a <= idx + 2
+                });
                 if !band.contains(cur_y, row_line_height) && !near_anchor {
                     rows.push(PaintRow {
                         line_index: line_idx,
@@ -3072,7 +3173,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         line_height: row_line_height,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
-                        checkbox_hit: None,
                         link_hits: empty_links.clone(),
                         cells: Vec::new(),
                     });
@@ -3080,9 +3180,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     continue;
                 }
                 let sub_map = if single_row {
-                    parsed_line.offset_map.clone()
+                    parsed_line.to_offset_map()
                 } else {
-                    let mut map = parsed_line.offset_map.slice_display(d_start..d_end);
+                    let mut map = parsed_line.slice_display(d_start..d_end);
                     map.line_start = byte_start;
                     map.line_end = byte_end;
                     Arc::new(map)
@@ -3104,7 +3204,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         ));
                         if sub_idx == 0 {
                             if let Some(lang) = language.as_ref().filter(|l| !l.is_empty()) {
-                                let badge: SharedString = lang.clone().into();
+                                let badge: SharedString = lang.to_string().into();
                                 let badge_run = TextRun {
                                     len: badge.len(),
                                     font: mono_font.clone(),
@@ -3167,13 +3267,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 }
 
                 // First sub-row markers (bullets, numbers, task checkboxes)
-                let mut checkbox_hit = None;
                 if sub_idx == 0 {
                     if let LineKind::ListItem {
                         ordered,
                         number,
                         task,
-                        ref checkbox_source,
                         ..
                     } = parsed_line.kind
                     {
@@ -3208,14 +3306,17 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                     check_mark_color(self.link_color),
                                 ));
                             }
-                            if let Some(src_range) = checkbox_source.clone().or_else(|| {
-                                find_task_bracket_range(&self.content, &parsed_line.source)
+                            if let Some(src_range) = parsed_line.checkbox_source().or_else(|| {
+                                find_task_bracket_range(
+                                    self.entity.read(cx).editor_content(),
+                                    &parsed_line.source,
+                                )
                             }) {
                                 let hit_bounds = Bounds::new(
                                     point(box_x - px(4.0), cur_y),
                                     size(box_sz + px(8.0), row_line_height),
                                 );
-                                checkbox_hit = Some((hit_bounds, src_range));
+                                checkbox_hits.push((hit_bounds, src_range));
                             }
                         } else if ordered {
                             let label: SharedString = format!("{number}.").into();
@@ -3253,14 +3354,18 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 }
 
                 // Shape the display text slice
+                let content = self.entity.read(cx).editor_content();
                 let display_len = d_end.saturating_sub(d_start);
                 let slice: SharedString = if display_len == 0 {
                     SharedString::from(" ")
                 } else {
-                    SharedString::from(parsed_line.display_text[d_start..d_end].to_string())
+                    SharedString::from(
+                        parsed_line.display_text(content)[d_start..d_end].to_string(),
+                    )
                 };
                 let runs = wysiwyg_slice_runs(
                     parsed_line,
+                    content,
                     d_start..d_end,
                     slice.len(),
                     &sub_map,
@@ -3311,8 +3416,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     if !seg.strike {
                         continue;
                     }
-                    let seg_disp_start = parsed_line.offset_map.source_to_display(seg.source.start);
-                    let seg_disp_end = parsed_line.offset_map.source_to_display(seg.source.end);
+                    let seg_disp_start = parsed_line.source_to_display(seg.source.start);
+                    let seg_disp_end = parsed_line.source_to_display(seg.source.end);
                     if seg_disp_end <= d_start || seg_disp_start >= d_end {
                         continue;
                     }
@@ -3406,7 +3511,6 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     line_height: row_line_height,
                     shaped: Rc::new(shaped),
                     offset_map: sub_map,
-                    checkbox_hit,
                     link_hits: link_hits.clone(),
                     cells: Vec::new(),
                 });
@@ -3425,6 +3529,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
 
         image_cache.retain_paths(&image_paths);
+        self.note_image_cache.update(cx, |cache, cx| {
+            cache.record_tab_paths(&self.content_key.0, &image_paths, Some(window), cx);
+        });
         let total_height = (cur_y - bounds.top() + px(32.0)).max(px(64.0));
         // The text is an I-beam; a picture is a plain arrow, and its resize
         // handle a diagonal arrow. Later hitboxes win where they overlap.
@@ -3462,6 +3569,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         }
         Prepaint {
             rows,
+            checkbox_hits,
             numbers: Vec::new(),
             decor_lines,
             check_icons,
@@ -3599,13 +3707,14 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             let mut paint = self.paint.borrow_mut();
             paint.line_height = prepaint.line_height;
             paint.total_height = prepaint.total_height;
-            paint.painted_len = self.content.len();
+            paint.painted_len = self.entity.read(cx).editor_content().len();
             paint.painted_selection = self.selection.clone();
             paint.painted_view_mode = self.view_mode;
             paint.bounds = Some(bounds);
             // Painting is done with the rows, so hand them over instead of
             // deep-copying every shaped line each frame.
             paint.rows = std::mem::take(&mut prepaint.rows);
+            paint.checkbox_hits = std::mem::take(&mut prepaint.checkbox_hits);
             paint.pictures = std::mem::take(&mut prepaint.pictures);
             paint.picture_handle = prepaint.picture_handle.take();
             if self.word_wrap {
@@ -3669,7 +3778,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
     }
 }
 
-impl<V: EntityInputHandler> IntoElement for EditorElement<V> {
+impl<V: EntityInputHandler + EditorContentSource> IntoElement for EditorElement<V> {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -3792,6 +3901,7 @@ fn keep_font_changes_distinct(runs: &mut [TextRun]) {
 #[allow(clippy::too_many_arguments)]
 fn wysiwyg_slice_runs(
     parsed_line: &ParsedLine,
+    content: &str,
     display_slice: Range<usize>,
     shaped_slice_len: usize,
     sub_map: &RowOffsetMap,
@@ -3838,8 +3948,8 @@ fn wysiwyg_slice_runs(
     let mut covered = display_slice.start;
 
     for seg in &parsed_line.styled_segments {
-        let seg_disp_start = parsed_line.offset_map.source_to_display(seg.source.start);
-        let seg_disp_end = parsed_line.offset_map.source_to_display(seg.source.end);
+        let seg_disp_start = parsed_line.source_to_display(seg.source.start);
+        let seg_disp_end = parsed_line.source_to_display(seg.source.end);
         if seg_disp_end <= display_slice.start || seg_disp_start >= display_slice.end {
             continue;
         }
@@ -3905,7 +4015,7 @@ fn wysiwyg_slice_runs(
     }
 
     if matches!(parsed_line.kind, LineKind::TableRow { .. }) {
-        let slice_str = &parsed_line.display_text[display_slice];
+        let slice_str = &parsed_line.display_text(content)[display_slice];
         runs = apply_table_pipe_style(runs, slice_str, colors.border_color);
     }
 
@@ -4211,13 +4321,6 @@ fn raw_line_runs(
     apply_underline_to_runs(vec![base], local_start..local_end, color)
 }
 
-/// Equal texts. Between edits the app hands every frame the same shared
-/// string, so the pointer check answers without comparing the document.
-fn same_text(a: &SharedString, b: &SharedString) -> bool {
-    let (a, b) = (a.as_str(), b.as_str());
-    (a.len() == b.len() && std::ptr::eq(a.as_ptr(), b.as_ptr())) || a == b
-}
-
 /// Find hits that can paint on a row spanning `row_start..=row_end`, with
 /// their index in `hits`. Hits are sorted and disjoint, so a binary search
 /// skips the rest instead of testing every match on every row.
@@ -4281,6 +4384,7 @@ mod tests {
     use crate::model::document::ViewMode;
     use crate::model::text_ops::Caret;
     use gpui::{point, px, size, Bounds, Pixels, ShapedLine};
+    use std::rc::Rc;
     use std::sync::Arc;
 
     /// Proportional stand-in for the text system: narrow glyphs are cheaper than wide ones.
@@ -4387,19 +4491,17 @@ mod tests {
             inner_range: 2..17,
             box_bounds: Bounds::new(point(px(10.0), px(0.0)), size(px(100.0), px(56.0))),
             text_origin: point(px(12.0), px(0.0)),
-            shaped: ShapedLine::default(),
-            offset_map: line0_map.clone(),
             lines: vec![
                 CellLine {
                     text_origin: point(px(12.0), px(0.0)),
                     line_height: px(28.0),
-                    shaped: ShapedLine::default(),
+                    shaped: Rc::new(ShapedLine::default()),
                     offset_map: line0_map,
                 },
                 CellLine {
                     text_origin: point(px(12.0), px(28.0)),
                     line_height: px(28.0),
-                    shaped: ShapedLine::default(),
+                    shaped: Rc::new(ShapedLine::default()),
                     offset_map: line1_map,
                 },
             ],
@@ -4413,7 +4515,6 @@ mod tests {
             line_height: px(56.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 22)),
-            checkbox_hit: None,
             link_hits: Arc::default(),
             cells: vec![cell_0],
         };
@@ -4423,12 +4524,10 @@ mod tests {
             inner_range: 25..36,
             box_bounds: Bounds::new(point(px(10.0), px(56.0)), size(px(100.0), px(28.0))),
             text_origin: point(px(12.0), px(56.0)),
-            shaped: ShapedLine::default(),
-            offset_map: RowOffsetMap::identity(25, 36),
             lines: vec![CellLine {
                 text_origin: point(px(12.0), px(56.0)),
                 line_height: px(28.0),
-                shaped: ShapedLine::default(),
+                shaped: Rc::new(ShapedLine::default()),
                 offset_map: RowOffsetMap::identity(25, 36),
             }],
         };
@@ -4441,7 +4540,6 @@ mod tests {
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(23, 42)),
-            checkbox_hit: None,
             link_hits: Arc::default(),
             cells: vec![next_cell],
         };
@@ -4452,6 +4550,7 @@ mod tests {
             line_height: px(28.0),
             total_height: px(84.0),
             rows: vec![row_0, row_1],
+            checkbox_hits: Vec::new(),
             bounds: Some(Bounds::new(
                 point(px(0.0), px(0.0)),
                 size(px(400.0), px(100.0)),
@@ -4516,19 +4615,17 @@ mod tests {
             inner_range: 2..17,
             box_bounds: Bounds::new(point(px(10.0), px(0.0)), size(px(100.0), px(56.0))),
             text_origin: point(px(12.0), px(0.0)),
-            shaped: ShapedLine::default(),
-            offset_map: line0_map.clone(),
             lines: vec![
                 CellLine {
                     text_origin: point(px(12.0), px(0.0)),
                     line_height: px(28.0),
-                    shaped: ShapedLine::default(),
+                    shaped: Rc::new(ShapedLine::default()),
                     offset_map: line0_map,
                 },
                 CellLine {
                     text_origin: point(px(12.0), px(28.0)),
                     line_height: px(28.0),
-                    shaped: ShapedLine::default(),
+                    shaped: Rc::new(ShapedLine::default()),
                     offset_map: line1_map,
                 },
             ],
@@ -4542,7 +4639,6 @@ mod tests {
             line_height: px(56.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 20)),
-            checkbox_hit: None,
             link_hits: Arc::default(),
             cells: vec![cell],
         };
@@ -4553,6 +4649,7 @@ mod tests {
             line_height: px(28.0),
             total_height: px(56.0),
             rows: vec![row],
+            checkbox_hits: Vec::new(),
             bounds: Some(Bounds::new(
                 point(px(0.0), px(0.0)),
                 size(px(200.0), px(100.0)),
@@ -4592,19 +4689,17 @@ mod tests {
             inner_range: 2..17,
             box_bounds: Bounds::new(point(px(10.0), px(0.0)), size(px(100.0), px(56.0))),
             text_origin: point(px(12.0), px(0.0)),
-            shaped: ShapedLine::default(),
-            offset_map: line0_map.clone(),
             lines: vec![
                 CellLine {
                     text_origin: point(px(12.0), px(0.0)),
                     line_height: px(28.0),
-                    shaped: ShapedLine::default(),
+                    shaped: Rc::new(ShapedLine::default()),
                     offset_map: line0_map,
                 },
                 CellLine {
                     text_origin: point(px(12.0), px(28.0)),
                     line_height: px(28.0),
-                    shaped: ShapedLine::default(),
+                    shaped: Rc::new(ShapedLine::default()),
                     offset_map: line1_map,
                 },
             ],
@@ -4618,7 +4713,6 @@ mod tests {
             line_height: px(56.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 20)),
-            checkbox_hit: None,
             link_hits: Arc::default(),
             cells: vec![cell],
         };
@@ -4629,6 +4723,7 @@ mod tests {
             line_height: px(28.0),
             total_height: px(56.0),
             rows: vec![row],
+            checkbox_hits: Vec::new(),
             bounds: Some(Bounds::new(
                 point(px(0.0), px(0.0)),
                 size(px(200.0), px(100.0)),
@@ -4673,13 +4768,11 @@ mod tests {
             inner_range: 0..20,
             box_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(112.0))),
             text_origin: point(px(0.0), px(0.0)),
-            shaped: ShapedLine::default(),
-            offset_map: RowOffsetMap::identity(0, 20),
             lines: (0..4)
                 .map(|i| CellLine {
                     text_origin: point(px(0.0), px(28.0) * i as f32),
                     line_height: px(28.0),
-                    shaped: ShapedLine::default(),
+                    shaped: Rc::new(ShapedLine::default()),
                     offset_map: RowOffsetMap::identity(i * 5, (i + 1) * 5),
                 })
                 .collect(),
@@ -4693,19 +4786,17 @@ mod tests {
             inner_range: 20..35,
             box_bounds: Bounds::new(point(px(100.0), px(0.0)), size(px(100.0), px(112.0))),
             text_origin: point(px(100.0), px(0.0)),
-            shaped: ShapedLine::default(),
-            offset_map: line0_map.clone(),
             lines: vec![
                 CellLine {
                     text_origin: point(px(100.0), px(0.0)),
                     line_height: px(28.0),
-                    shaped: ShapedLine::default(),
+                    shaped: Rc::new(ShapedLine::default()),
                     offset_map: line0_map,
                 },
                 CellLine {
                     text_origin: point(px(100.0), px(28.0)),
                     line_height: px(28.0),
-                    shaped: ShapedLine::default(),
+                    shaped: Rc::new(ShapedLine::default()),
                     offset_map: line1_map,
                 },
             ],
@@ -4719,7 +4810,6 @@ mod tests {
             line_height: px(112.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 35)),
-            checkbox_hit: None,
             link_hits: Arc::default(),
             cells: vec![cell0, cell1],
         };
@@ -4730,6 +4820,7 @@ mod tests {
             line_height: px(28.0),
             total_height: px(112.0),
             rows: vec![row],
+            checkbox_hits: Vec::new(),
             bounds: Some(Bounds::new(
                 point(px(0.0), px(0.0)),
                 size(px(200.0), px(112.0)),
@@ -4912,8 +5003,6 @@ mod tests {
             inner_range: 0..10,
             box_bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(28.0))),
             text_origin: point(px(0.0), px(0.0)),
-            shaped: ShapedLine::default(),
-            offset_map: RowOffsetMap::identity(0, 10),
             lines: Vec::new(),
         };
 
@@ -4925,7 +5014,6 @@ mod tests {
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 10)),
-            checkbox_hit: None,
             link_hits: Arc::default(),
             cells: vec![empty_cell],
         };
@@ -4936,6 +5024,7 @@ mod tests {
             line_height: px(28.0),
             total_height: px(28.0),
             rows: vec![row],
+            checkbox_hits: Vec::new(),
             bounds: Some(Bounds::new(
                 point(px(0.0), px(0.0)),
                 size(px(100.0), px(28.0)),
@@ -4978,7 +5067,6 @@ mod tests {
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::default()),
-            checkbox_hit: None,
             link_hits: Arc::default(),
             cells: Vec::new(),
         };
@@ -5044,13 +5132,16 @@ mod tests {
         let mono_font = font("Ubuntu Mono");
 
         // 1. Standalone italic
-        let doc = parse_document("Normal *italic* text");
+        let src1 = "Normal *italic* text";
+        let doc = parse_document(src1);
         let line = &doc.lines[0];
+        let map = line.to_offset_map();
         let runs = super::wysiwyg_slice_runs(
             line,
-            0..line.display_text.len(),
-            line.display_text.len(),
-            &line.offset_map,
+            src1,
+            0..line.display_len(),
+            line.display_len(),
+            &map,
             None,
             &base_font,
             &mono_font,
@@ -5071,13 +5162,16 @@ mod tests {
         assert_eq!(runs[2].font.style, FontStyle::Normal);
 
         // 2. Bold
-        let doc_bold = parse_document("Normal **bold** text");
+        let src2 = "Normal **bold** text";
+        let doc_bold = parse_document(src2);
         let line_bold = &doc_bold.lines[0];
+        let map_bold = line_bold.to_offset_map();
         let runs_bold = super::wysiwyg_slice_runs(
             line_bold,
-            0..line_bold.display_text.len(),
-            line_bold.display_text.len(),
-            &line_bold.offset_map,
+            src2,
+            0..line_bold.display_len(),
+            line_bold.display_len(),
+            &map_bold,
             None,
             &base_font,
             &mono_font,
@@ -5089,13 +5183,16 @@ mod tests {
         assert_eq!(runs_bold[1].color, colors.strong_color);
 
         // 3. Bold + Italic
-        let doc_bi = parse_document("Normal ***bold italic*** text");
+        let src3 = "Normal ***bold italic*** text";
+        let doc_bi = parse_document(src3);
         let line_bi = &doc_bi.lines[0];
+        let map_bi = line_bi.to_offset_map();
         let runs_bi = super::wysiwyg_slice_runs(
             line_bi,
-            0..line_bi.display_text.len(),
-            line_bi.display_text.len(),
-            &line_bi.offset_map,
+            src3,
+            0..line_bi.display_len(),
+            line_bi.display_len(),
+            &map_bi,
             None,
             &base_font,
             &mono_font,
@@ -5107,13 +5204,16 @@ mod tests {
         assert_eq!(runs_bi[1].color, colors.strong_color);
 
         // 4. Blockquote italic maintains blockquote's muted color
-        let doc_bq = parse_document("> A *quote with italic* text");
+        let src4 = "> A *quote with italic* text";
+        let doc_bq = parse_document(src4);
         let line_bq = &doc_bq.lines[0];
+        let map_bq = line_bq.to_offset_map();
         let runs_bq = super::wysiwyg_slice_runs(
             line_bq,
-            0..line_bq.display_text.len(),
-            line_bq.display_text.len(),
-            &line_bq.offset_map,
+            src4,
+            0..line_bq.display_len(),
+            line_bq.display_len(),
+            &map_bq,
             None,
             &base_font,
             &mono_font,
@@ -5141,11 +5241,13 @@ mod tests {
         let runs_for = |src: &str| {
             let doc = parse_document(src);
             let line = &doc.lines[0];
+            let map = line.to_offset_map();
             super::wysiwyg_slice_runs(
                 line,
-                0..line.display_text.len(),
-                line.display_text.len(),
-                &line.offset_map,
+                src,
+                0..line.display_len(),
+                line.display_len(),
+                &map,
                 None,
                 &base,
                 &mono,
@@ -5200,11 +5302,13 @@ mod tests {
         for src in sources {
             let doc = parse_document(src);
             let line = &doc.lines[0];
+            let map = line.to_offset_map();
             let runs = super::wysiwyg_slice_runs(
                 line,
-                0..line.display_text.len(),
-                line.display_text.len(),
-                &line.offset_map,
+                src,
+                0..line.display_len(),
+                line.display_len(),
+                &map,
                 None,
                 &base,
                 &mono,

@@ -340,7 +340,7 @@ impl DocumentTab {
                         }
                     }
                     _ => {
-                        let content_start = pline.prefix_range.end.max(pline.source.start);
+                        let content_start = pline.prefix_end().max(pline.source.start);
                         // A heading's closing-hash run (`# Title #`) is hidden
                         // syntax; wrapping it would make the `#` visible text.
                         let content_end = match pline.kind {
@@ -1164,7 +1164,7 @@ pub(super) fn indented_code_block_at(
     parsed: &ParsedDocument,
     offset: usize,
 ) -> Option<&[ParsedLine]> {
-    let at = parsed.line_at_offset(offset)?.line_index;
+    let at = parsed.line_at_offset(offset)?.line_index as usize;
     let lines = &parsed.lines;
     let code = |index: usize| is_indented_code(parsed, &lines[index]);
     if !code(at) {

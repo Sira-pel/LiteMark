@@ -199,10 +199,11 @@ pub struct LiteMarkApp {
     pub save_as_tab: Option<String>,
     pub pending_after_save: Option<PendingAfterSave>,
     pub editor_paint: Rc<RefCell<EditorPaint>>,
-    /// The active tab's text as a shared string, keyed by tab id, revision
-    /// and length. Frames and IME queries between edits share this one copy
-    /// instead of cloning the whole document each time.
-    content_snapshot: Option<(String, u64, usize, SharedString)>,
+    pub note_image_cache: Entity<crate::ui::note_images::NoteImageCache>,
+    /// Tabs closed since the last frame (any path: tab strip, Ctrl+W,
+    /// discard, workspace delete/move). The next render tells
+    /// `note_image_cache` to release pictures no open tab references.
+    pub(crate) closed_tab_ids: Vec<String>,
     /// Word count of the selection, keyed by tab id, revision and range, so
     /// a frame (caret blink, hover) doesn't rescan a large selection.
     selection_words: Option<(String, u64, Range<usize>, Option<usize>)>,
@@ -639,7 +640,8 @@ impl LiteMarkApp {
             save_as_tab: None,
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
-            content_snapshot: None,
+            note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
+            closed_tab_ids: Vec::new(),
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
@@ -791,7 +793,8 @@ impl LiteMarkApp {
             save_as_tab: None,
             pending_after_save: None,
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
-            content_snapshot: None,
+            note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
+            closed_tab_ids: Vec::new(),
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
@@ -998,6 +1001,17 @@ mod typing_tests;
 #[cfg(test)]
 #[path = "find_panel_tests.rs"]
 mod find_panel_tests;
+
+impl crate::ui::text_editor::EditorContentSource for LiteMarkApp {
+    fn editor_content(&self) -> &str {
+        // With no active tab, render() paints a fallback Welcome tab built
+        // from INITIAL_MARKDOWN; hand the editor that same text so its
+        // zero-copy line slices aren't taken from an empty string.
+        self.active_tab()
+            .map(|tab| tab.content.as_str())
+            .unwrap_or(INITIAL_MARKDOWN)
+    }
+}
 
 #[cfg(test)]
 #[path = "pdf_open_tests.rs"]

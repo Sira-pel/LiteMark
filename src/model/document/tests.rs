@@ -993,7 +993,8 @@ fn space_at_span_end_types_outside_the_closer() {
         let parsed = doc.parsed();
         let line = parsed.line_at_offset(0).unwrap();
         assert_eq!(
-            line.display_text, "read ",
+            line.display_text(&doc.content),
+            "read ",
             "{cmd}: raw markers leaked into the display"
         );
 
@@ -1068,7 +1069,11 @@ fn heading_trailing_space_stays_in_display_and_caret() {
     assert_eq!(doc.content, "# my ");
     let parsed = doc.parsed();
     let line = parsed.line_at_offset(0).unwrap();
-    assert_eq!(line.display_text, "my ", "trailing space left the display");
+    assert_eq!(
+        line.display_text(&doc.content),
+        "my ",
+        "trailing space left the display"
+    );
     assert_eq!(doc.cursor_offset(), 5, "caret fell back before the space");
 
     type_keystrokes(&mut doc, "note");
@@ -1154,14 +1159,15 @@ fn assert_clean_display(content: &str, expected: &str) {
     );
     let parsed = parse_document(content);
     assert_eq!(
-        parsed.lines[0].display_text, expected,
+        parsed.lines[0].display_text(content),
+        expected,
         "raw markers in display of {content:?}"
     );
     for ch in ['*', '~', '_'] {
         assert!(
-            !parsed.lines[0].display_text.contains(ch),
+            !parsed.lines[0].display_text(content).contains(ch),
             "literal {ch:?} in display {:?} of {content:?}",
-            parsed.lines[0].display_text
+            parsed.lines[0].display_text(content)
         );
     }
 }
@@ -1418,7 +1424,8 @@ fn stacked_typing_keeps_one_span_and_toggles_off_cleanly() {
     let parsed = doc.parsed();
     let line = parsed.line_at_offset(0).unwrap();
     assert_eq!(
-        line.display_text, "Go now ",
+        line.display_text(&doc.content),
+        "Go now ",
         "raw markers leaked into the display"
     );
 
@@ -1527,7 +1534,8 @@ fn extra_spaces_at_span_end_stay_outside_the_closer() {
         let parsed = doc.parsed();
         let line = parsed.line_at_offset(0).unwrap();
         assert_eq!(
-            line.display_text, "a  ",
+            line.display_text(&doc.content),
+            "a  ",
             "{cmd}: raw markers leaked into the display"
         );
         assert!(
@@ -1602,7 +1610,7 @@ fn select_all_inline_toggle_formats_each_block_and_toggles_back() {
             .map(|l| {
                 (
                     format!("{:?}", std::mem::discriminant(&l.kind)),
-                    l.display_text.clone(),
+                    l.display_text(content).to_string(),
                 )
             })
             .collect()
@@ -2038,7 +2046,7 @@ fn overlapping_toggles_nest_properly() {
         let content = doc.content.clone();
         let parsed = parse_document(&content);
         assert_eq!(
-            parsed.lines[0].display_text,
+            parsed.lines[0].display_text(&doc.content),
             chars.concat(),
             "{first}/{second}: raw markers visible in the display"
         );
@@ -2306,13 +2314,19 @@ fn wrap_escapes_delimiters_lt_and_hides_escape_backslashes() {
     type_keystrokes(&mut doc, "<");
     type_keystrokes(&mut doc, "b");
     assert_eq!(doc.content, "a\\<b", "the `<` was not escaped");
-    assert_eq!(parse_document(&doc.content).lines[0].display_text, "a<b");
+    assert_eq!(
+        parse_document(&doc.content).lines[0].display_text(&doc.content),
+        "a<b"
+    );
 
     let mut doc = DocumentTab::new("w3".into(), "test.md".into(), String::new(), None, None);
     type_keystrokes(&mut doc, "<");
     type_keystrokes(&mut doc, "b");
     assert_eq!(doc.content, "\\<b", "the `<` was not escaped");
-    assert_eq!(parse_document(&doc.content).lines[0].display_text, "<b");
+    assert_eq!(
+        parse_document(&doc.content).lines[0].display_text(&doc.content),
+        "<b"
+    );
 
     // Escape backslashes are hidden in the display and the offsets map.
     let mut doc = DocumentTab::new(
@@ -2325,9 +2339,9 @@ fn wrap_escapes_delimiters_lt_and_hides_escape_backslashes() {
     doc.place(3, false);
     let parsed = doc.parsed();
     let line = &parsed.lines[0];
-    assert_eq!(line.display_text, "a*b");
-    for (idx, ch) in line.display_text.char_indices() {
-        let src = line.offset_map.display_to_source(idx);
+    assert_eq!(line.display_text(&doc.content), "a*b");
+    for (idx, ch) in line.display_text(&doc.content).char_indices() {
+        let src = line.display_to_source(idx);
         assert!(
             doc.content.is_char_boundary(src) && doc.content[src..].starts_with(ch),
             "display {ch:?} at {idx} maps to {src}"
@@ -2946,7 +2960,9 @@ fn crlf_caret(source: &str) -> (usize, usize, String, String, String, String, St
     let mut ended = DocumentTab::new("e".into(), "t.md".into(), source.into(), None, None);
     ended.move_end(false);
     let end_at = ended.cursor_offset();
-    let before_disp = ended.parsed().lines[0].display_text.clone();
+    let before_disp = ended.parsed().lines[0]
+        .display_text(&ended.content)
+        .to_string();
     ended.move_home_in_mode(false, ViewMode::Wysiwyg);
     let home = ended.cursor_offset();
 
@@ -2955,13 +2971,17 @@ fn crlf_caret(source: &str) -> (usize, usize, String, String, String, String, St
     let at = typed.cursor_offset();
     typed.edit(at..at, "Z");
     let typed_content = typed.content.clone();
-    let typed_disp = typed.parsed().lines[0].display_text.clone();
+    let typed_disp = typed.parsed().lines[0]
+        .display_text(&typed.content)
+        .to_string();
 
     let mut backspaced = DocumentTab::new("b".into(), "t.md".into(), source.into(), None, None);
     backspaced.move_end(false);
     backspaced.smart_backspace_in_mode(ViewMode::Wysiwyg);
     let bs_content = backspaced.content.clone();
-    let bs_disp = backspaced.parsed().lines[0].display_text.clone();
+    let bs_disp = backspaced.parsed().lines[0]
+        .display_text(&backspaced.content)
+        .to_string();
 
     (
         end_at,
@@ -3020,7 +3040,7 @@ fn bare_cr_after_marker_1_dot_crfoo_is_not_a_list_item() {
         matches!(doc.lines[1].kind, LineKind::Paragraph),
         "foo after the bare CR is its own line"
     );
-    assert_eq!(doc.lines[1].display_text, "foo");
+    assert_eq!(doc.lines[1].display_text(source), "foo");
     assert_eq!(end_at, 2, "end_at");
     assert_eq!(home, 2, "home");
     assert_eq!(before_disp, "");
@@ -3044,6 +3064,7 @@ fn checklist_toggle_keeps_ordered_marker() {
         ("12. [X] a", "12. a", "- [ ] a"),
     ] {
         let mut doc = DocumentTab::new("c".into(), "t.md".into(), source.to_string(), None, None);
+        doc.ensure_cursor_formats();
         assert!(doc.active_formats.checklist, "{source} checklist");
         assert!(!doc.active_formats.ol, "{source} ol");
         doc.apply_format_in_mode("checklist", ViewMode::Wysiwyg);
@@ -3166,6 +3187,7 @@ fn enter_keeps_cr_on_ordered_task_and_paren_marker() {
 fn ordered_button_off_does_not_strip_task() {
     for source in ["1. [x] a", "1) [x] a", "12. [X] a"] {
         let mut doc = DocumentTab::new("o".into(), "t.md".into(), source.to_string(), None, None);
+        doc.ensure_cursor_formats();
         assert_eq!(
             format!(
                 "ol={} checklist={} content={:?}",
@@ -3268,8 +3290,8 @@ fn closing_hash_click_end_delete_and_enter_keep_the_heading() {
     let click = {
         let parsed = doc.parsed();
         let line = &parsed.lines[0];
-        assert_eq!(line.display_text, "foo");
-        line.offset_map.display_to_source(line.display_text.len())
+        assert_eq!(line.display_text(&doc.content), "foo");
+        line.display_to_source(line.display_len())
     };
 
     doc.place(0, false);
@@ -3292,7 +3314,7 @@ fn closing_hash_click_end_delete_and_enter_keep_the_heading() {
     assert_eq!(doc.content, "# foo #next");
     let parsed = doc.parsed();
     assert_eq!(parsed.lines.len(), 1);
-    assert_eq!(parsed.lines[0].display_text, "foo #next");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "foo #next");
     assert!(matches!(
         parsed.lines[0].kind,
         LineKind::Heading { level: 1 }
@@ -3303,9 +3325,9 @@ fn closing_hash_click_end_delete_and_enter_keep_the_heading() {
     doc.smart_newline(false);
     assert_eq!(doc.content, "# foo #\n\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "foo");
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "next");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "foo");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "");
+    assert_eq!(parsed.lines[2].display_text(&doc.content), "next");
     assert!(matches!(
         parsed.lines[0].kind,
         LineKind::Heading { level: 1 }
@@ -3318,8 +3340,8 @@ fn closing_hash_click_end_delete_and_enter_keep_the_heading() {
     let click = {
         let parsed = doc.parsed();
         let line = &parsed.lines[0];
-        assert_eq!(line.display_text, "foo");
-        line.offset_map.display_to_source(line.display_text.len())
+        assert_eq!(line.display_text(&doc.content), "foo");
+        line.display_to_source(line.display_len())
     };
     doc.place(0, false);
     doc.move_end(false);
@@ -3332,7 +3354,7 @@ fn closing_hash_click_end_delete_and_enter_keep_the_heading() {
     assert_eq!(doc.content, "## foo ##bar");
     let parsed = doc.parsed();
     assert_eq!(parsed.lines.len(), 1);
-    assert_eq!(parsed.lines[0].display_text, "foo ##bar");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "foo ##bar");
     assert!(matches!(
         parsed.lines[0].kind,
         LineKind::Heading { level: 2 }
@@ -3343,9 +3365,9 @@ fn closing_hash_click_end_delete_and_enter_keep_the_heading() {
     doc.smart_newline(false);
     assert_eq!(doc.content, "## foo ##\n\nbar");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "foo");
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "bar");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "foo");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "");
+    assert_eq!(parsed.lines[2].display_text(&doc.content), "bar");
     assert!(matches!(
         parsed.lines[0].kind,
         LineKind::Heading { level: 2 }
@@ -3363,7 +3385,7 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     let end = {
         let parsed = parse_document(src);
         assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
-        assert_eq!(parsed.lines[0].display_text, "");
+        assert_eq!(parsed.lines[0].display_text(src), "");
         parsed.lines[0].source.end
     };
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
@@ -3372,10 +3394,10 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     assert_eq!(doc.content, "---\n\nnext");
     let parsed = doc.parsed();
     assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
-    assert_eq!(parsed.lines[0].display_text, "");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "");
     assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "next");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "");
+    assert_eq!(parsed.lines[2].display_text(&doc.content), "next");
 
     let src = "- - -\nnext";
     let end = parse_document(src).lines[0].source.end;
@@ -3385,10 +3407,10 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     assert_eq!(doc.content, "- - -\n\nnext");
     let parsed = doc.parsed();
     assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
-    assert_eq!(parsed.lines[0].display_text, "");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "");
     assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "next");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "");
+    assert_eq!(parsed.lines[2].display_text(&doc.content), "next");
 
     let src = "* * *\nnext";
     let end = parse_document(src).lines[0].source.end;
@@ -3397,11 +3419,11 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     doc.smart_newline(false);
     assert_eq!(doc.content, "* * *\n\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "");
     assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
     assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "next");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "");
+    assert_eq!(parsed.lines[2].display_text(&doc.content), "next");
 
     let src = "-     -      -      -\nnext";
     let end = parse_document(src).lines[0].source.end;
@@ -3410,11 +3432,11 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     doc.smart_newline(false);
     assert_eq!(doc.content, "-     -      -      -\n\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "");
     assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
     assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "next");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "");
+    assert_eq!(parsed.lines[2].display_text(&doc.content), "next");
 
     let src = " **  * ** * ** * **\nnext";
     let end = parse_document(src).lines[0].source.end;
@@ -3424,10 +3446,10 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     assert_eq!(doc.content, " **  * ** * ** * **\n\nnext");
     let parsed = doc.parsed();
     assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
-    assert_eq!(parsed.lines[0].display_text, "");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "");
     assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "next");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "");
+    assert_eq!(parsed.lines[2].display_text(&doc.content), "next");
 }
 
 /// R5-3. Enter at offset 4 of `Foo\rBar` inserts a blank line between them.
@@ -3440,9 +3462,9 @@ fn enter_at_start_of_bare_cr_line_inserts_a_line() {
     assert_eq!(doc.content, "Foo\r\n\nBar");
     let parsed = doc.parsed();
     assert_eq!(parsed.lines.len(), 3);
-    assert_eq!(parsed.lines[0].display_text, "Foo");
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "Bar");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "Foo");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "");
+    assert_eq!(parsed.lines[2].display_text(&doc.content), "Bar");
     assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
 }
 
@@ -3460,7 +3482,7 @@ fn up_onto_closing_hash_lands_on_the_visible_end() {
     doc.insert_text_in_mode(at..at, "X", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "# fooX #\nnext!!!!");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "fooX");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "fooX");
     assert!(matches!(
         parsed.lines[0].kind,
         LineKind::Heading { level: 1 }
@@ -3474,15 +3496,15 @@ fn shift_enter_keeps_closing_hash_and_bare_cr_line() {
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     let click = {
         let line = &doc.parsed().lines[0];
-        line.offset_map.display_to_source(line.display_text.len())
+        line.display_to_source(line.display_len())
     };
     doc.place(click, false);
     doc.smart_newline(true);
     assert_eq!(doc.content, "# foo #\n\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "foo");
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "next");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "foo");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "");
+    assert_eq!(parsed.lines[2].display_text(&doc.content), "next");
     assert!(matches!(
         parsed.lines[0].kind,
         LineKind::Heading { level: 1 }
@@ -3495,9 +3517,9 @@ fn shift_enter_keeps_closing_hash_and_bare_cr_line() {
     assert_eq!(bare.content, "Foo\r\n\nBar");
     let parsed = bare.parsed();
     assert_eq!(parsed.lines.len(), 3);
-    assert_eq!(parsed.lines[0].display_text, "Foo");
-    assert_eq!(parsed.lines[1].display_text, "");
-    assert_eq!(parsed.lines[2].display_text, "Bar");
+    assert_eq!(parsed.lines[0].display_text(&bare.content), "Foo");
+    assert_eq!(parsed.lines[1].display_text(&bare.content), "");
+    assert_eq!(parsed.lines[2].display_text(&bare.content), "Bar");
 }
 
 /// R6-4. Toolbar toggles follow the visible heading text. A leftover
@@ -3509,34 +3531,34 @@ fn toolbar_toggle_uses_visible_heading_text() {
     let click_of = |text: &str| {
         let doc = parse_document(text);
         let line = &doc.lines[0];
-        line.offset_map.display_to_source(line.display_text.len())
+        line.display_to_source(line.display_len())
     };
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     doc.place(click_of(src), false);
     doc.apply_format_in_mode("h1", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "foo\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "foo");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "foo");
     assert!(matches!(parsed.lines[0].kind, LineKind::Paragraph));
-    assert_eq!(parsed.lines[1].display_text, "next");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "next");
 
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     doc.place(click_of(src), false);
     doc.apply_format_in_mode("ul", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "- foo\nnext");
-    assert_eq!(doc.parsed().lines[0].display_text, "foo");
+    assert_eq!(doc.parsed().lines[0].display_text(&doc.content), "foo");
 
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     doc.place(click_of(src), false);
     doc.apply_format_in_mode("ol", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "1. foo\nnext");
-    assert_eq!(doc.parsed().lines[0].display_text, "foo");
+    assert_eq!(doc.parsed().lines[0].display_text(&doc.content), "foo");
 
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     doc.place(click_of(src), false);
     doc.apply_format_in_mode("quote", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "> foo\nnext");
-    assert_eq!(doc.parsed().lines[0].display_text, "foo");
+    assert_eq!(doc.parsed().lines[0].display_text(&doc.content), "foo");
 
     let src = "## foo ##\nbar";
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
@@ -3544,7 +3566,7 @@ fn toolbar_toggle_uses_visible_heading_text() {
     doc.apply_format_in_mode("h1", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "# foo ##\nbar");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "foo");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "foo");
     assert!(matches!(
         parsed.lines[0].kind,
         LineKind::Heading { level: 1 }
@@ -3560,7 +3582,7 @@ fn delete_to_end_and_word_right_keep_the_closing_hash() {
     let click = {
         let doc = parse_document(src);
         let line = &doc.lines[0];
-        line.offset_map.display_to_source(line.display_text.len())
+        line.display_to_source(line.display_len())
     };
     assert_eq!(click, 5);
 
@@ -3569,29 +3591,29 @@ fn delete_to_end_and_word_right_keep_the_closing_hash() {
     doc.delete_to_line_end();
     assert_eq!(doc.content, "# foo #\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "foo");
-    assert_eq!(parsed.lines[1].display_text, "next");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "foo");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "next");
 
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     doc.place(click, false);
     doc.delete_word_right();
     assert_eq!(doc.content, "# foo #\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "foo");
-    assert_eq!(parsed.lines[1].display_text, "next");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "foo");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "next");
 
     let plain = "# foo\nnext";
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), plain.into(), None, None);
     doc.place(5, false);
     doc.delete_to_line_end();
     assert_eq!(doc.content, "# foo\nnext");
-    assert_eq!(doc.parsed().lines[0].display_text, "foo");
+    assert_eq!(doc.parsed().lines[0].display_text(&doc.content), "foo");
 
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), plain.into(), None, None);
     doc.place(5, false);
     doc.delete_word_right();
     assert_eq!(doc.content, "# foo");
-    assert_eq!(doc.parsed().lines[0].display_text, "foo");
+    assert_eq!(doc.parsed().lines[0].display_text(&doc.content), "foo");
 }
 
 /// K2. Select-line then Delete, and delete-to-line-start, at the visible
@@ -3610,7 +3632,7 @@ fn select_line_delete_and_delete_to_line_start_match_base() {
     assert_eq!(doc.content, "next");
     let parsed = doc.parsed();
     assert_eq!(parsed.lines.len(), 1);
-    assert_eq!(parsed.lines[0].display_text, "next");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "next");
     assert!(matches!(parsed.lines[0].kind, LineKind::Paragraph));
 
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
@@ -3618,9 +3640,9 @@ fn select_line_delete_and_delete_to_line_start_match_base() {
     doc.delete_to_line_start();
     assert_eq!(doc.content, "\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "");
     assert!(matches!(parsed.lines[0].kind, LineKind::Empty));
-    assert_eq!(parsed.lines[1].display_text, "next");
+    assert_eq!(parsed.lines[1].display_text(&doc.content), "next");
     assert!(matches!(parsed.lines[1].kind, LineKind::Paragraph));
 
     let plain = "# foo\nnext";
@@ -3679,12 +3701,12 @@ fn down_on_the_last_painted_row_snaps_before_the_closing_hash() {
     let (byte_start, byte_end, offset_map, vend) = {
         let parsed = doc.parsed();
         let line = &parsed.lines[0];
-        assert_eq!(line.display_text, "foo");
-        let vend = line.offset_map.display_to_source(line.display_text.len());
+        assert_eq!(line.display_text(&doc.content), "foo");
+        let vend = line.display_to_source(line.display_len());
         (
             line.source.start,
             line.source.end,
-            line.offset_map.clone(),
+            line.to_offset_map(),
             vend,
         )
     };
@@ -3702,7 +3724,6 @@ fn down_on_the_last_painted_row_snaps_before_the_closing_hash() {
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map,
-            checkbox_hit: None,
             link_hits: Arc::default(),
             cells: Vec::new(),
         }],
@@ -3724,7 +3745,7 @@ fn down_on_the_last_painted_row_snaps_before_the_closing_hash() {
     doc.insert_text_in_mode(at..at, "X", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "# fooX #");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "fooX");
+    assert_eq!(parsed.lines[0].display_text(&doc.content), "fooX");
     assert!(matches!(
         parsed.lines[0].kind,
         LineKind::Heading { level: 1 }
@@ -3789,7 +3810,7 @@ fn raw_end_then_rendered_type_keeps_the_closer() {
     let at = doc.cursor_offset();
     doc.insert_text_in_mode(at..at, "X", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "# fooX #");
-    assert_eq!(doc.parsed().lines[0].display_text, "fooX");
+    assert_eq!(doc.parsed().lines[0].display_text(&doc.content), "fooX");
 }
 
 /// Ancestor rendered End then Backspace yields `# fo #` (display `fo`).
@@ -3802,7 +3823,7 @@ fn raw_end_then_rendered_backspace_deletes_visible_text() {
     doc.set_view_mode(ViewMode::Wysiwyg);
     doc.smart_backspace_in_mode(ViewMode::Wysiwyg);
     assert_eq!(doc.content, "# fo #");
-    assert_eq!(doc.parsed().lines[0].display_text, "fo");
+    assert_eq!(doc.parsed().lines[0].display_text(&doc.content), "fo");
 }
 
 /// Ancestor rendered End then Ctrl-Delete on `# foo #\nnext` leaves both lines.
@@ -3816,8 +3837,8 @@ fn raw_end_then_rendered_ctrl_delete_keeps_the_next_line() {
     doc.set_view_mode(ViewMode::Wysiwyg);
     doc.delete_word_right();
     assert_eq!(doc.content, "# foo #\nnext");
-    assert_eq!(doc.parsed().lines[0].display_text, "foo");
-    assert_eq!(doc.parsed().lines[1].display_text, "next");
+    assert_eq!(doc.parsed().lines[0].display_text(&doc.content), "foo");
+    assert_eq!(doc.parsed().lines[1].display_text(&doc.content), "next");
 }
 
 /// Raw End, type X (`# foo #X`), switch to rendered, undo, redo, then type Y.
@@ -3843,7 +3864,7 @@ fn undo_redo_after_raw_edit_then_rendered_types_at_the_visible_end() {
     let at = doc.cursor_offset();
     doc.insert_text_in_mode(at..at, "Y", ViewMode::Wysiwyg);
     assert_eq!(doc.content, "# fooY #");
-    assert_eq!(doc.parsed().lines[0].display_text, "fooY");
+    assert_eq!(doc.parsed().lines[0].display_text(&doc.content), "fooY");
 }
 
 /// A caret that is valid in rendered mode stays put when the view becomes Raw.
@@ -4153,8 +4174,7 @@ fn paint_rows(doc: &mut DocumentTab) -> EditorPaint {
             origin: point(px(0.0), px(28.0 * ix as f32)),
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
-            offset_map: line.offset_map.clone(),
-            checkbox_hit: None,
+            offset_map: line.to_offset_map(),
             link_hits: Arc::default(),
             cells: Vec::new(),
         })
@@ -4931,7 +4951,7 @@ fn test_inline_format_stacked_combos_table_driven() {
 
                 // 1. No leaked markers in display text
                 assert_eq!(
-                    line.display_text, "Hello",
+                    line.display_text(&doc.content), "Hello",
                     "Display text leaked markers for combo {:?}, format {}, pos {}. Content was: {}",
                     combo_formats, cmd, pos, doc.content
                 );
@@ -4980,7 +5000,7 @@ fn test_inline_format_stacked_combos_table_driven() {
                         _ => unreachable!(),
                     };
 
-                    let src_offset = line.offset_map.display_to_source(i);
+                    let src_offset = line.display_to_source(i);
                     let seg = line
                         .styled_segments
                         .iter()
@@ -5045,7 +5065,7 @@ fn test_wysiwyg_typing_format_splice_inner_outer_plain() {
     assert_eq!(doc.content, "***now*ok** plain");
     let parsed = doc.parsed();
     let line = parsed.lines.first().unwrap();
-    assert_eq!(line.display_text, "nowok plain");
+    assert_eq!(line.display_text(&doc.content), "nowok plain");
 
     // Arm bold + italic, type "now", turn off bold (outer), type "ok", turn off italic, type " plain"
     let mut doc = DocumentTab::new("t2".into(), "test.md".into(), String::new(), None, None);
@@ -5060,7 +5080,7 @@ fn test_wysiwyg_typing_format_splice_inner_outer_plain() {
     assert_eq!(doc.content, "***now**ok* plain");
     let parsed = doc.parsed();
     let line = parsed.lines.first().unwrap();
-    assert_eq!(line.display_text, "nowok plain");
+    assert_eq!(line.display_text(&doc.content), "nowok plain");
 
     // Arm bold + underline, type "now", turn off underline (inner), type "ok", turn off bold, type " plain"
     let mut doc = DocumentTab::new("t3".into(), "test.md".into(), String::new(), None, None);
@@ -5076,7 +5096,7 @@ fn test_wysiwyg_typing_format_splice_inner_outer_plain() {
     assert_eq!(doc.content, "**<u>now</u>ok** plain");
     let parsed = doc.parsed();
     let line = parsed.lines.first().unwrap();
-    assert_eq!(line.display_text, "nowok plain");
+    assert_eq!(line.display_text(&doc.content), "nowok plain");
 
     // Arm bold + underline, type "now", turn off bold (outer), type "ok", turn off underline, type " plain"
     let mut doc = DocumentTab::new("t4".into(), "test.md".into(), String::new(), None, None);
@@ -5091,7 +5111,7 @@ fn test_wysiwyg_typing_format_splice_inner_outer_plain() {
     assert_eq!(doc.content, "<u>**now**ok</u> plain");
     let parsed = doc.parsed();
     let line = parsed.lines.first().unwrap();
-    assert_eq!(line.display_text, "nowok plain");
+    assert_eq!(line.display_text(&doc.content), "nowok plain");
 }
 
 #[test]
@@ -5107,7 +5127,7 @@ fn test_wysiwyg_typing_req5_consecutive_italic_toggle() {
     type_keystrokes(&mut doc, " d");
     assert_eq!(doc.content, "a *bc* d");
     let line = doc.parsed().lines.first().unwrap().clone();
-    assert_eq!(line.display_text, "a bc d");
+    assert_eq!(line.display_text(&doc.content), "a bc d");
 }
 
 #[test]
@@ -5119,7 +5139,7 @@ fn test_wysiwyg_typing_req6_underline_and_code_trailing_space() {
     type_keystrokes(&mut doc, "world");
     assert_eq!(doc.content, "<u>hello</u> world");
     let line = doc.parsed().lines.first().unwrap().clone();
-    assert_eq!(line.display_text, "hello world");
+    assert_eq!(line.display_text(&doc.content), "hello world");
 
     let mut doc = DocumentTab::new("c".into(), "test.md".into(), String::new(), None, None);
     doc.apply_format_in_mode("code", ViewMode::Wysiwyg);
@@ -5128,7 +5148,7 @@ fn test_wysiwyg_typing_req6_underline_and_code_trailing_space() {
     type_keystrokes(&mut doc, "world");
     assert_eq!(doc.content, "`hello` world");
     let line = doc.parsed().lines.first().unwrap().clone();
-    assert_eq!(line.display_text, "hello world");
+    assert_eq!(line.display_text(&doc.content), "hello world");
 }
 
 #[test]
@@ -5150,7 +5170,7 @@ fn test_wysiwyg_repro1_stacked_format_typing_continuation() {
     let parsed = crate::markdown::parse_document(&doc.content);
     let line = parsed.lines.first().unwrap();
     assert_eq!(
-        line.display_text,
+        line.display_text(&doc.content),
         "This is a test for combination i want jlkj "
     );
 
@@ -5191,7 +5211,7 @@ fn test_wysiwyg_repro2_stacked_format_typing_disarm_plain() {
     assert_eq!(doc.content, "<u>***combination i want***</u>fasjj");
     let parsed = crate::markdown::parse_document(&doc.content);
     let line = parsed.lines.first().unwrap();
-    assert_eq!(line.display_text, "combination i wantfasjj");
+    assert_eq!(line.display_text(&doc.content), "combination i wantfasjj");
 
     let s_formatted = line
         .styled_segments
@@ -5267,9 +5287,11 @@ fn test_all_stacked_combos_followed_by_unspaced_text() {
             let parsed = crate::markdown::parse_document(&doc.content);
             let line = parsed.lines.first().unwrap();
             assert_eq!(
-                line.display_text, "wordafter",
+                line.display_text(&doc.content),
+                "wordafter",
                 "Leaked delimiters for combo {:?}. Content was: {:?}",
-                fmts, doc.content
+                fmts,
+                doc.content
             );
 
             let seg_word = line
@@ -5326,7 +5348,7 @@ fn test_arrowing_back_into_stacked_span_and_typing() {
 
     let parsed = crate::markdown::parse_document(&doc.content);
     let line = parsed.lines.first().unwrap();
-    assert_eq!(line.display_text, "hellXo world");
+    assert_eq!(line.display_text(&doc.content), "hellXo world");
 
     let seg_mod = line
         .styled_segments
@@ -5374,13 +5396,15 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             let parsed = crate::markdown::parse_document(&doc.content);
             let line = parsed.lines.first().expect("line not found");
             assert_eq!(
-                line.display_text, "ahi",
+                line.display_text(&doc.content),
+                "ahi",
                 "Leaked delimiters in display text when toggling on combo {:?}. Content was: {:?}",
-                combo, doc.content
+                combo,
+                doc.content
             );
 
             // 'a' must be unstyled
-            let a_src = line.offset_map.display_to_source(0);
+            let a_src = line.display_to_source(0);
             let a_seg = line
                 .styled_segments
                 .iter()
@@ -5398,7 +5422,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
 
             // 'h' and 'i' must have the combo formats
             for ch_idx in 1..3 {
-                let src = line.offset_map.display_to_source(ch_idx);
+                let src = line.display_to_source(ch_idx);
                 let seg = line
                     .styled_segments
                     .iter()
@@ -5448,14 +5472,16 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             let parsed = crate::markdown::parse_document(&doc.content);
             let line = parsed.lines.first().expect("line not found");
             assert_eq!(
-                line.display_text, "hiy",
+                line.display_text(&doc.content),
+                "hiy",
                 "Leaked delimiters in display text when toggling off combo {:?}. Content was: {:?}",
-                combo, doc.content
+                combo,
+                doc.content
             );
 
             // 'h' and 'i' must have the combo formats
             for ch_idx in 0..2 {
-                let src = line.offset_map.display_to_source(ch_idx);
+                let src = line.display_to_source(ch_idx);
                 let seg = line
                     .styled_segments
                     .iter()
@@ -5489,7 +5515,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             }
 
             // 'y' must be unstyled
-            let y_src = line.offset_map.display_to_source(2);
+            let y_src = line.display_to_source(2);
             let y_seg = line
                 .styled_segments
                 .iter()
@@ -5528,14 +5554,14 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             let parsed = crate::markdown::parse_document(&doc.content);
             let line = parsed.lines.first().expect("line not found");
             assert_eq!(
-                line.display_text, "x hiy",
+                line.display_text(&doc.content), "x hiy",
                 "Leaked delimiters in display text when toggling off with prefix combo {:?}. Content was: {:?}",
                 combo, doc.content
             );
 
             // 'x' and ' ' must be unstyled
             for ch_idx in 0..2 {
-                let src = line.offset_map.display_to_source(ch_idx);
+                let src = line.display_to_source(ch_idx);
                 let seg = line
                     .styled_segments
                     .iter()
@@ -5551,7 +5577,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
 
             // 'h' and 'i' must have the combo formats
             for ch_idx in 2..4 {
-                let src = line.offset_map.display_to_source(ch_idx);
+                let src = line.display_to_source(ch_idx);
                 let seg = line
                     .styled_segments
                     .iter()
@@ -5585,7 +5611,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             }
 
             // 'y' must be unstyled
-            let y_src = line.offset_map.display_to_source(4);
+            let y_src = line.display_to_source(4);
             let y_seg = line
                 .styled_segments
                 .iter()
@@ -6600,6 +6626,8 @@ fn wysiwyg_typing_backspace_delete_and_enter_never_clone_cached_parse() {
     let src = "# Heading\n\nHello **world** here\n- item one\n- item two\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
     let mut doc = DocumentTab::new("t".into(), "note.md".into(), src.into(), None, None);
     doc.view_mode = ViewMode::Wysiwyg;
+    assert_eq!(doc.full_parse_count, 0);
+    let _ = doc.parsed();
     assert_eq!(doc.full_parse_count, 1);
 
     // Typing inside a bold span and after it
@@ -6704,12 +6732,14 @@ fn plain_text_tab_with_markdown_text_never_builds_parse() {
     assert_eq!(txt.full_parse_count, 0);
     assert_eq!(txt.parse_clone_count, 0);
 
-    // Raw mode on a .md tab still parses as before.
+    // Raw mode on a .md tab defers parsing on construction and parses on demand.
     let mut md = DocumentTab::new("m".into(), "notes.md".into(), src.into(), None, None);
     md.view_mode = ViewMode::Raw;
+    assert!(md.cached_parse.is_none());
+    assert_eq!(md.full_parse_count, 0);
+    assert!(!md.parsed().lines.is_empty());
     assert!(md.cached_parse.is_some());
     assert_eq!(md.full_parse_count, 1);
-    assert!(!md.parsed().lines.is_empty());
 }
 
 #[test]
@@ -6919,4 +6949,41 @@ fn typing_into_missing_table_cell_groups_into_one_undo() {
     assert_eq!(doc.content, "| a | b |\n| --- | --- |\n| 1 | x |");
     assert!(doc.undo());
     assert_eq!(doc.content, md);
+}
+
+#[test]
+fn reload_handles_bom_in_place_and_resets_history_and_parse_cache() {
+    let mut doc = DocumentTab::new(
+        "t".into(),
+        "t.md".into(),
+        "\u{feff}# Old\nhello".into(),
+        None,
+        None,
+    );
+    assert!(doc.has_bom);
+    assert_eq!(doc.content, "# Old\nhello");
+    // Startup parsing is deferred until requested.
+    assert!(doc.cached_parse.is_none());
+    doc.edit(0..5, "# Mod");
+    assert!(doc.is_modified);
+    doc.reload("\u{feff}# Fresh\nworld".into());
+    assert!(doc.has_bom);
+    assert!(!doc.is_modified);
+    assert_eq!(doc.content, "# Fresh\nworld");
+    assert!(!doc.undo(), "reload must drop old undo history");
+}
+
+#[test]
+fn huge_deletion_shrinks_content_capacity() {
+    let big = "a".repeat(256 * 1024);
+    let mut doc = DocumentTab::new("t".into(), "t.txt".into(), big, None, None);
+    assert!(doc.content.capacity() >= 256 * 1024);
+    let len = doc.content.len();
+    doc.edit(0..len, "tiny");
+    assert_eq!(doc.content, "tiny");
+    assert!(
+        doc.content.capacity() < 32 * 1024,
+        "capacity remained bloated at {}",
+        doc.content.capacity()
+    );
 }

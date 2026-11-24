@@ -664,3 +664,72 @@ fn remote_only_image_note_still_corrects_layout_height() {
     });
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Closing a tab by any path (here the Ctrl+W `handle_close_tab` path, which
+/// used to skip the release) frees the closed note's decoded pictures on the
+/// next frame, while the note that stays open keeps its own.
+#[std_test]
+fn closing_a_tab_releases_only_its_cached_pictures() {
+    let dir = fixture_dir("close-release");
+    let png = |name: &str| {
+        let path = dir.join("pics").join(name);
+        image::RgbaImage::from_pixel(40, 20, image::Rgba([9, 8, 7, 255]))
+            .save(&path)
+            .unwrap();
+        path
+    };
+    png("closed.png");
+    png("kept.png");
+    let (view, mut cx) = harness("![a](pics/closed.png)\n", &dir);
+    let closed_id = view.update(&mut cx, |app, _| app.active_tab_id.clone());
+    view.update(&mut cx, |app, _| {
+        app.handle_new_tab();
+        let tab = app.active_tab_mut().expect("tab");
+        tab.file_path = Some(dir.join("other.md"));
+        tab.edit(0..0, "![b](pics/kept.png)\n");
+        tab.is_modified = false;
+    });
+    redraw(&mut cx);
+    redraw(&mut cx);
+    let kept_id = view.update(&mut cx, |app, _| {
+        let id = app.active_tab_id.clone();
+        app.activate_tab(closed_id.clone());
+        id
+    });
+    redraw(&mut cx);
+    redraw(&mut cx);
+    let count = |view: &Entity<LiteMarkApp>, cx: &mut VisualTestContext| {
+        view.update(cx, |app, cx| app.note_image_cache.read(cx).entry_count())
+    };
+    assert_eq!(count(&view, &mut cx), 2, "both notes' pictures are cached");
+
+    view.update(&mut cx, |app, _| app.handle_close_tab(closed_id.clone()));
+    redraw(&mut cx);
+    redraw(&mut cx);
+    view.update(&mut cx, |app, _| {
+        assert_eq!(app.active_tab_id, kept_id);
+        assert!(
+            app.closed_tab_ids.is_empty(),
+            "render consumed the closed ids"
+        );
+    });
+    assert_eq!(
+        count(&view, &mut cx),
+        1,
+        "only the open note's picture stays"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// With no active tab the editor paints render()'s fallback Welcome tab, so
+/// the content it slices lines from must be that same text.
+#[std_test]
+fn editor_content_without_a_tab_is_the_fallback_welcome_text() {
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, _| {
+        app.tabs.clear();
+        use crate::ui::text_editor::EditorContentSource;
+        assert_eq!(app.editor_content(), INITIAL_MARKDOWN);
+    });
+}

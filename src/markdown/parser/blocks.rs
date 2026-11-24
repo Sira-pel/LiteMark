@@ -318,17 +318,16 @@ pub(super) fn fence_marker_line(
     } else {
         Vec::new()
     };
-    let (display_text, offset_map) = RowOffsetMap::from_hidden(line, line_start, line_end, &hidden);
     ParsedLine {
-        line_index: index,
+        line_index: index as u32,
         source,
-        content_end: line.len(),
+        content_end: line.len() as u32,
+        prefix_len: line.len() as u32,
         kind,
-        prefix_range: line_start..line_end,
         hidden_ranges: hidden,
         inline_pairs: Vec::new(),
-        display_text,
-        offset_map: Arc::new(offset_map),
+        display_text_owned: None,
+        offset_map_cached: None,
         link_hits: no_links(),
         styled_segments: Vec::new(),
     }
@@ -342,58 +341,35 @@ pub(super) fn code_content_line(
     strip: usize,
 ) -> ParsedLine {
     let line_start = source.start;
-    let line_end = source.end;
     if strip == 0 {
         return ParsedLine {
-            line_index: index,
-            source: source.clone(),
-            content_end: line.len(),
+            line_index: index as u32,
+            source,
+            content_end: line.len() as u32,
+            prefix_len: 0,
             kind: LineKind::CodeLine,
-            prefix_range: line_start..line_start,
             hidden_ranges: Vec::new(),
             inline_pairs: Vec::new(),
-            display_text: line.to_string(),
-            offset_map: Arc::new(RowOffsetMap::identity(line_start, line_end)),
+            display_text_owned: None,
+            offset_map_cached: None,
             link_hits: no_links(),
-            styled_segments: vec![StyledSegment {
-                source,
-                bold: false,
-                italic: false,
-                underline: false,
-                strike: false,
-                code: true,
-                link_url: None,
-            }],
+            styled_segments: Vec::new(),
         };
     }
     let content_start = line_start + strip;
     let hidden = vec![line_start..content_start];
-    let (display_text, offset_map) =
-        RowOffsetMap::from_hidden(line, line_start, content_start, &hidden);
-    let mut styled_segments = Vec::new();
-    if content_start < line_end {
-        styled_segments.push(StyledSegment {
-            source: content_start..line_end,
-            bold: false,
-            italic: false,
-            underline: false,
-            strike: false,
-            code: true,
-            link_url: None,
-        });
-    }
     ParsedLine {
-        line_index: index,
+        line_index: index as u32,
         source,
-        content_end: line.len(),
+        content_end: line.len() as u32,
+        prefix_len: strip as u32,
         kind: LineKind::CodeLine,
-        prefix_range: line_start..content_start,
         hidden_ranges: hidden,
         inline_pairs: Vec::new(),
-        display_text,
-        offset_map: Arc::new(offset_map),
+        display_text_owned: None,
+        offset_map_cached: None,
         link_hits: no_links(),
-        styled_segments,
+        styled_segments: Vec::new(),
     }
 }
 
@@ -423,18 +399,18 @@ pub(super) fn atx_line(
     };
     hidden.extend(inline_hidden);
     let hidden = merge_ranges(hidden);
-    let (display_text, offset_map) =
-        RowOffsetMap::from_hidden(line, line_start, line_start + content.start, &hidden);
+    let (display_text_owned, offset_map_cached) =
+        build_display_and_map(line, line_start, content.start, &hidden);
     ParsedLine {
-        line_index: index,
+        line_index: index as u32,
         source,
-        content_end: content.end,
+        content_end: content.end as u32,
+        prefix_len: content.start as u32,
         kind: LineKind::Heading { level },
-        prefix_range: line_start..line_start + content.start,
         hidden_ranges: hidden,
         inline_pairs,
-        display_text,
-        offset_map: Arc::new(offset_map),
+        display_text_owned,
+        offset_map_cached,
         link_hits: no_links(),
         styled_segments,
     }
