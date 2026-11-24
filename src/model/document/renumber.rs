@@ -55,8 +55,28 @@ pub(super) fn renumber_patches(members: &[Member], start: usize) -> Vec<Patch> {
         .collect()
 }
 
+/// The list marker on `line` of `parsed` (a parse of `src`), with the
+/// length of the quote prefix before it. The parser keeps no marker for an
+/// item inside a quote, so there the `>` markers are stripped and the rest
+/// scanned, as Enter in a quote does.
+fn line_marker(
+    src: &str,
+    parsed: &ParsedDocument,
+    line: &ParsedLine,
+) -> Option<(usize, crate::markdown::ListMarker)> {
+    if line.quote_depth == 0 {
+        return accepted_list_marker_in(parsed, src, line.source.start).map(|m| (0, m));
+    }
+    if !matches!(line.kind, LineKind::ListItem { .. }) {
+        return None;
+    }
+    let text = &src[line.source.clone()];
+    let (_, q_len) = crate::markdown::strip_blockquote_markers(text, 64)?;
+    crate::markdown::scan_list_marker(&text[q_len..]).map(|m| (q_len, m))
+}
+
 /// What `line` of `parsed` (a parse of `src`, which starts at `base` in the
-/// note) means to the run at `level` and `punct`.
+/// note) means to the run at `level` and `punct`, inside `depth` quotes.
 fn classify_run_line(
     src: &str,
     base: usize,
@@ -64,12 +84,17 @@ fn classify_run_line(
     line: &ParsedLine,
     level: usize,
     punct: u8,
+    depth: u8,
 ) -> Step {
+    // A list stays at one quote depth: entering or leaving a quote ends it.
+    if line.quote_depth != depth {
+        return Step::Stop;
+    }
     match line.kind {
         LineKind::Empty => Step::Skip,
         LineKind::Heading { .. } => Step::Stop,
         LineKind::ListItem { .. } => {
-            let Some(found) = accepted_list_marker_in(parsed, src, line.source.start) else {
+            let Some((q_len, found)) = line_marker(src, parsed, line) else {
                 return Step::Stop;
             };
             if found.indent_bytes > level {
@@ -78,7 +103,7 @@ fn classify_run_line(
             if found.indent_bytes < level || !found.ordered || found.punct != punct {
                 return Step::Stop;
             }
-            let digits_at = line.source.start + found.indent_bytes;
+            let digits_at = line.source.start + q_len + found.indent_bytes;
             let digits = src[digits_at..]
                 .bytes()
                 .take_while(u8::is_ascii_digit)
@@ -93,7 +118,17 @@ fn classify_run_line(
             })
         }
         _ => {
-            let text = &src[line.source.clone()];
+            let mut text = &src[line.source.clone()];
+            if depth > 0 {
+                // Inside a quote, measure past the `>` markers; a bare `>`
+                // line is a blank line of the quote.
+                let q_len =
+                    crate::markdown::strip_blockquote_markers(text, 64).map_or(0, |(_, q)| q);
+                text = &text[q_len..];
+                if text.trim().is_empty() {
+                    return Step::Skip;
+                }
+            }
             let lead = text.len() - text.trim_start_matches([' ', '\t']).len();
             if lead > level {
                 Step::Skip
@@ -141,13 +176,16 @@ impl DocumentTab {
         forward: bool,
         level: usize,
         punct: u8,
+        depth: u8,
     ) -> Vec<Member> {
         let mut out = Vec::new();
         let mut at = from;
         while let Some(line_start) = at {
             let (text, local) = self.local_line(line_start);
             let step = match local.lines.first() {
-                Some(line) => classify_run_line(text, line_start, &local, line, level, punct),
+                Some(line) => {
+                    classify_run_line(text, line_start, &local, line, level, punct, depth)
+                }
                 None => Step::Skip,
             };
             match step {
@@ -175,6 +213,7 @@ impl DocumentTab {
         forward: bool,
         level: usize,
         punct: u8,
+        depth: u8,
     ) -> Vec<Member> {
         let Some(from) = from else {
             return Vec::new();
@@ -182,20 +221,21 @@ impl DocumentTab {
         if self.reads_lines_locally() {
             let parsed = self.parsed();
             let start = parsed.lines.get(from).map(|l| l.source.start);
-            return self.scan_run_local(start, forward, level, punct);
+            return self.scan_run_local(start, forward, level, punct, depth);
         }
         let parsed = self.parsed();
         let mut out = Vec::new();
         let content = &self.content;
-        let mut visit =
-            |line: &ParsedLine| match classify_run_line(content, 0, &parsed, line, level, punct) {
-                Step::Member(m) => {
-                    out.push(m);
-                    true
-                }
-                Step::Skip => true,
-                Step::Stop => false,
-            };
+        let mut visit = |line: &ParsedLine| match classify_run_line(
+            content, 0, &parsed, line, level, punct, depth,
+        ) {
+            Step::Member(m) => {
+                out.push(m);
+                true
+            }
+            Step::Skip => true,
+            Step::Stop => false,
+        };
         if forward {
             for line in parsed.lines.iter().skip(from) {
                 if !visit(line) {
@@ -231,27 +271,32 @@ impl DocumentTab {
         }
         if self.reads_lines_locally() {
             let (text, local) = self.local_line(line_start);
-            let marker = accepted_list_marker_in(&local, text, 0)?;
+            let line = local.lines.first()?;
+            let (_, marker) = line_marker(text, &local, line)?;
             if !marker.ordered {
                 return None;
             }
-            let (level, punct) = (marker.indent_bytes, marker.punct);
+            let (level, punct, depth) = (marker.indent_bytes, marker.punct, line.quote_depth);
             let prev = self.prev_line_start(line_start);
-            let mut run = self.scan_run_local(prev, false, level, punct);
+            let mut run = self.scan_run_local(prev, false, level, punct, depth);
             let at = run.len();
-            run.extend(self.scan_run_local(Some(line_start), true, level, punct));
+            run.extend(self.scan_run_local(Some(line_start), true, level, punct, depth));
             return (run.get(at)?.line_start == line_start).then_some((run, at));
         }
         let parsed = self.parsed();
-        let marker = accepted_list_marker_in(&parsed, &self.content, line_start)?;
+        let line = parsed.line_at_offset(line_start)?;
+        if line.source.start != line_start {
+            return None;
+        }
+        let (_, marker) = line_marker(&self.content, &parsed, line)?;
         if !marker.ordered {
             return None;
         }
-        let index = parsed.line_at_offset(line_start)?.line_index as usize;
-        let (level, punct) = (marker.indent_bytes, marker.punct);
-        let mut run = self.scan_run(index.checked_sub(1), false, level, punct);
+        let index = line.line_index as usize;
+        let (level, punct, depth) = (marker.indent_bytes, marker.punct, line.quote_depth);
+        let mut run = self.scan_run(index.checked_sub(1), false, level, punct, depth);
         let at = run.len();
-        run.extend(self.scan_run(Some(index), true, level, punct));
+        run.extend(self.scan_run(Some(index), true, level, punct, depth));
         (run.get(at)?.line_start == line_start).then_some((run, at))
     }
 
@@ -288,18 +333,23 @@ impl DocumentTab {
         if range.is_empty() || !self.file_type.supports_markdown_features() {
             return;
         }
-        let takes_marker = |line_start: usize, marker: &crate::markdown::ListMarker| {
-            marker.ordered
-                && line_start + marker.indent_bytes >= range.start
-                && line_start + marker.marker_end <= range.end
-        };
+        let takes_marker =
+            |line_start: usize, (q_len, marker): (usize, crate::markdown::ListMarker)| {
+                let at = line_start + q_len;
+                marker.ordered
+                    && at + marker.indent_bytes >= range.start
+                    && at + marker.marker_end <= range.end
+            };
         let first = if self.reads_lines_locally() {
             let mut at = Some(home_offset(&self.content, range.start));
             let mut found = None;
             while let Some(line_start) = at.filter(|&s| s < range.end) {
                 let (text, local) = self.local_line(line_start);
-                if accepted_list_marker_in(&local, text, 0)
-                    .is_some_and(|m| takes_marker(line_start, &m))
+                if local
+                    .lines
+                    .first()
+                    .and_then(|line| line_marker(text, &local, line))
+                    .is_some_and(|m| takes_marker(line_start, m))
                 {
                     found = Some(line_start);
                     break;
@@ -320,12 +370,10 @@ impl DocumentTab {
                 if !matches!(line.kind, LineKind::ListItem { .. }) {
                     continue;
                 }
-                let Some(marker) =
-                    accepted_list_marker_in(&parsed, &self.content, line.source.start)
-                else {
+                let Some(marker) = line_marker(&self.content, &parsed, line) else {
                     continue;
                 };
-                if takes_marker(line.source.start, &marker) {
+                if takes_marker(line.source.start, marker) {
                     found = Some(line.source.start);
                     break;
                 }
@@ -402,7 +450,7 @@ impl DocumentTab {
         punct: u8,
     ) -> Option<Vec<Member>> {
         let index = self.line_index_at(block_start)?;
-        let head = self.scan_run(index.checked_sub(1), false, level, punct);
+        let head = self.scan_run(index.checked_sub(1), false, level, punct, 0);
         in_sequence(&head).then_some(head)
     }
 
@@ -419,7 +467,7 @@ impl DocumentTab {
         let Some(index) = self.line_index_at(block_end) else {
             return Vec::new();
         };
-        let tail = self.scan_run(Some(index + 1), true, level, punct);
+        let tail = self.scan_run(Some(index + 1), true, level, punct, 0);
         if !in_sequence(&tail) {
             return Vec::new();
         }

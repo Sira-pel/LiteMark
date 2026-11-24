@@ -325,7 +325,7 @@ impl DocumentTab {
                 if let Some(item) = crate::markdown::scan_list_marker(&line[q_len..]) {
                     let body = &line[q_len + item.prefix_end()..];
                     if body.trim().is_empty() && range.is_empty() {
-                        self.edit(line_start + q_len..line_end_pos, "");
+                        self.edit_removing(line_start + q_len..line_end_pos);
                     } else if range.is_empty() && cursor < line_start + q_len + item.prefix_end() {
                         self.edit(line_start..line_start, nl);
                         self.caret.move_to(cursor + nl.len());
@@ -333,6 +333,9 @@ impl DocumentTab {
                     } else {
                         let inner_indent = &line[q_len..q_len + item.indent_bytes];
                         let ins = quoted_item_continuation(&item, inner_indent, nl, &q_cont);
+                        if item.ordered && range.end <= line_end_pos {
+                            self.stage_renumber_after_enter(line_start, line_end_pos, item.number);
+                        }
                         self.edit(range, &ins);
                     }
                     return;
@@ -727,7 +730,7 @@ impl DocumentTab {
                     let inner_pfx = q_len + item.prefix_end();
                     let body = &line[inner_pfx..];
                     if body.trim().is_empty() && range.is_empty() {
-                        self.edit(line_start + q_len..line_end_pos, "");
+                        self.edit_removing(line_start + q_len..line_end_pos);
                     } else if range.is_empty() && cursor < line_start + inner_pfx {
                         self.edit(line_start..line_start, nl);
                         self.caret.move_to(cursor + nl.len());
@@ -735,6 +738,9 @@ impl DocumentTab {
                     } else {
                         let inner_indent = &line[q_len..q_len + item.indent_bytes];
                         let ins = quoted_item_continuation(&item, inner_indent, nl, &q_cont);
+                        if item.ordered && range.end <= line_end_pos {
+                            self.stage_renumber_after_enter(line_start, line_end_pos, item.number);
+                        }
                         if !self.split_inline_span_newline(&range, &ins) {
                             self.edit(range, &ins);
                         }

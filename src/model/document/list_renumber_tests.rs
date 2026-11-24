@@ -402,3 +402,36 @@ fn raw_view_renumbers_without_a_full_parse() {
     assert_eq!(d.content, "intro\n\n1. a\n\n2. b\n3. c\n");
     assert_eq!(d.full_parse_count, 0);
 }
+
+#[test]
+fn enter_renumbers_a_numbered_list_inside_a_quote() {
+    check(
+        "> 1. a\n> 2. b\n> 3. c",
+        "> 1. a\n> 2. \n> 3. b\n> 4. c",
+        |d, src| {
+            d.place(after(src, "1. a"), false);
+            d.smart_newline(false);
+        },
+    );
+    // A nested quote ends the list (as in CommonMark), so the items after
+    // it start a new list and keep their numbers.
+    check(
+        "> 1. a\n> > 2. x\n> 2. b",
+        "> 1. a\n> 2. \n> > 2. x\n> 2. b",
+        |d, src| {
+            d.place(after(src, "1. a"), false);
+            d.smart_newline(false);
+        },
+    );
+}
+
+#[test]
+fn enter_on_an_empty_quoted_item_shifts_the_rest_down() {
+    for mode in MODES {
+        let src = "> 1. a\n> 2. \n> 3. c";
+        let mut d = doc(src, mode);
+        d.place(after(src, "2. "), false);
+        d.smart_newline(false);
+        assert_eq!(d.content, "> 1. a\n> \n> 2. c", "{mode:?}");
+    }
+}
