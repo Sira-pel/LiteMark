@@ -2141,6 +2141,30 @@ impl Shift {
         }
     }
 
+    /// Move every line of `lines` (all after the edit). A long tail is split
+    /// across threads: the lines are independent, and each one's ranges and
+    /// shared maps are scattered on the heap, so the walk is memory-bound.
+    fn parsed_lines(self, lines: &mut [ParsedLine]) {
+        const PER_THREAD: usize = 8192;
+        // Same length and same line count: nothing moves.
+        if self.delta == 0 && self.line_delta == 0 {
+            return;
+        }
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(lines.len() / PER_THREAD);
+        if threads < 2 {
+            lines.iter_mut().for_each(|line| self.parsed_line(line));
+            return;
+        }
+        let chunk = lines.len().div_ceil(threads);
+        std::thread::scope(|scope| {
+            for part in lines.chunks_mut(chunk) {
+                scope.spawn(move || part.iter_mut().for_each(|line| self.parsed_line(line)));
+            }
+        });
+    }
+
     /// Move a line that comes after the edit. Its text is unchanged, so
     /// every position in it moves by the same amount.
     fn parsed_line(self, line: &mut ParsedLine) {
@@ -2273,9 +2297,7 @@ impl ParsedDocument {
             Some((_, k, ix, shift)) => {
                 let old_fences = self.lines[restart..k].iter().any(is_fence);
                 self.lines.splice(restart..k, new_lines);
-                for line in &mut self.lines[restart + inserted..] {
-                    shift.parsed_line(line);
-                }
+                shift.parsed_lines(&mut self.lines[restart + inserted..]);
                 let mut kept = later_checkpoints.split_off(ix - cut);
                 for (line, state) in &mut kept {
                     *line = shift.line(*line);
@@ -2341,7 +2363,7 @@ fn all_source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
 }
 
 /// Lines between checkpoints of the parser state.
-pub(crate) const CHECKPOINT_EVERY: usize = 64;
+pub(crate) const CHECKPOINT_EVERY: usize = 16;
 
 /// What `parse_lines` does with the next line.
 pub(crate) enum Step {

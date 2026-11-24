@@ -19,6 +19,10 @@ mod ui;
 use actions::*;
 use app::LiteMarkApp;
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(RustEmbed)]
 #[folder = "assets"]
 struct Assets;

@@ -244,3 +244,46 @@ fn slice_bounds_match_slice_display() {
         }
     }
 }
+
+/// Manual benchmark: an edit at the top of a 100k-line note, plain vs
+/// formatted lines. `cargo test --release bench_apply_edit -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_apply_edit_at_top_of_a_large_note() {
+    use std::time::Instant;
+    for (name, line) in [
+        (
+            "plain",
+            "just a plain paragraph of text, nothing special here\n",
+        ),
+        (
+            "styled",
+            "a **bold** and *italic* [link](https://example.com/x) with `code` bits\n",
+        ),
+    ] {
+        let mut text: String = line.repeat(100_000);
+        let mut doc = parse_document(&text);
+        let t = Instant::now();
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..20 {
+            let old = 5..5;
+            text.insert(5, 'x');
+            let start = Instant::now();
+            doc.apply_edit(&text, old, 1);
+            best = best.min(start.elapsed());
+        }
+        let mut same_len = std::time::Duration::MAX;
+        for k in 0..20 {
+            let c = if k % 2 == 0 { "y" } else { "z" };
+            text.replace_range(5..6, c);
+            let start = Instant::now();
+            doc.apply_edit(&text, 5..6, 1);
+            same_len = same_len.min(start.elapsed());
+        }
+        eprintln!("{name}: same-length edit = {same_len:?}");
+        eprintln!(
+            "{name}: best apply_edit at top of 100k lines = {best:?} (total {:?})",
+            t.elapsed()
+        );
+    }
+}

@@ -20,7 +20,8 @@ use crate::markdown::{
 };
 use crate::model::document::visible_line_end;
 use crate::model::text_ops::{
-    count_line_endings, visual_row_count_measured, visual_rows_measured, Caret, CharWidths,
+    count_line_endings, patch_visual_rows_measured, visual_row_count_measured,
+    visual_rows_measured, Caret, CharWidths,
 };
 use crate::model::ViewMode;
 use crate::theme::sz;
@@ -224,6 +225,79 @@ enum CachedRows {
     Wrapped(Rc<LineRows>),
 }
 
+/// Per-line height estimates with a running total, so `request_layout` costs
+/// the size of an edit, not of the document. Slots are quantized to 1/1024 px
+/// so the total is an exact integer sum that never drifts across splices.
+#[derive(Clone, Default)]
+struct HeightEstimates {
+    /// Estimated height per parsed line in 1/1024 px (`UNSET` = not computed
+    /// yet). Kept as integers so a very tall line can't lose precision.
+    slots: Vec<i64>,
+    /// Sum of the computed slots, in 1/1024 px.
+    sum_q: i64,
+    /// Slots that may still be uncomputed (a superset; `None` = all computed).
+    stale: Option<Range<usize>>,
+}
+
+impl HeightEstimates {
+    const SCALE: f32 = 1024.0;
+    const UNSET: i64 = i64::MIN;
+
+    fn quantize(px: f32) -> i64 {
+        (px * Self::SCALE).round() as i64
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Forget everything and size for `n` lines.
+    fn reset(&mut self, n: usize) {
+        self.slots.clear();
+        self.slots.resize(n, Self::UNSET);
+        self.sum_q = 0;
+        self.stale = Some(0..n);
+    }
+
+    /// Mirror a parse splice: drop `removed` slots at `start`, add `inserted`
+    /// uncomputed ones.
+    fn splice(&mut self, start: usize, removed: usize, inserted: usize) {
+        for &slot in &self.slots[start..start + removed] {
+            if slot != Self::UNSET {
+                self.sum_q -= slot;
+            }
+        }
+        self.slots.splice(
+            start..start + removed,
+            std::iter::repeat_n(Self::UNSET, inserted),
+        );
+        // A pending range from before the splice would have shifted; keep it simple.
+        self.stale = match self.stale {
+            Some(_) => Some(0..self.slots.len()),
+            None => Some(start..start + inserted),
+        };
+    }
+
+    /// Compute every uncomputed slot in the stale range with `estimate(line)`.
+    fn fill_stale(&mut self, mut estimate: impl FnMut(usize) -> f32) {
+        let Some(range) = self.stale.take() else {
+            return;
+        };
+        for i in range.start..range.end.min(self.slots.len()) {
+            if self.slots[i] == Self::UNSET {
+                let q = Self::quantize(estimate(i));
+                self.slots[i] = q;
+                self.sum_q += q;
+            }
+        }
+    }
+
+    /// The total estimate in px (once nothing is stale).
+    fn total(&self) -> f32 {
+        self.sum_q as f32 / Self::SCALE
+    }
+}
+
 /// Layout work that depends only on the parse and the wrap width, kept
 /// between frames so an idle redraw doesn't re-wrap every line of the
 /// document, and kept across an edit for every line the edit didn't touch.
@@ -235,7 +309,7 @@ pub struct LayoutCache {
     lines: Vec<CachedRows>,
     /// Per parsed line, its share of `request_layout`'s height estimate in px
     /// (`f32::NAN` = uncached), for the wrap columns and font size in `estimate_key`.
-    estimate: Vec<f32>,
+    estimate: HeightEstimates,
     estimate_key: (usize, u32),
     /// The last WYSIWYG height estimate, before it is raised to the painted
     /// total: what the layout height should be once the total is known.
@@ -287,21 +361,17 @@ impl LayoutCache {
                     std::iter::repeat_n(CachedRows::Uncached, inserted),
                 );
                 if self.estimate.len() == self.lines.len() - inserted + removed {
-                    self.estimate.splice(
-                        start..start + removed,
-                        std::iter::repeat_n(f32::NAN, inserted),
-                    );
+                    self.estimate.splice(start, removed, inserted);
                 } else {
-                    self.estimate = vec![f32::NAN; doc.lines.len()];
+                    self.estimate.reset(doc.lines.len());
                 }
             }
             _ => {
                 self.lines = vec![CachedRows::Uncached; doc.lines.len()];
-                self.estimate = vec![f32::NAN; doc.lines.len()];
+                self.estimate.reset(doc.lines.len());
             }
         }
         self.generation = meta.generation;
-        self.raw_rows = None;
     }
 
     /// Use `widths` (measured for `key`), dropping every row split with other
@@ -321,7 +391,7 @@ impl LayoutCache {
         self.lines
             .iter_mut()
             .for_each(|line| *line = CachedRows::Uncached);
-        self.estimate.iter_mut().for_each(|slot| *slot = f32::NAN);
+        self.estimate.reset(self.estimate.len());
         self.raw_rows = None;
     }
 
@@ -330,6 +400,7 @@ impl LayoutCache {
     fn raw_rows_for(
         &mut self,
         content_key: &(String, u64),
+        last_edit: Option<&(u64, Range<usize>, usize)>,
         content: &str,
         wrap_cols: usize,
         tab_width: usize,
@@ -337,6 +408,32 @@ impl LayoutCache {
         if let Some((key, cols, tab, rows)) = &self.raw_rows {
             if *cols == wrap_cols && *tab == tab_width && key == content_key {
                 return rows.clone();
+            }
+        }
+        // One known edit since the cached rows: wrap only the lines around it.
+        if let (Some((key, cols, tab, _)), Some((edit_rev, range, new_len))) =
+            (&self.raw_rows, last_edit)
+        {
+            if *cols == wrap_cols
+                && *tab == tab_width
+                && key.0 == content_key.0
+                && key.1 == *edit_rev
+                && edit_rev.wrapping_add(1) == content_key.1
+            {
+                let (_, cols, tab, mut rows) = self.raw_rows.take().expect("raw rows");
+                let patched = patch_visual_rows_measured(
+                    Rc::make_mut(&mut rows),
+                    content,
+                    range.clone(),
+                    *new_len,
+                    wrap_cols,
+                    tab_width,
+                    &self.widths,
+                );
+                if patched.is_some() {
+                    self.raw_rows = Some((content_key.clone(), cols, tab, rows.clone()));
+                    return rows;
+                }
             }
         }
         let rows = Rc::new(visual_rows_measured(
@@ -1254,6 +1351,8 @@ pub struct EditorElement<V: 'static> {
     pub paint: Rc<RefCell<EditorPaint>>,
     pub note_image_cache: Entity<NoteImageCache>,
     pub content_key: (String, u64),
+    /// The edit that made `content_key`'s revision from the one before it.
+    pub last_edit: Option<(u64, Range<usize>, usize)>,
     pub parsed: Arc<ParsedDocument>,
     pub view_mode: ViewMode,
     pub selection: Range<usize>,
@@ -1417,40 +1516,41 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
         };
         paint_borrow.layout_cache.keep_for(&self.parsed);
         let estimated_height = if self.view_mode == ViewMode::Wysiwyg {
+            paint_borrow.layout_cache.raw_rows = None;
             let content = self.entity.read(cx).editor_content();
             let cache = &mut paint_borrow.layout_cache;
             let key = (wrap_cols, f32::from(self.font_size).to_bits());
             if cache.estimate_key != key || cache.estimate.len() != self.parsed.lines.len() {
-                cache.estimate = vec![f32::NAN; self.parsed.lines.len()];
+                cache.estimate.reset(self.parsed.lines.len());
                 cache.estimate_key = key;
             }
-            let mut h = px(32.0);
-            for (line, slot) in self.parsed.lines.iter().zip(cache.estimate.iter_mut()) {
-                if !slot.is_nan() {
-                    h += px(*slot);
-                } else {
-                    let val = if matches!(line.kind, LineKind::TableDelimiter) {
-                        px(0.0)
-                    } else {
-                        let (_, line_h, top_gap, _) =
-                            wysiwyg_line_metrics(&line.kind, self.font_size);
-                        let disp = line.display_text(content);
-                        let wrapped = if disp.is_empty() {
-                            1
-                        } else {
-                            let widths = if matches!(line.kind, LineKind::CodeLine) {
-                                &cache.mono_widths
-                            } else {
-                                &cache.widths
-                            };
-                            visual_row_count_measured(disp, wrap_cols, 0, widths).max(1)
-                        };
-                        top_gap + line_h * wrapped as f32
-                    };
-                    *slot = f32::from(val);
-                    h += val;
+            let font_size = self.font_size;
+            let LayoutCache {
+                estimate,
+                widths,
+                mono_widths,
+                ..
+            } = cache;
+            estimate.fill_stale(|i| {
+                let line = &self.parsed.lines[i];
+                if matches!(line.kind, LineKind::TableDelimiter) {
+                    return 0.0;
                 }
-            }
+                let (_, line_h, top_gap, _) = wysiwyg_line_metrics(&line.kind, font_size);
+                let disp = line.display_text(content);
+                let wrapped = if disp.is_empty() {
+                    1
+                } else {
+                    let widths = if matches!(line.kind, LineKind::CodeLine) {
+                        &*mono_widths
+                    } else {
+                        &*widths
+                    };
+                    visual_row_count_measured(disp, wrap_cols, 0, widths).max(1)
+                };
+                f32::from(top_gap + line_h * wrapped as f32)
+            });
+            let h = px(32.0 + estimate.total());
             cache.estimated_height = h;
             h.max(paint_borrow.total_height)
         } else {
@@ -1460,7 +1560,13 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             let content = self.entity.read(cx).editor_content();
             let rows = paint_borrow
                 .layout_cache
-                .raw_rows_for(&self.content_key, content, wrap_cols, self.tab_width)
+                .raw_rows_for(
+                    &self.content_key,
+                    self.last_edit.as_ref(),
+                    content,
+                    wrap_cols,
+                    self.tab_width,
+                )
                 .len();
             let line_height = self.font_size * 1.65;
             line_height * rows as f32 + px(32.0)
@@ -1643,8 +1749,13 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
 
         if self.view_mode == ViewMode::Raw {
             let content = self.entity.read(cx).editor_content();
-            let raw_rows =
-                layout_cache.raw_rows_for(&self.content_key, content, wrap_cols, self.tab_width);
+            let raw_rows = layout_cache.raw_rows_for(
+                &self.content_key,
+                self.last_edit.as_ref(),
+                content,
+                wrap_cols,
+                self.tab_width,
+            );
             let anchor_rows: Vec<usize> = anchors
                 .iter()
                 .map(|&offset| {
@@ -4431,6 +4542,75 @@ fn paint_ranges_mapped(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn height_estimate_total_matches_a_naive_sum_after_random_splices() {
+        use super::HeightEstimates;
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |n: usize| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as usize) % n.max(1)
+        };
+        let height = |i: usize| {
+            // Every 11th line is far taller than f32 holds to 1/1024 px.
+            let tall = if i.is_multiple_of(11) {
+                3_000_000.0
+            } else {
+                0.0
+            };
+            17.0 + (i % 7) as f32 * 3.3 + 0.1234 + tall
+        };
+        let mut est = HeightEstimates::default();
+        est.reset(50);
+        est.fill_stale(height);
+        // A shadow of the values each slot should hold.
+        let mut shadow: Vec<i64> = (0..50)
+            .map(|i| HeightEstimates::quantize(height(i)))
+            .collect();
+        for step in 0..2000 {
+            match next(4) {
+                0 | 1 => {
+                    let start = next(est.len() + 1);
+                    let removed = next((est.len() - start).min(5) + 1).min(est.len() - start);
+                    let inserted = next(6);
+                    est.splice(start, removed, inserted);
+                    shadow.splice(
+                        start..start + removed,
+                        std::iter::repeat_n(HeightEstimates::UNSET, inserted),
+                    );
+                    // Occasionally splice again before filling.
+                    if next(5) == 0 {
+                        est.splice(0, 0, 1);
+                        shadow.insert(0, HeightEstimates::UNSET);
+                    }
+                    est.fill_stale(|i| height(i + step));
+                    for (i, v) in shadow.iter_mut().enumerate() {
+                        if *v == HeightEstimates::UNSET {
+                            *v = HeightEstimates::quantize(height(i + step));
+                        }
+                    }
+                }
+                2 => {
+                    let n = est.len();
+                    est.reset(n);
+                    est.fill_stale(|i| height(i + step));
+                    shadow = (0..n)
+                        .map(|i| HeightEstimates::quantize(height(i + step)))
+                        .collect();
+                }
+                _ => est.fill_stale(height),
+            }
+            assert_eq!(est.slots, shadow, "step {step}");
+            let naive: i64 = est.slots.iter().copied().sum();
+            assert_eq!(est.sum_q, naive, "step {step}");
+            assert!(
+                est.slots.iter().all(|&v| v != HeightEstimates::UNSET),
+                "step {step}"
+            );
+        }
+    }
     #[test]
     fn gutter_line_count_is_status_lines_plus_a_trailing_ending() {
         for text in [
