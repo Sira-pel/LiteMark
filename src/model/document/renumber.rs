@@ -385,18 +385,25 @@ impl DocumentTab {
         let first = if self.reads_lines_locally() {
             let mut at = Some(home_offset(&self.content, range.start));
             let mut found = None;
-            let mut fence = at.and_then(|s| self.fence_before_local(s));
+            // The fence state is only worked out (by reading the lines
+            // above) once a line that could be a marker turns up; from then
+            // on it is followed line by line.
+            let mut fence: Option<Option<Fence>> = None;
             while let Some(line_start) = at.filter(|&s| s < range.end) {
                 let text = &self.content[line_start..line_end(&self.content, line_start)];
-                let fenced = fence.is_some();
-                fence = fence_step(fence, text);
                 // Only a line that starts with a digit can hold a numbered
                 // marker, so a huge range is not parsed line by line.
-                let may_number = !fenced
-                    && text
-                        .trim_start_matches([' ', '\t', '>'])
-                        .starts_with(|c: char| c.is_ascii_digit());
-                if !may_number {
+                let digit_start = text
+                    .trim_start_matches([' ', '\t', '>'])
+                    .starts_with(|c: char| c.is_ascii_digit());
+                if fence.is_none() && digit_start {
+                    fence = Some(self.fence_before_local(line_start));
+                }
+                let fenced = fence.is_some_and(|f| f.is_some());
+                if let Some(f) = fence.as_mut() {
+                    *f = fence_step(*f, text);
+                }
+                if fenced || !digit_start {
                     at = self.next_line_start(line_start);
                     continue;
                 }
