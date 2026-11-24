@@ -4588,7 +4588,11 @@ mod tests {
         };
         let height = |i: usize| {
             // Every 11th line is far taller than f32 holds to 1/1024 px.
-            let tall = if i.is_multiple_of(11) { 3_000_000.0 } else { 0.0 };
+            let tall = if i.is_multiple_of(11) {
+                3_000_000.0
+            } else {
+                0.0
+            };
             17.0 + (i % 7) as f32 * 3.3 + 0.1234 + tall
         };
         let mut est = HeightEstimates::default();
