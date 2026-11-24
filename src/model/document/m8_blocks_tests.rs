@@ -473,3 +473,64 @@ fn w14a_spaces_stay_separate_steps_when_backspacing() {
     assert!(d.undo());
     assert_eq!(d.content, "ab cd");
 }
+
+// ---- Raw view Enter around code fences (no full parse) ----
+
+fn raw_enter(src: &str, caret: usize) -> DocumentTab {
+    let mut d = doc(src);
+    d.set_view_mode(ViewMode::Raw);
+    d.place(caret, false);
+    d.smart_newline(false);
+    d
+}
+
+#[test]
+fn raw_enter_on_unclosed_fence_inserts_closing_fence() {
+    for (src, expect) in [
+        ("intro\n\n```rust", "intro\n\n```rust\n\n```"),
+        ("a\r\n  ~~~~", "a\r\n  ~~~~\r\n  \r\n  ~~~~"),
+    ] {
+        let d = raw_enter(src, src.len());
+        assert_eq!(d.content, expect);
+        assert_eq!(d.full_parse_count, 0, "{src:?}");
+    }
+    // Already closed: a plain line break.
+    let src = "```\ncode\n```";
+    let d = raw_enter(src, 3);
+    assert_eq!(d.content, "```\n\ncode\n```");
+    // A closing fence is not an opener.
+    let src = "```\ncode\n```";
+    let d = raw_enter(src, src.len());
+    assert_eq!(d.content, "```\ncode\n```\n");
+}
+
+#[test]
+fn raw_enter_inside_code_block_adds_no_markers() {
+    for line in ["- item", "1. item", "> quote", "* star"] {
+        let src = format!("```\n{line}\n```\n");
+        let at = src.find(line).unwrap() + line.len();
+        let d = raw_enter(&src, at);
+        assert_eq!(d.content, format!("```\n{line}\n\n```\n"), "{line:?}");
+        assert_eq!(d.full_parse_count, 0);
+    }
+    // After the block closes, lists continue again.
+    let src = "~~~\ncode\n~~~\n- item";
+    let d = raw_enter(src, src.len());
+    assert_eq!(d.content, "~~~\ncode\n~~~\n- item\n- ");
+    // A shorter or different run does not close the block.
+    let src = "````\n```\n- item\n````";
+    let at = src.find("- item").unwrap() + 6;
+    let d = raw_enter(src, at);
+    assert_eq!(d.content, "````\n```\n- item\n\n````");
+}
+
+#[test]
+fn raw_backspace_inside_code_block_keeps_the_list_marker() {
+    let src = "```\n- \n```";
+    let mut d = doc(src);
+    d.set_view_mode(ViewMode::Raw);
+    d.place(6, false);
+    d.smart_backspace_in_mode(ViewMode::Raw);
+    assert_eq!(d.content, "```\n-\n```");
+    assert_eq!(d.full_parse_count, 0);
+}
