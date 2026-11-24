@@ -797,10 +797,11 @@ impl DocumentTab {
                         ..
                     } = &**body;
                     let col_count = cells.len().max(2);
-                    let row_str = format!("\n|{}", "  |".repeat(col_count));
                     let insert_pos = table_source.end;
+                    let nl = self.line_break(insert_pos);
+                    let row_str = format!("{nl}|{}", "  |".repeat(col_count));
                     self.edit(insert_pos..insert_pos, &row_str);
-                    let target_pos = (insert_pos + 3).min(self.content.len());
+                    let target_pos = (insert_pos + nl.len() + 2).min(self.content.len());
                     self.caret
                         .move_to(floor_boundary(&self.content, target_pos));
                     self.refresh_cursor();
@@ -809,29 +810,37 @@ impl DocumentTab {
             }
 
             // Outside table: insert clean standard 2-column table template
+            let nl = self.line_break(range.start);
             let mut prefix = String::new();
             if range.start > 0 {
-                let prev_char = self.content[..range.start].chars().next_back();
-                if let Some(c) = prev_char {
+                let before = &self.content[..range.start];
+                if let Some(c) = before.chars().next_back() {
                     if c != '\n' {
-                        prefix.push_str("\n\n");
-                    } else if !self.content[..range.start].ends_with("\n\n") {
-                        prefix.push('\n');
+                        prefix.push_str(nl);
+                        prefix.push_str(nl);
+                    } else if !before.ends_with("\n\n") && !before.ends_with("\n\r\n") {
+                        prefix.push_str(nl);
                     }
                 }
             }
             let mut suffix = String::new();
             if range.end < self.content.len() {
-                let next_char = self.content[range.end..].chars().next();
-                if let Some(c) = next_char {
-                    if c != '\n' {
-                        suffix.push_str("\n\n");
-                    } else if !self.content[range.end..].starts_with("\n\n") {
-                        suffix.push('\n');
+                let after = &self.content[range.end..];
+                if let Some(c) = after.chars().next() {
+                    if c != '\n' && c != '\r' {
+                        suffix.push_str(nl);
+                        suffix.push_str(nl);
+                    } else if !after.starts_with("\n\n")
+                        && !after.starts_with("\n\r\n")
+                        && !after.starts_with("\r\n\r\n")
+                        && !after.starts_with("\r\n\n")
+                    {
+                        suffix.push_str(nl);
                     }
                 }
             }
-            let table_template = "| Column 1 | Column 2 |\n| :--- | :--- |\n| Item 1 | Item 2 |";
+            let table_template =
+                format!("| Column 1 | Column 2 |{nl}| :--- | :--- |{nl}| Item 1 | Item 2 |");
             let full_insert = format!("{}{}{}", prefix, table_template, suffix);
             self.edit(range.clone(), &full_insert);
             let col1_start = range.start + prefix.len() + 2;

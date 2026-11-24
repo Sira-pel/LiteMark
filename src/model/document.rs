@@ -1262,3 +1262,6 @@ mod picture_tests;
 
 #[cfg(test)]
 mod milestone8_tests;
+
+#[cfg(test)]
+mod m8_paste_tests;
