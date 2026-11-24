@@ -1259,3 +1259,6 @@ mod heading_paragraph_parity_tests;
 mod clear_formatting_tests;
 #[cfg(test)]
 mod picture_tests;
+
+#[cfg(test)]
+mod milestone8_tests;
