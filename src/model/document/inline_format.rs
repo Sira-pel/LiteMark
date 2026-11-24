@@ -159,7 +159,13 @@ impl DocumentTab {
                                 InlineTagKind::Code => pending.code = false,
                                 InlineTagKind::Link => {}
                             }
-                            if range.start > pair.open_delim.start {
+                            if range.start == pair.inner.start {
+                                // At the very start of the text: step back
+                                // before the opener instead of teleporting
+                                // to the far end of the span.
+                                let open = span_open_start(&parsed, &pair);
+                                self.caret.move_to(floor_boundary(&self.content, open));
+                            } else if range.start > pair.open_delim.start {
                                 let group_end = span_close_end(&parsed, &pair);
                                 self.caret.move_to(floor_boundary(&self.content, group_end));
                             }
