@@ -533,3 +533,16 @@ fn raw_backspace_inside_code_block_keeps_the_list_marker() {
     assert_eq!(d.content, "```\n-\n```");
     assert_eq!(d.full_parse_count, 0);
 }
+
+#[test]
+fn raw_fence_scan_handles_lone_cr_endings() {
+    let src = "```\r- item\r```\r";
+    let at = src.find("- item").unwrap() + 6;
+    let d = raw_enter(src, at);
+    // No list marker is added (the editor breaks CR-only lines with LF).
+    assert_eq!(d.content, "```\r- item\n\r```\r");
+    // An unclosed fence after a CR-only line still gets its closer.
+    let src = "intro\r```rust";
+    let d = raw_enter(src, src.len());
+    assert!(d.content.ends_with("```rust\n\n```"), "{:?}", d.content);
+}
