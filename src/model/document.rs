@@ -24,6 +24,7 @@ mod inline_format;
 mod inline_rewrite;
 mod navigation;
 mod newline;
+mod paste;
 mod picture;
 mod table;
 mod typing;
