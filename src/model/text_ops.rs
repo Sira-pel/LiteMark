@@ -153,7 +153,7 @@ pub fn coalesce_typing(previous: &DiffEdit, next: &DiffEdit, elapsed_ms: u64) ->
     previous_is_word && next_is_word
 }
 
-/// True when what an edit really adds or removes holds whitespace. A span
+/// True when what an edit really adds holds whitespace. A span
 /// rewrite replaces the whole `**...**` run, so the shared text at both ends
 /// of `deleted` and `inserted` is left out first.
 fn net_change_has_whitespace(edit: &DiffEdit) -> bool {
@@ -172,10 +172,9 @@ fn net_change_has_whitespace(edit: &DiffEdit) -> bool {
         .take_while(|(a, b)| a == b)
         .map(|(a, _)| a.len_utf8())
         .sum();
-    old[..old.len() - suffix]
-        .chars()
-        .chain(new[..new.len() - suffix].chars())
-        .any(char::is_whitespace)
+    // Only added whitespace breaks a group; taking text back never does, so
+    // an input method cancelling its text still collapses the whole step.
+    new[..new.len() - suffix].chars().any(char::is_whitespace)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
