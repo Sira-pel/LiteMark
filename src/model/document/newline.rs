@@ -257,7 +257,7 @@ impl DocumentTab {
                     } else {
                         line_end_pos
                     };
-                    self.edit(line_start..remove_end, "");
+                    self.edit_removing(line_start..remove_end);
                 }
             } else if range.is_empty() && cursor < line_start + item.prefix_end() {
                 self.edit(line_start..line_start, nl);
@@ -268,6 +268,9 @@ impl DocumentTab {
             } else {
                 let kept = &line[..item.indent_bytes];
                 let cont = item.continuation(kept).replacen('\n', nl, 1);
+                if item.ordered && range.end <= line_end_pos {
+                    self.stage_renumber_after_enter(line_start, line_end_pos, item.number);
+                }
                 self.edit(range, &cont);
             }
             return;

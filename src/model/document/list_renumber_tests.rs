@@ -391,3 +391,14 @@ fn toggling_numbering_on_plain_lines_still_starts_at_one() {
         d.apply_format_in_mode("ol", mode);
     });
 }
+
+#[test]
+fn raw_view_renumbers_without_a_full_parse() {
+    let mut d = doc("intro\n\n1. a\n2. b\n3. c\n", ViewMode::Raw);
+    d.place(d.content.find("1. a").unwrap() + 4, false);
+    d.smart_newline(false);
+    assert_eq!(d.content, "intro\n\n1. a\n2. \n3. b\n4. c\n");
+    d.smart_newline(false);
+    assert_eq!(d.content, "intro\n\n1. a\n\n2. b\n3. c\n");
+    assert_eq!(d.full_parse_count, 0);
+}

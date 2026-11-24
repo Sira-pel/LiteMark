@@ -55,52 +55,116 @@ pub(super) fn renumber_patches(members: &[Member], start: usize) -> Vec<Patch> {
         .collect()
 }
 
-impl DocumentTab {
-    fn classify_run_line(
-        &self,
-        parsed: &ParsedDocument,
-        line: &ParsedLine,
-        level: usize,
-        punct: u8,
-    ) -> Step {
-        match line.kind {
-            LineKind::Empty => Step::Skip,
-            LineKind::Heading { .. } => Step::Stop,
-            LineKind::ListItem { .. } => {
-                let Some(found) = accepted_list_marker_in(parsed, &self.content, line.source.start)
-                else {
-                    return Step::Stop;
-                };
-                if found.indent_bytes > level {
-                    return Step::Skip;
-                }
-                if found.indent_bytes < level || !found.ordered || found.punct != punct {
-                    return Step::Stop;
-                }
-                let digits_at = line.source.start + found.indent_bytes;
-                let digits = self.content[digits_at..]
-                    .bytes()
-                    .take_while(u8::is_ascii_digit)
-                    .count();
-                if digits == 0 {
-                    return Step::Stop;
-                }
-                Step::Member(Member {
-                    line_start: line.source.start,
-                    digits: digits_at..digits_at + digits,
-                    number: found.number,
-                })
+/// What `line` of `parsed` (a parse of `src`, which starts at `base` in the
+/// note) means to the run at `level` and `punct`.
+fn classify_run_line(
+    src: &str,
+    base: usize,
+    parsed: &ParsedDocument,
+    line: &ParsedLine,
+    level: usize,
+    punct: u8,
+) -> Step {
+    match line.kind {
+        LineKind::Empty => Step::Skip,
+        LineKind::Heading { .. } => Step::Stop,
+        LineKind::ListItem { .. } => {
+            let Some(found) = accepted_list_marker_in(parsed, src, line.source.start) else {
+                return Step::Stop;
+            };
+            if found.indent_bytes > level {
+                return Step::Skip;
             }
-            _ => {
-                let text = &self.content[line.source.clone()];
-                let lead = text.len() - text.trim_start_matches([' ', '\t']).len();
-                if lead > level {
-                    Step::Skip
-                } else {
-                    Step::Stop
-                }
+            if found.indent_bytes < level || !found.ordered || found.punct != punct {
+                return Step::Stop;
+            }
+            let digits_at = line.source.start + found.indent_bytes;
+            let digits = src[digits_at..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            if digits == 0 {
+                return Step::Stop;
+            }
+            Step::Member(Member {
+                line_start: base + line.source.start,
+                digits: base + digits_at..base + digits_at + digits,
+                number: found.number,
+            })
+        }
+        _ => {
+            let text = &src[line.source.clone()];
+            let lead = text.len() - text.trim_start_matches([' ', '\t']).len();
+            if lead > level {
+                Step::Skip
+            } else {
+                Step::Stop
             }
         }
+    }
+}
+
+impl DocumentTab {
+    /// Raw view never parses the whole note (Milestone 9), so there list
+    /// lines are read one at a time, each parsed on its own, as Raw Enter
+    /// does. Code fences and other context above a line are not seen.
+    fn reads_lines_locally(&self) -> bool {
+        self.view_mode == ViewMode::Raw
+    }
+
+    /// The line starting at `line_start`, parsed on its own.
+    fn local_line(&self, line_start: usize) -> (&str, ParsedDocument) {
+        let text = &self.content[line_start..line_end(&self.content, line_start)];
+        (text, parse_document(text))
+    }
+
+    /// Start of the line after the one starting at `line_start`.
+    fn next_line_start(&self, line_start: usize) -> Option<usize> {
+        let end = line_end(&self.content, line_start);
+        match line_ending_len(&self.content, end) {
+            0 => None,
+            n => Some(end + n),
+        }
+    }
+
+    /// Start of the line before the one starting at `line_start`.
+    fn prev_line_start(&self, line_start: usize) -> Option<usize> {
+        let ending = line_ending_len_before(&self.content, line_start);
+        (line_start > 0 && ending > 0).then(|| home_offset(&self.content, line_start - ending))
+    }
+
+    /// [`Self::scan_run`] in Raw view: walks line by line from the line
+    /// starting at `from`.
+    fn scan_run_local(
+        &self,
+        from: Option<usize>,
+        forward: bool,
+        level: usize,
+        punct: u8,
+    ) -> Vec<Member> {
+        let mut out = Vec::new();
+        let mut at = from;
+        while let Some(line_start) = at {
+            let (text, local) = self.local_line(line_start);
+            let step = match local.lines.first() {
+                Some(line) => classify_run_line(text, line_start, &local, line, level, punct),
+                None => Step::Skip,
+            };
+            match step {
+                Step::Member(m) => out.push(m),
+                Step::Skip => {}
+                Step::Stop => break,
+            }
+            at = if forward {
+                self.next_line_start(line_start)
+            } else {
+                self.prev_line_start(line_start)
+            };
+        }
+        if !forward {
+            out.reverse();
+        }
+        out
     }
 
     /// The items of the list at `level` and `punct` found walking from line
@@ -115,10 +179,16 @@ impl DocumentTab {
         let Some(from) = from else {
             return Vec::new();
         };
+        if self.reads_lines_locally() {
+            let parsed = self.parsed();
+            let start = parsed.lines.get(from).map(|l| l.source.start);
+            return self.scan_run_local(start, forward, level, punct);
+        }
         let parsed = self.parsed();
         let mut out = Vec::new();
+        let content = &self.content;
         let mut visit =
-            |line: &ParsedLine| match self.classify_run_line(&parsed, line, level, punct) {
+            |line: &ParsedLine| match classify_run_line(content, 0, &parsed, line, level, punct) {
                 Step::Member(m) => {
                     out.push(m);
                     true
@@ -158,6 +228,19 @@ impl DocumentTab {
     pub(super) fn ordered_run(&mut self, line_start: usize) -> Option<(Vec<Member>, usize)> {
         if !self.file_type.supports_markdown_features() {
             return None;
+        }
+        if self.reads_lines_locally() {
+            let (text, local) = self.local_line(line_start);
+            let marker = accepted_list_marker_in(&local, text, 0)?;
+            if !marker.ordered {
+                return None;
+            }
+            let (level, punct) = (marker.indent_bytes, marker.punct);
+            let prev = self.prev_line_start(line_start);
+            let mut run = self.scan_run_local(prev, false, level, punct);
+            let at = run.len();
+            run.extend(self.scan_run_local(Some(line_start), true, level, punct));
+            return (run.get(at)?.line_start == line_start).then_some((run, at));
         }
         let parsed = self.parsed();
         let marker = accepted_list_marker_in(&parsed, &self.content, line_start)?;
@@ -205,7 +288,26 @@ impl DocumentTab {
         if range.is_empty() || !self.file_type.supports_markdown_features() {
             return;
         }
-        let first = {
+        let takes_marker = |line_start: usize, marker: &crate::markdown::ListMarker| {
+            marker.ordered
+                && line_start + marker.indent_bytes >= range.start
+                && line_start + marker.marker_end <= range.end
+        };
+        let first = if self.reads_lines_locally() {
+            let mut at = Some(home_offset(&self.content, range.start));
+            let mut found = None;
+            while let Some(line_start) = at.filter(|&s| s < range.end) {
+                let (text, local) = self.local_line(line_start);
+                if accepted_list_marker_in(&local, text, 0)
+                    .is_some_and(|m| takes_marker(line_start, &m))
+                {
+                    found = Some(line_start);
+                    break;
+                }
+                at = self.next_line_start(line_start);
+            }
+            found
+        } else {
             let parsed = self.parsed();
             let Some(index) = parsed.line_at_offset(range.start).map(|l| l.line_index) else {
                 return;
@@ -223,10 +325,7 @@ impl DocumentTab {
                 else {
                     continue;
                 };
-                if marker.ordered
-                    && line.source.start + marker.indent_bytes >= range.start
-                    && line.source.start + marker.marker_end <= range.end
-                {
+                if takes_marker(line.source.start, &marker) {
                     found = Some(line.source.start);
                     break;
                 }
