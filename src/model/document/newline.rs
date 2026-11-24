@@ -19,6 +19,66 @@ impl DocumentTab {
         }
     }
 
+    /// Enter at the end of an opening code fence that has no closing fence:
+    /// insert the matching closing fence (same character and length) and put
+    /// the caret on the empty line between.
+    pub(super) fn unclosed_fence_newline(&mut self, range: &Range<usize>, nl: &str) -> bool {
+        if !range.is_empty() {
+            return false;
+        }
+        let cursor = range.start;
+        let line_start = home_offset(&self.content, cursor);
+        if cursor != line_end(&self.content, cursor) {
+            return false;
+        }
+        let closed = {
+            let parsed = self.parsed();
+            let Some(line) = parsed.line_at_offset(cursor) else {
+                return false;
+            };
+            if !matches!(line.kind, LineKind::CodeFence { opening: true, .. }) {
+                return false;
+            }
+            parsed.lines[line.line_index as usize + 1..]
+                .iter()
+                .any(|l| matches!(l.kind, LineKind::CodeFence { opening: false, .. }))
+        };
+        if closed {
+            return false;
+        }
+        let line = &self.content[line_start..cursor];
+        let Some(marker_at) = line.find(['`', '~']) else {
+            return false;
+        };
+        let marker = line.as_bytes()[marker_at];
+        let run = line.as_bytes()[marker_at..]
+            .iter()
+            .take_while(|&&b| b == marker)
+            .count();
+        if run < 3 {
+            return false;
+        }
+        // The closer repeats a quote prefix and otherwise lines up with the
+        // opener (a list item's marker becomes spaces).
+        let before = &line[..marker_at];
+        let lead: String = if before.contains('>') {
+            before.to_string()
+        } else {
+            before
+                .chars()
+                .map(|c| if c == '\t' { '\t' } else { ' ' })
+                .collect()
+        };
+        let fence = (marker as char).to_string().repeat(run);
+        let ins = format!("{nl}{lead}{nl}{lead}{fence}");
+        let caret = cursor + nl.len() + lead.len();
+        self.next_redo_caret = Some(caret);
+        self.edit(cursor..cursor, &ins);
+        self.caret.move_to(floor_boundary(&self.content, caret));
+        self.refresh_cursor();
+        true
+    }
+
     /// `Foo\r` + `\n` + `Bar` is one CRLF ending. Enter at the start of the
     /// bare-CR line has to insert two breaks to add a line.
     pub(super) fn bare_cr_needs_extra_break(&self, range: &Range<usize>) -> bool {
@@ -368,6 +428,9 @@ impl DocumentTab {
             }
         }
 
+        if self.unclosed_fence_newline(&range, nl) {
+            return;
+        }
         if let Some(at) = self.heading_newline_at(&range) {
             self.edit(at..at, nl);
             return;
