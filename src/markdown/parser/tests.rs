@@ -3882,3 +3882,44 @@ fn rebuilt_offset_map_matches_from_hidden() {
     }
     assert!(seen >= 5, "only {seen} lines had maps");
 }
+
+#[test]
+fn zero_alloc_line_lookups_match_row_offset_map() {
+    let md = "plain text\n# Heading\n# \n---\n- item\n> quote **b**\n**bold** and *italic* and [link](https://example.com) and `code`\n**all**\n\u{1F600}*é*ក\n";
+    let doc = parse_document(md);
+    for line in &doc.lines {
+        let map = RowOffsetMap::from_hidden_ranges(
+            line.source.start,
+            line.source.end,
+            line.prefix_end(),
+            &line.hidden_ranges,
+        );
+        for src in line.source.start.saturating_sub(2)..=line.source.end + 2 {
+            assert_eq!(
+                line.source_to_display(src),
+                map.source_to_display(src),
+                "source_to_display({src}) on line {:?}",
+                &md[line.source.clone()]
+            );
+        }
+        let dlen = line.display_len();
+        for disp in 0..=dlen + 2 {
+            assert_eq!(
+                line.display_to_source(disp),
+                map.display_to_source(disp),
+                "display_to_source({disp}) on line {:?}",
+                &md[line.source.clone()]
+            );
+        }
+        for start in 0..=dlen + 1 {
+            for end in start..=dlen + 1 {
+                assert_eq!(
+                    line.slice_bounds(start..end),
+                    map.slice_bounds(start..end),
+                    "slice_bounds({start}..{end}) on line {:?}",
+                    &md[line.source.clone()]
+                );
+            }
+        }
+    }
+}

@@ -905,37 +905,120 @@ impl ParsedLine {
     }
 
     #[inline]
-    pub fn source_to_display(&self, source_offset: usize) -> usize {
-        if let Some(map) = self.offset_map_cached() {
-            map.source_to_display(source_offset)
-        } else {
-            let vis = self.prefix_end().min(self.source.end);
-            source_offset
-                .saturating_sub(vis)
-                .min(self.source.end.saturating_sub(vis))
+    fn has_only_prefix_hidden(&self) -> bool {
+        let prefix_end = self.prefix_end().min(self.source.end);
+        (self.hidden_ranges.is_empty() && self.prefix_len == 0)
+            || (self.hidden_ranges.len() == 1
+                && self.hidden_ranges[0].start == self.source.start
+                && self.hidden_ranges[0].end == prefix_end)
+    }
+
+    #[inline]
+    fn visit_visible_segments(
+        &self,
+        mut f: impl FnMut(std::ops::Range<usize>, std::ops::Range<usize>) -> bool,
+    ) {
+        let line_start = self.source.start;
+        let line_end = self.source.end;
+        let mut disp = 0usize;
+        let mut cursor = line_start;
+        let mut emitted = false;
+        for h in &self.hidden_ranges {
+            let h_start = h.start.clamp(line_start, line_end);
+            let h_end = h.end.clamp(line_start, line_end);
+            if h_start > cursor {
+                let start = disp;
+                disp += h_start - cursor;
+                emitted = true;
+                if !f(start..disp, cursor..h_start) {
+                    return;
+                }
+            }
+            cursor = cursor.max(h_end);
         }
+        if cursor < line_end {
+            let start = disp;
+            disp += line_end - cursor;
+            emitted = true;
+            let _ = f(start..disp, cursor..line_end);
+        }
+        if !emitted {
+            let anchor = self.prefix_end().clamp(line_start, line_end);
+            let _ = f(0..0, anchor..anchor);
+        }
+    }
+
+    #[inline]
+    pub fn source_to_display(&self, source_offset: usize) -> usize {
+        if self.has_only_prefix_hidden() {
+            let vis = self.prefix_end().min(self.source.end);
+            return source_offset
+                .saturating_sub(vis)
+                .min(self.source.end.saturating_sub(vis));
+        }
+        let mut result = 0usize;
+        self.visit_visible_segments(|d, s| {
+            if source_offset < s.start {
+                result = d.start;
+                return false;
+            }
+            if source_offset <= s.end {
+                result = d.start + (source_offset - s.start).min(d.len());
+                return false;
+            }
+            result = d.end;
+            true
+        });
+        result
     }
 
     #[inline]
     pub fn display_to_source(&self, display_offset: usize) -> usize {
-        if let Some(map) = self.offset_map_cached() {
-            map.display_to_source(display_offset)
-        } else {
+        if self.has_only_prefix_hidden() {
             let vis = self.prefix_end().min(self.source.end);
-            (vis + display_offset).min(self.source.end)
+            return (vis + display_offset).min(self.source.end);
         }
+        let mut result = self.prefix_end().clamp(self.source.start, self.source.end);
+        self.visit_visible_segments(|d, s| {
+            if display_offset < d.end {
+                let offset_in_seg = display_offset.saturating_sub(d.start).min(s.len());
+                result = s.start + offset_in_seg;
+                return false;
+            }
+            result = s.end;
+            true
+        });
+        result
     }
 
     #[inline]
     pub fn slice_bounds(&self, disp_range: std::ops::Range<usize>) -> (usize, usize) {
-        if let Some(map) = self.offset_map_cached() {
-            map.slice_bounds(disp_range)
-        } else {
-            (
+        if self.has_only_prefix_hidden() {
+            return (
                 self.display_to_source(disp_range.start),
                 self.display_to_source(disp_range.end),
-            )
+            );
         }
+        let mut first = None;
+        let mut last = None;
+        self.visit_visible_segments(|d, s| {
+            if d.end <= disp_range.start || d.start >= disp_range.end {
+                return true;
+            }
+            let overlap_start = d.start.max(disp_range.start);
+            let overlap_end = d.end.min(disp_range.end);
+            if overlap_end > overlap_start
+                || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end)
+            {
+                first.get_or_insert_with(|| s.start + (overlap_start - d.start));
+                last = Some(s.start + (overlap_end - d.start));
+            }
+            true
+        });
+        (
+            first.unwrap_or_else(|| self.display_to_source(disp_range.start)),
+            last.unwrap_or_else(|| self.display_to_source(disp_range.end)),
+        )
     }
 
     pub fn slice_display(&self, disp_range: std::ops::Range<usize>) -> RowOffsetMap {
