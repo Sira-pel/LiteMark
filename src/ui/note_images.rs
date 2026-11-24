@@ -1330,11 +1330,13 @@ mod tests {
             (Some((300, 40)), true)
         );
 
-        // Past TTL, throttled check also notices disk changes.
-        std::fs::write(&svg, r#"<svg width="400" height="50">"#).unwrap();
+        // Past TTL, throttled check also notices disk changes. A different
+        // length, so the change shows even when the write lands in the same
+        // file-time tick as the one above (coarse mtimes on CI).
+        std::fs::write(&svg, r#"<svg width="4000" height="50">"#).unwrap();
         assert_eq!(
             cache.size_checked_throttled(&svg, t1 + IMAGE_RECHECK_TTL),
-            (Some((400, 50)), true)
+            (Some((4000, 50)), true)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
