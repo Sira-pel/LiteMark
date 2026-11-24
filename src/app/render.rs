@@ -22,6 +22,10 @@ impl LiteMarkApp {
 
 impl Render for LiteMarkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.render_count += 1;
+        }
         let theme = Theme::resolve(self.settings.theme, window.appearance());
         self.sync_frame_state(&theme, window, cx);
         self.sync_tab_settings();
@@ -2100,9 +2104,6 @@ impl LiteMarkApp {
     /// Per-frame state sync before the tree is built: window close, caret
     /// follow, which focus slot owns the keyboard, and line-field colors.
     fn sync_frame_state(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) {
-        if self.follow_caret() == Some(true) {
-            window.request_animation_frame();
-        }
         self.coast_scroll(window);
         self.install_close_hook(window, cx);
         if self.allow_window_close {

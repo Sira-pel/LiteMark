@@ -52,6 +52,33 @@ fn geometry(view: &Entity<LiteMarkApp>, cx: &VisualTestContext) -> Geometry {
     })
 }
 
+fn assert_same_relative_geometry(edited: &Geometry, fresh: &Geometry) {
+    let relative = |rows: &Geometry| -> Vec<(usize, usize, Pixels, Pixels, Pixels)> {
+        let mut prev = rows.first().map_or(px(0.0), |r| r.2.y);
+        rows.iter()
+            .map(|&(start, end, origin, h)| {
+                let step = origin.y - prev;
+                prev = origin.y;
+                (start, end, origin.x, step, h)
+            })
+            .collect()
+    };
+    let fresh = relative(fresh);
+    let edited = relative(edited);
+    assert_eq!(edited.len(), fresh.len(), "row count");
+    let same = |a: &(usize, usize, Pixels, Pixels, Pixels),
+                b: &(usize, usize, Pixels, Pixels, Pixels)| {
+        (a.0, a.1, a.2, a.4) == (b.0, b.1, b.2, b.4)
+            && (f32::from(a.3) - f32::from(b.3)).abs() < 0.01
+    };
+    if let Some(ix) = edited.iter().zip(&fresh).position(|(a, b)| !same(a, b)) {
+        panic!(
+            "row {ix} differs: edited {:?} fresh {:?}",
+            edited[ix], fresh[ix]
+        );
+    }
+}
+
 /// Indices of rows whose text was shaped this frame.
 fn shaped_rows(view: &Entity<LiteMarkApp>, cx: &VisualTestContext) -> Vec<usize> {
     view.read_with(cx, |app, _| {
@@ -90,10 +117,11 @@ fn culls_far_rows_and_keeps_geometry(mode: ViewMode) {
         shaped_at_top.len()
     );
 
-    // Moving the caret to the far end shapes rows there, but no row moves.
+    // Moving the caret to the far end shapes rows there, but no row moves
+    // relative to the document.
     let end = content.len() - "line 2999\n".len() + 3;
     place_caret(&view, &mut cx, end);
-    assert_eq!(geometry(&view, &cx), at_top);
+    assert_same_relative_geometry(&geometry(&view, &cx), &at_top);
     let caret_row = row_of(&view, &cx, end);
     let shaped = shaped_rows(&view, &cx);
     for row in caret_row.saturating_sub(2)..=caret_row {
@@ -146,7 +174,7 @@ fn off_screen_table_keeps_its_height_without_shaping() {
 
     // Put the caret in the table: rows next to it are shaped, same geometry.
     place_caret(&view, &mut cx, table_start + 2);
-    assert_eq!(geometry(&view, &cx), first);
+    assert_same_relative_geometry(&geometry(&view, &cx), &first);
     let shaped = shaped_rows(&view, &cx);
     // Header and the first body row (the delimiter line has no row).
     for row in table_row..table_row + 2 {
@@ -185,7 +213,7 @@ fn caret_in_a_large_table_shapes_only_nearby_rows() {
     // Caret in a cell far down the table.
     let target = content.find("| row 1500 |").unwrap() + 4;
     place_caret(&view, &mut cx, target);
-    assert_eq!(geometry(&view, &cx), first);
+    assert_same_relative_geometry(&geometry(&view, &cx), &first);
     let shaped = shaped_rows(&view, &cx);
     let caret_row = row_of(&view, &cx, target);
     assert!(shaped.contains(&caret_row), "the caret's row is shaped");
@@ -435,32 +463,7 @@ fn layout_after_edits_matches_a_fresh_layout() {
         app.active_tab_mut().unwrap().place(caret, false);
     });
     redraw(&mut fresh_cx);
-    // Scroll position may differ, and y is a running float sum: compare each
-    // row's step from the row above instead of its absolute position.
-    let relative = |rows: Geometry| -> Vec<(usize, usize, Pixels, Pixels, Pixels)> {
-        let mut prev = rows.first().map_or(px(0.0), |r| r.2.y);
-        rows.into_iter()
-            .map(|(start, end, origin, h)| {
-                let step = origin.y - prev;
-                prev = origin.y;
-                (start, end, origin.x, step, h)
-            })
-            .collect()
-    };
-    let fresh = relative(geometry(&fresh_view, &fresh_cx));
-    let edited = relative(edited);
-    assert_eq!(edited.len(), fresh.len(), "row count");
-    let same = |a: &(usize, usize, Pixels, Pixels, Pixels),
-                b: &(usize, usize, Pixels, Pixels, Pixels)| {
-        (a.0, a.1, a.2, a.4) == (b.0, b.1, b.2, b.4)
-            && (f32::from(a.3) - f32::from(b.3)).abs() < 0.01
-    };
-    if let Some(ix) = edited.iter().zip(&fresh).position(|(a, b)| !same(a, b)) {
-        panic!(
-            "row {ix} differs: edited {:?} fresh {:?}",
-            edited[ix], fresh[ix]
-        );
-    }
+    assert_same_relative_geometry(&edited, &geometry(&fresh_view, &fresh_cx));
 }
 
 /// Manual benchmark: cost of a redraw (idle and after an edit) on a ~5 MB,

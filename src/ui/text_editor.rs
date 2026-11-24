@@ -1369,6 +1369,14 @@ pub fn editor_end_visual(paint: &EditorPaint, caret: &mut Caret, extend: bool) -
 /// it into a `SharedString` on every keystroke.
 pub trait EditorContentSource {
     fn editor_content(&self) -> &str;
+
+    fn needs_follow_caret(&self) -> bool {
+        false
+    }
+
+    fn follow_caret_after_paint(&mut self, _window: &mut Window) -> bool {
+        false
+    }
 }
 
 pub struct EditorElement<V: 'static> {
@@ -3969,10 +3977,20 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             }
             redraw
         };
-        if (wrap_changed && self.word_wrap) || height_changed {
+        let needs_layout_redraw = (wrap_changed && self.word_wrap) || height_changed;
+        if needs_layout_redraw {
             let entity = self.entity.clone();
             window.defer(cx, move |_, cx| {
                 entity.update(cx, |_, cx| cx.notify());
+            });
+        } else if self.entity.read(cx).needs_follow_caret() {
+            let entity = self.entity.clone();
+            window.defer(cx, move |window, cx| {
+                entity.update(cx, |view, cx| {
+                    if view.follow_caret_after_paint(window) {
+                        cx.notify();
+                    }
+                });
             });
         }
     }
