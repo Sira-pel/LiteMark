@@ -49,6 +49,8 @@ pub struct PaintCell {
     pub lines: Vec<CellLine>,
 }
 
+pub type LinkHits = Arc<Vec<(Range<usize>, Arc<str>)>>;
+
 #[derive(Clone)]
 pub struct PaintRow {
     /// `u32` keeps the row small (one exists per visual row of the whole
@@ -62,7 +64,7 @@ pub struct PaintRow {
     /// inline (about 3 KB), and every off-screen row shares one empty line.
     pub shaped: Rc<ShapedLine>,
     pub offset_map: Option<Arc<RowOffsetMap>>,
-    pub link_hits: Option<Arc<Vec<(Range<usize>, Arc<str>)>>>,
+    pub link_hits: Option<LinkHits>,
     /// Empty (no allocation) on every row that is not a table row.
     pub cells: Box<[PaintCell]>,
 }
@@ -893,7 +895,7 @@ pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<Stri
     let first = paint
         .rows
         .partition_point(|row| row.byte_end() < source_offset);
-        for row in &paint.rows[first..] {
+    for row in &paint.rows[first..] {
         if row.byte_start() > source_offset {
             break;
         }
@@ -2797,7 +2799,9 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         .editor_content()
                         .get(src.clone())
                         .unwrap_or("");
-                    line_text.trim_start().starts_with("![")
+                    line_text
+                        .trim_start()
+                        .starts_with("![")
                         .then_some(line_text)
                 } else {
                     None
@@ -4609,7 +4613,11 @@ mod tests {
         };
         let height = |i: usize| {
             // Every 11th line is far taller than f32 holds to 1/1024 px.
-            let tall = if i.is_multiple_of(11) { 3_000_000.0 } else { 0.0 };
+            let tall = if i.is_multiple_of(11) {
+                3_000_000.0
+            } else {
+                0.0
+            };
             17.0 + (i % 7) as f32 * 3.3 + 0.1234 + tall
         };
         let mut est = HeightEstimates::default();

@@ -67,8 +67,15 @@ fn mib(bytes: isize) -> String {
 #[std_test]
 fn bench_note_heap() {
     type Gen = fn(usize) -> String;
-    let samples: [(&str, Gen); 3] = [("dense", sample_note), ("prose", prose_note), ("code", code_note)];
-    for ((name, gen), mode) in samples.iter().flat_map(|s| [ViewMode::Raw, ViewMode::Wysiwyg].map(|m| (s, m))) {
+    let samples: [(&str, Gen); 3] = [
+        ("dense", sample_note),
+        ("prose", prose_note),
+        ("code", code_note),
+    ];
+    for ((name, gen), mode) in samples
+        .iter()
+        .flat_map(|s| [ViewMode::Raw, ViewMode::Wysiwyg].map(|m| (s, m)))
+    {
         eprintln!("== {name} / {mode:?}");
         let doc = gen(20_000);
         let doc_len = doc.len() as isize;
@@ -208,7 +215,9 @@ fn bench_two_large_tabs() {
     cx.run_until_parked();
     redraw(&mut cx);
     report("+ 3.2 MB note opened", base);
-    let ids: Vec<String> = view.read_with(&cx, |app, _| app.tabs.iter().map(|t| t.id.to_string()).collect());
+    let ids: Vec<String> = view.read_with(&cx, |app, _| {
+        app.tabs.iter().map(|t| t.id.to_string()).collect()
+    });
     for round in 0..3 {
         for id in &ids {
             view.update(&mut cx, |app, cx| {

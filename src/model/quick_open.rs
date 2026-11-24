@@ -137,6 +137,7 @@ fn span(matched: &[usize]) -> usize {
 }
 
 struct NameMatch {
+    #[cfg(test)]
     tier: Tier,
     name_hits: Vec<Range<usize>>,
     folder_hits: Vec<Range<usize>>,
@@ -147,6 +148,7 @@ fn match_name(name: &str, folder: &str, query: &[char]) -> Option<NameMatch> {
     if chars.len() >= query.len() && chars.iter().zip(query).all(|(&(_, c), &q)| fold(c) == q) {
         let matched: Vec<usize> = (0..query.len()).collect();
         return Some(NameMatch {
+            #[cfg(test)]
             tier: Tier::Prefix,
             name_hits: ranges_of(&chars, &matched),
             folder_hits: Vec::new(),
@@ -159,6 +161,7 @@ fn match_name(name: &str, folder: &str, query: &[char]) -> Option<NameMatch> {
         .min_by_key(|m| span(m));
     if let Some(matched) = word_best {
         return Some(NameMatch {
+            #[cfg(test)]
             tier: Tier::WordStart,
             name_hits: ranges_of(&chars, &matched),
             folder_hits: Vec::new(),
@@ -166,6 +169,7 @@ fn match_name(name: &str, folder: &str, query: &[char]) -> Option<NameMatch> {
     }
     if let Some(matched) = subsequence_from(&chars, query, 0, false) {
         return Some(NameMatch {
+            #[cfg(test)]
             tier: Tier::Subsequence,
             name_hits: ranges_of(&chars, &matched),
             folder_hits: Vec::new(),
@@ -190,6 +194,7 @@ fn match_name(name: &str, folder: &str, query: &[char]) -> Option<NameMatch> {
         }
     }
     Some(NameMatch {
+        #[cfg(test)]
         tier: Tier::Path,
         name_hits,
         folder_hits,
@@ -226,7 +231,8 @@ fn subsequence_span_chars(
             if pos < text.len() && fold(text[pos]) == q {
                 pick = Some(pos);
             } else {
-                pick = (pos..text.len()).find(|&i| fold(text[i]) == q && is_word_start_chars(text, i));
+                pick =
+                    (pos..text.len()).find(|&i| fold(text[i]) == q && is_word_start_chars(text, i));
             }
         }
         let i = match pick {
@@ -255,12 +261,7 @@ fn score_name_with_scratch(
     scratch.clear();
     scratch.extend(name.chars());
     let char_count = scratch.len();
-    if char_count >= query.len()
-        && scratch
-            .iter()
-            .zip(query)
-            .all(|(&c, &q)| fold(c) == q)
-    {
+    if char_count >= query.len() && scratch.iter().zip(query).all(|(&c, &q)| fold(c) == q) {
         return Some((Tier::Prefix, 0, char_count));
     }
     let word_best = (0..char_count)
@@ -289,6 +290,7 @@ fn score_name_with_scratch(
 /// those with the match starting at a word, then any other match. Ties go
 /// to the tighter match, then the shorter name. `workspace` is the folder
 /// the shown folder paths are relative to.
+#[cfg(test)]
 pub fn match_notes(
     files: &[PathBuf],
     recents: &[PathBuf],
@@ -341,15 +343,13 @@ pub fn match_notes_by<'a, T>(
         })
         .collect();
     let order = |a: &(Tier, usize, usize, usize), b: &(Tier, usize, usize, usize)| {
-        (a.0, a.1, a.2)
-            .cmp(&(b.0, b.1, b.2))
-            .then_with(|| {
-                let pa = path_of(&files[a.3]);
-                let pb = path_of(&files[b.3]);
-                let (na, _) = recent_note_label_parts(pa, workspace);
-                let (nb, _) = recent_note_label_parts(pb, workspace);
-                cmp_lowercase(&na, &nb).then_with(|| pa.cmp(pb))
-            })
+        (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)).then_with(|| {
+            let pa = path_of(&files[a.3]);
+            let pb = path_of(&files[b.3]);
+            let (na, _) = recent_note_label_parts(pa, workspace);
+            let (nb, _) = recent_note_label_parts(pb, workspace);
+            cmp_lowercase(&na, &nb).then_with(|| pa.cmp(pb))
+        })
     };
     // Only `limit` rows are shown: partition them out in O(n), then sort
     // just those. The order is total, so the result is the same.

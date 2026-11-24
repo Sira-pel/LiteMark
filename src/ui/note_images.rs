@@ -1309,7 +1309,10 @@ mod tests {
         assert_eq!(cache.len(), 0);
 
         let t0 = Instant::now();
-        assert_eq!(cache.size_checked_throttled(&svg, t0), (Some((10, 20)), false));
+        assert_eq!(
+            cache.size_checked_throttled(&svg, t0),
+            (Some((10, 20)), false)
+        );
         assert_eq!(cache.cached_size(&svg), Some((10, 20)));
 
         // Overwrite on disk: within TTL, throttled check returns cached size without statting.
@@ -1322,7 +1325,10 @@ mod tests {
         // mark_recheck_due forces immediate re-stat even within TTL.
         cache.mark_recheck_due();
         let t1 = t0 + Duration::from_secs(1);
-        assert_eq!(cache.size_checked_throttled(&svg, t1), (Some((300, 40)), true));
+        assert_eq!(
+            cache.size_checked_throttled(&svg, t1),
+            (Some((300, 40)), true)
+        );
 
         // Past TTL, throttled check also notices disk changes.
         std::fs::write(&svg, r#"<svg width="400" height="50">"#).unwrap();

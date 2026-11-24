@@ -693,6 +693,7 @@ impl RowOffsetMap {
     /// Slice a sub-map for a wrapped visual row covering `disp_range` in `display_text`.
     /// `(line_start, line_end)` of `slice_display(disp_range)`, without
     /// building the sliced map.
+    #[cfg(test)]
     pub fn slice_bounds(&self, disp_range: std::ops::Range<usize>) -> (usize, usize) {
         let mut first = None;
         let mut last = None;
@@ -2509,7 +2510,10 @@ impl ParsedDocument {
         let (removed, old_fences, old_tables, shift) = match resync {
             Some((_, k, ix, shift)) => {
                 let old_fences = self.lines[restart..k].iter().any(is_fence);
-                let old_tables = self.lines[restart..k].iter().filter(|l| is_table(l)).count();
+                let old_tables = self.lines[restart..k]
+                    .iter()
+                    .filter(|l| is_table(l))
+                    .count();
                 self.lines.splice(restart..k, new_lines);
                 shift.parsed_lines(&mut self.lines[restart + inserted..]);
                 let mut kept = later_checkpoints.split_off(ix - cut);
@@ -3041,8 +3045,7 @@ fn parse_lines(
         }
         let merged_hidden = merge_ranges(inline_hidden);
 
-        let display_text_owned =
-            build_display(line, line_start, prefix_len, &merged_hidden);
+        let display_text_owned = build_display(line, line_start, prefix_len, &merged_hidden);
 
         push_line!(ParsedLine {
             line_index: i as u32,

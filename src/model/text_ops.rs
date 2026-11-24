@@ -202,9 +202,7 @@ impl UndoHistory {
             let before = last.cost();
             last.inserted.shrink_to_fit();
             let after = last.cost();
-            self.undo_bytes = self
-                .undo_bytes
-                .saturating_sub(before.saturating_sub(after));
+            self.undo_bytes = self.undo_bytes.saturating_sub(before.saturating_sub(after));
         }
     }
 
@@ -258,8 +256,7 @@ impl UndoHistory {
             if let Some(previous) = self.undo.back_mut() {
                 let before = previous.cost();
                 previous.inserted.push_str(&edit.inserted);
-                previous.redo_caret =
-                    saturating_u32(previous.start() + previous.inserted.len());
+                previous.redo_caret = saturating_u32(previous.start() + previous.inserted.len());
                 let after = previous.cost();
                 self.undo_bytes = (self.undo_bytes + after).saturating_sub(before);
             }
@@ -268,9 +265,7 @@ impl UndoHistory {
                 let before = previous.cost();
                 previous.inserted.shrink_to_fit();
                 let after = previous.cost();
-                self.undo_bytes = self
-                    .undo_bytes
-                    .saturating_sub(before.saturating_sub(after));
+                self.undo_bytes = self.undo_bytes.saturating_sub(before.saturating_sub(after));
             }
             edit.inserted.shrink_to_fit();
             self.undo_bytes += edit.cost();
@@ -314,7 +309,9 @@ impl UndoHistory {
         if end > content.len() || content.get(start..end).is_none() {
             return None;
         }
-        let caret = edit.undo_caret().min(content.len() - edit.inserted.len() + edit.deleted.len());
+        let caret = edit
+            .undo_caret()
+            .min(content.len() - edit.inserted.len() + edit.deleted.len());
         let inserted = edit.deleted.into_string();
         content.replace_range(start..end, &inserted);
         let replaced = (start..end, inserted.len());
@@ -356,7 +353,9 @@ impl UndoHistory {
         if end > content.len() || content.get(start..end).is_none() {
             return None;
         }
-        let caret = edit.undo_caret().min(content.len() - edit.inserted.len() + edit.deleted.len());
+        let caret = edit
+            .undo_caret()
+            .min(content.len() - edit.inserted.len() + edit.deleted.len());
         let inserted = edit.deleted.into_string();
         content.replace_range(start..end, &inserted);
         let replaced = (start..end, inserted.len());
