@@ -297,8 +297,10 @@ fn w10_word_ops_stay_inside_table_cell() {
 #[test]
 fn w11_tab_indents_to_preceding_marker_width() {
     for (src, expect) in [
-        ("1. a\n2. b", "1. a\n   2. b"),
-        ("10. a\n11. b", "10. a\n    11. b"),
+        // A nested ordered item has to start at 1 to interrupt the text of
+        // the item above it (CommonMark), so these start at 1.
+        ("1. a\n1. b", "1. a\n   1. b"),
+        ("10. a\n1. b", "10. a\n    1. b"),
         ("- a\n- b", "- a\n  - b"),
         ("- a\n  - b\n- c", "- a\n  - b\n  - c"),
     ] {
@@ -315,8 +317,8 @@ fn w11_tab_indents_to_preceding_marker_width() {
 #[test]
 fn w11_shift_tab_outdents_to_parent_indent() {
     for (src, expect) in [
-        ("1. a\n   2. b", "1. a\n2. b"),
-        ("10. a\n    11. b", "10. a\n11. b"),
+        ("1. a\n   1. b", "1. a\n1. b"),
+        ("10. a\n    1. b", "10. a\n1. b"),
         ("- a\n  - b", "- a\n- b"),
     ] {
         let mut d = wys(src);
@@ -336,10 +338,10 @@ fn w11_first_item_keeps_default_indent() {
 
 #[test]
 fn w11_tab_keeps_caret_on_same_text() {
-    let mut d = wys("1. a\n2. bc");
+    let mut d = wys("1. a\n1. bc");
     d.place(8, false);
     d.indent();
-    assert_eq!(d.content, "1. a\n   2. bc");
+    assert_eq!(d.content, "1. a\n   1. bc");
     assert_eq!(d.cursor_offset(), 11);
 }
 
@@ -352,11 +354,13 @@ fn w12a_ordered_list_numbers_lines_in_sequence() {
     d.apply_format_in_mode("ol", ViewMode::Wysiwyg);
     assert_eq!(d.content, "1. a\n\n2. b\n3. c");
 
-    let mut d = wys("x\n| h | i |\n| --- | --- |\n| j | k |\ny");
+    let mut d = wys("x\n\n| h | i |\n| --- | --- |\n| j | k |\n\ny");
     d.select_all();
     d.apply_format_in_mode("ol", ViewMode::Wysiwyg);
-    assert!(d.content.starts_with("1. x\n| h | i |"));
-    assert!(d.content.ends_with("| j | k |\n2. y"), "{:?}", d.content);
+    assert_eq!(
+        d.content,
+        "1. x\n\n| h | i |\n| --- | --- |\n| j | k |\n\n2. y"
+    );
 }
 
 // ---- W14c (document level): backspace and delete coalescing ----
