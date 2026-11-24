@@ -516,7 +516,16 @@ impl DocumentTab {
                 return;
             }
             Some(super::word_nav::WordStep::Edge) => {
-                self.move_right_in_mode(extend, ViewMode::Wysiwyg);
+                // At the visible end of a closing-hash heading the step
+                // takes the hidden closer with it, and stops there.
+                let hidden_end = self.parsed().line_at_offset(origin).and_then(|line| {
+                    let vend = visible_line_end(line, self.view_mode);
+                    (vend < line.source.end && origin <= vend).then_some(line.source.end)
+                });
+                match hidden_end {
+                    Some(end) => self.place(end, extend),
+                    None => self.move_right_in_mode(extend, ViewMode::Wysiwyg),
+                }
                 return;
             }
             None => {}

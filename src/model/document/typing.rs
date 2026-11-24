@@ -757,7 +757,28 @@ impl DocumentTab {
                     return;
                 }
                 Some(super::word_nav::WordStep::Edge) => {
-                    self.delete_forward_in_mode(ViewMode::Wysiwyg);
+                    // A heading's hidden closer is never deleted by a word step.
+                    let before_closer = self.parsed().line_at_offset(cursor).is_some_and(|line| {
+                        let vend = visible_line_end(line, self.view_mode);
+                        vend < line.source.end && cursor <= vend
+                    });
+                    if !before_closer {
+                        // At a line end: join the next line (guards apply),
+                        // then take its first visible word, as in a raw view.
+                        let ending = line_ending_len(&self.content, cursor);
+                        let before_len = self.content.len();
+                        self.delete_forward_in_mode(ViewMode::Wysiwyg);
+                        if ending > 0
+                            && self.content.len() + ending == before_len
+                            && self.cursor_offset() == cursor
+                        {
+                            if let Some(super::word_nav::WordStep::Range(range)) =
+                                self.visible_word_step(cursor, true)
+                            {
+                                self.delete_visible_range(range);
+                            }
+                        }
+                    }
                     return;
                 }
                 None => {}

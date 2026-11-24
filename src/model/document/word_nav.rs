@@ -139,6 +139,26 @@ impl DocumentTab {
     /// Delete visible text through the WYSIWYG replace path, so a span that
     /// loses text keeps valid markers.
     pub(super) fn delete_visible_range(&mut self, range: Range<usize>) {
+        // Taking the last word of a span would leave a space before its
+        // closing marker (or after its opening one), which ends the span, so
+        // that space goes with the word.
+        let (mut start, mut end) = (range.start, range.end);
+        {
+            let parsed = self.parsed();
+            if let Some(line) = parsed.line_at_offset(start) {
+                if line.hidden_ranges.iter().any(|r| r.start == end) {
+                    while self.content[..start].ends_with([' ', '\t']) {
+                        start -= 1;
+                    }
+                }
+                if line.hidden_ranges.iter().any(|r| r.end == range.start) {
+                    while self.content[end..].starts_with([' ', '\t']) {
+                        end += 1;
+                    }
+                }
+            }
+        }
+        let range = start..end;
         if !self.replace_wysiwyg_selection(range.clone(), "") {
             self.edit(range, "");
         }
