@@ -1506,7 +1506,12 @@ pub(super) fn compute_active_formats(
             _ => {}
         }
         for pair in line.inline_pairs() {
-            if cursor >= pair.open_delim.start && cursor <= pair.close_delim.end {
+            let (lo, hi) = if pair.kind == InlineTagKind::Link {
+                (pair.open_delim.start, pair.close_delim.end)
+            } else {
+                (pair.inner.start, pair.inner.end)
+            };
+            if cursor >= lo && cursor <= hi {
                 match pair.kind {
                     InlineTagKind::Bold => fmt.bold = true,
                     InlineTagKind::Italic => fmt.italic = true,

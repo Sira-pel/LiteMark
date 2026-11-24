@@ -1496,7 +1496,8 @@ fn undo_removes_a_newly_typed_span_in_one_step() {
     assert!(doc.redo(), "redo failed");
     assert_eq!(doc.content, "Hello **world**");
 
-    // Stacked span with a space inside: still one undo step
+    // Stacked span with a space inside: a space is a word boundary (W14b),
+    // so the phrase is a few undo steps, and undoing them all removes it.
     let mut doc = DocumentTab::new("v".into(), "test.md".into(), "Go ".into(), None, None);
     doc.place(3, false);
     doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
@@ -1504,11 +1505,13 @@ fn undo_removes_a_newly_typed_span_in_one_step() {
     type_keystrokes(&mut doc, "now please");
     doc.apply_format_in_mode("italic", ViewMode::Wysiwyg);
     doc.apply_format_in_mode("bold", ViewMode::Wysiwyg);
-    assert!(doc.undo(), "undo failed");
-    assert_eq!(
-        doc.content, "Go ",
-        "one undo did not remove the stacked span"
-    );
+    let mut steps = 0;
+    while doc.content != "Go " && steps < 10 {
+        assert!(doc.undo(), "undo failed at {:?}", doc.content);
+        steps += 1;
+    }
+    assert_eq!(doc.content, "Go ", "undo did not remove the stacked span");
+    assert!(steps >= 2, "a space should start a new undo step");
 }
 
 /// Extra spaces typed at the end of an emphasis span keep stacking

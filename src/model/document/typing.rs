@@ -67,6 +67,12 @@ impl DocumentTab {
         }
         if mode == ViewMode::Wysiwyg
             && self.file_type.supports_markdown_features()
+            && self.block_marker_insert(range.clone(), text)
+        {
+            return;
+        }
+        if mode == ViewMode::Wysiwyg
+            && self.file_type.supports_markdown_features()
             && !range.is_empty()
             && !text.is_empty()
             && text != "\n"
@@ -420,7 +426,10 @@ impl DocumentTab {
         if self.is_read_only() {
             return false;
         }
-        if self.picture_remove(false) || self.picture_guard_join_back() {
+        if self.picture_remove(false)
+            || self.picture_guard_join_back()
+            || self.block_marker_backspace()
+        {
             return true;
         }
         if !self.selection_range().is_empty() {
@@ -526,7 +535,11 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if mode == ViewMode::Wysiwyg && (self.picture_remove(true) || self.picture_guard_join()) {
+        if mode == ViewMode::Wysiwyg
+            && (self.picture_remove(true)
+                || self.picture_guard_join()
+                || self.block_marker_delete())
+        {
             return;
         }
         if !self.selection_range().is_empty() {
@@ -699,13 +712,27 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if self.picture_remove(false) || self.picture_guard_join_back() {
+        if self.picture_remove(false)
+            || self.picture_guard_join_back()
+            || self.block_marker_backspace()
+        {
             return;
         }
         if !self.caret.range.is_empty() {
             self.edit(self.selection_range(), "");
         } else {
             let cursor = self.cursor_offset();
+            match self.visible_word_step(cursor, false) {
+                Some(super::word_nav::WordStep::Range(range)) => {
+                    self.delete_visible_range(range);
+                    return;
+                }
+                Some(super::word_nav::WordStep::Edge) => {
+                    self.smart_backspace_in_mode(ViewMode::Wysiwyg);
+                    return;
+                }
+                None => {}
+            }
             let target = crate::model::text_ops::word_left(&self.content, cursor);
             if target < cursor {
                 self.edit(target..cursor, "");
@@ -717,13 +744,45 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if self.picture_remove(true) || self.picture_guard_join() {
+        if self.picture_remove(true) || self.picture_guard_join() || self.block_marker_delete() {
             return;
         }
         if !self.caret.range.is_empty() {
             self.edit(self.selection_range(), "");
         } else {
             let cursor = self.cursor_offset();
+            match self.visible_word_step(cursor, true) {
+                Some(super::word_nav::WordStep::Range(range)) => {
+                    self.delete_visible_range(range);
+                    return;
+                }
+                Some(super::word_nav::WordStep::Edge) => {
+                    // A heading's hidden closer is never deleted by a word step.
+                    let before_closer = self.parsed().line_at_offset(cursor).is_some_and(|line| {
+                        let vend = visible_line_end(line, self.view_mode);
+                        vend < line.source.end && cursor <= vend
+                    });
+                    if !before_closer {
+                        // At a line end: join the next line (guards apply),
+                        // then take its first visible word, as in a raw view.
+                        let ending = line_ending_len(&self.content, cursor);
+                        let before_len = self.content.len();
+                        self.delete_forward_in_mode(ViewMode::Wysiwyg);
+                        if ending > 0
+                            && self.content.len() + ending == before_len
+                            && self.cursor_offset() == cursor
+                        {
+                            if let Some(super::word_nav::WordStep::Range(range)) =
+                                self.visible_word_step(cursor, true)
+                            {
+                                self.delete_visible_range(range);
+                            }
+                        }
+                    }
+                    return;
+                }
+                None => {}
+            }
             let mut target = crate::model::text_ops::word_right(&self.content, cursor);
             if self.file_type.supports_markdown_features() {
                 if let Some(line) = self.parsed().line_at_offset(cursor) {

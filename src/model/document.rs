@@ -19,14 +19,17 @@ use super::text_ops::{
     HistoryRestore, SelectionSnap, UndoHistory, TAB_DISPLAY_COLUMNS,
 };
 
+mod block_guard;
 mod blocks;
 mod inline_format;
 mod inline_rewrite;
 mod navigation;
 mod newline;
+mod paste;
 mod picture;
 mod table;
 mod typing;
+mod word_nav;
 
 pub(crate) use blocks::*;
 use inline_format::*;
@@ -381,6 +384,9 @@ pub struct DocumentTab {
     /// Set only on the scratch tab used by Clear Formatting: forces inline
     /// toggles to turn the format off instead of deciding from the selection.
     force_inline_toggle: Option<bool>,
+    /// A URL taken from the clipboard for the next link toggle: it fills the
+    /// link destination instead of the `https://` placeholder.
+    pub link_url_hint: Option<String>,
     pub marked_range: Option<Range<usize>>,
     /// Start of a picture line whose raw Markdown is being edited.
     pub picture_raw_line: Option<usize>,
@@ -470,6 +476,7 @@ impl DocumentTab {
             view_mode: ViewMode::Wysiwyg,
             indent_style,
             force_inline_toggle: None,
+            link_url_hint: None,
             marked_range: None,
             picture_raw_line: None,
             pending_table_col: None,
@@ -545,6 +552,7 @@ impl DocumentTab {
         self.caret.move_to(cursor);
         self.indent_style = indent_style;
         self.force_inline_toggle = None;
+        self.link_url_hint = None;
         self.marked_range = None;
         self.picture_raw_line = None;
         self.pending_table_col = None;
@@ -1259,3 +1267,12 @@ mod heading_paragraph_parity_tests;
 mod clear_formatting_tests;
 #[cfg(test)]
 mod picture_tests;
+
+#[cfg(test)]
+mod milestone8_tests;
+
+#[cfg(test)]
+mod m8_paste_tests;
+
+#[cfg(test)]
+mod m8_blocks_tests;

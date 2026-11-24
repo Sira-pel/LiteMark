@@ -769,7 +769,18 @@ impl LiteMarkApp {
     }
 
     pub fn handle_insert_link(&mut self, cx: &mut App) {
+        // A URL on the clipboard becomes the link's destination.
+        let url = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .and_then(|text| clipboard_http_url(&text));
+        if let Some(tab) = self.active_tab_mut() {
+            tab.link_url_hint = url;
+        }
         self.handle_format_cmd("link", cx);
+        if let Some(tab) = self.active_tab_mut() {
+            tab.link_url_hint = None;
+        }
     }
 
     pub fn handle_toggle_show_code_files(&mut self) {
@@ -1091,11 +1102,13 @@ impl LiteMarkApp {
                     self.show_error("PDF files are read-only.");
                     return;
                 }
+                let mode = self.effective_view_mode();
                 if let Some(tab) = self.active_tab_mut() {
                     let range = tab.selection_range();
                     // At a picture the text goes on its own line.
                     match tab.picture_target(&range) {
                         Some(target) => {
+                            let text = tab.paste_with_note_breaks(&text, target.start);
                             let nl = tab.line_break(target.start);
                             let before = tab
                                 .picture_block_at(target.start)
@@ -1112,7 +1125,7 @@ impl LiteMarkApp {
                                 tab.place(target.start + text.len(), false);
                             }
                         }
-                        None => tab.edit(range, &text),
+                        None => tab.paste_text_in_mode(range, &text, mode),
                     }
                 }
                 self.refresh_find();
