@@ -214,7 +214,7 @@ impl DocumentTab {
             self.code_newline(range);
             return;
         }
-        if self.picture_newline() {
+        if self.picture_newline() || self.block_marker_newline() {
             return;
         }
         // The ending the line already uses, so a CRLF file stays CRLF.

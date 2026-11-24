@@ -19,6 +19,7 @@ use super::text_ops::{
     HistoryRestore, SelectionSnap, UndoHistory, TAB_DISPLAY_COLUMNS,
 };
 
+mod block_guard;
 mod blocks;
 mod inline_format;
 mod inline_rewrite;

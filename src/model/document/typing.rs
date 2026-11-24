@@ -67,6 +67,12 @@ impl DocumentTab {
         }
         if mode == ViewMode::Wysiwyg
             && self.file_type.supports_markdown_features()
+            && self.block_marker_insert(range.clone(), text)
+        {
+            return;
+        }
+        if mode == ViewMode::Wysiwyg
+            && self.file_type.supports_markdown_features()
             && !range.is_empty()
             && !text.is_empty()
             && text != "\n"
@@ -420,7 +426,10 @@ impl DocumentTab {
         if self.is_read_only() {
             return false;
         }
-        if self.picture_remove(false) || self.picture_guard_join_back() {
+        if self.picture_remove(false)
+            || self.picture_guard_join_back()
+            || self.block_marker_backspace()
+        {
             return true;
         }
         if !self.selection_range().is_empty() {
@@ -526,7 +535,11 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if mode == ViewMode::Wysiwyg && (self.picture_remove(true) || self.picture_guard_join()) {
+        if mode == ViewMode::Wysiwyg
+            && (self.picture_remove(true)
+                || self.picture_guard_join()
+                || self.block_marker_delete())
+        {
             return;
         }
         if !self.selection_range().is_empty() {
@@ -699,7 +712,10 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if self.picture_remove(false) || self.picture_guard_join_back() {
+        if self.picture_remove(false)
+            || self.picture_guard_join_back()
+            || self.block_marker_backspace()
+        {
             return;
         }
         if !self.caret.range.is_empty() {
@@ -717,7 +733,7 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
-        if self.picture_remove(true) || self.picture_guard_join() {
+        if self.picture_remove(true) || self.picture_guard_join() || self.block_marker_delete() {
             return;
         }
         if !self.caret.range.is_empty() {
