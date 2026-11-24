@@ -91,6 +91,15 @@ static GLOBAL: heap_counter::Counting = heap_counter::Counting;
 #[exclude = "windows/*"]
 struct Assets;
 
+/// The bundled fonts, deflated by `build.rs`: 1.26 MB off the binary.
+///
+/// Unpacking them (about 2.6 MB) at launch costs nothing measurable. On
+/// Windows, gpui hands the bytes to DirectWrite's in-memory loader with no
+/// owner, so DirectWrite keeps its own copy whether the bytes were borrowed
+/// or owned, and the unpacked buffer is freed right after. Release builds
+/// measured with 6 interleaved launches each: time to window 358 vs 367 ms,
+/// idle working set 187.0 vs 188.7 MB, private 161.7 vs 162.3 MB
+/// (compressed vs plain `include_bytes!`), all within run-to-run noise.
 const COMPRESSED_FONTS: &[&[u8]] = &[
     include_bytes!(concat!(env!("OUT_DIR"), "/Ubuntu-R.ttf.deflate")),
     include_bytes!(concat!(env!("OUT_DIR"), "/Ubuntu-RI.ttf.deflate")),
