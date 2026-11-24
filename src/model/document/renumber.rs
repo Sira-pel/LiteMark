@@ -368,7 +368,11 @@ impl DocumentTab {
     /// An edit that takes numbered items' markers away (`range` covers them
     /// whole): the items after it shift down into the gap.
     pub(super) fn stage_renumber_for_removal(&mut self, range: &Range<usize>) {
-        if range.is_empty() || !self.file_type.supports_markdown_features() {
+        // Nothing after the range means nothing to shift down.
+        if range.is_empty()
+            || range.end >= self.content.len()
+            || !self.file_type.supports_markdown_features()
+        {
             return;
         }
         let takes_marker =
@@ -383,15 +387,25 @@ impl DocumentTab {
             let mut found = None;
             let mut fence = at.and_then(|s| self.fence_before_local(s));
             while let Some(line_start) = at.filter(|&s| s < range.end) {
-                let (text, local) = self.local_line(line_start);
+                let text = &self.content[line_start..line_end(&self.content, line_start)];
                 let fenced = fence.is_some();
                 fence = fence_step(fence, text);
-                if !fenced
-                    && local
-                        .lines
-                        .first()
-                        .and_then(|line| line_marker(text, &local, line))
-                        .is_some_and(|m| takes_marker(line_start, m))
+                // Only a line that starts with a digit can hold a numbered
+                // marker, so a huge range is not parsed line by line.
+                let may_number = !fenced
+                    && text
+                        .trim_start_matches([' ', '\t', '>'])
+                        .starts_with(|c: char| c.is_ascii_digit());
+                if !may_number {
+                    at = self.next_line_start(line_start);
+                    continue;
+                }
+                let (text, local) = self.local_line(line_start);
+                if local
+                    .lines
+                    .first()
+                    .and_then(|line| line_marker(text, &local, line))
+                    .is_some_and(|m| takes_marker(line_start, m))
                 {
                     found = Some(line_start);
                     break;

@@ -463,3 +463,18 @@ fn a_list_after_a_closed_fence_still_renumbers() {
         assert_eq!(d.content, "```\n1. x\n```\n\n1. a\n2. c\n", "{mode:?}");
     }
 }
+
+#[test]
+fn removing_a_big_range_still_finds_the_numbered_items_in_it() {
+    for mode in MODES {
+        let src = "intro\n\ntext\n  1. a\n  2. b\n  3. c\n";
+        let mut d = doc(src, mode);
+        let end = src.find("  2. b").unwrap();
+        d.edit_removing(0..end);
+        assert_eq!(d.content, "  1. b\n  2. c\n", "{mode:?}");
+        // Select All + Delete leaves an empty note.
+        let mut d = doc(src, mode);
+        d.edit_removing(0..src.len());
+        assert_eq!(d.content, "", "{mode:?}");
+    }
+}
