@@ -19,6 +19,7 @@ use super::text_ops::{
     HistoryRestore, SelectionSnap, UndoHistory, TAB_DISPLAY_COLUMNS,
 };
 
+mod block_guard;
 mod blocks;
 mod inline_format;
 mod inline_rewrite;
@@ -28,6 +29,7 @@ mod paste;
 mod picture;
 mod table;
 mod typing;
+mod word_nav;
 
 pub(crate) use blocks::*;
 use inline_format::*;
@@ -1271,3 +1273,6 @@ mod milestone8_tests;
 
 #[cfg(test)]
 mod m8_paste_tests;
+
+#[cfg(test)]
+mod m8_blocks_tests;

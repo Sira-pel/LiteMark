@@ -286,7 +286,9 @@ impl DocumentTab {
     /// written (input methods edit the text directly). Returns the empty
     /// range to write into.
     pub fn picture_open_line(&mut self, range: &Range<usize>) -> Option<Range<usize>> {
-        let target = self.picture_target(range)?;
+        let target = self
+            .picture_target(range)
+            .or_else(|| self.block_marker_target(range))?;
         let nl = self.line_break(target.start);
         self.history.seal();
         // The line break and the text written into it are one undo step; if

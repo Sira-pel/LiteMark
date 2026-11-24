@@ -470,6 +470,17 @@ impl DocumentTab {
                 }
             }
         }
+        match self.visible_word_step(origin, false) {
+            Some(super::word_nav::WordStep::Range(range)) => {
+                self.place(range.start, extend);
+                return;
+            }
+            Some(super::word_nav::WordStep::Edge) => {
+                self.move_left_in_mode(extend, ViewMode::Wysiwyg);
+                return;
+            }
+            None => {}
+        }
         let mut target = crate::model::text_ops::word_left(&self.content, origin);
         if self.file_type.supports_markdown_features() {
             if let Some(block) = self.picture_block_at(target) {
@@ -498,6 +509,26 @@ impl DocumentTab {
                     return;
                 }
             }
+        }
+        match self.visible_word_step(origin, true) {
+            Some(super::word_nav::WordStep::Range(range)) => {
+                self.place(range.end, extend);
+                return;
+            }
+            Some(super::word_nav::WordStep::Edge) => {
+                // At the visible end of a closing-hash heading the step
+                // takes the hidden closer with it, and stops there.
+                let hidden_end = self.parsed().line_at_offset(origin).and_then(|line| {
+                    let vend = visible_line_end(line, self.view_mode);
+                    (vend < line.source.end && origin <= vend).then_some(line.source.end)
+                });
+                match hidden_end {
+                    Some(end) => self.place(end, extend),
+                    None => self.move_right_in_mode(extend, ViewMode::Wysiwyg),
+                }
+                return;
+            }
+            None => {}
         }
         let mut target = crate::model::text_ops::word_right(&self.content, origin);
         if self.file_type.supports_markdown_features() {

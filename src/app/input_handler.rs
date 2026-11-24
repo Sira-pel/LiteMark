@@ -224,9 +224,9 @@ impl EntityInputHandler for LiteMarkApp {
         // Typing at a picture never wraps or pairs its Markdown: it goes
         // straight to `insert_text_in_mode`, which opens a line for it.
         let on_picture = self.effective_view_mode() == ViewMode::Wysiwyg
-            && self
-                .active_tab_mut()
-                .is_some_and(|tab| tab.range_on_picture(&range));
+            && self.active_tab_mut().is_some_and(|tab| {
+                tab.range_on_picture(&range) || tab.range_on_block_marker(&range)
+            });
         let has_pending_table_col = self
             .active_tab()
             .is_some_and(|tab| tab.pending_table_col.is_some());
