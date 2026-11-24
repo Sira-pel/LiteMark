@@ -342,3 +342,19 @@ fn w11_tab_keeps_caret_on_same_text() {
     assert_eq!(d.content, "1. a\n   2. bc");
     assert_eq!(d.cursor_offset(), 11);
 }
+
+// ---- W12a: sequential numbering ----
+
+#[test]
+fn w12a_ordered_list_numbers_lines_in_sequence() {
+    let mut d = wys("a\n\nb\nc");
+    d.select_all();
+    d.apply_format_in_mode("ol", ViewMode::Wysiwyg);
+    assert_eq!(d.content, "1. a\n\n2. b\n3. c");
+
+    let mut d = wys("x\n| h | i |\n| --- | --- |\n| j | k |\ny");
+    d.select_all();
+    d.apply_format_in_mode("ol", ViewMode::Wysiwyg);
+    assert!(d.content.starts_with("1. x\n| h | i |"));
+    assert!(d.content.ends_with("| j | k |\n2. y"), "{:?}", d.content);
+}

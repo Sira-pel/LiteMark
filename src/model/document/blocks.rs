@@ -261,6 +261,9 @@ impl DocumentTab {
         let mut first_delta: isize = 0;
         let mut total_delta: isize = 0;
 
+        // Converted lines count 1, 2, 3 in order; blank and table lines the
+        // selection skips do not take a number.
+        let mut sequence = 0usize;
         for (idx, line) in split_lines.iter().enumerate() {
             if is_table_line(line_at[idx]) {
                 transformed.push(line.to_string());
@@ -270,6 +273,7 @@ impl DocumentTab {
                 transformed.push(line.to_string());
                 continue;
             }
+            sequence += 1;
             let (indent, _existing, prefix_end) =
                 parse_line_block_prefix(&parsed, &self.content, line_at[idx]);
             let leading_spaces = if matches!(target, BlockFormatTarget::Heading(_)) {
@@ -311,7 +315,7 @@ impl DocumentTab {
                     BlockFormatTarget::Heading(5) => "##### ".to_string(),
                     BlockFormatTarget::Heading(_) => "###### ".to_string(),
                     BlockFormatTarget::BulletList => "- ".to_string(),
-                    BlockFormatTarget::OrderedList => format!("{}. ", idx + 1),
+                    BlockFormatTarget::OrderedList => format!("{sequence}. "),
                     BlockFormatTarget::TaskList => "- [ ] ".to_string(),
                     BlockFormatTarget::Blockquote => "> ".to_string(),
                 };
