@@ -465,23 +465,7 @@ impl LiteMarkApp {
                                 .ok();
                         }
                     }),
-                    Arc::new({
-                        let app_handle = app_handle.clone();
-                        move |text, _previous, app| {
-                            let text = text.to_string();
-                            app_handle
-                                .update(app, |this, cx| {
-                                    if this.save_as_tab.is_some() {
-                                        this.commit_save_naming(Some(text), cx);
-                                    } else {
-                                        this.rename_value = text.clone();
-                                        this.commit_rename(Some(text), cx);
-                                    }
-                                    cx.notify();
-                                })
-                                .ok();
-                        }
-                    }),
+                    Self::rename_field_submit(app_handle.clone()),
                     Arc::new({
                         let app_handle = app_handle.clone();
                         move |app| {
@@ -507,18 +491,7 @@ impl LiteMarkApp {
                             app_handle.update(app, |_, cx| cx.notify()).ok();
                         }
                     }),
-                    Arc::new({
-                        let app_handle = app_handle.clone();
-                        move |text, _previous, app| {
-                            let text = text.to_string();
-                            app_handle
-                                .update(app, |this, cx| {
-                                    this.commit_create(text, cx);
-                                    cx.notify();
-                                })
-                                .ok();
-                        }
-                    }),
+                    Self::create_field_submit(app_handle.clone()),
                     Arc::new({
                         let app_handle = app_handle.clone();
                         move |app| {
@@ -745,6 +718,48 @@ impl LiteMarkApp {
         }
         app.start_update_check(cx);
         app
+    }
+
+    /// Enter in the rename / save-name field. It runs after the field's own
+    /// update: saving an untitled note while closing the window opens the
+    /// name box again for the next one, which writes into this same field,
+    /// and doing that inside the field's update panicked (an abort in
+    /// release, losing the other unsaved notes).
+    pub(crate) fn rename_field_submit(app_handle: WeakEntity<Self>) -> FieldSubmit {
+        Arc::new(move |text, _previous, app| {
+            let text = text.to_string();
+            let app_handle = app_handle.clone();
+            app.defer(move |app| {
+                app_handle
+                    .update(app, |this, cx| {
+                        if this.save_as_tab.is_some() {
+                            this.commit_save_naming(Some(text), cx);
+                        } else {
+                            this.rename_value = text.clone();
+                            this.commit_rename(Some(text), cx);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            });
+        })
+    }
+
+    /// Enter in the inline create field, deferred for the same reason as
+    /// [`Self::rename_field_submit`]: committing may write into this field.
+    pub(crate) fn create_field_submit(app_handle: WeakEntity<Self>) -> FieldSubmit {
+        Arc::new(move |text, _previous, app| {
+            let text = text.to_string();
+            let app_handle = app_handle.clone();
+            app.defer(move |app| {
+                app_handle
+                    .update(app, |this, cx| {
+                        this.commit_create(text, cx);
+                        cx.notify();
+                    })
+                    .ok();
+            });
+        })
     }
 
     #[cfg(test)]
@@ -1074,6 +1089,10 @@ mod table_drag_handler_tests;
 #[cfg(test)]
 #[path = "viewport_culling_tests.rs"]
 mod viewport_culling_tests;
+
+#[cfg(all(test, feature = "heap-count", not(feature = "mimalloc")))]
+#[path = "memory_bench_tests.rs"]
+mod memory_bench_tests;
 
 #[cfg(test)]
 #[path = "outline_tests.rs"]

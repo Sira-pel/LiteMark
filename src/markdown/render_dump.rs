@@ -48,7 +48,7 @@ pub fn render_tree(markdown: &str, wrap_cols: usize) -> String {
             }
         }
 
-        for (segment_index, segment) in line.styled_segments.iter().enumerate() {
+        for (segment_index, segment) in line.styled_segments().iter().enumerate() {
             out.push_str(&format!(
                 "segment[{line_index}][{segment_index}] {}\n",
                 segment_token(markdown, segment),

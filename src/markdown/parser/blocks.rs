@@ -324,12 +324,8 @@ pub(super) fn fence_marker_line(
         content_end: line.len() as u32,
         prefix_len: line.len() as u32,
         kind,
-        hidden_ranges: hidden,
-        inline_pairs: Vec::new(),
-        display_text_owned: None,
-        offset_map_cached: None,
-        link_hits: no_links(),
-        styled_segments: Vec::new(),
+        hidden_ranges: hidden.into(),
+        inline: None,
     }
 }
 
@@ -348,12 +344,8 @@ pub(super) fn code_content_line(
             content_end: line.len() as u32,
             prefix_len: 0,
             kind: LineKind::CodeLine,
-            hidden_ranges: Vec::new(),
-            inline_pairs: Vec::new(),
-            display_text_owned: None,
-            offset_map_cached: None,
-            link_hits: no_links(),
-            styled_segments: Vec::new(),
+            hidden_ranges: Box::default(),
+            inline: None,
         };
     }
     let content_start = line_start + strip;
@@ -364,12 +356,8 @@ pub(super) fn code_content_line(
         content_end: line.len() as u32,
         prefix_len: strip as u32,
         kind: LineKind::CodeLine,
-        hidden_ranges: hidden,
-        inline_pairs: Vec::new(),
-        display_text_owned: None,
-        offset_map_cached: None,
-        link_hits: no_links(),
-        styled_segments: Vec::new(),
+        hidden_ranges: hidden.into(),
+        inline: None,
     }
 }
 
@@ -399,20 +387,19 @@ pub(super) fn atx_line(
     };
     hidden.extend(inline_hidden);
     let hidden = merge_ranges(hidden);
-    let (display_text_owned, offset_map_cached) =
-        build_display_and_map(line, line_start, content.start, &hidden);
+    let display_text_owned = build_display(line, line_start, content.start, &hidden);
     ParsedLine {
         line_index: index as u32,
         source,
         content_end: content.end as u32,
         prefix_len: content.start as u32,
         kind: LineKind::Heading { level },
-        hidden_ranges: hidden,
-        inline_pairs,
-        display_text_owned,
-        offset_map_cached,
-        link_hits: no_links(),
-        styled_segments,
+        hidden_ranges: hidden.into(),
+        inline: LineInline::boxed(
+            inline_pairs.into(),
+            styled_segments.into(),
+            display_text_owned,
+        ),
     }
 }
 

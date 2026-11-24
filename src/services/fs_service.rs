@@ -1,12 +1,12 @@
 use crate::model::{
-    content_hash, copy_name, file_dialog_block_reason, looks_binary, unique_name, DiskChange,
-    DiskVersion, FileType, PortalProbe, WorkspaceDirectory, WorkspaceFile, WorkspaceFolder,
-    CODE_EXTENSIONS, TEXT_EXTENSIONS,
+    content_hash, copy_name, file_dialog_block_reason, looks_binary, unique_name, ContentHasher,
+    DiskChange, DiskVersion, FileType, PortalProbe, WorkspaceDirectory, WorkspaceFile,
+    WorkspaceFolder, CODE_EXTENSIONS, TEXT_EXTENSIONS,
 };
 #[cfg(target_os = "linux")]
 use std::ffi::{c_char, CString};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
@@ -305,6 +305,15 @@ fn write_temp(target: &Path, content: &str) -> io::Result<PathBuf> {
 
 /// [`write_temp`] for bytes that are not text, such as an image.
 fn write_temp_bytes(target: &Path, content: &[u8]) -> io::Result<PathBuf> {
+    write_temp_with(target, &mut |file| file.write_all(content))
+}
+
+/// Create a temp file next to `target`, fill it with `fill`, and sync it.
+/// On failure the temp file is removed.
+fn write_temp_with(
+    target: &Path,
+    fill: &mut dyn FnMut(&mut fs::File) -> io::Result<()>,
+) -> io::Result<PathBuf> {
     let parent = target.parent().unwrap_or(Path::new("."));
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
@@ -342,7 +351,7 @@ fn write_temp_bytes(target: &Path, content: &[u8]) -> io::Result<PathBuf> {
             if let Some(meta) = &original {
                 match_owner(&file, meta)?;
             }
-            file.write_all(content)?;
+            fill(&mut file)?;
             file.sync_all()?;
             if let Some(meta) = &original {
                 fs::set_permissions(&temp_path, meta.permissions())?;
@@ -455,6 +464,7 @@ pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
 pub fn disk_version(path: &Path, content: &str) -> Option<DiskVersion> {
     fs::metadata(path).ok()?;
     Some(DiskVersion {
+        len: content.len() as u64,
         content_hash: content_hash(content.as_bytes()),
     })
 }
@@ -464,16 +474,50 @@ pub fn disk_version(path: &Path, content: &str) -> Option<DiskVersion> {
 /// read even when size, time and file id all match: a same-size write within
 /// the filesystem's timestamp granularity leaves all three unchanged.
 pub fn disk_change(path: &Path, seen: &DiskVersion) -> DiskChange {
-    match fs::metadata(path) {
-        Ok(_) => {}
+    let len = match fs::metadata(path) {
+        Ok(meta) => meta.len(),
         Err(err) if err.kind() == io::ErrorKind::NotFound => return DiskChange::Deleted,
         // Can't tell; let the save itself report the problem.
         Err(_) => return DiskChange::Unchanged,
+    };
+    // A different size is a different text: no need to read it.
+    if len != seen.len {
+        return DiskChange::Changed;
     }
-    match fs::read(path) {
-        Ok(bytes) if content_hash(&bytes) == seen.content_hash => DiskChange::Unchanged,
+    match hash_file(path, len) {
+        Ok(Some(hash)) if hash == seen.content_hash => DiskChange::Unchanged,
         _ => DiskChange::Changed,
     }
+}
+
+/// `content_hash` of the file's bytes, read in 64 KiB chunks so a large note
+/// is never held in memory twice. `None` when the file no longer has `len`
+/// bytes (it changed while being read).
+fn hash_file(path: &Path, len: u64) -> io::Result<Option<u64>> {
+    hash_file_chunked(path, len, HASH_CHUNK)
+}
+
+const HASH_CHUNK: usize = 64 * 1024;
+
+fn hash_file_chunked(path: &Path, len: u64, chunk: usize) -> io::Result<Option<u64>> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = ContentHasher::new(len);
+    let mut buf = vec![0u8; chunk];
+    let mut total = 0u64;
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        total += n as u64;
+        if total > len {
+            return Ok(None);
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok((total == len).then(|| hasher.finish()))
 }
 
 /// Folder next to a note where pasted and dropped images are kept.
@@ -525,31 +569,53 @@ pub fn numbered_asset_name(name: &str, n: usize) -> String {
 /// later by someone else, the next numbered name is used. Returns the path
 /// written.
 pub fn save_note_asset(note_dir: &Path, desired_name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    save_note_asset_with(note_dir, desired_name, &mut |file| file.write_all(bytes))
+}
+
+/// [`save_note_asset`] with the bytes written by `fill`, so a large source
+/// can be streamed instead of held in memory. The temp file is written once
+/// and then renamed to the first free name.
+fn save_note_asset_with(
+    note_dir: &Path,
+    desired_name: &str,
+    fill: &mut dyn FnMut(&mut fs::File) -> io::Result<()>,
+) -> io::Result<PathBuf> {
     let dir = note_dir.join(ASSETS_DIR);
     fs::create_dir_all(&dir)?;
     let mut name = sanitize_name(desired_name);
     if name.is_empty() {
         name = "image.png".to_string();
     }
+    let mut temp: Option<PathBuf> = None;
     for n in 1..=1000 {
         let path = dir.join(numbered_asset_name(&name, n));
         if fs::symlink_metadata(&path).is_ok() {
             continue;
         }
-        let temp_path = write_temp_bytes(&path, bytes)?;
+        // Written once, for the first free name (so it never inherits the
+        // owner or mode of an existing file), then renamed to a free name.
+        let temp_path = match &temp {
+            Some(temp_path) => temp_path.clone(),
+            None => {
+                let temp_path = write_temp_with(&path, fill)?;
+                temp = Some(temp_path.clone());
+                temp_path
+            }
+        };
         match rename_noreplace(&temp_path, &path) {
             Ok(()) => {
                 fsync_parent(&path)?;
                 return Ok(path);
             }
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                let _ = fs::remove_file(&temp_path);
-            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
             Err(err) => {
                 let _ = fs::remove_file(&temp_path);
                 return Err(err);
             }
         }
+    }
+    if let Some(temp_path) = temp {
+        let _ = fs::remove_file(temp_path);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
@@ -577,7 +643,11 @@ pub fn copy_into_note_assets(note_dir: &Path, src: &Path) -> io::Result<PathBuf>
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid file name"))?;
-    save_note_asset(note_dir, name, &fs::read(src)?)
+    // Streamed: a 64 MB picture is never held in memory whole.
+    let mut source = fs::File::open(src)?;
+    save_note_asset_with(note_dir, name, &mut |file| {
+        io::copy(&mut source, file).map(|_| ())
+    })
 }
 
 /// Create `dir/desired_name` without replacing an existing file.
@@ -2523,5 +2593,131 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(copy_into_note_assets(&note_dir, &root.join("missing.png")).is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn pseudo_random_bytes(n: usize, mut seed: u64) -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (seed >> 33) as u8
+            })
+            .collect()
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("litemark-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn streamed_hash_equals_content_hash_at_every_chunk_size() {
+        let dir = scratch_dir("d1-streamhash");
+        let path = dir.join("f.bin");
+        for size in [
+            0usize,
+            1,
+            7,
+            100,
+            HASH_CHUNK - 1,
+            HASH_CHUNK,
+            HASH_CHUNK + 1,
+            3 * HASH_CHUNK + 5,
+        ] {
+            let bytes = pseudo_random_bytes(size, size as u64 + 1);
+            fs::write(&path, &bytes).unwrap();
+            for chunk in [1usize, 7, 64 * 1024, HASH_CHUNK] {
+                if chunk == 1 && size > 1000 {
+                    continue;
+                }
+                assert_eq!(
+                    hash_file_chunked(&path, size as u64, chunk).unwrap(),
+                    Some(content_hash(&bytes)),
+                    "size {size}, chunk {chunk}"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disk_change_matches_text_with_multibyte_chars_and_bom() {
+        let dir = scratch_dir("d1-diskchange");
+        let path = dir.join("n.md");
+        let text = format!(
+            "\u{feff}h\u{e9}llo \u{1f600}\r\n{}",
+            "x".repeat(HASH_CHUNK + 3)
+        );
+        fs::write(&path, &text).unwrap();
+        let version = disk_version(&path, &text).unwrap();
+        assert_eq!(disk_change(&path, &version), DiskChange::Unchanged);
+        // Same size, different bytes.
+        let mut other = text.clone().into_bytes();
+        *other.last_mut().unwrap() = b'y';
+        fs::write(&path, &other).unwrap();
+        assert_eq!(disk_change(&path, &version), DiskChange::Changed);
+        // Different size, caught without reading.
+        fs::write(&path, "short").unwrap();
+        assert_eq!(disk_change(&path, &version), DiskChange::Changed);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(disk_change(&path, &version), DiskChange::Deleted);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hashing_a_file_that_changed_size_is_not_a_match() {
+        let dir = scratch_dir("d1-hashrace");
+        let path = dir.join("f");
+        fs::write(&path, b"0123456789").unwrap();
+        // Shrunk since the length was read, or grown.
+        assert_eq!(hash_file_chunked(&path, 20, 4).unwrap(), None);
+        assert_eq!(hash_file_chunked(&path, 5, 4).unwrap(), None);
+        // A directory can't be read: an error, which disk_change reports as Changed.
+        let version = DiskVersion {
+            len: 0,
+            content_hash: content_hash(b""),
+        };
+        assert_eq!(disk_change(&dir, &version), DiskChange::Changed);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_asset_copy_leaves_no_file_behind() {
+        let dir = scratch_dir("d2-assetfail");
+        let err = save_note_asset_with(&dir, "pic.png", &mut |file| {
+            file.write_all(b"partial")?;
+            Err(io::Error::other("source went away"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "source went away");
+        let left: Vec<_> = fs::read_dir(dir.join(ASSETS_DIR))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(left.is_empty(), "left {left:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn streamed_asset_copy_keeps_names_unique_and_content_exact() {
+        let dir = scratch_dir("d2-assetcopy");
+        let src = dir.join("pic.png");
+        let bytes = pseudo_random_bytes(300_000, 9);
+        fs::write(&src, &bytes).unwrap();
+        let first = copy_into_note_assets(&dir, &src).unwrap();
+        let second = copy_into_note_assets(&dir, &src).unwrap();
+        assert_eq!(first.file_name().unwrap(), "pic.png");
+        assert_eq!(second.file_name().unwrap(), "pic-2.png");
+        assert_eq!(fs::read(&first).unwrap(), bytes);
+        assert_eq!(fs::read(&second).unwrap(), bytes);
+        let names: Vec<_> = fs::read_dir(dir.join(ASSETS_DIR))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(names.len(), 2, "no temp files left");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

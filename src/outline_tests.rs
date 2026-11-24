@@ -59,7 +59,7 @@ fn a_jump_scrolls_the_heading_near_the_top() {
             .rows
             .iter()
             .rev()
-            .find(|r| r.byte_start <= target)
+            .find(|r| r.byte_start() <= target)
             .unwrap();
         let view_top = app.editor_scroll.bounds().top();
         let from_top = row.origin.y - view_top;

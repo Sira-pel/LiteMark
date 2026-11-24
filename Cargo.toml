@@ -9,11 +9,13 @@ license = "MIT"
 [features]
 # Opt-in: benchmark RSS before making this the default.
 mimalloc = ["dep:mimalloc"]
+# Test-only: count live heap bytes for `memory_bench_tests` (one atomic per call).
+heap-count = []
 
 [dependencies]
 mimalloc = { version = "0.1", optional = true }
 gpui = { version = "=0.2.2" }
-rust-embed = "8.5"
+rust-embed = { version = "8.5", features = ["include-exclude"] }
 rfd = "0.15"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -50,3 +52,21 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Size-optimize dependencies (about 8% smaller binary, no measurable frame-time
+# change) but keep full optimization for the app crate (a workspace member, so
+# "*" skips it) and the hot parse/text paths. See docs/m6-perf-plan.md, E3.
+[profile.release.package."*"]
+opt-level = "z"
+
+[profile.release.package.gpui]
+opt-level = 3
+
+[profile.release.package.pulldown-cmark]
+opt-level = 3
+
+[profile.release.package.memchr]
+opt-level = 3
+
+[profile.release.package.unicode-segmentation]
+opt-level = 3

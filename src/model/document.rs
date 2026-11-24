@@ -311,6 +311,9 @@ fn window_line_endings(before: Option<u8>, mid: &str, after: Option<u8>) -> usiz
     count
 }
 
+/// Spare `String` capacity (bytes) an inactive tab keeps before it is shrunk.
+const SPARE_CAPACITY_SLACK: usize = 64 * 1024;
+
 /// Incrementally maintained stats staged during `DocumentTab::edit` so
 /// `ensure_stats` can publish up-to-date counts in O(1) without rescanning the
 /// whole document on every keystroke.
@@ -624,6 +627,17 @@ impl DocumentTab {
     /// rebuilds it when the tab is shown again.
     pub fn release_parse_cache(&mut self) {
         self.cached_parse = None;
+        // Typing and a big paste can leave a lot of spare capacity on the text.
+        // Give it back only when the waste is clearly worth a reallocation.
+        let len = self.content.len();
+        if self.content.capacity() > len + len / 4 + SPARE_CAPACITY_SLACK {
+            self.content.shrink_to_fit();
+        }
+    }
+
+    #[cfg(all(test, feature = "heap-count"))]
+    pub fn has_parse_cache_for_bench(&self) -> bool {
+        self.cached_parse.is_some()
     }
 
     /// Re-detect the type after Save As or a rename. A change drops the parse cache,

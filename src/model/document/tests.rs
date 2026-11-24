@@ -1128,7 +1128,7 @@ fn partial_unformat_splits_the_span() {
 fn flags_for_word(content: &str, word: &str) -> (bool, bool, bool, bool) {
     let parsed = parse_document(content);
     let segs: Vec<_> = parsed.lines[0]
-        .styled_segments
+        .styled_segments()
         .iter()
         .filter(|s| {
             let text = &content[s.source.clone()];
@@ -1139,7 +1139,7 @@ fn flags_for_word(content: &str, word: &str) -> (bool, bool, bool, bool) {
         !segs.is_empty(),
         "word {word:?} missing in {content:?} segs={:?}",
         parsed.lines[0]
-            .styled_segments
+            .styled_segments()
             .iter()
             .map(|s| &content[s.source.clone()])
             .collect::<Vec<_>>()
@@ -1647,7 +1647,7 @@ fn select_all_inline_toggle_formats_each_block_and_toggles_back() {
                     if matches!(line.kind, LineKind::CodeLine | LineKind::CodeFence { .. }) {
                         continue;
                     }
-                    for seg in &line.styled_segments {
+                    for seg in line.styled_segments() {
                         let text = &on[seg.source.clone()];
                         assert!(
                             text.trim().is_empty() || has(seg, cmd),
@@ -1664,7 +1664,7 @@ fn select_all_inline_toggle_formats_each_block_and_toggles_back() {
                     parsed
                         .lines
                         .iter()
-                        .flat_map(|l| &l.styled_segments)
+                        .flat_map(|l| l.styled_segments())
                         .all(|s| !has(s, cmd)),
                     "second press left {cmd}: {ctx}\n{off}"
                 );
@@ -1851,7 +1851,7 @@ fn code_stays_innermost_when_a_non_code_format_toggles_off() {
         // markers inside a code span.
         let parsed = parse_document(&doc.content);
         let segments: Vec<(&str, bool, bool, bool, bool, bool)> = parsed.lines[0]
-            .styled_segments
+            .styled_segments()
             .iter()
             .map(|s| {
                 (
@@ -1896,7 +1896,7 @@ fn assert_no_delimiter_runs(doc: &DocumentTab) {
     let content = doc.content.clone();
     let parsed = parse_document(&content);
     for line in &parsed.lines {
-        for seg in &line.styled_segments {
+        for seg in line.styled_segments() {
             let text = &content[seg.source.clone()];
             assert!(
                 !text.contains("**") && !text.contains("~~"),
@@ -1926,7 +1926,7 @@ fn delete_forward_skips_delimiters_and_drops_empty_spans() {
         "Delete did not drop the span once it was empty"
     );
     let parsed = parse_document(&doc.content);
-    assert!(parsed.lines[0].styled_segments.iter().all(|s| !s.bold));
+    assert!(parsed.lines[0].styled_segments().iter().all(|s| !s.bold));
 }
 
 /// Backspace through a stacked span never splits a delimiter: the empty
@@ -2051,7 +2051,7 @@ fn overlapping_toggles_nest_properly() {
             "{first}/{second}: raw markers visible in the display"
         );
         let segments: Vec<(&str, bool, bool, bool, bool)> = parsed.lines[0]
-            .styled_segments
+            .styled_segments()
             .iter()
             .map(|s| {
                 (
@@ -2095,7 +2095,7 @@ fn toggles_split_code_span_keeping_code_innermost() {
         let content = doc.content.clone();
         let parsed = parse_document(&content);
         let segments: Vec<(&str, bool, bool, bool, bool, bool)> = parsed.lines[0]
-            .styled_segments
+            .styled_segments()
             .iter()
             .map(|s| {
                 (
@@ -2160,7 +2160,7 @@ fn symbol_adjacent_delimiters_keep_flanking() {
     let content = doc.content.clone();
     let parsed = parse_document(&content);
     let segments: Vec<(&str, bool)> = parsed.lines[0]
-        .styled_segments
+        .styled_segments()
         .iter()
         .map(|s| (content[s.source.clone()].as_ref(), s.bold))
         .collect();
@@ -2179,7 +2179,7 @@ fn symbol_adjacent_delimiters_keep_flanking() {
     let content = doc.content.clone();
     let parsed = parse_document(&content);
     let segments: Vec<(&str, bool)> = parsed.lines[0]
-        .styled_segments
+        .styled_segments()
         .iter()
         .map(|s| (content[s.source.clone()].as_ref(), s.bold))
         .collect();
@@ -2203,7 +2203,7 @@ fn typing_span_delimiters_inside_keeps_the_span() {
     let content = doc.content.clone();
     let parsed = parse_document(&content);
     let segments: Vec<(&str, bool)> = parsed.lines[0]
-        .styled_segments
+        .styled_segments()
         .iter()
         .map(|s| (content[s.source.clone()].trim_matches('\\'), s.strike))
         .collect();
@@ -2219,7 +2219,7 @@ fn typing_span_delimiters_inside_keeps_the_span() {
     let content = doc.content.clone();
     let parsed = parse_document(&content);
     let segments: Vec<(&str, bool)> = parsed.lines[0]
-        .styled_segments
+        .styled_segments()
         .iter()
         .map(|s| (content[s.source.clone()].trim_matches('\\'), s.italic))
         .collect();
@@ -2240,7 +2240,7 @@ fn typing_span_delimiters_inside_keeps_the_span() {
     let content = doc.content.clone();
     let parsed = parse_document(&content);
     let segments: Vec<(&str, bool)> = parsed.lines[0]
-        .styled_segments
+        .styled_segments()
         .iter()
         .map(|s| (content[s.source.clone()].as_ref(), s.code))
         .collect();
@@ -2257,7 +2257,7 @@ fn typing_span_delimiters_inside_keeps_the_span() {
     let parsed = doc.parsed();
     assert!(
         parsed.lines[0]
-            .styled_segments
+            .styled_segments()
             .iter()
             .any(|s| s.code && doc.content[s.source.clone()] == *"a`"),
         "the re-fenced span is not displayed as code"
@@ -2271,7 +2271,7 @@ fn typing_span_delimiters_inside_keeps_the_span() {
     let content = doc.content.clone();
     let parsed = parse_document(&content);
     let segments: Vec<(&str, bool)> = parsed.lines[0]
-        .styled_segments
+        .styled_segments()
         .iter()
         .map(|s| (content[s.source.clone()].as_ref(), s.code))
         .collect();
@@ -2301,7 +2301,7 @@ fn wrap_escapes_delimiters_lt_and_hides_escape_backslashes() {
     let content = doc.content.clone();
     let parsed = parse_document(&content);
     let segments: Vec<(&str, bool)> = parsed.lines[0]
-        .styled_segments
+        .styled_segments()
         .iter()
         .map(|s| (content[s.source.clone()].trim_matches('\\'), s.strike))
         .collect();
@@ -3718,14 +3718,14 @@ fn down_on_the_last_painted_row_snaps_before_the_closing_hash() {
         total_height: px(28.0),
         rows: vec![PaintRow {
             line_index: 0,
-            byte_start,
-            byte_end,
+            byte_start: crate::ui::text_editor::row_u32(byte_start),
+            byte_end: crate::ui::text_editor::row_u32(byte_end),
             origin: point(px(0.0), px(0.0)),
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map,
             link_hits: Arc::default(),
-            cells: Vec::new(),
+            cells: Box::default(),
         }],
         bounds: None,
         ..EditorPaint::default()
@@ -4168,15 +4168,15 @@ fn paint_rows(doc: &mut DocumentTab) -> EditorPaint {
         .iter()
         .enumerate()
         .map(|(ix, line)| PaintRow {
-            line_index: ix,
-            byte_start: line.source.start,
-            byte_end: line.source.end,
+            line_index: crate::ui::text_editor::row_u32(ix),
+            byte_start: crate::ui::text_editor::row_u32(line.source.start),
+            byte_end: crate::ui::text_editor::row_u32(line.source.end),
             origin: point(px(0.0), px(28.0 * ix as f32)),
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: line.to_offset_map(),
             link_hits: Arc::default(),
-            cells: Vec::new(),
+            cells: Box::default(),
         })
         .collect();
     let n = parsed.lines.len() as f32;
@@ -5002,7 +5002,7 @@ fn test_inline_format_stacked_combos_table_driven() {
 
                     let src_offset = line.display_to_source(i);
                     let seg = line
-                        .styled_segments
+                        .styled_segments()
                         .iter()
                         .find(|s| s.source.start <= src_offset && src_offset < s.source.end)
                         .unwrap_or_else(|| {
@@ -5175,21 +5175,21 @@ fn test_wysiwyg_repro1_stacked_format_typing_continuation() {
     );
 
     let s_lead = line
-        .styled_segments
+        .styled_segments()
         .iter()
         .find(|s| s.source == (0..19))
         .unwrap();
     assert!(!s_lead.bold && !s_lead.italic && !s_lead.underline && !s_lead.strike);
 
     let s_combo = line
-        .styled_segments
+        .styled_segments()
         .iter()
         .find(|s| &doc.content[s.source.clone()] == "combination i want")
         .unwrap();
     assert!(s_combo.bold && s_combo.italic && s_combo.underline);
 
     let s_jlkj = line
-        .styled_segments
+        .styled_segments()
         .iter()
         .find(|s| &doc.content[s.source.clone()] == " jlkj")
         .unwrap();
@@ -5214,14 +5214,14 @@ fn test_wysiwyg_repro2_stacked_format_typing_disarm_plain() {
     assert_eq!(line.display_text(&doc.content), "combination i wantfasjj");
 
     let s_formatted = line
-        .styled_segments
+        .styled_segments()
         .iter()
         .find(|s| &doc.content[s.source.clone()] == "combination i want")
         .unwrap();
     assert!(s_formatted.bold && s_formatted.italic && s_formatted.underline && !s_formatted.strike);
 
     let s_plain = line
-        .styled_segments
+        .styled_segments()
         .iter()
         .find(|s| &doc.content[s.source.clone()] == "fasjj")
         .unwrap();
@@ -5295,7 +5295,7 @@ fn test_all_stacked_combos_followed_by_unspaced_text() {
             );
 
             let seg_word = line
-                .styled_segments
+                .styled_segments()
                 .iter()
                 .find(|seg| &doc.content[seg.source.clone()] == "word")
                 .unwrap_or_else(|| {
@@ -5310,7 +5310,7 @@ fn test_all_stacked_combos_followed_by_unspaced_text() {
             assert_eq!(seg_word.strike, s, "{:?}: strike mismatch", fmts);
 
             let seg_after = line
-                .styled_segments
+                .styled_segments()
                 .iter()
                 .find(|seg| &doc.content[seg.source.clone()] == "after")
                 .unwrap_or_else(|| {
@@ -5351,14 +5351,14 @@ fn test_arrowing_back_into_stacked_span_and_typing() {
     assert_eq!(line.display_text(&doc.content), "hellXo world");
 
     let seg_mod = line
-        .styled_segments
+        .styled_segments()
         .iter()
         .find(|seg| &doc.content[seg.source.clone()] == "hellXo")
         .expect("hellXo segment not found");
     assert!(seg_mod.bold && seg_mod.italic && seg_mod.underline && !seg_mod.strike);
 
     let seg_world = line
-        .styled_segments
+        .styled_segments()
         .iter()
         .find(|seg| &doc.content[seg.source.clone()] == " world")
         .expect("world segment not found");
@@ -5406,7 +5406,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             // 'a' must be unstyled
             let a_src = line.display_to_source(0);
             let a_seg = line
-                .styled_segments
+                .styled_segments()
                 .iter()
                 .find(|s| s.source.start <= a_src && a_src < s.source.end)
                 .unwrap_or_else(|| panic!("No styled segment covering 'a' for combo {:?}", combo));
@@ -5424,7 +5424,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             for ch_idx in 1..3 {
                 let src = line.display_to_source(ch_idx);
                 let seg = line
-                    .styled_segments
+                    .styled_segments()
                     .iter()
                     .find(|s| s.source.start <= src && src < s.source.end)
                     .unwrap_or_else(|| {
@@ -5483,7 +5483,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             for ch_idx in 0..2 {
                 let src = line.display_to_source(ch_idx);
                 let seg = line
-                    .styled_segments
+                    .styled_segments()
                     .iter()
                     .find(|s| s.source.start <= src && src < s.source.end)
                     .unwrap_or_else(|| {
@@ -5517,7 +5517,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             // 'y' must be unstyled
             let y_src = line.display_to_source(2);
             let y_seg = line
-                .styled_segments
+                .styled_segments()
                 .iter()
                 .find(|s| s.source.start <= y_src && y_src < s.source.end)
                 .unwrap_or_else(|| panic!("No styled segment covering 'y' for combo {:?}", combo));
@@ -5563,7 +5563,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             for ch_idx in 0..2 {
                 let src = line.display_to_source(ch_idx);
                 let seg = line
-                    .styled_segments
+                    .styled_segments()
                     .iter()
                     .find(|s| s.source.start <= src && src < s.source.end)
                     .unwrap_or_else(|| {
@@ -5579,7 +5579,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             for ch_idx in 2..4 {
                 let src = line.display_to_source(ch_idx);
                 let seg = line
-                    .styled_segments
+                    .styled_segments()
                     .iter()
                     .find(|s| s.source.start <= src && src < s.source.end)
                     .unwrap_or_else(|| {
@@ -5613,7 +5613,7 @@ fn test_b_i_s_c_pairs_and_triples_toggled_off_and_on_adjacent_to_letters() {
             // 'y' must be unstyled
             let y_src = line.display_to_source(4);
             let y_seg = line
-                .styled_segments
+                .styled_segments()
                 .iter()
                 .find(|s| s.source.start <= y_src && y_src < s.source.end)
                 .unwrap_or_else(|| panic!("No styled segment covering 'y' for combo {:?}", combo));
@@ -5686,7 +5686,7 @@ fn test_whitespace_only_inserts_with_each_format_armed() {
             let parsed = crate::markdown::parse_document(&doc2.content);
             let line = parsed.lines.first().unwrap();
             let seg = line
-                .styled_segments
+                .styled_segments()
                 .iter()
                 .find(|seg| &doc2.content[seg.source.clone()] == "word")
                 .unwrap_or_else(|| {
@@ -5746,7 +5746,7 @@ fn test_whitespace_only_inserts_in_table_cell_with_each_format_armed() {
             let parsed = crate::markdown::parse_document(&doc.content);
             let line = parsed.lines.first().unwrap();
             let seg = line
-                .styled_segments
+                .styled_segments()
                 .iter()
                 .find(|seg| &doc.content[seg.source.clone()] == "word")
                 .unwrap_or_else(|| {

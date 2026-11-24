@@ -51,9 +51,11 @@ pub struct PaintCell {
 
 #[derive(Clone)]
 pub struct PaintRow {
-    pub line_index: usize,
-    pub byte_start: usize,
-    pub byte_end: usize,
+    /// `u32` keeps the row small (one exists per visual row of the whole
+    /// note); [`row_u32`] saturates for notes past 4 GB, which are not supported.
+    pub line_index: u32,
+    pub byte_start: u32,
+    pub byte_end: u32,
     pub origin: Point<Pixels>,
     pub line_height: Pixels,
     /// Shared so a row stays small: `ShapedLine` keeps its decoration runs
@@ -61,7 +63,31 @@ pub struct PaintRow {
     pub shaped: Rc<ShapedLine>,
     pub offset_map: Arc<RowOffsetMap>,
     pub link_hits: Arc<Vec<(Range<usize>, Arc<str>)>>,
-    pub cells: Vec<PaintCell>,
+    /// Empty (no allocation) on every row that is not a table row.
+    pub cells: Box<[PaintCell]>,
+}
+
+impl PaintRow {
+    pub fn byte_start(&self) -> usize {
+        self.byte_start as usize
+    }
+    pub fn byte_end(&self) -> usize {
+        self.byte_end as usize
+    }
+}
+
+/// The row count is unknown up front, so pushing grows the buffer by doubling
+/// and can leave nearly half of it unused. Give that back (once; later frames
+/// reuse the trimmed buffer) when the slack is large.
+fn trim_row_slack(rows: &mut Vec<PaintRow>) {
+    if rows.capacity() - rows.len() > rows.len() / 8 {
+        rows.shrink_to_fit();
+    }
+}
+
+/// Narrow a byte offset or line index for [`PaintRow`], saturating.
+pub fn row_u32(v: usize) -> u32 {
+    u32::try_from(v).unwrap_or(u32::MAX)
 }
 
 #[derive(Clone, Debug)]
@@ -837,14 +863,14 @@ pub fn padded_table_cell_col(paint: &EditorPaint, position: Point<Pixels>) -> Op
                 None
             }
         })?;
-    (col_idx > 0 && cell.raw_range.is_empty() && cell.raw_range.start == row.byte_end)
+    (col_idx > 0 && cell.raw_range.is_empty() && cell.raw_range.start == row.byte_end())
         .then_some(col_idx)
 }
 
 /// The last row starting at or before `offset` (the first row when none
 /// does). Rows are in source order, so this is a binary search.
 pub fn row_at_or_before(rows: &[PaintRow], offset: usize) -> Option<&PaintRow> {
-    let after = rows.partition_point(|row| row.byte_start <= offset);
+    let after = rows.partition_point(|row| row.byte_start() <= offset);
     rows.get(after.saturating_sub(1))
 }
 
@@ -852,9 +878,9 @@ pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<Stri
     // Rows are in source order, so skip straight to the first that can hold it.
     let first = paint
         .rows
-        .partition_point(|row| row.byte_end < source_offset);
+        .partition_point(|row| row.byte_end() < source_offset);
     for row in &paint.rows[first..] {
-        if row.byte_start > source_offset {
+        if row.byte_start() > source_offset {
             break;
         }
         {
@@ -999,15 +1025,15 @@ fn move_vertical_rows(
             .get(ix + 1)
             .is_some_and(|next| next.line_index == row.line_index);
         let matches = if is_last || !next_same_line {
-            cursor >= row.byte_start && cursor <= row.byte_end
+            cursor >= row.byte_start() && cursor <= row.byte_end()
         } else {
-            cursor >= row.byte_start && cursor < row.byte_end
+            cursor >= row.byte_start() && cursor < row.byte_end()
         };
         if matches {
             current_row_ix = ix;
             break;
         }
-        if cursor >= row.byte_start {
+        if cursor >= row.byte_start() {
             current_row_ix = ix;
         }
     }
@@ -1169,7 +1195,7 @@ fn move_vertical_rows(
         target_row
             .offset_map
             .display_to_source(target_display)
-            .clamp(target_row.byte_start, target_row.byte_end)
+            .clamp(target_row.byte_start(), target_row.byte_end())
             .min(content.len())
     };
     let target_source = snap(target_source);
@@ -1249,12 +1275,12 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
         return row
             .offset_map
             .display_to_source(0)
-            .clamp(row.byte_start, row.byte_end);
+            .clamp(row.byte_start(), row.byte_end());
     }
     let display_idx = row.shaped.closest_index_for_x(local_x);
     row.offset_map
         .display_to_source(display_idx)
-        .clamp(row.byte_start, row.byte_end)
+        .clamp(row.byte_start(), row.byte_end())
 }
 
 pub fn editor_home_visual(paint: &EditorPaint, caret: &mut Caret, extend: bool) -> bool {
@@ -1797,15 +1823,15 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 );
                 if !band.contains(origin.y, base_line_height) && !near_any(&anchor_rows, index) {
                     rows.push(PaintRow {
-                        line_index: line_number.saturating_sub(1),
-                        byte_start: start,
-                        byte_end: end,
+                        line_index: row_u32(line_number.saturating_sub(1)),
+                        byte_start: row_u32(start),
+                        byte_end: row_u32(end),
                         origin,
                         line_height: base_line_height,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
                         link_hits: empty_links.clone(),
-                        cells: Vec::new(),
+                        cells: Box::default(),
                     });
                     continue;
                 }
@@ -1930,15 +1956,15 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     numbers.push((point(number_x, origin.y), base_line_height, shaped_num));
                 }
                 rows.push(PaintRow {
-                    line_index: line_number.saturating_sub(1),
-                    byte_start: start,
-                    byte_end: end,
+                    line_index: row_u32(line_number.saturating_sub(1)),
+                    byte_start: row_u32(start),
+                    byte_end: row_u32(end),
                     origin,
                     line_height: base_line_height,
                     shaped: Rc::new(shaped),
                     offset_map: Arc::new(offset_map),
                     link_hits: empty_links.clone(),
-                    cells: Vec::new(),
+                    cells: Box::default(),
                 });
             }
 
@@ -1948,6 +1974,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
             table_width_cache.clear_and_shrink();
             layout_cache.table_keys = None;
+            trim_row_slack(&mut rows);
             return Prepaint {
                 rows,
                 checkbox_hits: Vec::new(),
@@ -2128,8 +2155,6 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 wysiwyg_line_metrics(&parsed_line.kind, self.font_size);
             cur_y += top_gap;
 
-            let link_hits = parsed_line.link_hits.clone();
-
             if let LineKind::TableRow {
                 is_header,
                 ref body,
@@ -2178,15 +2203,15 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         .unwrap_or(row_line_height);
                     *row_ix += 1;
                     rows.push(PaintRow {
-                        line_index: line_idx,
-                        byte_start: parsed_line.source.start,
-                        byte_end: parsed_line.source.end,
+                        line_index: row_u32(line_idx),
+                        byte_start: row_u32(parsed_line.source.start),
+                        byte_end: row_u32(parsed_line.source.end),
                         origin: point(base_x, cur_y),
                         line_height: row_height,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
                         link_hits: empty_links.clone(),
-                        cells: Vec::new(),
+                        cells: Box::default(),
                     });
                     cur_y += row_height;
                     continue;
@@ -2361,9 +2386,9 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                             &cell_geoms,
                         );
                         rows.push(PaintRow {
-                            line_index: line_idx,
-                            byte_start: parsed_line.source.start,
-                            byte_end: parsed_line.source.end,
+                            line_index: row_u32(line_idx),
+                            byte_start: row_u32(parsed_line.source.start),
+                            byte_end: row_u32(parsed_line.source.end),
                             origin: point(base_x, cur_y),
                             line_height: height,
                             shaped: unshaped.clone(),
@@ -2371,7 +2396,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                             // other rows outside the shaping band.
                             offset_map: empty_map.clone(),
                             link_hits: empty_links.clone(),
-                            cells: Vec::new(),
+                            cells: Box::default(),
                         });
                         cur_y += height;
                         continue;
@@ -2596,7 +2621,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         }
 
                         // Strikethrough inside cell
-                        for seg in &parsed_line.styled_segments {
+                        for seg in parsed_line.styled_segments() {
                             if !seg.strike
                                 || seg.source.end <= sub_map.line_start
                                 || seg.source.start >= sub_map.line_end
@@ -2720,15 +2745,15 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     &cell_geoms,
                 );
                 rows.push(PaintRow {
-                    line_index: line_idx,
-                    byte_start: parsed_line.source.start,
-                    byte_end: parsed_line.source.end,
+                    line_index: row_u32(line_idx),
+                    byte_start: row_u32(parsed_line.source.start),
+                    byte_end: row_u32(parsed_line.source.end),
                     origin: point(base_x, cur_y),
                     line_height: row_height,
                     shaped: unshaped.clone(),
                     offset_map: parsed_line.to_offset_map(),
-                    link_hits,
-                    cells: paint_cells,
+                    link_hits: parsed_line.link_hits().clone(),
+                    cells: paint_cells.into_boxed_slice(),
                 });
                 cur_y += row_height;
                 continue;
@@ -2983,15 +3008,15 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         }
                     }
                     rows.push(PaintRow {
-                        line_index: line_idx,
-                        byte_start: src.start,
-                        byte_end: src.end,
+                        line_index: row_u32(line_idx),
+                        byte_start: row_u32(src.start),
+                        byte_end: row_u32(src.end),
                         origin: point(base_x, cur_y),
                         line_height: row_h,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
                         link_hits: empty_links.clone(),
-                        cells: Vec::new(),
+                        cells: Box::default(),
                     });
                     cur_y += row_h;
                     continue;
@@ -3222,15 +3247,15 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         }
                     }
                     rows.push(PaintRow {
-                        line_index: line_idx,
-                        byte_start: src.start,
-                        byte_end: src.end,
+                        line_index: row_u32(line_idx),
+                        byte_start: row_u32(src.start),
+                        byte_end: row_u32(src.end),
                         origin: point(base_x, cur_y),
                         line_height: row_h,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
                         link_hits: empty_links.clone(),
-                        cells: Vec::new(),
+                        cells: Box::default(),
                     });
                     cur_y += row_h;
                     continue;
@@ -3250,7 +3275,9 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             };
 
             let row_wrap_key = row_wrap_cols.min(u32::MAX as usize) as u32;
-            let single_span = [(0usize, parsed_line.display_len())];
+            // End of a single-row line is filled in once the row is known to be
+            // shaped (`display_len` reads the line's inline box).
+            let single_span = [(0usize, 0usize)];
             let wrapped_rows: Option<Rc<LineRows>> = match layout_cache.lines.get(line_idx) {
                 Some(CachedRows::Single { wrap_cols }) if *wrap_cols == row_wrap_key => None,
                 Some(CachedRows::Wrapped(cached)) if cached.wrap_cols == row_wrap_cols => {
@@ -3320,19 +3347,24 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 });
                 if !band.contains(cur_y, row_line_height) && !near_anchor {
                     rows.push(PaintRow {
-                        line_index: line_idx,
-                        byte_start,
-                        byte_end,
+                        line_index: row_u32(line_idx),
+                        byte_start: row_u32(byte_start),
+                        byte_end: row_u32(byte_end),
                         origin: row_origin,
                         line_height: row_line_height,
                         shaped: unshaped.clone(),
                         offset_map: empty_map.clone(),
                         link_hits: empty_links.clone(),
-                        cells: Vec::new(),
+                        cells: Box::default(),
                     });
                     cur_y += row_line_height;
                     continue;
                 }
+                let d_end = if single_row {
+                    parsed_line.display_len()
+                } else {
+                    d_end
+                };
                 let sub_map = if single_row {
                     parsed_line.to_offset_map()
                 } else {
@@ -3566,7 +3598,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 }
 
                 // Strikethrough lines (bright, solid, and slightly extended past the words)
-                for seg in &parsed_line.styled_segments {
+                for seg in parsed_line.styled_segments() {
                     if !seg.strike {
                         continue;
                     }
@@ -3658,15 +3690,15 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 }
 
                 rows.push(PaintRow {
-                    line_index: line_idx,
-                    byte_start: sub_map.line_start,
-                    byte_end: sub_map.line_end,
+                    line_index: row_u32(line_idx),
+                    byte_start: row_u32(sub_map.line_start),
+                    byte_end: row_u32(sub_map.line_end),
                     origin: row_origin,
                     line_height: row_line_height,
                     shaped: Rc::new(shaped),
                     offset_map: sub_map,
-                    link_hits: link_hits.clone(),
-                    cells: Vec::new(),
+                    link_hits: parsed_line.link_hits().clone(),
+                    cells: Box::default(),
                 });
 
                 cur_y += row_line_height;
@@ -3726,6 +3758,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 }
             }
         }
+        trim_row_slack(&mut rows);
         Prepaint {
             rows,
             checkbox_hits,
@@ -4114,7 +4147,7 @@ fn wysiwyg_slice_runs(
     let mut runs: Vec<TextRun> = Vec::new();
     let mut covered = display_slice.start;
 
-    for seg in &parsed_line.styled_segments {
+    for seg in parsed_line.styled_segments() {
         let seg_disp_start = parsed_line.source_to_display(seg.source.start);
         let seg_disp_end = parsed_line.source_to_display(seg.source.end);
         if seg_disp_end <= display_slice.start || seg_disp_start >= display_slice.end {
@@ -4221,7 +4254,7 @@ fn wysiwyg_cell_runs(
     let mut runs: Vec<TextRun> = Vec::new();
     let mut covered = 0usize;
 
-    for seg in &parsed_line.styled_segments {
+    for seg in parsed_line.styled_segments() {
         if seg.source.end <= cell_map.line_start || seg.source.start >= cell_map.line_end {
             continue;
         }
@@ -4775,7 +4808,7 @@ mod tests {
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 22)),
             link_hits: Arc::default(),
-            cells: vec![cell_0],
+            cells: vec![cell_0].into_boxed_slice(),
         };
 
         let next_cell = PaintCell {
@@ -4800,7 +4833,7 @@ mod tests {
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(23, 42)),
             link_hits: Arc::default(),
-            cells: vec![next_cell],
+            cells: vec![next_cell].into_boxed_slice(),
         };
 
         let paint = EditorPaint {
@@ -4899,7 +4932,7 @@ mod tests {
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 20)),
             link_hits: Arc::default(),
-            cells: vec![cell],
+            cells: vec![cell].into_boxed_slice(),
         };
 
         let paint = EditorPaint {
@@ -4973,7 +5006,7 @@ mod tests {
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 20)),
             link_hits: Arc::default(),
-            cells: vec![cell],
+            cells: vec![cell].into_boxed_slice(),
         };
 
         let paint = EditorPaint {
@@ -5070,7 +5103,7 @@ mod tests {
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 35)),
             link_hits: Arc::default(),
-            cells: vec![cell0, cell1],
+            cells: vec![cell0, cell1].into_boxed_slice(),
         };
 
         let paint = EditorPaint {
@@ -5274,7 +5307,7 @@ mod tests {
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::identity(0, 10)),
             link_hits: Arc::default(),
-            cells: vec![empty_cell],
+            cells: vec![empty_cell].into_boxed_slice(),
         };
 
         let paint = EditorPaint {
@@ -5327,7 +5360,7 @@ mod tests {
             shaped: std::rc::Rc::new(ShapedLine::default()),
             offset_map: Arc::new(RowOffsetMap::default()),
             link_hits: Arc::default(),
-            cells: Vec::new(),
+            cells: Box::default(),
         };
         let paint = EditorPaint {
             rows: vec![row],

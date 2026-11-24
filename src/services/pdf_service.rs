@@ -70,18 +70,35 @@ fn extract_with_limits(path: &Path, limits: &Limits) -> Result<(String, usize), 
         ));
     }
     let bytes = fs::read(path).map_err(|err| format!("Failed to read PDF document: {err}"))?;
-    extract_from_bytes(&bytes, limits)
+    let started = Instant::now();
+    let doc = load_document(&bytes, limits)?;
+    // The parsed document is all the page loop needs; the raw file is not
+    // held through it.
+    drop(bytes);
+    extract_pages(&doc, limits, started)
 }
 
+#[cfg(test)]
 fn extract_from_bytes(bytes: &[u8], limits: &Limits) -> Result<(String, usize), String> {
     let started = Instant::now();
+    let doc = load_document(bytes, limits)?;
+    extract_pages(&doc, limits, started)
+}
+
+fn load_document(bytes: &[u8], limits: &Limits) -> Result<lopdf::Document, String> {
     let options = lopdf::LoadOptions {
         max_decompressed_size: Some(limits.stream_bytes),
         ..Default::default()
     };
-    let doc = lopdf::Document::load_mem_with_options(bytes, options)
-        .map_err(|e| format!("Failed to read PDF document: {}", e))?;
+    lopdf::Document::load_mem_with_options(bytes, options)
+        .map_err(|e| format!("Failed to read PDF document: {}", e))
+}
 
+fn extract_pages(
+    doc: &lopdf::Document,
+    limits: &Limits,
+    started: Instant,
+) -> Result<(String, usize), String> {
     let pages = doc.get_pages();
     let total_pages = pages.len();
 

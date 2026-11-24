@@ -62,11 +62,11 @@ fn row_at(
         let row = paint
             .rows
             .iter()
-            .find(|r| r.byte_start == offset)
+            .find(|r| r.byte_start() == offset)
             .unwrap_or_else(|| panic!("no row at {offset}"));
         (
-            row.byte_start,
-            row.byte_end,
+            row.byte_start(),
+            row.byte_end(),
             f32::from(row.origin.y),
             f32::from(row.line_height),
         )
@@ -348,7 +348,7 @@ fn clicking_a_tall_picture_does_not_scroll_it_off_screen() {
         let row = paint
             .rows
             .iter()
-            .find(|r| r.byte_start == pic_start)
+            .find(|r| r.byte_start() == pic_start)
             .expect("tall picture row");
         (view_b, row.origin.y, row.line_height)
     });

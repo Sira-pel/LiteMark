@@ -47,7 +47,7 @@ fn geometry(view: &Entity<LiteMarkApp>, cx: &VisualTestContext) -> Geometry {
             .borrow()
             .rows
             .iter()
-            .map(|r| (r.byte_start, r.byte_end, r.origin, r.line_height))
+            .map(|r| (r.byte_start(), r.byte_end(), r.origin, r.line_height))
             .collect()
     })
 }
@@ -72,7 +72,7 @@ fn row_of(view: &Entity<LiteMarkApp>, cx: &VisualTestContext, offset: usize) -> 
             .borrow()
             .rows
             .iter()
-            .rposition(|r| r.byte_start <= offset)
+            .rposition(|r| r.byte_start() <= offset)
             .expect("row")
     })
 }
@@ -267,7 +267,7 @@ fn caret_row_in_view(
             .rows
             .iter()
             .rev()
-            .find(|r| r.byte_start <= cursor)
+            .find(|r| r.byte_start() <= cursor)
             .expect("row");
         let b = app.editor_scroll.bounds();
         (row.origin.y + row.line_height, b.bottom(), b.top())
