@@ -20,7 +20,7 @@ fn plain_inline_shortcut_matches_pulldown() {
         for base in [0, 7] {
             assert_eq!(
                 parse_inline_syntax(text, base),
-                parse_inline_with_pulldown(text, base),
+                parse_inline_with_pulldown(text, base, false),
                 "{text:?}"
             );
         }
@@ -48,7 +48,7 @@ fn plain_inline_shortcut_matches_pulldown() {
         if is_plain_inline(&text) {
             assert_eq!(
                 parse_inline_syntax(&text, 3),
-                parse_inline_with_pulldown(&text, 3),
+                parse_inline_with_pulldown(&text, 3, false),
                 "{text:?}"
             );
             checked += 1;
@@ -147,6 +147,7 @@ fn test_in_list_or_quote_tracker_exhaustive() {
             seq.push(ParsedLine {
                 line_index: depth,
                 source: 0..0,
+                content_end: 0,
                 kind: kind.clone(),
                 prefix_range: 0..0,
                 hidden_ranges: Vec::new(),
@@ -611,31 +612,23 @@ fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
         (
             "ex50-hr-long",
             "_____________________________________",
-            vec![leaf(
-                "p",
-                "_____________________________________",
-                "_____________________________________",
-            )],
+            vec![leaf("hr", "", "_____________________________________")],
         ),
-        (
-            "ex51-hr-spaced",
-            " - - -",
-            vec![leaf("ul:1", "- -", " - - -")],
-        ),
+        ("ex51-hr-spaced", " - - -", vec![leaf("hr", "", " - - -")]),
         (
             "ex52-hr-stars",
             " **  * ** * ** * **",
-            vec![leaf("p", " **  * ** * ** * **", " **  * ** * ** * **")],
+            vec![leaf("hr", "", " **  * ** * ** * **")],
         ),
         (
             "ex53-hr-spaced-dashes",
             "-     -      -      -",
-            vec![leaf("ul:0", "    -      -      -", "-     -      -      -")],
+            vec![leaf("hr", "", "-     -      -      -")],
         ),
         (
             "ex54-hr-trailing-space",
             "- - - -    ",
-            vec![leaf("ul:0", "- - -    ", "- - - -    ")],
+            vec![leaf("hr", "", "- - - -    ")],
         ),
         (
             "ex55-not-hr",
@@ -676,7 +669,7 @@ fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
             "* Foo\n* * *\n* Bar",
             vec![
                 leaf("ul:0", "Foo", "* Foo"),
-                leaf("ul:0", "* *", "* * *"),
+                leaf("hr", "", "* * *"),
                 leaf("ul:0", "Bar", "* Bar"),
             ],
         ),
@@ -798,9 +791,9 @@ fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
             "ex77-four-stars",
             "****\n## foo\n****",
             vec![
-                leaf("p", "****", "****"),
+                leaf("hr", "", "****"),
                 leaf("h2", "foo", "## foo"),
-                leaf("p", "****", "****"),
+                leaf("hr", "", "****"),
             ],
         ),
         (
@@ -829,7 +822,7 @@ fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
                 leaf("p", "= =", "= ="),
                 leaf("empty", "", ""),
                 leaf("p", "Foo", "Foo"),
-                leaf("p", "--- -", "--- -"),
+                leaf("hr", "", "--- -"),
             ],
         ),
         (
@@ -1070,22 +1063,22 @@ fn leaf_block_cases() -> Vec<(&'static str, &'static str, Vec<LeafExpect>)> {
         (
             "spaced-dashes-after-paragraph",
             "Foo\n- - -",
-            vec![leaf("p", "Foo", "Foo"), leaf("ul:0", "- -", "- - -")],
+            vec![leaf("p", "Foo", "Foo"), leaf("hr", "", "- - -")],
         ),
         (
             "four-dashes-after-paragraph-stay-text",
             "Foo\n ----\nFoo\n   ----      ",
             vec![
                 leaf("p", "Foo", "Foo"),
-                leaf("p", " ----", " ----"),
+                leaf("hr", "", " ----"),
                 leaf("p", "Foo", "Foo"),
-                leaf("p", "   ----      ", "   ----      "),
+                leaf("hr", "", "   ----      "),
             ],
         ),
         (
             "four-dashes-at-top-are-hr",
             "----",
-            vec![leaf("p", "----", "----")],
+            vec![leaf("hr", "", "----")],
         ),
         (
             "table-unchanged",
@@ -1847,8 +1840,8 @@ bare[1] Paragraph display=\"foo\" strike=- link=- map=ok"
 fn extended_rules_inside_html_stay_visible_text() {
     let outside_src = "Foo\n****\n";
     let outside = parse_document(outside_src);
-    assert!(matches!(outside.lines[1].kind, LineKind::Paragraph));
-    assert_eq!(outside.lines[1].display_text, "****");
+    assert!(matches!(outside.lines[1].kind, LineKind::HorizontalRule));
+    assert_eq!(outside.lines[1].display_text, "");
     assert_eq!(&outside_src[outside.lines[1].source.clone()], "****");
     let kept = "- item\n<br>\n---\n";
     let list_rule = parse_document(kept);
@@ -1885,55 +1878,21 @@ fn extended_rules_inside_html_stay_visible_text() {
         ("Para\n<pre>\n****\n", 2, "****"),
         ("<pre>\n   ****\n", 1, "   ****"),
         ("<pre>\r****\r", 1, "****"),
+        ("<pre>\n* * *\n", 1, "* * *"),
+        ("<pre>\n- - -\n", 1, "- - -"),
+        ("<pre>\n*\t*\t*\n", 1, "*\t*\t*"),
     ];
-    for (src, index, display) in cases {
+    for (src, index, raw) in cases {
         let doc = parse_document(src);
         let line = &doc.lines[index];
-        assert_eq!(&src[line.source.clone()], display, "{src:?}");
-        assert_eq!(line.display_text, display, "{src:?}");
+        assert_eq!(&src[line.source.clone()], raw, "{src:?}");
+        assert_eq!(line.display_text, "", "{src:?}");
         assert!(
-            matches!(line.kind, LineKind::Paragraph),
+            matches!(line.kind, LineKind::HorizontalRule),
             "{src:?} kind {:?}",
             line.kind
         );
     }
-
-    let stars = "<pre>\n* * *\n";
-    let star_doc = parse_document(stars);
-    assert_eq!(&stars[star_doc.lines[1].source.clone()], "* * *");
-    assert_eq!(star_doc.lines[1].display_text, "* *");
-    assert!(matches!(
-        star_doc.lines[1].kind,
-        LineKind::ListItem {
-            ordered: false,
-            indent_cols: 0,
-            ..
-        }
-    ));
-    let dashes = "<pre>\n- - -\n";
-    let dash_doc = parse_document(dashes);
-    assert_eq!(&dashes[dash_doc.lines[1].source.clone()], "- - -");
-    assert_eq!(dash_doc.lines[1].display_text, "- -");
-    assert!(matches!(
-        dash_doc.lines[1].kind,
-        LineKind::ListItem {
-            ordered: false,
-            indent_cols: 0,
-            ..
-        }
-    ));
-    let tabs = "<pre>\n*\t*\t*\n";
-    let tab_doc = parse_document(tabs);
-    assert_eq!(&tabs[tab_doc.lines[1].source.clone()], "*\t*\t*");
-    assert_eq!(tab_doc.lines[1].display_text, "*\t*");
-    assert!(matches!(
-        tab_doc.lines[1].kind,
-        LineKind::ListItem {
-            ordered: false,
-            indent_cols: 0,
-            ..
-        }
-    ));
 }
 
 /// R6-9. Four spaces before `---` is indented code once a bare CR is a
@@ -2047,16 +2006,15 @@ fn tab_rule_inside_an_open_list_is_a_rule() {
     }
 }
 
-/// BASE `1d03313` display of `# foo #\t` is `foo #\t` (the tab stays, and
-/// the hash is text). `#\t#` stays a heading whose display is `#`.
+/// CommonMark allows tabs before and after a closing ATX hash run.
 #[test]
 fn tab_after_a_closing_hash_stays_in_the_heading_text() {
     let doc = parse_document("# foo #\t");
     assert!(matches!(doc.lines[0].kind, LineKind::Heading { level: 1 }));
-    assert_eq!(doc.lines[0].display_text, "foo #\t");
+    assert_eq!(doc.lines[0].display_text, "foo");
 
     let kept = parse_document("# foo\t#");
-    assert_eq!(kept.lines[0].display_text, "foo\t#");
+    assert_eq!(kept.lines[0].display_text, "foo");
 
     let trailed = parse_document("# foo\t");
     assert_eq!(trailed.lines[0].display_text, "foo\t");
@@ -2072,7 +2030,7 @@ fn tab_after_a_closing_hash_stays_in_the_heading_text() {
         tab_hash.lines[0].kind,
         LineKind::Heading { level: 1 }
     ));
-    assert_eq!(tab_hash.lines[0].display_text, "#");
+    assert_eq!(tab_hash.lines[0].display_text, "");
 }
 fn shape_of(markdown: &str) -> String {
     let doc = parse_document(markdown);
@@ -2175,7 +2133,7 @@ fn gfm_table_columns_follow_the_delimiter() {
         &[
             r#"line[0] TableRow header=true align=[none] cells=["f\\|oo "] display="| f\\|oo  |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
-            r#"line[2] TableRow header=false align=[none] cells=["b `\\|` az"] display="| b `\\|` az |" code=["\\|"]"#,
+            r#"line[2] TableRow header=false align=[none] cells=["b `\\|` az"] display="| b `\\|` az |" code=["|"]"#,
             r#"line[3] TableRow header=false align=[none] cells=["b **\\|** im"] display="| b **\\|** im |" code=[]"#,
         ],
     );
@@ -2389,7 +2347,7 @@ fn table_membership_kinds_and_cells() {
         &[
             r#"line[0] TableRow header=true align=[none] cells=["f\\|oo "] display="| f\\|oo  |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
-            r#"line[2] TableRow header=false align=[none] cells=["b `\\|` az"] display="| b `\\|` az |" code=["\\|"]"#,
+            r#"line[2] TableRow header=false align=[none] cells=["b `\\|` az"] display="| b `\\|` az |" code=["|"]"#,
             r#"line[3] TableRow header=false align=[none] cells=["b **\\|** im"] display="| b **\\|** im |" code=[]"#,
         ],
         false,
@@ -2772,7 +2730,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] Paragraph display="----" code=[]"#,
+            r#"line[3] HorizontalRule display="" code=[]"#,
         ],
         false,
     );
@@ -2783,7 +2741,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] Paragraph display="****" code=[]"#,
+            r#"line[3] HorizontalRule display="" code=[]"#,
         ],
         false,
     );
@@ -2794,7 +2752,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] Paragraph display="____" code=[]"#,
+            r#"line[3] HorizontalRule display="" code=[]"#,
         ],
         false,
     );
@@ -2805,7 +2763,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] ListItem display="- -" code=[]"#,
+            r#"line[3] HorizontalRule display="" code=[]"#,
         ],
         false,
     );
@@ -2816,7 +2774,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] ListItem display="* *" code=[]"#,
+            r#"line[3] HorizontalRule display="" code=[]"#,
         ],
         false,
     );
@@ -2827,7 +2785,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] Paragraph display="** ** **" code=[]"#,
+            r#"line[3] HorizontalRule display="" code=[]"#,
         ],
         false,
     );
@@ -2838,7 +2796,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] Paragraph display="   ----" code=[]"#,
+            r#"line[3] HorizontalRule display="" code=[]"#,
         ],
         false,
     );
@@ -3106,7 +3064,7 @@ fn table_membership_kinds_and_cells() {
         &[
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
-            r#"line[2] TableRow header=false align=[none,none] cells=["c `\\|` d", "e"] display="| c `\\|` d | e |" code=["\\|"]"#,
+            r#"line[2] TableRow header=false align=[none,none] cells=["c `\\|` d", "e"] display="| c `\\|` d | e |" code=["|"]"#,
         ],
         false,
     );
@@ -3258,7 +3216,7 @@ fn table_membership_kinds_and_cells() {
             r#"line[0] TableRow header=true align=[none,none] cells=["a", "b"] display="| a | b |" code=[]"#,
             r#"line[1] TableDelimiter display="" code=[]"#,
             r#"line[2] TableRow header=false align=[none,none] cells=["c", "d"] display="| c | d |" code=[]"#,
-            r#"line[3] Heading level=1 display="heading" code=[]"#,
+            r#"line[3] Paragraph display="\t# heading" code=[]"#,
         ],
         false,
     );
@@ -3682,4 +3640,187 @@ fn blockquote_indent_counts_from_the_list_item_content_column() {
     assert_eq!(kind_of("- a\n  - b\n      > deep", 2), LineKind::Blockquote);
     // Capped at 3 columns at the margin.
     assert_eq!(kind_of("para\n\n    > code", 2), LineKind::CodeLine);
+}
+
+#[test]
+fn link_stack_advances_across_nested_closers_and_linked_images() {
+    let bold_link = "[**bold**](https://example.com)";
+    let doc = parse_document(bold_link);
+    let pair = doc.lines[0]
+        .inline_pairs
+        .iter()
+        .find(|p| p.kind == InlineTagKind::Link)
+        .expect("link pair");
+    assert_eq!(&bold_link[pair.open_delim.clone()], "[");
+    assert_eq!(&bold_link[pair.inner.clone()], "bold");
+    assert_eq!(
+        &bold_link[pair.close_delim.clone()],
+        "](https://example.com)"
+    );
+
+    let u_link = "[<u>under</u>](https://example.com)";
+    let u_doc = parse_document(u_link);
+    let u_pair = u_doc.lines[0]
+        .inline_pairs
+        .iter()
+        .find(|p| p.kind == InlineTagKind::Link)
+        .expect("underline link pair");
+    assert_eq!(&u_link[u_pair.inner.clone()], "under");
+    assert_eq!(
+        &u_link[u_pair.close_delim.clone()],
+        "](https://example.com)"
+    );
+
+    let img_link = "[![alt](img.png)](https://example.com)";
+    let img_doc = parse_document(img_link);
+    let img_pair = img_doc.lines[0]
+        .inline_pairs
+        .iter()
+        .find(|p| p.kind == InlineTagKind::Link)
+        .expect("linked image pair");
+    assert_eq!(&img_link[img_pair.open_delim.clone()], "[");
+    assert_eq!(&img_link[img_pair.inner.clone()], "![alt](img.png)");
+    assert_eq!(
+        &img_link[img_pair.close_delim.clone()],
+        "](https://example.com)"
+    );
+    assert!(img_doc.lines[0]
+        .styled_segments
+        .iter()
+        .any(|s| s.link_url.as_deref() == Some("https://example.com")));
+}
+
+#[test]
+fn prepare_for_pulldown_preserves_link_destinations() {
+    let md = "[link](https://example.com/foo_*bar) and [a*`b`](https://example.com/x_*y)";
+    let doc = parse_document(md);
+    let mut urls: Vec<&str> = doc.lines[0]
+        .link_hits
+        .iter()
+        .map(|(_, url)| url.as_str())
+        .collect();
+    urls.dedup();
+    assert_eq!(
+        urls,
+        vec!["https://example.com/foo_*bar", "https://example.com/x_*y"]
+    );
+}
+
+#[test]
+fn synthesize_flanking_pairs_respects_html_comments_images_and_existing_pairs() {
+    let comment = parse_document("<!-- *not italic* -->");
+    assert!(comment.lines[0].inline_pairs.is_empty());
+    assert!(comment.lines[0]
+        .styled_segments
+        .iter()
+        .all(|s| !s.italic && !s.bold));
+
+    let tag = parse_document(r#"<span data-x="*a*">hi</span>"#);
+    assert!(tag.lines[0].inline_pairs.is_empty());
+    assert!(tag.lines[0].styled_segments.iter().all(|s| !s.italic));
+
+    let inline_img = parse_document("foo ![alt](https://example.com/*a*_b*c.png) bar");
+    assert!(inline_img.lines[0].inline_pairs.is_empty());
+    assert!(inline_img.lines[0]
+        .styled_segments
+        .iter()
+        .all(|s| !s.italic && !s.bold));
+
+    let crossing = parse_document("**a *b** c*");
+    let pairs = &crossing.lines[0].inline_pairs;
+    for (i, a) in pairs.iter().enumerate() {
+        for b in &pairs[i + 1..] {
+            let disjoint =
+                a.close_delim.end <= b.open_delim.start || a.open_delim.start >= b.close_delim.end;
+            let a_in_b = a.open_delim.start >= b.inner.start && a.close_delim.end <= b.inner.end;
+            let b_in_a = b.open_delim.start >= a.inner.start && b.close_delim.end <= a.inner.end;
+            assert!(
+                disjoint || a_in_b || b_in_a,
+                "crossing pairs: {a:?} vs {b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unclosed_underline_tag_does_not_underline_trailing_text() {
+    let unclosed = parse_document("hello <u>world");
+    assert!(unclosed.lines[0]
+        .styled_segments
+        .iter()
+        .all(|s| !s.underline));
+
+    let mixed_src = "<u>closed</u> and <u>unclosed";
+    let mixed = parse_document(mixed_src);
+    let closed_seg = mixed.lines[0]
+        .styled_segments
+        .iter()
+        .find(|s| &mixed_src[s.source.clone()] == "closed")
+        .expect("closed segment");
+    let unclosed_seg = mixed.lines[0]
+        .styled_segments
+        .iter()
+        .find(|s| &mixed_src[s.source.clone()] == "unclosed")
+        .expect("unclosed segment");
+    assert!(closed_seg.underline);
+    assert!(!unclosed_seg.underline);
+}
+
+#[test]
+fn table_cells_do_not_trigger_block_constructs() {
+    let md = "| ```rust | <!-- c --> | # h | - list |\n| --- | --- | --- | --- |";
+    let doc = parse_document(md);
+    let LineKind::TableRow { ref body, .. } = doc.lines[0].kind else {
+        panic!("expected TableRow");
+    };
+    let texts: Vec<&str> = body.cells.iter().map(|r| &md[r.clone()]).collect();
+    assert_eq!(texts, vec!["```rust", "<!-- c -->", "# h", "- list"]);
+    assert!(doc.lines[0].hidden_ranges.is_empty());
+}
+
+#[test]
+fn atx_heading_rejects_tab_and_nbsp_indent() {
+    let tab_doc = parse_document("\t# heading");
+    assert!(matches!(tab_doc.lines[0].kind, LineKind::CodeLine));
+
+    let nbsp_doc = parse_document("\u{00A0}# heading");
+    assert!(matches!(nbsp_doc.lines[0].kind, LineKind::Paragraph));
+}
+
+#[test]
+fn slice_bounds_and_slice_display_clamp_expanded_tabs() {
+    let (_disp, map) = RowOffsetMap::expand_tabs("\tabc", 0, 4).expect("tab map");
+    let (s0, e0) = map.slice_bounds(0..2);
+    assert!(s0 <= e0 && e0 <= 1);
+    let sub0 = map.slice_display(0..2);
+    assert_eq!((sub0.line_start, sub0.line_end), (s0, e0));
+    let (s1, e1) = map.slice_bounds(2..7);
+    assert!(s1 <= e1 && e1 <= 4);
+    let sub1 = map.slice_display(2..7);
+    assert_eq!((sub1.line_start, sub1.line_end), (s1, e1));
+}
+
+#[test]
+fn prepare_for_pulldown_handles_many_unclosed_links_and_backticks() {
+    let mut line = String::new();
+    for _ in 0..2000 {
+        line.push_str("]( ");
+    }
+    for _ in 0..500 {
+        line.push_str("` `` ``` ");
+    }
+    line.push_str("*ok*");
+    let doc = parse_document(&line);
+    assert!(doc.lines[0].styled_segments.iter().any(|s| s.italic));
+    assert_eq!(
+        prepare_for_pulldown(&"]([a](foo_*bar)".repeat(500)).as_ref(),
+        &"]([a](foo_*bar)".repeat(500)
+    );
+    let quoted_title = r#"]( [a](https://example.com "ti)a*`b`*c")"#;
+    assert_eq!(prepare_for_pulldown(quoted_title).as_ref(), quoted_title);
+    let many_unclosed_with_closer = format!("{} )*ok*", "]( ".repeat(2000));
+    assert_eq!(
+        prepare_for_pulldown(&many_unclosed_with_closer).as_ref(),
+        many_unclosed_with_closer
+    );
 }

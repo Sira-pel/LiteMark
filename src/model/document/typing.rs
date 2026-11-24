@@ -12,6 +12,53 @@ impl DocumentTab {
         if self.is_read_only() {
             return;
         }
+        if mode == ViewMode::Wysiwyg && self.file_type.supports_markdown_features() {
+            if let Some(target_col) = self.pending_table_col.take() {
+                if range.is_empty() && text != "\n" {
+                    let row_start = {
+                        let parsed = self.parsed();
+                        parsed
+                            .line_at_offset(range.start)
+                            .filter(|l| {
+                                matches!(l.kind, LineKind::TableRow { .. })
+                                    && range.start == l.source.end
+                            })
+                            .map(|l| l.source.start)
+                    };
+                    if let Some(line_start) = row_start {
+                        let pf = self.pending_formats;
+                        let formatted;
+                        let payload =
+                            if self.has_pending_inline_formats() && !text.trim().is_empty() {
+                                let flags = FormatFlags {
+                                    bold: pf.bold,
+                                    italic: pf.italic,
+                                    underline: pf.underline,
+                                    strike: pf.strike,
+                                    code: pf.code,
+                                };
+                                let (open, close) = wrap_delimiters(&flags);
+                                formatted = format!("{open}{text}{close}");
+                                formatted.as_str()
+                            } else {
+                                text
+                            };
+                        if self
+                            .insert_into_padded_table_cell(line_start, target_col, payload)
+                            .is_some()
+                        {
+                            // Only a successful insert uses up the pending formats.
+                            if payload.len() != text.len() {
+                                self.pending_formats = ActiveFormats::default();
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        } else {
+            self.pending_table_col = None;
+        }
         if mode == ViewMode::Wysiwyg
             && self.file_type.supports_markdown_features()
             && self.picture_insert(range.clone(), text)

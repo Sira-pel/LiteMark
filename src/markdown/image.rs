@@ -52,11 +52,23 @@ fn parse_image_at(text: &str) -> Option<(ImageLine, usize)> {
     // Destination: `<...>` (may hold spaces) or a run without whitespace
     // whose parentheses balance.
     let (target, after) = if let Some(inner) = after.strip_prefix('<') {
-        let end = inner.find(['>', '\n'])?;
-        if inner.as_bytes()[end] != b'>' {
-            return None;
+        let mut end = None;
+        let mut chars = inner.char_indices();
+        while let Some((at, ch)) = chars.next() {
+            match ch {
+                '\\' => {
+                    chars.next();
+                }
+                '<' | '\n' | '\r' => return None,
+                '>' => {
+                    end = Some(at);
+                    break;
+                }
+                _ => {}
+            }
         }
-        (inner[..end].to_string(), &inner[end + 1..])
+        let end = end?;
+        (unescape(&inner[..end]), &inner[end + 1..])
     } else {
         let mut depth = 0usize;
         let mut end = after.len();
@@ -726,5 +738,13 @@ mod tests {
                 "{target:?}"
             );
         }
+    }
+
+    #[test]
+    fn parse_image_line_rejects_unescaped_angle_bracket_inside_destination() {
+        assert_eq!(parse_image_line("![alt](<foo<bar>.png)"), None);
+        let escaped =
+            parse_image_line("![alt](<foo\\<bar\\>.png>)").expect("escaped angle brackets");
+        assert_eq!(escaped.target, "foo<bar>.png");
     }
 }

@@ -556,6 +556,7 @@ pub(super) fn parse_line_block_prefix(
     (indent, None, indent)
 }
 
+#[cfg(test)]
 pub fn block_prefix_len(line: &str) -> usize {
     block_prefix_in(line, 0)
 }
@@ -572,31 +573,22 @@ pub fn block_prefix_in_parsed(parsed: &ParsedDocument, content: &str, line_start
     block_prefix_with(content, line_start, || std::borrow::Cow::Borrowed(parsed))
 }
 
-/// `parsed` is only called when the line isn't a heading, so a heading line
-/// never pays for a parse.
 fn block_prefix_with<'a>(
-    content: &str,
+    _content: &str,
     line_start: usize,
     parsed: impl FnOnce() -> std::borrow::Cow<'a, ParsedDocument>,
 ) -> usize {
-    let line_end_pos = crate::model::text_ops::line_end(content, line_start);
-    let line = &content[line_start..line_end_pos];
-    let trimmed_start = line.trim_start();
-    let indent_len = line.len() - trimmed_start.len();
-
-    if indent_len <= 3 {
-        for prefix in ["###### ", "##### ", "#### ", "### ", "## ", "# "] {
-            if trimmed_start.starts_with(prefix) {
-                return indent_len + prefix.len();
-            }
-        }
-    }
-
     let parsed = parsed();
-    if let Some(item) = accepted_list_marker_in(&parsed, content, line_start) {
-        return item.prefix_end();
-    }
-    blockquote_prefix_in(&parsed, line_start).unwrap_or(0)
+    parsed
+        .line_at_offset(line_start)
+        .filter(|l| {
+            l.source.start == line_start
+                && matches!(
+                    l.kind,
+                    LineKind::Heading { .. } | LineKind::ListItem { .. } | LineKind::Blockquote
+                )
+        })
+        .map_or(0, |l| l.prefix_range.end - l.source.start)
 }
 
 /// Prefix length of the blockquote line starting at `line_start`, as the

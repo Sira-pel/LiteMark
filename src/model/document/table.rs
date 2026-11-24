@@ -369,13 +369,127 @@ impl DocumentTab {
         let _ = self.apply_table_op(TableOp::SetAlign(align));
     }
 
+    /// Ensures a short table row at `line_start` has `|` separators through
+    /// `target_col` and returns the materialized range for `target_col`.
+    pub fn materialize_table_row_cell(
+        &mut self,
+        line_start: usize,
+        target_col: usize,
+    ) -> Option<Range<usize>> {
+        let (line_end, cols, target) = {
+            let parsed = self.parsed();
+            let pline = parsed.line_at_offset(line_start)?;
+            let LineKind::TableRow { ref body, .. } = pline.kind else {
+                return None;
+            };
+            let cols = body.alignments.len();
+            if cols == 0 {
+                return None;
+            }
+            (pline.source.end, cols, target_col.min(cols - 1))
+        };
+        let line_str = self.content.get(line_start..line_end)?;
+        let real_ranges = crate::markdown::parser::table_cell_ranges(line_str);
+        if target < real_ranges.len() {
+            let parsed = self.parsed();
+            if let Some(pline) = parsed.line_at_offset(line_start) {
+                if let LineKind::TableRow { ref body, .. } = pline.kind {
+                    return body.cells.get(target).cloned();
+                }
+            }
+            return None;
+        }
+        let has_trailing_pipe = real_ranges
+            .last()
+            .is_some_and(|last| last.end < line_str.trim_end().len());
+        let missing = cols.saturating_sub(real_ranges.len());
+        let mut suffix = String::new();
+        if !has_trailing_pipe {
+            suffix.push_str(if line_str.ends_with(' ') { "|" } else { " |" });
+        }
+        for _ in 0..missing {
+            suffix.push_str("  |");
+        }
+        self.edit(line_end..line_end, &suffix);
+        let parsed = self.parsed();
+        let pline = parsed.line_at_offset(line_start)?;
+        if let LineKind::TableRow { ref body, .. } = pline.kind {
+            body.cells.get(target).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Inserts `text` into a padded (missing `|` separator) cell `target_col`
+    /// of the short table row at `line_start` as a single undoable edit,
+    /// returning the byte range of the inserted `text` (or `None` if `target_col`
+    /// already exists in the row).
+    pub fn insert_into_padded_table_cell(
+        &mut self,
+        line_start: usize,
+        target_col: usize,
+        text: &str,
+    ) -> Option<Range<usize>> {
+        let (line_end, cols, target) = {
+            let parsed = self.parsed();
+            let pline = parsed.line_at_offset(line_start)?;
+            let LineKind::TableRow { ref body, .. } = pline.kind else {
+                return None;
+            };
+            let cols = body.alignments.len();
+            if cols == 0 {
+                return None;
+            }
+            (pline.source.end, cols, target_col.min(cols - 1))
+        };
+        let line_str = self.content.get(line_start..line_end)?;
+        let real_ranges = crate::markdown::parser::table_cell_ranges(line_str);
+        if target < real_ranges.len() {
+            return None;
+        }
+        let has_trailing_pipe = real_ranges
+            .last()
+            .is_some_and(|last| last.end < line_str.trim_end().len());
+        let mut combined = String::new();
+        if !has_trailing_pipe {
+            combined.push_str(if line_str.ends_with(' ') { "|" } else { " |" });
+        }
+        let mut text_rel: Option<Range<usize>> = None;
+        for col in real_ranges.len()..cols {
+            if col == target {
+                combined.push(' ');
+                let start = combined.len();
+                combined.push_str(text);
+                let end = combined.len();
+                text_rel = Some(start..end);
+                combined.push_str(" |");
+            } else {
+                combined.push_str("  |");
+            }
+        }
+        let rel = text_rel?;
+        let text_range = (line_end + rel.start)..(line_end + rel.end);
+        self.next_redo_caret = Some(text_range.end);
+        self.edit(line_end..line_end, &combined);
+        self.caret
+            .move_to(floor_boundary(&self.content, text_range.end));
+        self.refresh_cursor();
+        Some(text_range)
+    }
+
     pub fn tab_table_cell(&mut self, backwards: bool) -> bool {
         if !self.file_type.supports_markdown_features() {
             return false;
         }
         let cursor = self.cursor_offset();
         let parsed = self.parsed();
-        let mut all_cells: Vec<Range<usize>> = Vec::new();
+        struct TabCell {
+            range: Range<usize>,
+            line_start: usize,
+            col_idx: usize,
+            padded: bool,
+        }
+        let mut all_cells: Vec<TabCell> = Vec::new();
         let mut in_table = false;
         let mut table_end = 0usize;
         let mut num_cols = 2usize;
@@ -383,6 +497,7 @@ impl DocumentTab {
             if let LineKind::TableRow { ref body, .. } = line.kind {
                 let TableRowBody {
                     cells,
+                    raw_cells,
                     table_source,
                     ..
                 } = &**body;
@@ -390,7 +505,20 @@ impl DocumentTab {
                     in_table = true;
                     table_end = table_source.end;
                     num_cols = cells.len().max(num_cols);
-                    all_cells.extend(cells.iter().cloned());
+                    for (col_idx, (c, rc)) in cells.iter().zip(raw_cells.iter()).enumerate() {
+                        let padded = col_idx > 0
+                            && rc.is_empty()
+                            && rc.start == line.source.end
+                            && raw_cells
+                                .get(col_idx - 1)
+                                .is_some_and(|prev| prev.end == rc.start);
+                        all_cells.push(TabCell {
+                            range: c.clone(),
+                            line_start: line.source.start,
+                            col_idx,
+                            padded,
+                        });
+                    }
                 }
             }
         }
@@ -399,11 +527,16 @@ impl DocumentTab {
         }
         let cur_idx = all_cells
             .iter()
-            .position(|c| cursor >= c.start && cursor <= c.end)
+            .position(|c| !c.padded && cursor >= c.range.start && cursor <= c.range.end)
+            .or_else(|| {
+                all_cells
+                    .iter()
+                    .position(|c| cursor >= c.range.start && cursor <= c.range.end)
+            })
             .unwrap_or_else(|| {
                 all_cells
                     .iter()
-                    .rposition(|c| c.start <= cursor)
+                    .rposition(|c| c.range.start <= cursor)
                     .unwrap_or(0)
             });
         let next_idx = if backwards {
@@ -426,7 +559,17 @@ impl DocumentTab {
             }
             cur_idx + 1
         };
-        let target = all_cells[next_idx].clone();
+        let next = &all_cells[next_idx];
+        let target = if next.padded {
+            let line_start = next.line_start;
+            let col_idx = next.col_idx;
+            drop(all_cells);
+            drop(parsed);
+            self.materialize_table_row_cell(line_start, col_idx)
+                .unwrap_or(cursor..cursor)
+        } else {
+            next.range.clone()
+        };
         self.caret.range = target;
         self.caret.reversed = false;
         self.refresh_cursor();

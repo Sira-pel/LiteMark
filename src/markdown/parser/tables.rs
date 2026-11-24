@@ -83,7 +83,7 @@ pub fn unescaped_pipe_offsets(line: &str) -> Vec<usize> {
     offsets
 }
 
-pub(super) fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
     let bytes = line.as_bytes();
     let code = code_span_ranges(line);
     let mut start = 0;

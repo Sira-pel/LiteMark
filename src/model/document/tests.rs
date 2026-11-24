@@ -3382,21 +3382,11 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     doc.place(end, false);
     doc.smart_newline(false);
-    assert_eq!(doc.content, "- - -\n- \nnext");
+    assert_eq!(doc.content, "- - -\n\nnext");
     let parsed = doc.parsed();
-    assert!(matches!(
-        parsed.lines[0].kind,
-        LineKind::ListItem {
-            ordered: false,
-            indent_cols: 0,
-            ..
-        }
-    ));
-    assert_eq!(parsed.lines[0].display_text, "- -");
-    assert!(matches!(
-        parsed.lines[1].kind,
-        LineKind::ListItem { ordered: false, .. }
-    ));
+    assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
+    assert_eq!(parsed.lines[0].display_text, "");
+    assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
     assert_eq!(parsed.lines[1].display_text, "");
     assert_eq!(parsed.lines[2].display_text, "next");
 
@@ -3405,17 +3395,11 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     doc.place(end, false);
     doc.smart_newline(false);
-    assert_eq!(doc.content, "* * *\n* \nnext");
+    assert_eq!(doc.content, "* * *\n\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "* *");
-    assert!(matches!(
-        parsed.lines[0].kind,
-        LineKind::ListItem {
-            ordered: false,
-            indent_cols: 0,
-            ..
-        }
-    ));
+    assert_eq!(parsed.lines[0].display_text, "");
+    assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
+    assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
     assert_eq!(parsed.lines[1].display_text, "");
     assert_eq!(parsed.lines[2].display_text, "next");
 
@@ -3424,17 +3408,11 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     doc.place(end, false);
     doc.smart_newline(false);
-    assert_eq!(doc.content, "-     -      -      -\n- \nnext");
+    assert_eq!(doc.content, "-     -      -      -\n\nnext");
     let parsed = doc.parsed();
-    assert_eq!(parsed.lines[0].display_text, "    -      -      -");
-    assert!(matches!(
-        parsed.lines[0].kind,
-        LineKind::ListItem {
-            ordered: false,
-            indent_cols: 0,
-            ..
-        }
-    ));
+    assert_eq!(parsed.lines[0].display_text, "");
+    assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
+    assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
     assert_eq!(parsed.lines[1].display_text, "");
     assert_eq!(parsed.lines[2].display_text, "next");
 
@@ -3443,12 +3421,12 @@ fn enter_on_spaced_rules_inserts_a_plain_break() {
     let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
     doc.place(end, false);
     doc.smart_newline(false);
-    assert_eq!(doc.content, " **  * ** * ** * **\n \nnext");
+    assert_eq!(doc.content, " **  * ** * ** * **\n\nnext");
     let parsed = doc.parsed();
-    assert!(matches!(parsed.lines[0].kind, LineKind::Paragraph));
-    assert_eq!(parsed.lines[0].display_text, " **  * ** * ** * **");
+    assert!(matches!(parsed.lines[0].kind, LineKind::HorizontalRule));
+    assert_eq!(parsed.lines[0].display_text, "");
     assert!(matches!(parsed.lines[1].kind, LineKind::Empty));
-    assert_eq!(parsed.lines[1].display_text, " ");
+    assert_eq!(parsed.lines[1].display_text, "");
     assert_eq!(parsed.lines[2].display_text, "next");
 }
 
@@ -4042,8 +4020,8 @@ fn delete_forward(doc: &mut DocumentTab) {
     doc.delete_forward_in_mode(ViewMode::Wysiwyg);
 }
 
-/// BASE `1d03313` `move_end(true)` then Delete. The selection runs to the
-/// source end, and on CRLF through the CR up to the LF.
+/// `move_end(true)` then Delete. The selection runs to the
+/// source end of the line, preserving CRLF line endings.
 #[test]
 fn shift_end_extend_deletes_through_the_closing_hash() {
     let cases = [
@@ -4053,7 +4031,7 @@ fn shift_end_extend_deletes_through_the_closing_hash() {
         ("## bar ##", ""),
         ("### ###", ""),
         ("# foo #   ", ""),
-        ("# foo #\r\nnext", "\nnext"),
+        ("# foo #\r\nnext", "\r\nnext"),
         ("# café #", ""),
         ("# 😀 #", ""),
     ];
@@ -6863,4 +6841,82 @@ fn anchored_line_and_utf16_lookups_stay_exact_through_edits() {
             );
         }
     }
+}
+
+#[test]
+fn visible_line_end_allows_caret_past_trailing_formatting_on_headings() {
+    for src in ["# **bold**", "# [link](https://example.com)"] {
+        let mut doc = DocumentTab::new("t".into(), "t.md".into(), src.into(), None, None);
+        doc.move_end(false);
+        assert_eq!(doc.cursor_offset(), src.len(), "{src}");
+        doc.set_view_mode(ViewMode::Wysiwyg);
+        assert_eq!(doc.cursor_offset(), src.len(), "{src}");
+    }
+
+    let closed = "# **bold** ##";
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), closed.into(), None, None);
+    doc.move_end(false);
+    assert_eq!(doc.cursor_offset(), "# **bold**".len());
+    doc.set_view_mode(ViewMode::Wysiwyg);
+    assert_eq!(doc.cursor_offset(), "# **bold**".len());
+}
+
+#[test]
+fn crlf_and_cr_navigation_across_tables_and_headings() {
+    let crlf = "before\r\n| a | b |\r\n| --- | --- |\r\n| c | d |\r\nafter";
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), crlf.into(), None, None);
+    let cell_a = crlf.find('a').unwrap();
+    doc.place(cell_a, false);
+    doc.move_left_in_mode(true, ViewMode::Wysiwyg);
+    assert_eq!(doc.selection_range().start, "before".len());
+
+    doc.place(cell_a, false);
+    doc.move_left_in_mode(false, ViewMode::Wysiwyg);
+    assert_eq!(doc.cursor_offset(), "before".len());
+
+    let cell_d_end = crlf.find('d').unwrap() + 1;
+    doc.place(cell_d_end, false);
+    doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+    assert_eq!(doc.cursor_offset(), crlf.find("after").unwrap());
+
+    let bare_cr = "# foo\rbar";
+    let mut cr_doc = DocumentTab::new("t".into(), "t.md".into(), bare_cr.into(), None, None);
+    cr_doc.place(2, false);
+    cr_doc.move_end(true);
+    assert_eq!(cr_doc.selection_range(), 2..5);
+}
+
+#[test]
+fn short_table_row_navigation_and_materialization() {
+    let md = "| a | b | c |\n| --- | --- | --- |\n| x";
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), md.into(), None, None);
+    doc.place(md.len(), false);
+    doc.move_right_in_mode(false, ViewMode::Wysiwyg);
+    assert_eq!(doc.cursor_offset(), md.len());
+
+    let cell_x = md.find('x').unwrap();
+    doc.place(cell_x, false);
+    assert!(doc.tab_table_cell(false));
+    assert_eq!(
+        doc.content,
+        "| a | b | c |\n| --- | --- | --- |\n| x |  |  |"
+    );
+    let parsed = doc.parsed();
+    let LineKind::TableRow { ref body, .. } = parsed.lines[2].kind else {
+        panic!("expected TableRow");
+    };
+    assert_eq!(body.cells.len(), 3);
+    assert_eq!(doc.selection_range(), body.cells[1]);
+}
+
+#[test]
+fn typing_into_missing_table_cell_groups_into_one_undo() {
+    let md = "| a | b |\n| --- | --- |\n| 1 |";
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), md.into(), None, None);
+    doc.place(md.len(), false);
+    doc.pending_table_col = Some(1);
+    doc.insert_text_in_mode(md.len()..md.len(), "x", ViewMode::Wysiwyg);
+    assert_eq!(doc.content, "| a | b |\n| --- | --- |\n| 1 | x |");
+    assert!(doc.undo());
+    assert_eq!(doc.content, md);
 }

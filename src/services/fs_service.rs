@@ -2086,6 +2086,7 @@ mod tests {
         #[cfg(unix)]
         perms.set_mode(0o600);
         #[cfg(not(unix))]
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         fs::set_permissions(&from, perms.clone()).unwrap();
 

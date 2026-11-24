@@ -463,10 +463,12 @@ impl LiteMarkApp {
                 self.table_drag = None;
                 self.clear_table_drag_press();
                 if let Some(tab) = self.active_tab_mut() {
-                    if !tab.is_read_only() && range.end <= tab.content.len() {
-                        let current = &tab.content[range.clone()];
-                        let replacement = if current == "[ ]" { "[x]" } else { "[ ]" };
-                        tab.edit(range, replacement);
+                    if !tab.is_read_only() {
+                        if let Some(current) = tab.content.get(range.clone()) {
+                            let replacement =
+                                crate::markdown::parser::checkbox_click_replacement(current);
+                            tab.edit(range, replacement);
+                        }
                     }
                 }
                 self.refresh_find();
@@ -476,11 +478,19 @@ impl LiteMarkApp {
             }
         }
 
-        let (offset, clicked_link) = {
+        let (offset, clicked_link, padded_col) = {
             let paint = self.editor_paint.borrow();
             let off = index_for_position(&paint, event.position);
             let link = off.and_then(|o| link_for_offset(&paint, o));
-            (off, link)
+            let col = if self.effective_view_mode() == ViewMode::Wysiwyg
+                && !event.modifiers.shift
+                && event.click_count == 1
+            {
+                padded_table_cell_col(&paint, event.position)
+            } else {
+                None
+            };
+            (off, link, col)
         };
         let Some(offset) = offset else {
             return;
@@ -554,6 +564,9 @@ impl LiteMarkApp {
                 tab.select_word();
             } else {
                 tab.place(offset, event.modifiers.shift);
+                if !event.modifiers.shift {
+                    tab.pending_table_col = padded_col;
+                }
             }
         }
         self.selecting = event.click_count <= 1 && !on_picture;

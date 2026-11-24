@@ -1,6 +1,75 @@
 //! Platform text input (IME) bridge for the editor.
 
 use super::*;
+use crate::markdown::{InlineTagKind, LineKind};
+
+fn ordered_range(range: Range<usize>) -> Range<usize> {
+    if range.start <= range.end {
+        range
+    } else {
+        range.end..range.start
+    }
+}
+
+fn line_has_block_prefix(line: &crate::markdown::ParsedLine) -> bool {
+    matches!(
+        line.kind,
+        LineKind::Heading { .. }
+            | LineKind::ListItem { .. }
+            | LineKind::Blockquote
+            | LineKind::CodeLine
+    ) && line.prefix_range.end > line.source.start
+}
+
+fn widen_wysiwyg_wrap_range(
+    parsed: &crate::markdown::ParsedDocument,
+    mut range: Range<usize>,
+) -> Range<usize> {
+    loop {
+        let prev = range.clone();
+        for line in parsed.lines_overlapping(range.clone()) {
+            if line_has_block_prefix(line)
+                && range.start >= line.source.start
+                && range.start < line.prefix_range.end
+                && range.end > line.prefix_range.end
+            {
+                range.start = line.prefix_range.end;
+            }
+            for pair in &line.inline_pairs {
+                let disjoint =
+                    range.end <= pair.open_delim.start || range.start >= pair.close_delim.end;
+                let inside_inner = range.start >= pair.inner.start && range.end <= pair.inner.end;
+                let encloses =
+                    range.start <= pair.open_delim.start && range.end >= pair.close_delim.end;
+                if !(disjoint || inside_inner || encloses) {
+                    range.start = range
+                        .start
+                        .min(pair.group_open_start.min(pair.open_delim.start));
+                    range.end = range
+                        .end
+                        .max(pair.group_close_end.max(pair.close_delim.end));
+                }
+            }
+        }
+        if let Some(end_idx) = parsed.line_index_at(range.end) {
+            if end_idx > 0 {
+                let end_line = &parsed.lines[end_idx];
+                let prev_end = parsed.lines[end_idx - 1].source.end;
+                if line_has_block_prefix(end_line)
+                    && range.start < end_line.source.start
+                    && range.end <= end_line.prefix_range.end
+                    && prev_end >= range.start
+                {
+                    range.end = prev_end;
+                }
+            }
+        }
+        if range == prev {
+            break;
+        }
+    }
+    range
+}
 
 impl EntityInputHandler for LiteMarkApp {
     fn text_for_range(
@@ -12,7 +81,7 @@ impl EntityInputHandler for LiteMarkApp {
     ) -> Option<String> {
         let tab = self.active_tab()?;
         let content = &tab.content;
-        let mut range = tab.range_from_utf16(&range_utf16);
+        let mut range = ordered_range(tab.range_from_utf16(&range_utf16));
         range.start = range.start.min(content.len());
         range.end = range.end.min(content.len());
         if !content.is_char_boundary(range.start) || !content.is_char_boundary(range.end) {
@@ -87,24 +156,38 @@ impl EntityInputHandler for LiteMarkApp {
             cx.notify();
             return;
         }
-        let content = self.active_content();
         let mut range = range_utf16
             .as_ref()
-            .and_then(|range| self.active_tab().map(|tab| tab.range_from_utf16(range)))
-            .or_else(|| self.active_tab().and_then(|tab| tab.marked_range.clone()))
+            .and_then(|range| {
+                self.active_tab()
+                    .map(|tab| ordered_range(tab.range_from_utf16(range)))
+            })
+            .or_else(|| {
+                self.active_tab()
+                    .and_then(|tab| tab.marked_range.clone().map(ordered_range))
+            })
             .or_else(|| self.active_tab().map(|tab| tab.selection_range()))
             .unwrap_or(0..0);
 
         // 1. In WYSIWYG mode, preserve block prefixes when typing at start of line
         if self.effective_view_mode() == ViewMode::Wysiwyg && range.is_empty() && text != "\n" {
             let cursor = range.start;
-            let line_start = home_offset(&content, cursor);
-            let line_end_pos = line_end(&content, cursor);
-            let line = &content[line_start..line_end_pos];
-            let prefix_len = block_prefix_len(line);
-            if prefix_len > 0 && cursor < line_start + prefix_len {
-                let target = line_start + prefix_len;
-                range = target..target;
+            if let Some(tab) = self.active_tab_mut() {
+                if tab.file_type.supports_markdown_features() {
+                    let parsed = tab.parsed();
+                    if let Some(pline) = parsed.line_at_offset(cursor) {
+                        if matches!(
+                            pline.kind,
+                            LineKind::Heading { .. }
+                                | LineKind::ListItem { .. }
+                                | LineKind::Blockquote
+                        ) && cursor < pline.prefix_range.end
+                        {
+                            let target = pline.prefix_range.end;
+                            range = target..target;
+                        }
+                    }
+                }
             }
         }
 
@@ -144,8 +227,12 @@ impl EntityInputHandler for LiteMarkApp {
             && self
                 .active_tab_mut()
                 .is_some_and(|tab| tab.range_on_picture(&range));
-        if text.chars().count() == 1 && !on_picture {
+        let has_pending_table_col = self
+            .active_tab()
+            .is_some_and(|tab| tab.pending_table_col.is_some());
+        if text.chars().count() == 1 && !on_picture && !has_pending_table_col {
             let ch = text.chars().next().unwrap();
+            let is_wysiwyg = self.effective_view_mode() == ViewMode::Wysiwyg && markdown_tab;
             if !range.is_empty() {
                 let closing = match ch {
                     '\'' | '`' if markdown_tab => Some(ch),
@@ -153,13 +240,33 @@ impl EntityInputHandler for LiteMarkApp {
                     _ => code_pair_close(ch),
                 };
                 if let Some(close_ch) = closing {
-                    let selected = &content[range.clone()];
-                    let wrapped = format!("{}{}{}", ch, selected, close_ch);
                     if let Some(tab) = self.active_tab_mut() {
-                        tab.edit(range.clone(), &wrapped);
-                        tab.caret.range = (range.start + 1)..(range.start + 1 + selected.len());
-                        tab.caret.reversed = false;
-                        tab.refresh_cursor();
+                        let wrap_range = if is_wysiwyg {
+                            let parsed = tab.parsed();
+                            if ch == '`'
+                                && parsed.lines_overlapping(range.clone()).iter().any(|line| {
+                                    line.inline_pairs.iter().any(|p| {
+                                        p.kind == InlineTagKind::Code
+                                            && range.start >= p.open_delim.start
+                                            && range.end <= p.close_delim.end
+                                    })
+                                })
+                            {
+                                return;
+                            }
+                            widen_wysiwyg_wrap_range(&parsed, range.clone())
+                        } else {
+                            range.clone()
+                        };
+                        if let Some(selected) = tab.content.get(wrap_range.clone()) {
+                            let selected_len = selected.len();
+                            let wrapped = format!("{ch}{selected}{close_ch}");
+                            tab.edit(wrap_range.clone(), &wrapped);
+                            tab.caret.range =
+                                (wrap_range.start + 1)..(wrap_range.start + 1 + selected_len);
+                            tab.caret.reversed = false;
+                            tab.refresh_cursor();
+                        }
                     }
                     self.refresh_find();
                     window.refresh();
@@ -168,10 +275,73 @@ impl EntityInputHandler for LiteMarkApp {
                 }
             } else {
                 let cursor = range.start;
+                let (
+                    suppress_overtype,
+                    suppress_autopair,
+                    starts_with_ch,
+                    ends_with_double_tick,
+                    prev_is_alnum,
+                ) = if let Some(tab) = self.active_tab_mut() {
+                    let (overtype_blocked, autopair_blocked) = if is_wysiwyg {
+                        let parsed = tab.parsed();
+                        parsed
+                            .line_at_offset(cursor)
+                            .map_or((false, false), |line| {
+                                let in_hidden_interior = line
+                                    .hidden_ranges
+                                    .iter()
+                                    .any(|h| cursor > h.start && cursor < h.end);
+                                let at_link_or_multi_code_closer =
+                                    line.inline_pairs.iter().any(|p| {
+                                        (p.kind == InlineTagKind::Link
+                                            || (p.kind == InlineTagKind::Code
+                                                && p.close_delim.len() > 1))
+                                            && cursor >= p.close_delim.start
+                                            && cursor < p.close_delim.end
+                                    });
+                                let at_any_link_or_code_closer =
+                                    line.inline_pairs.iter().any(|p| {
+                                        matches!(p.kind, InlineTagKind::Link | InlineTagKind::Code)
+                                            && cursor >= p.close_delim.start
+                                            && cursor < p.close_delim.end
+                                    });
+                                let in_code_span = line.inline_pairs.iter().any(|p| {
+                                    p.kind == InlineTagKind::Code
+                                        && cursor >= p.inner.start
+                                        && cursor <= p.inner.end
+                                });
+                                (
+                                    in_hidden_interior || at_link_or_multi_code_closer,
+                                    in_hidden_interior
+                                        || at_any_link_or_code_closer
+                                        || (ch == '`' && in_code_span),
+                                )
+                            })
+                    } else {
+                        (false, false)
+                    };
+                    let starts =
+                        cursor < tab.content.len() && tab.content[cursor..].starts_with(ch);
+                    let double_tick = tab.content[..cursor].ends_with("``");
+                    let alnum = cursor > 0
+                        && tab.content[..cursor]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_alphanumeric());
+                    (
+                        overtype_blocked,
+                        autopair_blocked,
+                        starts,
+                        double_tick,
+                        alnum,
+                    )
+                } else {
+                    (false, false, false, false, false)
+                };
                 // Over-typing closing bracket or quote
                 let over_types = matches!(ch, ')' | ']' | '}' | '"')
                     || (markdown_tab && matches!(ch, '\'' | '`'));
-                if over_types && cursor < content.len() && content[cursor..].starts_with(ch) {
+                if over_types && !suppress_overtype && starts_with_ch {
                     if let Some(tab) = self.active_tab_mut() {
                         tab.caret.move_to(cursor + ch.len_utf8());
                         tab.refresh_cursor();
@@ -182,25 +352,24 @@ impl EntityInputHandler for LiteMarkApp {
                 }
 
                 // Auto-closing brackets and backticks
-                let auto_pair = match ch {
-                    '(' => Some("()"),
-                    '[' => Some("[]"),
-                    '{' => Some("{}"),
-                    // A third backtick starts a fence: no closer.
-                    '`' if markdown_tab && !content[..cursor].ends_with("``") => Some("``"),
-                    '"' => {
-                        let prev_is_alnum = cursor > 0
-                            && content[..cursor]
-                                .chars()
-                                .next_back()
-                                .is_some_and(|c| c.is_alphanumeric());
-                        if !prev_is_alnum {
-                            Some("\"\"")
-                        } else {
-                            None
+                let auto_pair = if suppress_autopair {
+                    None
+                } else {
+                    match ch {
+                        '(' => Some("()"),
+                        '[' => Some("[]"),
+                        '{' => Some("{}"),
+                        // A third backtick starts a fence: no closer.
+                        '`' if markdown_tab && !ends_with_double_tick => Some("``"),
+                        '"' => {
+                            if !prev_is_alnum {
+                                Some("\"\"")
+                            } else {
+                                None
+                            }
                         }
+                        _ => None,
                     }
-                    _ => None,
                 };
 
                 if let Some(pair) = auto_pair {
@@ -255,8 +424,14 @@ impl EntityInputHandler for LiteMarkApp {
         }
         let range = range_utf16
             .as_ref()
-            .and_then(|range| self.active_tab().map(|tab| tab.range_from_utf16(range)))
-            .or_else(|| self.active_tab().and_then(|tab| tab.marked_range.clone()))
+            .and_then(|range| {
+                self.active_tab()
+                    .map(|tab| ordered_range(tab.range_from_utf16(range)))
+            })
+            .or_else(|| {
+                self.active_tab()
+                    .and_then(|tab| tab.marked_range.clone().map(ordered_range))
+            })
             .or_else(|| self.active_tab().map(|tab| tab.selection_range()))
             .unwrap_or(0..0);
         // Composing at a picture starts on a line of its own.
@@ -267,23 +442,58 @@ impl EntityInputHandler for LiteMarkApp {
         } else {
             range
         };
-        let start = range.start;
-        if let Some(tab) = self.active_tab_mut() {
-            tab.edit(range, new_text);
-            if new_text.is_empty() {
-                tab.cancel_picture_ime_line();
-                tab.marked_range = None;
-            } else {
-                let end = (start + new_text.len()).min(tab.content.len());
-                tab.marked_range = Some(start..end);
+        let mut padded_ime_range: Option<Range<usize>> = None;
+        if self.effective_view_mode() == ViewMode::Wysiwyg && !new_text.is_empty() {
+            if let Some(tab) = self.active_tab_mut() {
+                if let Some(target_col) = tab.pending_table_col.take() {
+                    if range.is_empty() && tab.file_type.supports_markdown_features() {
+                        let row_start = tab
+                            .parsed()
+                            .line_at_offset(range.start)
+                            .filter(|l| {
+                                matches!(l.kind, LineKind::TableRow { .. })
+                                    && range.start == l.source.end
+                            })
+                            .map(|l| l.source.start);
+                        if let Some(row_start) = row_start {
+                            padded_ime_range =
+                                tab.insert_into_padded_table_cell(row_start, target_col, new_text);
+                        }
+                    }
+                }
             }
-            if let Some(selected) = new_selected_range {
-                let relative = range_from_utf16(new_text, &selected);
-                let sel_start = (start + relative.start).min(tab.content.len());
-                let sel_end = (start + relative.end).min(tab.content.len());
-                tab.caret.range = sel_start..sel_end;
-                tab.caret.reversed = false;
-                tab.refresh_cursor();
+        }
+        if let Some(text_range) = padded_ime_range {
+            if let Some(tab) = self.active_tab_mut() {
+                tab.marked_range = Some(text_range.clone());
+                if let Some(selected) = new_selected_range {
+                    let relative = ordered_range(range_from_utf16(new_text, &selected));
+                    let sel_start = (text_range.start + relative.start).min(tab.content.len());
+                    let sel_end = (text_range.start + relative.end).min(tab.content.len());
+                    tab.caret.range = sel_start..sel_end;
+                    tab.caret.reversed = false;
+                    tab.refresh_cursor();
+                }
+            }
+        } else {
+            let start = range.start;
+            if let Some(tab) = self.active_tab_mut() {
+                tab.edit(range, new_text);
+                if new_text.is_empty() {
+                    tab.cancel_picture_ime_line();
+                    tab.marked_range = None;
+                } else {
+                    let end = (start + new_text.len()).min(tab.content.len());
+                    tab.marked_range = Some(start..end);
+                }
+                if let Some(selected) = new_selected_range {
+                    let relative = ordered_range(range_from_utf16(new_text, &selected));
+                    let sel_start = (start + relative.start).min(tab.content.len());
+                    let sel_end = (start + relative.end).min(tab.content.len());
+                    tab.caret.range = sel_start..sel_end;
+                    tab.caret.reversed = false;
+                    tab.refresh_cursor();
+                }
             }
         }
         self.refresh_find();
@@ -298,7 +508,7 @@ impl EntityInputHandler for LiteMarkApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let range = self.active_tab()?.range_from_utf16(&range_utf16);
+        let range = ordered_range(self.active_tab()?.range_from_utf16(&range_utf16));
         let paint = self.editor_paint.borrow();
         let row = paint
             .rows

@@ -381,7 +381,6 @@ pub fn accepted_list_marker_in(
 
 /// Wysiwyg checkbox click. An unchecked box (space, tab, VT, or FF) becomes
 /// `[x]`. A ticked box becomes `[ ]`.
-#[cfg(test)]
 pub fn checkbox_click_replacement(current: &str) -> &'static str {
     let bytes = current.as_bytes();
     if bytes.len() == 3 && bytes[0] == b'[' && bytes[2] == b']' {
