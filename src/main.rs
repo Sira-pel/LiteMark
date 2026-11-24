@@ -60,7 +60,10 @@ pub(crate) mod heap_counter {
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
             let new = System.realloc(ptr, layout, new_size);
             if !new.is_null() {
-                LIVE.fetch_add(new_size as isize - layout.size() as isize, Ordering::Relaxed);
+                LIVE.fetch_add(
+                    new_size as isize - layout.size() as isize,
+                    Ordering::Relaxed,
+                );
             }
             new
         }

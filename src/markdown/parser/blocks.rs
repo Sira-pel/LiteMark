@@ -387,8 +387,7 @@ pub(super) fn atx_line(
     };
     hidden.extend(inline_hidden);
     let hidden = merge_ranges(hidden);
-    let display_text_owned =
-        build_display(line, line_start, content.start, &hidden);
+    let display_text_owned = build_display(line, line_start, content.start, &hidden);
     ParsedLine {
         line_index: index as u32,
         source,

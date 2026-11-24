@@ -2945,8 +2945,7 @@ fn parse_lines(
         }
         let merged_hidden = merge_ranges(inline_hidden);
 
-        let display_text_owned =
-            build_display(line, line_start, prefix_len, &merged_hidden);
+        let display_text_owned = build_display(line, line_start, prefix_len, &merged_hidden);
 
         push_line!(ParsedLine {
             line_index: i as u32,

@@ -402,7 +402,10 @@ fn naming_the_first_of_two_untitled_notes_on_close_does_not_panic() {
         assert!(root.join("one.md").exists(), "first note saved");
         let second = app.save_as_tab.clone().expect("asks for the second name");
         let tab = app.tabs.iter().find(|t| t.id == second).unwrap();
-        assert!(tab.file_path.is_none() && tab.is_modified, "second note kept");
+        assert!(
+            tab.file_path.is_none() && tab.is_modified,
+            "second note kept"
+        );
     });
     let _ = std::fs::remove_dir_all(&root);
 }
