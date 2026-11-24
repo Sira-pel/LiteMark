@@ -77,17 +77,16 @@ impl DocumentTab {
         if run < 3 {
             return false;
         }
-        // The closer repeats a quote prefix and otherwise lines up with the
-        // opener (a list item's marker becomes spaces).
-        let before = &line[..marker_at];
-        let lead: String = if before.contains('>') {
-            before.to_string()
-        } else {
-            before
-                .chars()
-                .map(|c| if c == '\t' { '\t' } else { ' ' })
-                .collect()
-        };
+        // The closer keeps quote markers and otherwise lines up with the
+        // opener: a list item's marker becomes spaces, inside a quote too
+        // (`> - ```` would close with `>   ````, not start a `> - ` item).
+        let lead: String = line[..marker_at]
+            .chars()
+            .map(|c| match c {
+                '>' | '\t' => c,
+                _ => ' ',
+            })
+            .collect();
         let fence = (marker as char).to_string().repeat(run);
         let ins = format!("{nl}{lead}{nl}{lead}{fence}");
         let caret = cursor + nl.len() + lead.len();

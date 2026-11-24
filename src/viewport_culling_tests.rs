@@ -529,6 +529,10 @@ fn table_cell_wrap_cache_reuses_shaped_lines_and_updates_offset_maps() {
 fn table_cell_wrap_cache_invalidates_on_theme_zoom_width_and_bypasses_marked() {
     let table = "| Header A | Header B |\n| --- | --- |\n| alpha beta gamma delta epsilon zeta eta theta iota kappa | short |\n";
     let (view, mut cx) = harness(table, ViewMode::Wysiwyg);
+    // Every shaped line seen stays alive to the end of the test, so a freed
+    // line's address can't be reused by its replacement (macOS's allocator
+    // hands it straight back, which made the address checks flaky there).
+    let kept = std::cell::RefCell::new(Vec::new());
     let body_ptrs = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| -> Vec<usize> {
         view.read_with(cx, |app, _| {
             let paint = app.editor_paint.borrow();
@@ -540,7 +544,10 @@ fn table_cell_wrap_cache_invalidates_on_theme_zoom_width_and_bypasses_marked() {
             row.cells[0]
                 .lines
                 .iter()
-                .map(|l| std::rc::Rc::as_ptr(&l.shaped) as usize)
+                .map(|l| {
+                    kept.borrow_mut().push(l.shaped.clone());
+                    std::rc::Rc::as_ptr(&l.shaped) as usize
+                })
                 .collect()
         })
     };
