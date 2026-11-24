@@ -722,6 +722,17 @@ impl DocumentTab {
             self.edit(self.selection_range(), "");
         } else {
             let cursor = self.cursor_offset();
+            match self.visible_word_step(cursor, false) {
+                Some(super::word_nav::WordStep::Range(range)) => {
+                    self.delete_visible_range(range);
+                    return;
+                }
+                Some(super::word_nav::WordStep::Edge) => {
+                    self.smart_backspace_in_mode(ViewMode::Wysiwyg);
+                    return;
+                }
+                None => {}
+            }
             let target = crate::model::text_ops::word_left(&self.content, cursor);
             if target < cursor {
                 self.edit(target..cursor, "");
@@ -740,6 +751,17 @@ impl DocumentTab {
             self.edit(self.selection_range(), "");
         } else {
             let cursor = self.cursor_offset();
+            match self.visible_word_step(cursor, true) {
+                Some(super::word_nav::WordStep::Range(range)) => {
+                    self.delete_visible_range(range);
+                    return;
+                }
+                Some(super::word_nav::WordStep::Edge) => {
+                    self.delete_forward_in_mode(ViewMode::Wysiwyg);
+                    return;
+                }
+                None => {}
+            }
             let mut target = crate::model::text_ops::word_right(&self.content, cursor);
             if self.file_type.supports_markdown_features() {
                 if let Some(line) = self.parsed().line_at_offset(cursor) {

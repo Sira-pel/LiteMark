@@ -198,3 +198,96 @@ fn w9_delete_before_closing_fence_never_merges() {
     d.delete_forward_in_mode(ViewMode::Wysiwyg);
     assert_eq!(d.content, src);
 }
+
+// ---- W10: word navigation and deletion on visible text ----
+
+fn visible_all(d: &mut DocumentTab) -> String {
+    let all = 0..d.content.len();
+    let content = d.content.clone();
+    d.parsed().visible_text(&content, all)
+}
+
+#[test]
+fn w10_ctrl_left_from_after_closer_lands_on_visible_word_start() {
+    let src = "a **bold word** z";
+    let mut d = wys(src);
+    d.place(src.find(" z").unwrap(), false);
+    d.move_word_left(false);
+    assert_eq!(d.cursor_offset(), src.find("word").unwrap());
+    d.move_word_left(false);
+    assert_eq!(d.cursor_offset(), src.find("bold").unwrap());
+}
+
+#[test]
+fn w10_ctrl_right_from_before_opener_lands_on_visible_word_end() {
+    let src = "**bold** x";
+    let mut d = wys(src);
+    d.place(0, false);
+    d.move_word_right(false);
+    assert_eq!(d.cursor_offset(), 6);
+}
+
+#[test]
+fn w10_ctrl_shift_arrows_select_visible_words() {
+    let src = "a **bold word** z";
+    let mut d = wys(src);
+    d.place(src.find(" z").unwrap(), false);
+    d.move_word_left(true);
+    assert_eq!(d.selected_visible_text(), "word");
+}
+
+#[test]
+fn w10_ctrl_backspace_keeps_span_valid() {
+    let src = "**hello world**";
+    let mut d = wys(src);
+    d.place(13, false);
+    d.delete_word_left();
+    assert_eq!(visible_all(&mut d).trim_end(), "hello");
+    assert!(
+        !d.content.contains(" **"),
+        "closer after space: {:?}",
+        d.content
+    );
+}
+
+#[test]
+fn w10_ctrl_delete_removes_visible_word_only() {
+    let src = "x **hello** world";
+    let mut d = wys(src);
+    d.place(src.find("hello").unwrap(), false);
+    d.delete_word_right();
+    assert!(!d.content.contains("hello"), "{:?}", d.content);
+    assert_eq!(visible_all(&mut d), "x  world");
+    assert!(d.content.ends_with(" world"));
+}
+
+const TABLE: &str = "| a b | c d |\n| --- | --- |\n| e f | g h |";
+
+#[test]
+fn w10_word_ops_stay_inside_table_cell() {
+    // Ctrl+Delete at the end of a cell must not eat the pipe.
+    let mut d = wys(TABLE);
+    d.place(TABLE.find("a b").unwrap() + 3, false);
+    d.delete_word_right();
+    assert_eq!(d.content, TABLE);
+
+    // Ctrl+Backspace at the start of a cell does nothing.
+    let mut d = wys(TABLE);
+    d.place(TABLE.find("c d").unwrap(), false);
+    d.delete_word_left();
+    assert_eq!(d.content, TABLE);
+
+    // Ctrl+Left inside a cell stops at the cell's words.
+    let mut d = wys(TABLE);
+    d.place(TABLE.find("c d").unwrap() + 3, false);
+    d.move_word_left(false);
+    assert_eq!(d.cursor_offset(), TABLE.find("d |").unwrap());
+    d.move_word_left(false);
+    assert_eq!(d.cursor_offset(), TABLE.find("c d").unwrap());
+
+    // Ctrl+Backspace deletes a word inside the cell only.
+    let mut d = wys(TABLE);
+    d.place(TABLE.find("c d").unwrap() + 3, false);
+    d.delete_word_left();
+    assert_eq!(d.content, TABLE.replacen("c d", "c ", 1));
+}

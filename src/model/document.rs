@@ -28,6 +28,7 @@ mod newline;
 mod picture;
 mod table;
 mod typing;
+mod word_nav;
 
 pub(crate) use blocks::*;
 use inline_format::*;
