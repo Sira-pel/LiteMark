@@ -436,13 +436,34 @@ impl DocumentTab {
     pub fn snap_wysiwyg_table_delimiter(&mut self) {
         let cursor = self.cursor_offset();
         let parsed = self.parsed();
-        if let Some(pline) = parsed.line_at_offset(cursor) {
-            if matches!(pline.kind, LineKind::TableDelimiter) {
-                let next_pos = (pline.source.end + 1).min(self.content.len());
-                let target = floor_boundary(&self.content, next_pos);
-                self.caret.move_to(target);
-                self.refresh_cursor();
+        let target = parsed.line_at_offset(cursor).and_then(|pline| {
+            if !matches!(pline.kind, LineKind::TableDelimiter) {
+                return None;
             }
+            let ending = line_ending_len(&self.content, pline.source.end);
+            if ending > 0 && pline.source.end + ending <= self.content.len() {
+                Some(pline.source.end + ending)
+            } else {
+                // Header-only table at EOF: snap to the header row's first cell.
+                parsed
+                    .lines
+                    .get(pline.line_index.saturating_sub(1))
+                    .map(|prev| {
+                        if let LineKind::TableRow { ref body, .. } = prev.kind {
+                            body.cells
+                                .first()
+                                .map_or(prev.source.start, |cell| cell.start)
+                        } else {
+                            prev.source.start
+                        }
+                    })
+                    .or(Some(0))
+            }
+        });
+        if let Some(next_pos) = target {
+            let target = floor_boundary(&self.content, next_pos.min(self.content.len()));
+            self.caret.move_to(target);
+            self.refresh_cursor();
         }
     }
 }

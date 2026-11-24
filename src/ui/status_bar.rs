@@ -65,6 +65,10 @@ where
         .text_size(px(12.0))
         .font_family(Theme::FONT_PROSE)
         .flex_shrink_0()
+        // Keep clicks on the status bar from reaching scrolled-off editor
+        // pictures, resize handles, or text rows underneath.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         // Left document metrics
         .child(
             div()

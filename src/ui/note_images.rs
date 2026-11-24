@@ -2,11 +2,13 @@
 //! file header, remembering them between frames, and fitting them to the
 //! editor column. The picture itself is drawn by gpui's `img()`.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use gpui::{point, px, size, Bounds, Pixels};
+use gpui::{point, px, size, Bounds, ElementId, Pixels, SharedString};
 
 /// Tallest an image block grows, before zoom.
 pub const MAX_IMAGE_HEIGHT: Pixels = px(480.0);
@@ -27,6 +29,8 @@ struct Entry {
     stamp: Option<Stamp>,
     /// Pixel size, or `None` when the file is missing or isn't a picture.
     size: Option<(u32, u32)>,
+    /// Incremented each time this path is loaded or reloaded after changing on disk.
+    generation: u64,
 }
 
 /// Decoded sizes by path, so a frame never reads a file it has already seen.
@@ -35,6 +39,25 @@ struct Entry {
 #[derive(Clone, Default)]
 pub struct ImageSizeCache {
     entries: HashMap<PathBuf, Entry>,
+    next_generation: u64,
+}
+
+/// Element ID for a rendered image slot. Hashing the slot, resolved file path,
+/// and reload generation ensures GPUI never reuses a multi-frame animation's
+/// `ImgState { frame_index }` across a different or replaced image.
+pub fn image_element_id(
+    kind: &'static str,
+    line_idx: usize,
+    slot: usize,
+    path: &Path,
+    generation: u64,
+) -> ElementId {
+    let mut hasher = DefaultHasher::new();
+    line_idx.hash(&mut hasher);
+    slot.hash(&mut hasher);
+    path.hash(&mut hasher);
+    generation.hash(&mut hasher);
+    ElementId::NamedInteger(SharedString::new_static(kind), hasher.finish())
 }
 
 impl ImageSizeCache {
@@ -61,9 +84,22 @@ impl ImageSizeCache {
         };
         let changed = self.entries.contains_key(path);
         let size = stamp.and_then(|_| read_image_size(path));
-        self.entries
-            .insert(path.to_path_buf(), Entry { stamp, size });
+        self.next_generation = self.next_generation.wrapping_add(1);
+        let generation = self.next_generation;
+        self.entries.insert(
+            path.to_path_buf(),
+            Entry {
+                stamp,
+                size,
+                generation,
+            },
+        );
         (size, changed)
+    }
+
+    /// Current reload generation for `path`, or `0` if not cached yet.
+    pub fn generation(&self, path: &Path) -> u64 {
+        self.entries.get(path).map_or(0, |e| e.generation)
     }
 
     /// Drops entries for paths that no longer appear in the note.
@@ -71,10 +107,6 @@ impl ImageSizeCache {
         if self.entries.len() > live.len() + 64 {
             self.entries.retain(|path, _| live.contains(path));
         }
-    }
-
-    pub fn has_entries(&self) -> bool {
-        !self.entries.is_empty()
     }
 
     #[cfg(test)]
@@ -772,6 +804,41 @@ mod tests {
         // A file that appears later is found on the next visible check.
         std::fs::write(&gone, b"not an image").unwrap();
         assert_eq!(cache.size(&gone, true), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_element_id_changes_with_path_slot_and_reload_generation() {
+        let dir = std::env::temp_dir().join(format!("litemark-img-gen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gif = dir.join("anim.svg");
+        let png = dir.join("static.svg");
+        std::fs::write(&gif, r#"<svg width="20" height="20">"#).unwrap();
+        std::fs::write(&png, r#"<svg width="20" height="20">"#).unwrap();
+
+        let mut cache = ImageSizeCache::default();
+        let _ = cache.size_checked(&gif, true);
+        let gen1 = cache.generation(&gif);
+        assert!(gen1 > 0);
+        let id_gif = image_element_id("note-image", 0, 0, &gif, gen1);
+        let id_png = image_element_id("note-image", 0, 0, &png, gen1);
+        let id_slot1 = image_element_id("note-thumb", 0, 1, &gif, gen1);
+        let id_line1 = image_element_id("note-image", 1, 0, &gif, gen1);
+        assert_ne!(id_gif, id_png, "different path must get a new ElementId");
+        assert_ne!(id_gif, id_slot1, "different slot must get a new ElementId");
+        assert_ne!(id_gif, id_line1, "different line must get a new ElementId");
+
+        // Replacing the file on disk increments generation and rotates ElementId.
+        std::fs::write(&gif, r#"<svg width="100" height="50">"#).unwrap();
+        let (_, changed) = cache.size_checked(&gif, true);
+        assert!(changed);
+        let gen2 = cache.generation(&gif);
+        assert_ne!(gen1, gen2);
+        let id_gif_reloaded = image_element_id("note-image", 0, 0, &gif, gen2);
+        assert_ne!(
+            id_gif, id_gif_reloaded,
+            "disk replacement must rotate ElementId"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -112,8 +112,18 @@ impl DocumentTab {
         if new == line {
             return true;
         }
+        let undo_sel = self.selection_snap();
+        let undo_caret = self.cursor_offset();
         self.history.seal();
         let end = block.start + new.len();
+        self.next_undo_caret = Some(undo_caret);
+        self.next_undo_sel = undo_sel;
+        self.next_redo_caret = Some(end);
+        self.next_redo_sel = Some(SelectionSnap {
+            start: block.start,
+            end,
+            reversed: false,
+        });
         self.edit(block.clone(), &new);
         self.select_picture(block.start..end);
         self.history.seal();
@@ -154,8 +164,18 @@ impl DocumentTab {
         if new == line {
             return false;
         }
+        let undo_sel = self.selection_snap();
+        let undo_caret = self.cursor_offset();
         self.history.seal();
         let end = range.start + new.len();
+        self.next_undo_caret = Some(undo_caret);
+        self.next_undo_sel = undo_sel;
+        self.next_redo_caret = Some(end);
+        self.next_redo_sel = Some(SelectionSnap {
+            start: range.start,
+            end,
+            reversed: false,
+        });
         self.edit(range.clone(), &new);
         self.select_picture(range.start..end);
         self.history.seal();
@@ -308,6 +328,20 @@ impl DocumentTab {
         }
     }
 
+    /// Commits any active IME composition (preserving composed text and sealing
+    /// its undo group) or cancels an empty IME-opened picture line.
+    pub fn finish_ime_composition(&mut self) {
+        if let Some(range) = self.marked_range.take() {
+            self.ime_opened_line = None;
+            let end = floor_boundary(&self.content, range.end.min(self.content.len()));
+            self.caret.move_to(end);
+            self.history.seal();
+            self.refresh_cursor();
+        } else {
+            self.cancel_picture_ime_line();
+        }
+    }
+
     /// Backspace at the start of the text below a picture selects the
     /// picture instead of joining the text onto its Markdown.
     pub(super) fn picture_guard_join_back(&mut self) -> bool {
@@ -400,7 +434,32 @@ impl DocumentTab {
             Some(next) => (image.start..next.start, i),
             None => (spans[i - 1].end..image.end, i - 1),
         };
+        let undo_sel = self.selection_snap().or(Some(SelectionSnap {
+            start: image.start,
+            end: image.end,
+            reversed: false,
+        }));
+        let undo_caret = self.cursor_offset();
+        let redo_range = if spans.len() > 2 {
+            let survivor_idx = if keep < i { keep } else { keep + 1 };
+            let r = &spans[survivor_idx];
+            if survivor_idx > i {
+                (r.start - cut.len())..(r.end - cut.len())
+            } else {
+                r.clone()
+            }
+        } else {
+            block.start..(block.end - cut.len())
+        };
         self.history.seal();
+        self.next_undo_caret = Some(undo_caret);
+        self.next_undo_sel = undo_sel;
+        self.next_redo_caret = Some(redo_range.end);
+        self.next_redo_sel = Some(SelectionSnap {
+            start: redo_range.start,
+            end: redo_range.end,
+            reversed: false,
+        });
         self.edit(cut.clone(), "");
         let end = block.end - cut.len();
         let line = block.start..end;
@@ -487,7 +546,17 @@ impl DocumentTab {
             let before = line_ending_len_before(&self.content, block.start);
             (block.start - before, block.end)
         };
+        let undo_sel = self.selection_snap();
+        let undo_caret = self.cursor_offset();
         self.history.seal();
+        self.next_undo_caret = Some(undo_caret);
+        self.next_undo_sel = undo_sel;
+        self.next_redo_caret = Some(start);
+        self.next_redo_sel = Some(SelectionSnap {
+            start,
+            end: start,
+            reversed: false,
+        });
         self.edit(start..end, "");
         self.caret.move_to(floor_boundary(&self.content, start));
         self.refresh_cursor();

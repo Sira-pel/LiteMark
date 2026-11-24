@@ -26,9 +26,9 @@ use crate::model::ViewMode;
 use crate::theme::sz;
 
 use super::note_images::{
-    ellipsize, fit_image, fit_image_size, flow_thumbnails, placeholder_height, thumbnail_size,
-    ImageSizeCache, HANDLE_SIZE, IMAGE_MARGIN_Y, IMAGE_RADIUS, MAX_IMAGE_HEIGHT, THUMB_GAP,
-    THUMB_HEIGHT,
+    ellipsize, fit_image, fit_image_size, flow_thumbnails, image_element_id, placeholder_height,
+    thumbnail_size, ImageSizeCache, HANDLE_SIZE, IMAGE_MARGIN_Y, IMAGE_RADIUS, MAX_IMAGE_HEIGHT,
+    THUMB_GAP, THUMB_HEIGHT,
 };
 
 #[derive(Clone)]
@@ -313,6 +313,18 @@ impl LayoutCache {
     }
 }
 
+/// Hit-test geometry for the selected picture's resize handle.
+/// `bounds` is the full picture box (used for edge positions and drag start
+/// size); `clip` is the viewport content mask so hits outside the visible area
+/// are rejected.
+#[derive(Clone, Debug)]
+pub struct PictureHandleGeom {
+    pub range: Range<usize>,
+    pub bounds: Bounds<Pixels>,
+    pub clip: Bounds<Pixels>,
+    pub column: Pixels,
+}
+
 #[derive(Clone)]
 pub struct EditorPaint {
     pub layout_cache: LayoutCache,
@@ -325,15 +337,26 @@ pub struct EditorPaint {
     pub tables: Vec<TableGeom>,
     /// Sizes of the pictures in the note, kept between frames.
     pub images: ImageSizeCache,
-    /// Where each picture block (by source range) was drawn.
+    /// Where each picture block (by source range) was drawn, clipped to the viewport.
     pub pictures: Vec<(Range<usize>, Bounds<Pixels>)>,
-    /// The handle of the selected picture: its source range, where it is
-    /// drawn and the column width, for the app to hit-test a press.
-    pub picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)>,
-    /// Length and selection of the content the rows were laid out for, so a
-    /// caller can tell whether the geometry matches the current document.
+    /// The handle of the selected picture, clipped to the viewport content mask.
+    pub picture_handle: Option<PictureHandleGeom>,
+    /// Length, selection, and view mode of the content the rows were laid out for,
+    /// so a caller can tell whether the geometry matches the current document.
     pub painted_len: usize,
     pub painted_selection: Range<usize>,
+    pub painted_view_mode: ViewMode,
+}
+
+impl EditorPaint {
+    /// Clears mode/tab-specific geometry when switching view modes or active tabs
+    /// so stale height or hit targets from the previous view do not leak across.
+    pub fn reset_for_switch(&mut self) {
+        self.total_height = px(0.0);
+        self.layout_cache.redrawn_for = None;
+        self.pictures.clear();
+        self.picture_handle = None;
+    }
 }
 
 impl Default for EditorPaint {
@@ -350,6 +373,7 @@ impl Default for EditorPaint {
             images: ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            painted_view_mode: ViewMode::Wysiwyg,
             pictures: Vec::new(),
             picture_handle: None,
         }
@@ -1277,7 +1301,7 @@ pub struct Prepaint {
     /// Pictures to draw, already laid out.
     images: Vec<AnyElement>,
     pictures: Vec<(Range<usize>, Bounds<Pixels>)>,
-    picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)>,
+    picture_handle: Option<PictureHandleGeom>,
     /// Mouse-cursor regions, least specific first so a later one wins.
     cursor_hitboxes: Vec<(CursorStyle, Hitbox)>,
     image_cache: ImageSizeCache,
@@ -1479,7 +1503,8 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let wrap_cols = wrap_cols.max(1);
         let base_line_height = self.font_size * 1.65;
         let focused = self.focus.is_focused(window);
-        let band = ShapingBand::new(window.content_mask().bounds);
+        let clip = window.content_mask().bounds;
+        let band = ShapingBand::new(clip);
         // Rows near these offsets are always shaped, wherever they are, so
         // the caret, the selection ends and IME text keep exact geometry.
         let mut anchors = vec![self.selection.start, self.selection.end];
@@ -1744,7 +1769,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
         let mut tables: Vec<TableGeom> = Vec::new();
         let mut images: Vec<AnyElement> = Vec::new();
         let mut pictures: Vec<(Range<usize>, Bounds<Pixels>)> = Vec::new();
-        let mut picture_handle: Option<(Range<usize>, Bounds<Pixels>, Pixels)> = None;
+        let mut picture_handle: Option<PictureHandleGeom> = None;
         // Squares drawn on the corner of the selected picture.
         let handle_quad = |bounds: Bounds<Pixels>| {
             let side = HANDLE_SIZE;
@@ -2555,19 +2580,23 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     let row_h = block_size.height + IMAGE_MARGIN_Y * 2.0;
                     let block_bounds =
                         Bounds::new(point(base_x, cur_y + IMAGE_MARGIN_Y), block_size);
-                    pictures.push((src.clone(), block_bounds));
+                    let visible_bounds = block_bounds.intersect(&clip);
+                    if visible_bounds.size.width > px(0.0) && visible_bounds.size.height > px(0.0) {
+                        pictures.push((src.clone(), visible_bounds));
+                    }
                     if band.contains(cur_y, row_h) || near_anchor {
                         match &picture {
                             Some((path, picture_size)) => {
                                 let muted = self.muted_color;
                                 let surface = self.surface_bg;
                                 let font_size = self.font_size;
+                                let gen = image_cache.generation(path);
                                 // The picture sits in a box of exactly its size:
                                 // gpui keeps an image's own aspect ratio when
                                 // it lays itself out, which would undo a
                                 // stretch to a different shape.
                                 let picture = img(path.clone())
-                                    .id(("note-image", line_idx))
+                                    .id(image_element_id("note-image", line_idx, 0, path, gen))
                                     .absolute()
                                     .top_0()
                                     .left_0()
@@ -2679,7 +2708,16 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                             quads.push(q);
                             // The handle to drag the whole picture's size.
                             quads.push(handle_quad(block_bounds));
-                            picture_handle = Some((src.clone(), block_bounds, content_width));
+                            if visible_bounds.size.width > px(0.0)
+                                && visible_bounds.size.height > px(0.0)
+                            {
+                                picture_handle = Some(PictureHandleGeom {
+                                    range: src.clone(),
+                                    bounds: block_bounds,
+                                    clip,
+                                    column: content_width,
+                                });
+                            }
                         }
                         if !self.selection.is_empty()
                             && self.selection.start <= src.end
@@ -2775,7 +2813,11 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                     {
                         let bounds = Bounds::new(point(base_x + dx, top + dy), size(w, h));
                         all_bounds.push(bounds);
-                        pictures.push((abs.clone(), bounds));
+                        let visible_thumb = bounds.intersect(&clip);
+                        if visible_thumb.size.width > px(0.0) && visible_thumb.size.height > px(0.0)
+                        {
+                            pictures.push((abs.clone(), visible_thumb));
+                        }
                         if !on_screen(row_h) {
                             continue;
                         }
@@ -2784,8 +2826,9 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                                 let muted = self.muted_color;
                                 let surface = self.surface_bg;
                                 let font_size = self.font_size;
+                                let gen = image_cache.generation(path);
                                 let picture = img(path.clone())
-                                    .id(("note-thumb", line_idx * 4096 + k.min(4095)))
+                                    .id(image_element_id("note-thumb", line_idx, k, path, gen))
                                     .absolute()
                                     .top_0()
                                     .left_0()
@@ -2868,7 +2911,16 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                         // One image selected by itself gets the handle.
                         if selected_one == Some(k) {
                             quads.push(handle_quad(bounds));
-                            picture_handle = Some((abs.clone(), bounds, content_width));
+                            if visible_thumb.size.width > px(0.0)
+                                && visible_thumb.size.height > px(0.0)
+                            {
+                                picture_handle = Some(PictureHandleGeom {
+                                    range: abs.clone(),
+                                    bounds,
+                                    clip,
+                                    column: content_width,
+                                });
+                            }
                         }
                         if !self.selection.is_empty()
                             && self.selection.start < abs.end
@@ -3343,14 +3395,21 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 window.insert_hitbox(*b, HitboxBehavior::Normal),
             ));
         }
-        if let Some((_, b, _)) = &picture_handle {
+        if let Some(handle) = &picture_handle {
             use super::note_images::{bottom_edge_area, handle_grab_area, right_edge_area};
             for (style, area) in [
-                (CursorStyle::ResizeLeftRight, right_edge_area(*b)),
-                (CursorStyle::ResizeUpDown, bottom_edge_area(*b)),
-                (CursorStyle::ResizeUpLeftDownRight, handle_grab_area(*b)),
+                (CursorStyle::ResizeLeftRight, right_edge_area(handle.bounds)),
+                (CursorStyle::ResizeUpDown, bottom_edge_area(handle.bounds)),
+                (
+                    CursorStyle::ResizeUpLeftDownRight,
+                    handle_grab_area(handle.bounds),
+                ),
             ] {
-                cursor_hitboxes.push((style, window.insert_hitbox(area, HitboxBehavior::Normal)));
+                let clipped = area.intersect(&handle.clip);
+                if clipped.size.width > px(0.0) && clipped.size.height > px(0.0) {
+                    cursor_hitboxes
+                        .push((style, window.insert_hitbox(clipped, HitboxBehavior::Normal)));
+                }
             }
         }
         Prepaint {
@@ -3494,6 +3553,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
             paint.total_height = prepaint.total_height;
             paint.painted_len = self.content.len();
             paint.painted_selection = self.selection.clone();
+            paint.painted_view_mode = self.view_mode;
             paint.bounds = Some(bounds);
             // Painting is done with the rows, so hand them over instead of
             // deep-copying every shaped line each frame.
@@ -3545,8 +3605,7 @@ impl<V: EntityInputHandler> Element for EditorElement<V> {
                 .layout_cache
                 .estimated_height
                 .max(prepaint.total_height);
-            let redraw = paint.images.has_entries()
-                && (expected - bounds.size.height).abs() > px(1.0)
+            let redraw = (expected - bounds.size.height).abs() > px(1.0)
                 && paint.layout_cache.redrawn_for != Some(expected);
             if redraw {
                 paint.layout_cache.redrawn_for = Some(expected);
@@ -4338,6 +4397,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            painted_view_mode: ViewMode::Wysiwyg,
             pictures: Vec::new(),
             picture_handle: None,
         };
@@ -4438,6 +4498,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            painted_view_mode: ViewMode::Wysiwyg,
             pictures: Vec::new(),
             picture_handle: None,
         };
@@ -4513,6 +4574,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            painted_view_mode: ViewMode::Wysiwyg,
             pictures: Vec::new(),
             picture_handle: None,
         };
@@ -4613,6 +4675,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            painted_view_mode: ViewMode::Wysiwyg,
             pictures: Vec::new(),
             picture_handle: None,
         };
@@ -4818,6 +4881,7 @@ mod tests {
             images: super::super::note_images::ImageSizeCache::default(),
             painted_len: 0,
             painted_selection: 0..0,
+            painted_view_mode: ViewMode::Wysiwyg,
             pictures: Vec::new(),
             picture_handle: None,
         };

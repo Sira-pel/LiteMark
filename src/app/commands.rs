@@ -8,6 +8,40 @@ impl LiteMarkApp {
         self.table_pressed = false;
     }
 
+    /// Clears transient editor interaction state (hovers, drags, context menu,
+    /// pending formats, IME composition, and cached layout height) when
+    /// switching view modes or changing the active tab.
+    pub(super) fn reset_editor_transient_state(&mut self) {
+        self.table_hover = None;
+        self.table_hot = None;
+        self.table_drag = None;
+        self.clear_table_drag_press();
+        self.cancel_image_drag();
+        self.selecting = false;
+        self.dismiss_editor_context_menu();
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
+            tab.pending_formats = ActiveFormats::default();
+            tab.finish_ime_composition();
+            tab.picture_raw_line = None;
+        }
+        self.editor_paint.borrow_mut().reset_for_switch();
+    }
+
+    /// Switches the active tab to `id`, clearing transient editor state and
+    /// snapping the newly active tab's caret out of WYSIWYG-hidden regions.
+    pub(super) fn activate_tab(&mut self, id: String) {
+        if self.active_tab_id == id {
+            return;
+        }
+        self.reset_editor_transient_state();
+        self.active_tab_id = id;
+        if self.effective_view_mode() == ViewMode::Wysiwyg {
+            if let Some(tab) = self.active_tab_mut() {
+                tab.snap_wysiwyg_table_delimiter();
+            }
+        }
+    }
+
     pub(super) fn handle_window_deactivated(&mut self) {
         self.cancel_image_drag();
         self.table_drag = None;
@@ -320,7 +354,8 @@ impl LiteMarkApp {
             .position(|t| t.id == self.active_tab_id)
             .unwrap_or(0) as isize;
         let next = (cur + delta).rem_euclid(len) as usize;
-        self.active_tab_id = self.tabs[next].id.clone();
+        let next_id = self.tabs[next].id.clone();
+        self.activate_tab(next_id);
         self.sync_selection_to_active_tab();
         self.refresh_find();
     }
@@ -331,7 +366,7 @@ impl LiteMarkApp {
         let title = format!("Untitled-{number}.md");
         let tab = DocumentTab::new(new_id.clone(), title, String::new(), None, None);
         self.tabs.push(tab);
-        self.active_tab_id = new_id;
+        self.activate_tab(new_id);
     }
 
     pub fn handle_close_tab(&mut self, id: String) {
@@ -403,7 +438,8 @@ impl LiteMarkApp {
                 .map(|tab| tab.file_path.as_deref())
                 .collect();
             if let Some(index) = tab_index_for_path(&paths, &path) {
-                self.active_tab_id = self.tabs[index].id.clone();
+                let id = self.tabs[index].id.clone();
+                self.activate_tab(id);
                 self.show_pdf_modal = true;
                 self.prompt_selected_ix = 0;
                 return;
@@ -487,7 +523,7 @@ impl LiteMarkApp {
             new_id
         };
         if still_there {
-            self.active_tab_id = id;
+            self.activate_tab(id);
             self.show_pdf_modal = true;
             self.prompt_selected_ix = 0;
         } else if opened_new {
@@ -758,22 +794,23 @@ impl LiteMarkApp {
         self.flash_zoom(cx);
     }
 
-    pub fn handle_toggle_mode(&mut self) {
+    fn apply_view_mode(&mut self, mode: ViewMode) {
         if self.view_locked_raw() {
             return;
         }
-        self.table_hover = None;
-        self.table_drag = None;
-        self.table_drag_press_held = false;
-        self.dismiss_editor_context_menu();
-        self.settings.view_mode = self.settings.view_mode.toggle();
-        self.active_tab_mut();
-        if self.settings.view_mode == ViewMode::Wysiwyg {
-            if let Some(tab) = self.active_tab_mut() {
+        self.reset_editor_transient_state();
+        self.settings.view_mode = mode;
+        if let Some(tab) = self.active_tab_mut() {
+            if mode == ViewMode::Wysiwyg {
                 tab.snap_wysiwyg_table_delimiter();
             }
         }
         self.save_settings();
+    }
+
+    pub fn handle_toggle_mode(&mut self) {
+        let next = self.settings.view_mode.toggle();
+        self.apply_view_mode(next);
     }
 
     pub fn handle_save_as(&mut self, cx: &mut Context<Self>) {
@@ -943,17 +980,7 @@ impl LiteMarkApp {
     }
 
     pub fn handle_set_view_mode(&mut self, mode: ViewMode) {
-        if self.view_locked_raw() {
-            return;
-        }
-        self.settings.view_mode = mode;
-        self.active_tab_mut();
-        if mode == ViewMode::Wysiwyg {
-            if let Some(tab) = self.active_tab_mut() {
-                tab.snap_wysiwyg_table_delimiter();
-            }
-        }
-        self.save_settings();
+        self.apply_view_mode(mode);
     }
 
     pub fn handle_set_theme(&mut self, theme: ThemeMode) {

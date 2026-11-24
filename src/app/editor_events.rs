@@ -30,7 +30,11 @@ impl LiteMarkApp {
 
     /// F2: show the Markdown of the selected picture for editing.
     pub(super) fn editor_edit_picture(&mut self, _cx: &mut App) {
-        if self.input_blocked() || !document_accepts_keystrokes(self.field_focus) {
+        if self.block_table_drag_edit()
+            || self.input_blocked()
+            || !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+        {
             return;
         }
         if let Some(tab) = self.active_tab_mut() {
@@ -40,11 +44,18 @@ impl LiteMarkApp {
 
     /// F3: step the selected picture through its preset widths.
     pub(super) fn editor_cycle_picture_size(&mut self, _cx: &mut App) {
-        if self.input_blocked() || !document_accepts_keystrokes(self.field_focus) {
+        if self.block_table_drag_edit()
+            || self.input_blocked()
+            || !document_accepts_keystrokes(self.field_focus)
+            || self.field_owns_keys
+        {
             return;
         }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.cycle_picture_size();
+        let changed = self
+            .active_tab_mut()
+            .is_some_and(|tab| tab.cycle_picture_size());
+        if changed {
+            self.refresh_find();
         }
     }
 
@@ -280,7 +291,9 @@ impl LiteMarkApp {
                     tab.id == drag.tab_id
                         && tab.content.get(drag.range.clone()) == Some(drag.source.as_str())
                 }) {
-                    tab.set_picture_size_at(drag.range, Some(width), height);
+                    if tab.set_picture_size_at(drag.range, Some(width), height) {
+                        self.refresh_find();
+                    }
                 }
             }
             window.refresh();
@@ -320,10 +333,24 @@ impl LiteMarkApp {
         self.image_drag.take().is_some()
     }
 
+    /// True when `position` lies inside the visible editor scroll viewport.
+    /// When the scroll handle has not been laid out yet (e.g. unit tests with
+    /// synthetic `EditorPaint`), fall back to `editor_paint.bounds`.
+    fn in_editor_viewport(&self, position: Point<Pixels>) -> bool {
+        let view = self.editor_scroll.bounds();
+        if view.size.width > px(0.0) && view.size.height > px(0.0) {
+            return view.contains(&position);
+        }
+        self.editor_paint
+            .borrow()
+            .bounds
+            .is_some_and(|b| b.contains(&position))
+    }
+
     /// A press on the handle of the selected picture starts resizing it. The
     /// selection and caret stay as they are, so the picture is still selected
     /// when the drag ends.
-    fn handle_picture_handle_press(
+    pub(crate) fn handle_picture_handle_press(
         &mut self,
         event: &MouseDownEvent,
         window: &mut Window,
@@ -331,15 +358,20 @@ impl LiteMarkApp {
     ) -> bool {
         if self.effective_view_mode() != ViewMode::Wysiwyg
             || event.button != MouseButton::Left
+            || event.click_count != 1
             || event.modifiers.shift
+            || !self.in_editor_viewport(event.position)
             || self.active_tab().is_none_or(|tab| tab.is_read_only())
         {
             return false;
         }
-        let Some((range, bounds, column)) = self.editor_paint.borrow().picture_handle.clone()
-        else {
+        let Some(handle) = self.editor_paint.borrow().picture_handle.clone() else {
             return false;
         };
+        if !handle.clip.contains(&event.position) {
+            return false;
+        }
+        let (range, bounds, column) = (handle.range, handle.bounds, handle.column);
         let Some(axis) = handle_at(bounds, &event.position) else {
             return false;
         };
@@ -410,6 +442,10 @@ impl LiteMarkApp {
             self.selected_target = None;
         }
         if self.input_blocked() || window.default_prevented() {
+            return;
+        }
+        if !self.in_editor_viewport(event.position) {
+            self.dismiss_editor_context_menu();
             return;
         }
         if self.handle_picture_handle_press(event, window, cx) {
@@ -607,6 +643,10 @@ impl LiteMarkApp {
         self.table_drag = None;
         self.clear_table_drag_press();
         if self.input_blocked() || window.default_prevented() {
+            return;
+        }
+        if !self.in_editor_viewport(event.position) {
+            self.dismiss_editor_context_menu();
             return;
         }
 

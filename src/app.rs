@@ -207,9 +207,9 @@ pub struct LiteMarkApp {
     /// a frame (caret blink, hover) doesn't rescan a large selection.
     selection_words: Option<(String, u64, Range<usize>, Option<usize>)>,
     pub editor_scroll: ScrollHandle,
-    /// Tab, caret and length the editor last scrolled to follow, so only a
-    /// real edit or caret move scrolls (not the wheel or a repaint).
-    caret_followed: Option<(String, Range<usize>, usize)>,
+    /// Tab, view mode, caret and length the editor last scrolled to follow, so
+    /// only a real edit, mode switch, or caret move scrolls (not the wheel or a repaint).
+    caret_followed: Option<(String, ViewMode, Range<usize>, usize)>,
     caret_follow_waits: u8,
     scroll_momentum: crate::ui::editor::ScrollMomentum,
     /// Clock for touchpad momentum. `None` is the real clock; tests set and
