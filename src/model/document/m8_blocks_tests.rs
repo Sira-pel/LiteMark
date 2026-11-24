@@ -317,15 +317,80 @@ fn w11_tab_indents_to_preceding_marker_width() {
 #[test]
 fn w11_shift_tab_outdents_to_parent_indent() {
     for (src, expect) in [
-        ("1. a\n   1. b", "1. a\n1. b"),
-        ("10. a\n    1. b", "10. a\n1. b"),
+        // A numbered item moved out continues the outer list's numbering.
+        ("1. a\n   1. b", "1. a\n2. b"),
+        ("10. a\n    1. b", "10. a\n11. b"),
         ("- a\n  - b", "- a\n- b"),
+        // After a bullet there is no outer numbering to continue.
+        ("- a\n  1. b", "- a\n1. b"),
     ] {
         let mut d = wys(src);
         d.place(src.len(), false);
         d.outdent();
         assert_eq!(d.content, expect, "{src:?}");
     }
+}
+
+#[test]
+fn w11_tab_renumbers_a_nested_numbered_item_from_one() {
+    // CommonMark only nests a numbered list that starts at 1: a nested `2.`
+    // reads as text of the item above, so Tab renumbers it.
+    for (src, line, expect) in [
+        ("1. a\n2. b", 1, "1. a\n   1. b"),
+        ("1. a\n2. b\n3. c", 1, "1. a\n   1. b\n3. c"),
+        // A sub-list already under the item above is continued.
+        ("1. a\n   1. x\n2. b", 2, "1. a\n   1. x\n   2. b"),
+        // `)` delimiters stay as they are.
+        ("1) a\n2) b", 1, "1) a\n   1) b"),
+        // Bullets have no number to change.
+        ("1. a\n- b", 1, "1. a\n   - b"),
+    ] {
+        let mut d = wys(src);
+        let at = src
+            .split('\n')
+            .take(line + 1)
+            .map(|l| l.len() + 1)
+            .sum::<usize>()
+            - 1;
+        d.place(at, false);
+        d.indent();
+        assert_eq!(d.content, expect, "{src:?}");
+        let parsed = d.parsed();
+        assert!(
+            matches!(parsed.lines[line].kind, LineKind::ListItem { .. }),
+            "{src:?}: line {line} should still be a list item"
+        );
+    }
+}
+
+#[test]
+fn w11_tab_renumbering_keeps_caret_on_same_text() {
+    // `10.` shrinks to `1.`: the caret stays right after "bc".
+    let mut d = wys("9. a\n10. bc");
+    d.place("9. a\n10. bc".len(), false);
+    d.indent();
+    assert_eq!(d.content, "9. a\n   1. bc");
+    assert_eq!(d.cursor_offset(), d.content.len());
+}
+
+#[test]
+fn w11_tab_renumbers_every_moved_item_in_a_selection() {
+    let src = "1. a\n2. b\n3. c";
+    let mut d = wys(src);
+    d.place(5, false);
+    d.place(src.len(), true);
+    d.indent();
+    assert_eq!(d.content, "1. a\n   1. b\n   2. c");
+}
+
+#[test]
+fn w11_shift_tab_after_renumber_restores_outer_numbering() {
+    let mut d = wys("1. a\n2. b");
+    d.place("1. a\n2. b".len(), false);
+    d.indent();
+    assert_eq!(d.content, "1. a\n   1. b");
+    d.outdent();
+    assert_eq!(d.content, "1. a\n2. b");
 }
 
 #[test]

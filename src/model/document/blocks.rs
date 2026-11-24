@@ -78,6 +78,87 @@ impl DocumentTab {
         (indent > parent_indent).then_some(indent - parent_indent)
     }
 
+    /// The number a numbered item gets when Tab or Shift+Tab moves it to
+    /// `target` indent: one more than the numbered item already at that level
+    /// just above (a sub-list being continued, or the outer list on Shift+Tab),
+    /// else 1. CommonMark only nests a numbered list that starts at 1; a
+    /// nested `2.` would read as text of the item above.
+    fn number_at_level(&mut self, line_start: usize, target: usize) -> usize {
+        let parsed = self.parsed();
+        let Some(index) = parsed
+            .line_at_offset(line_start)
+            .map(|l| l.line_index as usize)
+        else {
+            return 1;
+        };
+        for line in parsed.lines[..index].iter().rev() {
+            match line.kind {
+                LineKind::Empty => continue,
+                LineKind::ListItem { .. } => {
+                    let Some(found) =
+                        accepted_list_marker_in(&parsed, &self.content, line.source.start)
+                    else {
+                        return 1;
+                    };
+                    if found.indent_bytes > target {
+                        continue;
+                    }
+                    if found.indent_bytes == target && found.ordered {
+                        return found.number.saturating_add(1);
+                    }
+                    return 1;
+                }
+                _ => return 1,
+            }
+        }
+        1
+    }
+
+    /// Renumber the numbered items among `lines` (the selected lines after a
+    /// Tab or Shift+Tab, starting at `start_line` in the text before the
+    /// edit) that were at `level` indent: they count up from `first`. Lines
+    /// at other levels keep their numbers. Returns how much the first line
+    /// grew or shrank, for the caret.
+    fn renumber_moved_items(
+        &mut self,
+        start_line: usize,
+        lines: &mut [String],
+        level: usize,
+        first: usize,
+    ) -> isize {
+        let parsed = self.parsed();
+        let mut next = first;
+        let mut first_delta = 0isize;
+        let mut at = start_line;
+        for (i, line) in lines.iter_mut().enumerate() {
+            let original_len = self.content[at..]
+                .find('\n')
+                .unwrap_or(self.content.len() - at);
+            let marker = accepted_list_marker_in(&parsed, &self.content, at);
+            at += original_len + 1;
+            let Some(marker) = marker else { continue };
+            if !marker.ordered || marker.indent_bytes != level {
+                continue;
+            }
+            let digits_at = line.len() - line.trim_start_matches(' ').len();
+            let digits = line[digits_at..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            if digits == 0 {
+                continue;
+            }
+            let number = next.to_string();
+            next = next.saturating_add(1);
+            let before = line.len();
+            line.replace_range(digits_at..digits_at + digits, &number);
+            if i == 0 {
+                first_delta = line.len() as isize - before as isize;
+            }
+        }
+        first_delta
+    }
+
     pub fn indent(&mut self) {
         if self.is_read_only() || self.range_on_picture(&self.selection_range()) {
             return;
@@ -115,10 +196,18 @@ impl DocumentTab {
         } else {
             None
         };
+        // Where the moved level's numbers restart, decided before the edit.
+        let level = self.content[start_line..]
+            .bytes()
+            .take_while(|b| *b == b' ')
+            .count();
+        let numbering = list_pad
+            .as_ref()
+            .map(|pad| self.number_at_level(start_line, level + pad.len()));
         let unit = list_pad.unwrap_or_else(|| style.unit());
         let lines_str = self.content[start_line..end_line].to_string();
         let mut modified = Vec::new();
-        let mut first_added = 0;
+        let mut first_added: isize = 0;
         let last = lines_str.split('\n').count() - 1;
         for (i, line) in lines_str.split('\n').enumerate() {
             let blank = line.trim().is_empty();
@@ -131,10 +220,18 @@ impl DocumentTab {
                 continue;
             }
             if i == 0 {
-                first_added = unit.len();
+                first_added = unit.len() as isize;
             }
             modified.push(format!("{unit}{line}"));
         }
+        if let Some(first) = numbering {
+            let delta = self.renumber_moved_items(start_line, &mut modified, level, first);
+            // The caret only shifts with the number when it sits after it.
+            if range.start > start_line + level {
+                first_added += delta;
+            }
+        }
+        let first_added = first_added.max(0) as usize;
         let replacement = modified.join("\n");
         let added_len = replacement.len() - lines_str.len();
         self.edit(start_line..end_line, &replacement);
@@ -153,13 +250,21 @@ impl DocumentTab {
         }
         let range = self.selection_range();
         let (start_line, end_line) = self.indent_target_lines(&range);
-        let strip_spaces = match self.list_outdent_width(start_line) {
+        let list_width = self.list_outdent_width(start_line);
+        let strip_spaces = match list_width {
             Some(width) => width,
             None => match self.indent_style {
                 IndentStyle::Tabs => 4,
                 IndentStyle::Spaces(n) => n.max(1),
             },
         };
+        // A numbered item moved out continues the outer list's numbering.
+        let level = self.content[start_line..]
+            .bytes()
+            .take_while(|b| *b == b' ')
+            .count();
+        let numbering =
+            list_width.map(|width| self.number_at_level(start_line, level.saturating_sub(width)));
 
         let lines_str = self.content[start_line..end_line].to_string();
         let mut modified = Vec::new();
@@ -184,6 +289,17 @@ impl DocumentTab {
             removed_before_end += strip.min(range.end.saturating_sub(line_start_pos));
             line_start_pos += line.len() + 1;
             modified.push(stripped.to_string());
+        }
+        if let Some(first) = numbering {
+            let delta = self.renumber_moved_items(start_line, &mut modified, level, first);
+            // Fold the number's change into the first line's shift, so a
+            // caret after the number stays on the same text.
+            if range.start > start_line + level {
+                first_line_stripped = (first_line_stripped as isize - delta).max(0) as usize;
+            }
+            if range.end > start_line + level {
+                removed_before_end = (removed_before_end as isize - delta).max(0) as usize;
+            }
         }
         let replacement = modified.join("\n");
         self.edit(start_line..end_line, &replacement);
