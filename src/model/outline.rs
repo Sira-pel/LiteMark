@@ -22,7 +22,7 @@ pub fn outline_items(parsed: &ParsedDocument, content: &str) -> Vec<OutlineItem>
         .lines
         .iter()
         .filter_map(|line| match line.kind {
-            LineKind::Heading { level } => Some(OutlineItem {
+            LineKind::Heading { level } if line.quote_depth == 0 => Some(OutlineItem {
                 level,
                 text: line.display_text(content).trim().to_string(),
                 offset: line.source.start,
@@ -50,7 +50,7 @@ pub fn can_skip_outline_patch(
     }
     let has_new_heading = parsed.lines[restart..restart + inserted]
         .iter()
-        .any(|line| matches!(line.kind, LineKind::Heading { .. }));
+        .any(|line| matches!(line.kind, LineKind::Heading { .. }) && line.quote_depth == 0);
     if has_new_heading {
         return false;
     }
@@ -72,7 +72,7 @@ pub fn patch_outline_items(
     let new_headings: Vec<OutlineItem> = parsed.lines[restart..restart + inserted]
         .iter()
         .filter_map(|line| match line.kind {
-            LineKind::Heading { level } => Some(OutlineItem {
+            LineKind::Heading { level } if line.quote_depth == 0 => Some(OutlineItem {
                 level,
                 text: line.display_text(content).trim().to_string(),
                 offset: line.source.start,
@@ -309,10 +309,11 @@ mod tests {
 
     #[test]
     fn raw_outline_matches_parsed_outline_for_atx_and_fences() {
-        let doc = "# One\r\n\r\n```\r\n# inside\r\n```\r\n## **Two** `code` ##\n~~~\n# tilde\n~~~\n    # indented\n### Three\r";
+        let doc = "# One\r\n\r\n```\r\n# inside\r\n```\r\n## **Two** `code` ##\n~~~\n# tilde\n~~~\n    # indented\n> # quoted\n### Three\r";
         let expected = items(doc);
         let got = outline_items_raw(doc);
         assert_eq!(got, expected);
+        assert_eq!(got.len(), 3);
     }
 
     #[test]

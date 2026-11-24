@@ -4,9 +4,11 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(test)]
+use crate::markdown::StyledSegment;
 use crate::markdown::{
     accepted_list_marker_in, empty_parsed_document, parse_document, unescaped_pipe_offsets,
-    InlinePair, InlineTagKind, LineKind, ParsedDocument, ParsedLine, StyledSegment,
+    AbsStyledSegment, InlinePair, InlineTagKind, LineKind, LineRange, ParsedDocument, ParsedLine,
     TableColumnAlign, TableRowBody, MAX_LIST_NUMBER,
 };
 

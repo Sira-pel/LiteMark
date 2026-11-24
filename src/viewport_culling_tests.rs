@@ -6,7 +6,7 @@ use gpui::{Entity, TestAppContext, VisualTestContext};
 
 // `use gpui::*` in this crate re-exports a `test` attribute that is not
 // Rust's `#[test]`. Pin the std one so these stay ordinary unit tests.
-use ::core::prelude::v1::test as std_test;
+use core::prelude::v1::test as std_test;
 
 const LINES: usize = 3000;
 
@@ -464,6 +464,163 @@ fn layout_after_edits_matches_a_fresh_layout() {
     });
     redraw(&mut fresh_cx);
     assert_same_relative_geometry(&edited, &geometry(&fresh_view, &fresh_cx));
+}
+
+#[std_test]
+fn table_cell_wrap_cache_reuses_shaped_lines_and_updates_offset_maps() {
+    let table = "| Header A | Header B |\n| --- | --- |\n| alpha beta gamma delta epsilon zeta eta theta iota kappa | short |\n";
+    let (view, mut cx) = harness(table, ViewMode::Wysiwyg);
+    let cell_shaped_ptrs =
+        |view: &Entity<LiteMarkApp>, cx: &VisualTestContext, line_idx: u32| -> Vec<usize> {
+            view.read_with(cx, |app, _| {
+                let paint = app.editor_paint.borrow();
+                let row = paint
+                    .rows
+                    .iter()
+                    .find(|r| !r.cells.is_empty() && r.line_index == line_idx)
+                    .expect("body table row");
+                row.cells[0]
+                    .lines
+                    .iter()
+                    .map(|l| std::rc::Rc::as_ptr(&l.shaped) as usize)
+                    .collect()
+            })
+        };
+    let initial_ptrs = cell_shaped_ptrs(&view, &cx, 2);
+    assert!(!initial_ptrs.is_empty());
+
+    // Idle redraw reuses the exact same Rc<ShapedLine>s.
+    redraw(&mut cx);
+    assert_eq!(cell_shaped_ptrs(&view, &cx, 2), initial_ptrs);
+
+    // Inserting a paragraph above the table shifts byte offsets, yet the cached
+    // Rc<ShapedLine>s are reused while CellLine::offset_map updates to the new offsets.
+    let prefix = "Inserted paragraph above table.\n\n";
+    view.update(&mut cx, |app, _cx| {
+        app.active_tab_mut()
+            .unwrap()
+            .insert_text_in_mode(0..0, prefix, ViewMode::Wysiwyg);
+    });
+    redraw(&mut cx);
+    assert_eq!(cell_shaped_ptrs(&view, &cx, 4), initial_ptrs);
+
+    let (alpha_start, alpha_end) = view.read_with(&cx, |app, _| {
+        let paint = app.editor_paint.borrow();
+        let row = paint
+            .rows
+            .iter()
+            .find(|r| !r.cells.is_empty() && r.line_index == 4)
+            .expect("shifted body row");
+        let first_line = &row.cells[0].lines[0];
+        let last_line = row.cells[0].lines.last().unwrap();
+        (
+            first_line.offset_map.line_start,
+            last_line.offset_map.line_end,
+        )
+    });
+    let expected_start = view.read_with(&cx, |app, _| {
+        app.active_tab().unwrap().content.find("alpha").unwrap()
+    });
+    assert_eq!(alpha_start, expected_start);
+    assert!(alpha_end > alpha_start);
+}
+
+#[std_test]
+fn table_cell_wrap_cache_invalidates_on_theme_zoom_width_and_bypasses_marked() {
+    let table = "| Header A | Header B |\n| --- | --- |\n| alpha beta gamma delta epsilon zeta eta theta iota kappa | short |\n";
+    let (view, mut cx) = harness(table, ViewMode::Wysiwyg);
+    // Every shaped line seen stays alive to the end of the test, so a freed
+    // line's address can't be reused by its replacement (macOS's allocator
+    // hands it straight back, which made the address checks flaky there).
+    let kept = std::cell::RefCell::new(Vec::new());
+    let body_ptrs = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| -> Vec<usize> {
+        view.read_with(cx, |app, _| {
+            let paint = app.editor_paint.borrow();
+            let row = paint
+                .rows
+                .iter()
+                .find(|r| !r.cells.is_empty() && r.line_index == 2)
+                .expect("body row");
+            row.cells[0]
+                .lines
+                .iter()
+                .map(|l| {
+                    kept.borrow_mut().push(l.shaped.clone());
+                    std::rc::Rc::as_ptr(&l.shaped) as usize
+                })
+                .collect()
+        })
+    };
+    let p0 = body_ptrs(&view, &cx);
+
+    // 1. Zoom change invalidates wrapped_cells.
+    view.update(&mut cx, |app, _cx| {
+        app.settings.zoom_level = 125;
+    });
+    redraw(&mut cx);
+    let p1 = body_ptrs(&view, &cx);
+    assert_ne!(p1, p0, "zoom change must re-shape cached table cells");
+
+    // 2. Theme change invalidates wrapped_cells.
+    view.update(&mut cx, |app, _cx| {
+        app.settings.theme = if app.settings.theme == crate::theme::ThemeMode::YaruDark {
+            crate::theme::ThemeMode::YaruLight
+        } else {
+            crate::theme::ThemeMode::YaruDark
+        };
+    });
+    redraw(&mut cx);
+    let p2 = body_ptrs(&view, &cx);
+    assert_ne!(p2, p1, "theme change must re-shape cached table cells");
+
+    // 3. Column width change (widening column B) invalidates wrapped_cells for column A.
+    view.update(&mut cx, |app, _cx| {
+        let tab = app.active_tab_mut().unwrap();
+        let pos = tab.content.find("short").unwrap();
+        tab.insert_text_in_mode(pos..pos, "much longer column B text ", ViewMode::Wysiwyg);
+    });
+    redraw(&mut cx);
+    let p3 = body_ptrs(&view, &cx);
+    assert_ne!(
+        p3, p2,
+        "column width change must re-shape cached table cells"
+    );
+
+    // 4. Active IME marked_range inside column A bypasses wrapped_cells without overwriting it.
+    view.update(&mut cx, |app, _cx| {
+        let tab = app.active_tab_mut().unwrap();
+        let pos = tab.content.find("alpha").unwrap();
+        tab.marked_range = Some(pos..pos + 5);
+    });
+    redraw(&mut cx);
+    let p_marked = body_ptrs(&view, &cx);
+    assert_ne!(
+        p_marked, p3,
+        "IME marked range must bypass wrapped_cells cache"
+    );
+    view.update(&mut cx, |app, _cx| {
+        app.active_tab_mut().unwrap().marked_range = None;
+    });
+    redraw(&mut cx);
+    assert_eq!(
+        body_ptrs(&view, &cx),
+        p3,
+        "IME frame must not overwrite non-IME cached wrapped_cells"
+    );
+
+    // 5. Switching to Raw mode clears wrapped_cells.
+    view.update(&mut cx, |app, _cx| {
+        app.settings.view_mode = ViewMode::Raw;
+    });
+    redraw(&mut cx);
+    view.read_with(&cx, |app, _| {
+        assert!(app
+            .editor_paint
+            .borrow()
+            .table_width_cache
+            .wrapped_cells
+            .is_empty());
+    });
 }
 
 /// Manual benchmark: cost of a redraw (idle and after an edit) on a ~5 MB,

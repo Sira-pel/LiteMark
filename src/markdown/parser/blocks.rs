@@ -311,18 +311,17 @@ pub(super) fn fence_marker_line(
     line: &str,
     kind: LineKind,
 ) -> ParsedLine {
-    let line_start = source.start;
-    let line_end = source.end;
-    let hidden = if line_end > line_start {
-        vec![line_start..line_end]
-    } else {
+    let hidden = if line.is_empty() {
         Vec::new()
+    } else {
+        vec![LineRange::new(0, line.len() as u32)]
     };
     ParsedLine {
         line_index: index as u32,
         source,
         content_end: line.len() as u32,
         prefix_len: line.len() as u32,
+        quote_depth: 0,
         kind,
         hidden_ranges: hidden.into(),
         inline: None,
@@ -336,25 +335,25 @@ pub(super) fn code_content_line(
     line: &str,
     strip: usize,
 ) -> ParsedLine {
-    let line_start = source.start;
     if strip == 0 {
         return ParsedLine {
             line_index: index as u32,
             source,
             content_end: line.len() as u32,
             prefix_len: 0,
+            quote_depth: 0,
             kind: LineKind::CodeLine,
             hidden_ranges: Box::default(),
             inline: None,
         };
     }
-    let content_start = line_start + strip;
-    let hidden = vec![line_start..content_start];
+    let hidden = vec![LineRange::new(0, strip as u32)];
     ParsedLine {
         line_index: index as u32,
         source,
         content_end: line.len() as u32,
         prefix_len: strip as u32,
+        quote_depth: 0,
         kind: LineKind::CodeLine,
         hidden_ranges: hidden.into(),
         inline: None,
@@ -368,38 +367,30 @@ pub(super) fn atx_line(
     level: u8,
     content: std::ops::Range<usize>,
 ) -> ParsedLine {
-    let line_start = source.start;
-    let line_end = source.end;
     let mut hidden = Vec::new();
     if content.start > 0 {
-        hidden.push(line_start..line_start + content.start);
+        hidden.push(0..content.start);
     }
     if content.end < line.len() {
-        hidden.push(line_start + content.end..line_end);
+        hidden.push(content.end..line.len());
     }
     let (inline_hidden, inline_pairs, styled_segments) = if content.is_empty() {
         (Vec::new(), Vec::new(), Vec::new())
     } else {
-        parse_inline_syntax(
-            &line[content.start..content.end],
-            line_start + content.start,
-        )
+        parse_inline_syntax(&line[content.start..content.end], content.start)
     };
     hidden.extend(inline_hidden);
-    let hidden = merge_ranges(hidden);
-    let display_text_owned = build_display(line, line_start, content.start, &hidden);
+    let hidden = merge_line_ranges(hidden);
+    let display_text_owned = build_display(line, content.start, &hidden);
     ParsedLine {
         line_index: index as u32,
         source,
         content_end: content.end as u32,
         prefix_len: content.start as u32,
+        quote_depth: 0,
         kind: LineKind::Heading { level },
         hidden_ranges: hidden.into(),
-        inline: LineInline::boxed(
-            inline_pairs.into(),
-            styled_segments.into(),
-            display_text_owned,
-        ),
+        inline: LineInline::boxed(inline_pairs, styled_segments, display_text_owned),
     }
 }
 

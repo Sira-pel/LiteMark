@@ -546,3 +546,15 @@ fn raw_fence_scan_handles_lone_cr_endings() {
     let d = raw_enter(src, src.len());
     assert!(d.content.ends_with("```rust\n\n```"), "{:?}", d.content);
 }
+
+#[test]
+fn quoted_ordered_item_at_the_largest_number_ends_the_list() {
+    for mode in [ViewMode::Raw, ViewMode::Wysiwyg] {
+        let src = "> 999999999. a";
+        let mut d = doc(src);
+        d.set_view_mode(mode);
+        d.place(src.len(), false);
+        d.smart_newline(false);
+        assert_eq!(d.content, "> 999999999. a\n> ", "{mode:?}");
+    }
+}

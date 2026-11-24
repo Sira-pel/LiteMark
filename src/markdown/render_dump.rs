@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use crate::model::text_ops::visual_rows;
 
-use super::{parse_document, LineKind, StyledSegment, TableColumnAlign};
+use super::{parse_document, LineKind, ParsedLine, StyledSegment, TableColumnAlign};
 
 pub fn render_tree(markdown: &str, wrap_cols: usize) -> String {
     let doc = parse_document(markdown);
@@ -51,7 +51,7 @@ pub fn render_tree(markdown: &str, wrap_cols: usize) -> String {
         for (segment_index, segment) in line.styled_segments().iter().enumerate() {
             out.push_str(&format!(
                 "segment[{line_index}][{segment_index}] {}\n",
-                segment_token(markdown, segment),
+                segment_token(markdown, line, segment),
             ));
         }
 
@@ -113,20 +113,21 @@ fn kind_token(kind: &LineKind) -> String {
     }
 }
 
-fn segment_token(markdown: &str, segment: &StyledSegment) -> String {
-    let link = match &segment.link_url {
+fn segment_token(markdown: &str, line: &ParsedLine, segment: &StyledSegment) -> String {
+    let link = match line.segment_link_url(segment) {
         Some(url) => quote_token(url),
         None => "-".to_string(),
     };
-    let text = slice_text(markdown, &segment.source);
+    let source = segment.source(line.source.start);
+    let text = slice_text(markdown, &source);
     format!(
         "source={} bold={} italic={} underline={} strike={} code={} link={} text={}",
-        range_token(&segment.source),
-        segment.bold,
-        segment.italic,
-        segment.underline,
-        segment.strike,
-        segment.code,
+        range_token(&source),
+        segment.bold(),
+        segment.italic(),
+        segment.underline(),
+        segment.strike(),
+        segment.code(),
         link,
         quote_token(&text),
     )
