@@ -17,6 +17,67 @@ impl DocumentTab {
         (start_line, line_end(&self.content, end).max(start_line))
     }
 
+    /// For the list item at `line_start`: its indent, and the nearest
+    /// preceding item at the same or a shallower level (`shallower` limits it
+    /// to strictly shallower, the parent) as `(indent, marker width)`. `None`
+    /// when the line is not a list item, or tabs make the widths unreliable.
+    fn list_neighbor(
+        &mut self,
+        line_start: usize,
+        shallower: bool,
+    ) -> Option<(usize, Option<(usize, usize)>)> {
+        if !self.file_type.supports_markdown_features() {
+            return None;
+        }
+        let parsed = self.parsed();
+        let has_tab = |at: usize, indent: usize| self.content[at..at + indent].contains('\t');
+        let current = accepted_list_marker_in(&parsed, &self.content, line_start)?;
+        if has_tab(line_start, current.indent_bytes) {
+            return None;
+        }
+        let index = parsed.line_at_offset(line_start)?.line_index as usize;
+        for line in parsed.lines[..index].iter().rev() {
+            match line.kind {
+                LineKind::Empty => continue,
+                LineKind::ListItem { .. } => {
+                    let found = accepted_list_marker_in(&parsed, &self.content, line.source.start)?;
+                    if has_tab(line.source.start, found.indent_bytes) {
+                        return None;
+                    }
+                    let fits = if shallower {
+                        found.indent_bytes < current.indent_bytes
+                    } else {
+                        found.indent_bytes <= current.indent_bytes
+                    };
+                    if fits {
+                        let width = found.marker_end - found.indent_bytes;
+                        return Some((current.indent_bytes, Some((found.indent_bytes, width))));
+                    }
+                }
+                _ => break,
+            }
+        }
+        Some((current.indent_bytes, None))
+    }
+
+    /// Spaces a Tab adds to the list item at `line_start`: enough to line it
+    /// up under the text of the item it nests in (3 under `1. `, 2 under
+    /// `- `). `None` falls back to the ordinary indent step.
+    fn list_indent_pad(&mut self, line_start: usize) -> Option<String> {
+        let (indent, found) = self.list_neighbor(line_start, false)?;
+        let (found_indent, width) = found?;
+        let nested = found_indent + width;
+        (nested > indent).then(|| " ".repeat(nested - indent))
+    }
+
+    /// Spaces a Shift+Tab removes from the list item at `line_start`: back
+    /// to the level of the item it nests in.
+    fn list_outdent_width(&mut self, line_start: usize) -> Option<usize> {
+        let (indent, found) = self.list_neighbor(line_start, true)?;
+        let parent_indent = found.map_or(0, |(found_indent, _)| found_indent);
+        (indent > parent_indent).then_some(indent - parent_indent)
+    }
+
     pub fn indent(&mut self) {
         if self.is_read_only() || self.range_on_picture(&self.selection_range()) {
             return;
@@ -47,7 +108,14 @@ impl DocumentTab {
             return;
         }
         let (start_line, end_line) = self.indent_target_lines(&range);
-        let unit = style.unit();
+        // A list item nests under the item above it, so the step is that
+        // item's marker width; every selected line moves by the same amount.
+        let list_pad = if markdown {
+            self.list_indent_pad(start_line)
+        } else {
+            None
+        };
+        let unit = list_pad.unwrap_or_else(|| style.unit());
         let lines_str = self.content[start_line..end_line].to_string();
         let mut modified = Vec::new();
         let mut first_added = 0;
@@ -85,9 +153,12 @@ impl DocumentTab {
         }
         let range = self.selection_range();
         let (start_line, end_line) = self.indent_target_lines(&range);
-        let strip_spaces = match self.indent_style {
-            IndentStyle::Tabs => 4,
-            IndentStyle::Spaces(n) => n.max(1),
+        let strip_spaces = match self.list_outdent_width(start_line) {
+            Some(width) => width,
+            None => match self.indent_style {
+                IndentStyle::Tabs => 4,
+                IndentStyle::Spaces(n) => n.max(1),
+            },
         };
 
         let lines_str = self.content[start_line..end_line].to_string();

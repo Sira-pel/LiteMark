@@ -291,3 +291,54 @@ fn w10_word_ops_stay_inside_table_cell() {
     d.delete_word_left();
     assert_eq!(d.content, TABLE.replacen("c d", "c ", 1));
 }
+
+// ---- W11: list Tab nesting ----
+
+#[test]
+fn w11_tab_indents_to_preceding_marker_width() {
+    for (src, expect) in [
+        ("1. a\n2. b", "1. a\n   2. b"),
+        ("10. a\n11. b", "10. a\n    11. b"),
+        ("- a\n- b", "- a\n  - b"),
+        ("- a\n  - b\n- c", "- a\n  - b\n  - c"),
+    ] {
+        let mut d = wys(src);
+        d.place(src.len(), false);
+        d.indent();
+        assert_eq!(d.content, expect, "{src:?}");
+        let parsed = d.parsed();
+        let last = parsed.lines.last().unwrap();
+        assert!(matches!(last.kind, LineKind::ListItem { .. }));
+    }
+}
+
+#[test]
+fn w11_shift_tab_outdents_to_parent_indent() {
+    for (src, expect) in [
+        ("1. a\n   2. b", "1. a\n2. b"),
+        ("10. a\n    11. b", "10. a\n11. b"),
+        ("- a\n  - b", "- a\n- b"),
+    ] {
+        let mut d = wys(src);
+        d.place(src.len(), false);
+        d.outdent();
+        assert_eq!(d.content, expect, "{src:?}");
+    }
+}
+
+#[test]
+fn w11_first_item_keeps_default_indent() {
+    let mut d = wys("1. a");
+    d.place(4, false);
+    d.indent();
+    assert_eq!(d.content, "  1. a");
+}
+
+#[test]
+fn w11_tab_keeps_caret_on_same_text() {
+    let mut d = wys("1. a\n2. bc");
+    d.place(8, false);
+    d.indent();
+    assert_eq!(d.content, "1. a\n   2. bc");
+    assert_eq!(d.cursor_offset(), 11);
+}
