@@ -133,9 +133,15 @@ fn bench_note_heap() {
             {
                 use std::collections::HashSet;
                 let rows = &paint.rows;
-                let maps: HashSet<usize> = rows.iter().map(|r| std::sync::Arc::as_ptr(&r.offset_map) as usize).collect();
+                let maps: HashSet<usize> = rows
+                    .iter()
+                    .filter_map(|r| r.offset_map.as_ref().map(|m| std::sync::Arc::as_ptr(m) as usize))
+                    .collect();
                 let shaped: HashSet<usize> = rows.iter().map(|r| std::rc::Rc::as_ptr(&r.shaped) as usize).collect();
-                let links: HashSet<usize> = rows.iter().map(|r| std::sync::Arc::as_ptr(&r.link_hits) as usize).collect();
+                let links: HashSet<usize> = rows
+                    .iter()
+                    .filter_map(|r| r.link_hits.as_ref().map(|l| std::sync::Arc::as_ptr(l) as usize))
+                    .collect();
                 let with_cells = rows.iter().filter(|r| !r.cells.is_empty()).count();
                 eprintln!(
                     "  paint: {} rows (cap {}), PaintRow {} B -> {} inline | distinct maps {} | shaped {} | link vecs {} | rows with cells {}",

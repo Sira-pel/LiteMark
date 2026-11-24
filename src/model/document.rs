@@ -727,47 +727,28 @@ impl DocumentTab {
 
     /// Replace `range` and record a diff. Read-only documents ignore the edit.
     pub fn edit(&mut self, range: Range<usize>, new_text: &str) {
-        let undo_caret_override = self.next_undo_caret.take();
-        let redo_caret_override = self.next_redo_caret.take();
-        let undo_sel = self.next_undo_sel.take();
-        let redo_sel = self.next_redo_sel.take();
-        if self.is_read_only() {
-            return;
-        }
-        let opens_span_group = std::mem::take(&mut self.next_edit_opens_span_group);
-        let range = self.clamp_range(range);
-        if !self.content.is_char_boundary(range.start) || !self.content.is_char_boundary(range.end)
-        {
-            return;
-        }
-        let deleted = self.content[range.clone()].to_string();
-        if deleted == new_text {
-            let cursor = range.start + new_text.len();
-            self.caret.move_to(cursor.min(self.content.len()));
-            self.marked_range = None;
-            self.refresh_cursor();
-            return;
-        }
-        let undo_caret = undo_caret_override.unwrap_or(range.end);
-        let redo_caret = redo_caret_override.unwrap_or(range.start + new_text.len());
-        let mut edit = DiffEdit::new(range.start, deleted, new_text.to_string());
-        edit.undo_caret = undo_caret;
-        edit.redo_caret = redo_caret;
-        edit.undo_sel = undo_sel;
-        edit.redo_sel = redo_sel;
-        if opens_span_group {
-            self.history.push_span_opening(edit);
-        } else {
-            self.history.push(edit);
-        }
-        let cursor_at = range.start + new_text.len();
-        self.last_edit = Some((self.revision, range.clone(), new_text.len()));
-        if let Some(staged) = self.staged_stats {
-            let staged_next = (staged.revision == self.revision)
+        self.edit_inner(range, new_text, true);
+    }
+
+    /// Replace `range` without calling [`Self::refresh_cursor`] at the end.
+    /// Used when the caller immediately repositions the caret and refreshes once.
+    pub(super) fn edit_without_cursor_refresh(&mut self, range: Range<usize>, new_text: &str) {
+        self.edit_inner(range, new_text, false);
+    }
+
+    fn advance_staged_stats(
+        staged_stats: &mut Option<StagedStats>,
+        revision: u64,
+        content: &str,
+        range: &Range<usize>,
+        new_text: &str,
+    ) {
+        if let Some(staged) = *staged_stats {
+            let staged_next = (staged.revision == revision)
                 .then(|| {
-                    let old_slice = &self.content[range.clone()];
-                    let before = &self.content[..range.start];
-                    let after = &self.content[range.end..];
+                    let old_slice = content.get(range.clone())?;
+                    let before = content.get(..range.start)?;
+                    let after = content.get(range.end..)?;
                     // Counts in a window around the edit, before and after it.
                     let shift =
                         |total: usize, new: usize, old: usize| (total + new).checked_sub(old);
@@ -789,7 +770,7 @@ impl DocumentTab {
                         count_window_words(b, old_slice, a),
                     )?;
                     Some(StagedStats {
-                        revision: self.revision.wrapping_add(1),
+                        revision: revision.wrapping_add(1),
                         words,
                         chars,
                         line_endings,
@@ -798,8 +779,53 @@ impl DocumentTab {
                 .flatten();
             // A count that would go negative means the staged numbers are
             // off; dropping them makes the next read recount from scratch.
-            self.staged_stats = staged_next;
+            *staged_stats = staged_next;
         }
+    }
+
+    fn edit_inner(&mut self, range: Range<usize>, new_text: &str, refresh: bool) {
+        let undo_caret_override = self.next_undo_caret.take();
+        let redo_caret_override = self.next_redo_caret.take();
+        let undo_sel = self.next_undo_sel.take();
+        let redo_sel = self.next_redo_sel.take();
+        if self.is_read_only() {
+            return;
+        }
+        let opens_span_group = std::mem::take(&mut self.next_edit_opens_span_group);
+        let range = self.clamp_range(range);
+        if !self.content.is_char_boundary(range.start) || !self.content.is_char_boundary(range.end)
+        {
+            return;
+        }
+        let deleted = self.content[range.clone()].to_string();
+        if deleted == new_text {
+            let cursor = range.start + new_text.len();
+            self.caret.move_to(cursor.min(self.content.len()));
+            self.marked_range = None;
+            if refresh {
+                self.refresh_cursor();
+            }
+            return;
+        }
+        let undo_caret = undo_caret_override.unwrap_or(range.end);
+        let redo_caret = redo_caret_override.unwrap_or(range.start + new_text.len());
+        let mut edit = DiffEdit::new(range.start, deleted, new_text.to_string());
+        edit.set_carets(undo_caret, redo_caret);
+        edit.set_selections(undo_sel, redo_sel);
+        if opens_span_group {
+            self.history.push_span_opening(edit);
+        } else {
+            self.history.push(edit);
+        }
+        let cursor_at = range.start + new_text.len();
+        self.last_edit = Some((self.revision, range.clone(), new_text.len()));
+        Self::advance_staged_stats(
+            &mut self.staged_stats,
+            self.revision,
+            &self.content,
+            &range,
+            new_text,
+        );
         self.carry_count_anchors_past(&range);
         self.content.replace_range(range, new_text);
         self.shrink_content_if_bloated();
@@ -809,7 +835,9 @@ impl DocumentTab {
         self.marked_range = None;
         self.pending_table_col = None;
         self.is_modified = true;
-        self.refresh_cursor();
+        if refresh {
+            self.refresh_cursor();
+        }
     }
 
     pub fn move_line_up(&mut self) {
@@ -835,7 +863,7 @@ impl DocumentTab {
         let curr_len = curr_line.len();
 
         let new_text = format!("{curr_line}{ending}{prev_line}");
-        self.edit(prev_line_start..current_line_end, &new_text);
+        self.edit_without_cursor_refresh(prev_line_start..current_line_end, &new_text);
 
         let new_cursor = (prev_line_start + col).min(prev_line_start + curr_len);
         self.caret.move_to(new_cursor);
@@ -868,7 +896,7 @@ impl DocumentTab {
         let next_len = next_line.len();
 
         let new_text = format!("{next_line}{ending}{curr_line}");
-        self.edit(current_line_start..next_line_end, &new_text);
+        self.edit_without_cursor_refresh(current_line_start..next_line_end, &new_text);
 
         let new_line_start = current_line_start + next_len + ending_len;
         let new_cursor = (new_line_start + col).min(new_line_start + curr_len);
@@ -1124,7 +1152,19 @@ impl DocumentTab {
     }
 
     pub fn undo(&mut self) -> bool {
+        if let Some((range, new_text)) = self.history.peek_undo_replace() {
+            Self::advance_staged_stats(
+                &mut self.staged_stats,
+                self.revision,
+                &self.content,
+                &range,
+                new_text,
+            );
+        } else {
+            self.staged_stats = None;
+        }
         let Some(restore) = self.history.undo(&mut self.content) else {
+            self.staged_stats = None;
             return false;
         };
         self.shrink_content_if_bloated();
@@ -1133,7 +1173,6 @@ impl DocumentTab {
             restore.replaced.0.clone(),
             restore.replaced.1,
         ));
-        self.staged_stats = None;
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);
@@ -1143,7 +1182,19 @@ impl DocumentTab {
     }
 
     pub fn redo(&mut self) -> bool {
+        if let Some((range, new_text)) = self.history.peek_redo_replace() {
+            Self::advance_staged_stats(
+                &mut self.staged_stats,
+                self.revision,
+                &self.content,
+                &range,
+                new_text,
+            );
+        } else {
+            self.staged_stats = None;
+        }
         let Some(restore) = self.history.redo(&mut self.content) else {
+            self.staged_stats = None;
             return false;
         };
         self.shrink_content_if_bloated();
@@ -1152,7 +1203,6 @@ impl DocumentTab {
             restore.replaced.0.clone(),
             restore.replaced.1,
         ));
-        self.staged_stats = None;
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);

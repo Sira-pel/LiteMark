@@ -72,6 +72,7 @@ pub fn image_element_id(
 
 impl ImageSizeCache {
     /// Cached size without any filesystem access, even on a cache miss.
+    #[cfg(test)]
     pub fn cached_size(&self, path: &Path) -> Option<(u32, u32)> {
         self.entries.get(path).and_then(|e| e.size)
     }

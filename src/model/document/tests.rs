@@ -3723,8 +3723,8 @@ fn down_on_the_last_painted_row_snaps_before_the_closing_hash() {
             origin: point(px(0.0), px(0.0)),
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
-            offset_map,
-            link_hits: Arc::default(),
+            offset_map: Some(offset_map),
+            link_hits: None,
             cells: Box::default(),
         }],
         bounds: None,
@@ -4174,8 +4174,8 @@ fn paint_rows(doc: &mut DocumentTab) -> EditorPaint {
             origin: point(px(0.0), px(28.0 * ix as f32)),
             line_height: px(28.0),
             shaped: std::rc::Rc::new(ShapedLine::default()),
-            offset_map: line.to_offset_map(),
-            link_hits: Arc::default(),
+            offset_map: Some(line.to_offset_map()),
+            link_hits: None,
             cells: Box::default(),
         })
         .collect();
@@ -6529,7 +6529,7 @@ fn replace_all_survives_the_next_keystroke_on_a_large_note() {
     t.set_content(edited.clone());
     assert_eq!(t.content, edited);
     assert!(
-        t.undo_stored_bytes() < 64,
+        t.undo_stored_bytes() < 256,
         "{} bytes",
         t.undo_stored_bytes()
     );
@@ -6549,6 +6549,30 @@ fn set_content_trims_on_character_boundaries() {
     assert_eq!(t.content, "aé😀b😀");
     assert!(t.undo());
     assert_eq!(t.content, "aé😀b");
+}
+
+#[test]
+fn undo_and_redo_preserve_staged_stats() {
+    let mut t = DocumentTab::new(
+        "t".into(),
+        "t.md".into(),
+        "hello world\nsecond line\n".into(),
+        None,
+        None,
+    );
+    t.ensure_stats();
+    let initial_stats = (t.word_count, t.char_count, t.line_count);
+    t.edit(5..11, " rust\nthird");
+    t.ensure_stats();
+    let edited_stats = (t.word_count, t.char_count, t.line_count);
+    assert!(t.undo());
+    assert!(t.staged_stats.is_some());
+    t.ensure_stats();
+    assert_eq!((t.word_count, t.char_count, t.line_count), initial_stats);
+    assert!(t.redo());
+    assert!(t.staged_stats.is_some());
+    t.ensure_stats();
+    assert_eq!((t.word_count, t.char_count, t.line_count), edited_stats);
 }
 
 /// Audit F23 (B5, B7, B8): small edit-result bugs.

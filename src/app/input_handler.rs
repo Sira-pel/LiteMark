@@ -549,8 +549,8 @@ impl EntityInputHandler for LiteMarkApp {
                 ));
             }
         }
-        let local_start = row.offset_map.source_to_display(range.start);
-        let local_end = row.offset_map.source_to_display(range.end);
+        let local_start = row.source_to_display(range.start);
+        let local_end = row.source_to_display(range.end);
         let x0 = row.shaped.x_for_index(local_start);
         let x1 = row.shaped.x_for_index(local_end);
         Some(Bounds::from_corners(

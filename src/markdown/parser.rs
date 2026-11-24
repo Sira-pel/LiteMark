@@ -1099,6 +1099,8 @@ pub struct ParseMeta {
     pub(crate) checkpoints: Vec<(usize, ParseState)>,
     /// Changes whenever the lines change, so caches can tell parses apart.
     pub generation: u64,
+    /// Number of [`LineKind::TableRow`] lines in the document.
+    pub(crate) table_line_count: usize,
     /// The last incremental update: `(generation before it, first line,
     /// lines removed, lines inserted)`. Lets caches keyed by line index
     /// follow the edit instead of starting over.
@@ -2282,12 +2284,17 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         Step::Parse
     });
     let code_blocks = code_blocks_of(&lines, markdown.len());
+    let table_line_count = lines
+        .iter()
+        .filter(|l| matches!(l.kind, LineKind::TableRow { .. }))
+        .count();
     ParsedDocument {
         lines,
         code_blocks,
         meta: ParseMeta {
             checkpoints,
             generation: next_generation(),
+            table_line_count,
             last_splice: None,
         },
     }
@@ -2496,10 +2503,13 @@ impl ParsedDocument {
         let mut later_checkpoints = checkpoints.split_off(cut);
         checkpoints.extend(new_checkpoints);
         let is_fence = |line: &ParsedLine| matches!(line.kind, LineKind::CodeFence { .. });
+        let is_table = |line: &ParsedLine| matches!(line.kind, LineKind::TableRow { .. });
         let new_fences = new_lines.iter().any(is_fence);
-        let (removed, old_fences, shift) = match resync {
+        let new_tables = new_lines.iter().filter(|l| is_table(l)).count();
+        let (removed, old_fences, old_tables, shift) = match resync {
             Some((_, k, ix, shift)) => {
                 let old_fences = self.lines[restart..k].iter().any(is_fence);
+                let old_tables = self.lines[restart..k].iter().filter(|l| is_table(l)).count();
                 self.lines.splice(restart..k, new_lines);
                 shift.parsed_lines(&mut self.lines[restart + inserted..]);
                 let mut kept = later_checkpoints.split_off(ix - cut);
@@ -2508,11 +2518,12 @@ impl ParsedDocument {
                     shift.state_in_place(state);
                 }
                 checkpoints.extend(kept);
-                (k - restart, old_fences, shift)
+                (k - restart, old_fences, old_tables, shift)
             }
             None => {
                 let removed = self.lines.len() - restart;
                 let old_fences = self.lines[restart..].iter().any(is_fence);
+                let old_tables = self.lines[restart..].iter().filter(|l| is_table(l)).count();
                 self.lines.truncate(restart);
                 self.lines.extend(new_lines);
                 let shift = Shift {
@@ -2521,7 +2532,7 @@ impl ParsedDocument {
                     old_line: 0,
                     line_delta: 0,
                 };
-                (removed, old_fences, shift)
+                (removed, old_fences, old_tables, shift)
             }
         };
         if old_fences || new_fences {
@@ -2535,9 +2546,11 @@ impl ParsedDocument {
                 shift.range(close);
             }
         }
+        let table_line_count = self.meta.table_line_count - old_tables + new_tables;
         self.meta = ParseMeta {
             checkpoints,
             generation: next_generation(),
+            table_line_count,
             last_splice: Some((old_generation, restart, removed, inserted)),
         };
     }

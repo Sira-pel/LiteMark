@@ -144,14 +144,9 @@ impl LiteMarkApp {
                     }
                     list
                 };
-                let files: Vec<PathBuf> = self
-                    .workspace
-                    .files
-                    .iter()
-                    .map(|file| file.path.clone())
-                    .collect();
-                let notes = match_notes(
-                    &files,
+                let notes = match_notes_by(
+                    &self.workspace.files,
+                    |file| file.path.as_path(),
                     &recents,
                     &self.workspace.folder_path,
                     &query,
