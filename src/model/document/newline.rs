@@ -42,13 +42,13 @@ impl DocumentTab {
         }
         let closed = if self.view_mode == ViewMode::Raw {
             // Raw view never parses the whole note: scan the text instead.
-            if open_fence_above(&self.content, line_start).is_some() {
-                return false;
-            }
             let line = &self.content[line_start..cursor];
             let Some((ch, run, _)) = fence_run(line) else {
                 return false;
             };
+            if open_fence_above(&self.content, line_start).is_some() {
+                return false;
+            }
             fence_closed_below(&self.content, cursor, ch, run)
         } else {
             let parsed = self.parsed();
@@ -238,8 +238,10 @@ impl DocumentTab {
         let cursor = range.start;
         let line_start = home_offset(&self.content, cursor);
         // Inside a fenced code block, `- `, `1. ` and `> ` are code: no
-        // continuation. A scan of the text above, not a full parse.
-        if open_fence_above(&self.content, line_start).is_some() {
+        // continuation. A scan of the text above, not a full parse, and only
+        // for a line that could continue a list or quote or open a fence.
+        let line_text = &self.content[line_start..line_end(&self.content, cursor)];
+        if may_continue_block(line_text) && open_fence_above(&self.content, line_start).is_some() {
             self.edit(range, nl);
             return;
         }
@@ -944,13 +946,11 @@ impl DocumentTab {
 
         let list_item = if self.view_mode == ViewMode::Raw {
             let line = &self.content[line_start..line_end(&self.content, cursor)];
-            // `- ` inside a code block is code, not a list item.
-            if open_fence_above(&self.content, line_start).is_some() {
-                None
-            } else {
-                let local = parse_document(line);
-                accepted_list_marker_in(&local, line, 0)
-            }
+            let local = parse_document(line);
+            // `- ` inside a code block is code, not a list item. The scan of
+            // the text above runs only when the line has a marker.
+            accepted_list_marker_in(&local, line, 0)
+                .filter(|_| open_fence_above(&self.content, line_start).is_none())
         } else {
             let parsed = self.parsed();
             accepted_list_marker_in(&parsed, &self.content, line_start)
@@ -1056,7 +1056,9 @@ fn closes_fence(line: &str, ch: u8, run: usize) -> bool {
 /// parse; fences inside quotes or list items are not seen.
 pub(super) fn open_fence_above(content: &str, line_start: usize) -> Option<(u8, usize)> {
     let mut open = None;
-    for line in content[..line_start].split('\n') {
+    // LF, CRLF and a lone CR all end a line. CRLF yields an extra empty
+    // piece, which neither opens nor closes a fence.
+    for line in content[..line_start].split(['\n', '\r']) {
         open = match open {
             Some((ch, run)) if closes_fence(line, ch, run) => None,
             Some(fence) => Some(fence),
@@ -1069,7 +1071,15 @@ pub(super) fn open_fence_above(content: &str, line_start: usize) -> Option<(u8, 
 /// Whether a line after `from` closes a fence of `ch` at least `run` long.
 fn fence_closed_below(content: &str, from: usize, ch: u8, run: usize) -> bool {
     content[from..]
-        .split('\n')
+        .split(['\n', '\r'])
         .skip(1)
         .any(|line| closes_fence(line, ch, run))
+}
+
+/// Whether Enter on `line` could continue a list or quote or open a fence:
+/// its first non-blank byte is a list, quote or fence marker or a digit.
+fn may_continue_block(line: &str) -> bool {
+    line.bytes()
+        .find(|&b| b != b' ' && b != b'\t')
+        .is_some_and(|b| matches!(b, b'-' | b'*' | b'+' | b'>' | b'`' | b'~') || b.is_ascii_digit())
 }
