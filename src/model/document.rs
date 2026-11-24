@@ -30,6 +30,7 @@ mod navigation;
 mod newline;
 mod paste;
 mod picture;
+mod renumber;
 mod table;
 mod typing;
 mod word_nav;
@@ -532,6 +533,10 @@ pub struct DocumentTab {
     /// When set, the next `edit` records this caret on its undo entry instead
     /// of the end of the deleted range (Enter rewrites a whole span).
     next_undo_caret: Option<usize>,
+    /// Number rewrites staged for the next `edit` (the revision they were
+    /// computed at, and patches after the edited range); `edit` folds them
+    /// into its own change so they share its undo step.
+    next_tail_patches: Option<(u64, Vec<renumber::Patch>)>,
     /// Caret restored by redo of the next edit. Defaults to the end of the
     /// inserted text when unset.
     next_redo_caret: Option<usize>,
@@ -698,6 +703,7 @@ impl DocumentTab {
             history: UndoHistory::default(),
             next_edit_opens_span_group: false,
             next_undo_caret: None,
+            next_tail_patches: None,
             next_redo_caret: None,
             next_undo_sel: None,
             next_redo_sel: None,
@@ -778,6 +784,7 @@ impl DocumentTab {
         });
         self.next_edit_opens_span_group = false;
         self.next_undo_caret = None;
+        self.next_tail_patches = None;
         self.next_redo_caret = None;
         self.next_undo_sel = None;
         self.next_redo_sel = None;
@@ -1012,6 +1019,7 @@ impl DocumentTab {
 
     fn edit_inner(&mut self, range: Range<usize>, new_text: &str, refresh: bool) {
         let undo_caret_override = self.next_undo_caret.take();
+        let staged_patches = self.next_tail_patches.take();
         let redo_caret_override = self.next_redo_caret.take();
         let undo_sel = self.next_undo_sel.take();
         let redo_sel = self.next_redo_sel.take();
@@ -1024,6 +1032,15 @@ impl DocumentTab {
         {
             return;
         }
+        // Staged renumbering rides along: the edit grows to cover it, while
+        // the carets stay where the plain edit would have put them.
+        let folded = self.fold_tail_patches(staged_patches, &range, new_text);
+        let (edit_end, plain_end) = (range.end, range.start + new_text.len());
+        let (range, folded_text) = match folded {
+            Some((wider, text)) => (wider, Some(text)),
+            None => (range, None),
+        };
+        let new_text = folded_text.as_deref().unwrap_or(new_text);
         let deleted = self.content[range.clone()].to_string();
         if deleted == new_text {
             let cursor = range.start + new_text.len();
@@ -1034,8 +1051,8 @@ impl DocumentTab {
             }
             return;
         }
-        let undo_caret = undo_caret_override.unwrap_or(range.end);
-        let redo_caret = redo_caret_override.unwrap_or(range.start + new_text.len());
+        let undo_caret = undo_caret_override.unwrap_or(edit_end);
+        let redo_caret = redo_caret_override.unwrap_or(plain_end);
         let mut edit = DiffEdit::new(range.start, deleted, new_text.to_string());
         edit.set_carets(undo_caret, redo_caret);
         edit.set_selections(undo_sel, redo_sel);
@@ -1044,7 +1061,7 @@ impl DocumentTab {
         } else {
             self.history.push(edit);
         }
-        let cursor_at = range.start + new_text.len();
+        let cursor_at = plain_end;
         self.last_edit = Some((self.revision, range.clone(), new_text.len()));
         Self::advance_staged_stats(
             &mut self.staged_stats,
@@ -1535,3 +1552,6 @@ mod m8_paste_tests;
 
 #[cfg(test)]
 mod m8_blocks_tests;
+
+#[cfg(test)]
+mod list_renumber_tests;
