@@ -31,7 +31,17 @@ impl DocumentTab {
         if cursor != line_end(&self.content, cursor) {
             return false;
         }
-        let closed = {
+        let closed = if self.view_mode == ViewMode::Raw {
+            // Raw view never parses the whole note: scan the text instead.
+            if open_fence_above(&self.content, line_start).is_some() {
+                return false;
+            }
+            let line = &self.content[line_start..cursor];
+            let Some((ch, run, _)) = fence_run(line) else {
+                return false;
+            };
+            fence_closed_below(&self.content, cursor, ch, run)
+        } else {
             let parsed = self.parsed();
             let Some(line) = parsed.line_at_offset(cursor) else {
                 return false;
@@ -219,6 +229,15 @@ impl DocumentTab {
         }
         let cursor = range.start;
         let line_start = home_offset(&self.content, cursor);
+        // Inside a fenced code block, `- `, `1. ` and `> ` are code: no
+        // continuation. A scan of the text above, not a full parse.
+        if open_fence_above(&self.content, line_start).is_some() {
+            self.edit(range, nl);
+            return;
+        }
+        if self.unclosed_fence_newline(&range, nl) {
+            return;
+        }
         let line_end_pos = line_end(&self.content, cursor);
         let line = &self.content[line_start..line_end_pos];
         let local = parse_document(line);
@@ -838,8 +857,13 @@ impl DocumentTab {
 
         let list_item = if self.view_mode == ViewMode::Raw {
             let line = &self.content[line_start..line_end(&self.content, cursor)];
-            let local = parse_document(line);
-            accepted_list_marker_in(&local, line, 0)
+            // `- ` inside a code block is code, not a list item.
+            if open_fence_above(&self.content, line_start).is_some() {
+                None
+            } else {
+                let local = parse_document(line);
+                accepted_list_marker_in(&local, line, 0)
+            }
         } else {
             let parsed = self.parsed();
             accepted_list_marker_in(&parsed, &self.content, line_start)
@@ -884,4 +908,52 @@ impl DocumentTab {
         self.edit(prev..cursor, "");
         true
     }
+}
+
+/// An opening or closing fence line outside any container: up to three
+/// spaces, then three or more backticks or tildes. Returns the fence
+/// character, the run length and the text after the run. A backtick fence's
+/// info string can't contain a backtick.
+fn fence_run(line: &str) -> Option<(u8, usize, &str)> {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let ch = *rest.as_bytes().first()?;
+    if ch != b'`' && ch != b'~' {
+        return None;
+    }
+    let run = rest.bytes().take_while(|&b| b == ch).count();
+    let after = &rest[run..];
+    (run >= 3 && !(ch == b'`' && after.contains('`'))).then_some((ch, run, after))
+}
+
+/// Whether `line` closes a fence of `ch` at least `run` long.
+fn closes_fence(line: &str, ch: u8, run: usize) -> bool {
+    fence_run(line).is_some_and(|(c, n, after)| c == ch && n >= run && after.trim().is_empty())
+}
+
+/// The fence still open at `line_start` (its character and run length),
+/// found by scanning the lines above. Raw view uses this instead of a full
+/// parse; fences inside quotes or list items are not seen.
+pub(super) fn open_fence_above(content: &str, line_start: usize) -> Option<(u8, usize)> {
+    let mut open = None;
+    for line in content[..line_start].split('\n') {
+        open = match open {
+            Some((ch, run)) if closes_fence(line, ch, run) => None,
+            Some(fence) => Some(fence),
+            None => fence_run(line).map(|(ch, run, _)| (ch, run)),
+        };
+    }
+    open
+}
+
+/// Whether a line after `from` closes a fence of `ch` at least `run` long.
+fn fence_closed_below(content: &str, from: usize, ch: u8, run: usize) -> bool {
+    content[from..]
+        .split('\n')
+        .skip(1)
+        .any(|line| closes_fence(line, ch, run))
 }
