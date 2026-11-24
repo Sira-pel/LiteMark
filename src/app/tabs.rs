@@ -67,6 +67,7 @@ impl LiteMarkApp {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
             tab.reload(content);
         }
+        self.editor_paint.borrow_mut().images.mark_recheck_due();
         self.record_disk_version(id);
         self.refresh_find();
         Ok(())
@@ -416,6 +417,7 @@ impl LiteMarkApp {
                     // `content` is the raw file, BOM included.
                     if tab.file_text_ref() != content.as_str() {
                         tab.reload(content);
+                        self.editor_paint.borrow_mut().images.mark_recheck_due();
                     }
                     self.record_disk_version(&id);
                 }

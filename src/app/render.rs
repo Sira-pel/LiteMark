@@ -568,8 +568,10 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cols: usize, rows: usize, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.table_picker_size = (cols, rows);
-                    cx.notify();
+                    if this.table_picker_size != (cols, rows) {
+                        this.table_picker_size = (cols, rows);
+                        cx.notify();
+                    }
                 });
             }
         };
@@ -1412,8 +1414,9 @@ impl Render for LiteMarkApp {
                 }),
             )
             .on_mouse_down_out(cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                this.handle_mouse_down_out();
-                cx.notify();
+                if this.handle_mouse_down_out() {
+                    cx.notify();
+                }
             }))
             .child({
                 let view = cx.weak_entity();
@@ -1425,8 +1428,9 @@ impl Render for LiteMarkApp {
                                 return;
                             }
                             let _ = view.update(cx, |this, cx| {
-                                this.handle_mouse_exit(event);
-                                cx.notify();
+                                if this.handle_mouse_exit(event) {
+                                    cx.notify();
+                                }
                             });
                         });
                     },

@@ -311,6 +311,9 @@ fn swapping_animated_gif_with_static_png_on_same_line_does_not_panic() {
         redraw(&mut cx);
     }
     write_static_png(&gif);
+    view.update(&mut cx, |app, _| {
+        app.editor_paint.borrow_mut().images.mark_recheck_due();
+    });
     redraw(&mut cx);
     redraw(&mut cx);
 

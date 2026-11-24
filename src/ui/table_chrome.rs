@@ -170,6 +170,39 @@ pub fn contains(bounds: Bounds<Pixels>, point: Point<Pixels>) -> bool {
         && point.y < bounds.bottom()
 }
 
+/// Fast coarse check: whether `at` lies anywhere near `table` or its chrome
+/// pills (including pills clamped inside `table.viewport` by `fit()`).
+/// Used to skip `occupied_content(&paint.rows)` on every mouse move outside tables.
+pub fn near_table_chrome(table: &TableGeom, at: Point<Pixels>) -> bool {
+    let left_pad = sz::TABLE_PILL * 2.0 + sz::TABLE_GAP + sz::TABLE_EDGE;
+    let top_pad = sz::TABLE_PILL + sz::TABLE_GAP + sz::TABLE_EDGE;
+    let right_pad = sz::TABLE_PILL + sz::TABLE_GAP + sz::TABLE_EDGE;
+    let bottom_pad = sz::TABLE_EDGE;
+    let mut left = table.bounds.left() - left_pad;
+    let mut top = table.bounds.top() - top_pad;
+    let mut right = table.bounds.right() + right_pad;
+    let mut bottom = table.bounds.bottom() + bottom_pad;
+    if let Some(view) = table.viewport {
+        if table.bounds.bottom() >= view.top() && table.bounds.top() <= view.bottom() {
+            if top < view.top() + sz::TABLE_EDGE {
+                bottom = bottom.max(view.top() + sz::TABLE_EDGE + sz::TABLE_PILL);
+            }
+            if bottom > view.bottom() - sz::TABLE_EDGE {
+                top = top.min(view.bottom() - sz::TABLE_EDGE - sz::TABLE_PILL);
+            }
+        }
+        if table.bounds.right() >= view.left() && table.bounds.left() <= view.right() {
+            if left < view.left() + sz::TABLE_EDGE {
+                right = right.max(view.left() + sz::TABLE_EDGE + sz::TABLE_PILL * 2.0);
+            }
+            if right > view.right() - sz::TABLE_EDGE {
+                left = left.min(view.right() - sz::TABLE_EDGE - sz::TABLE_PILL * 3.0);
+            }
+        }
+    }
+    at.x >= left && at.x < right && at.y >= top && at.y < bottom
+}
+
 pub fn column_pill_bounds(header: Bounds<Pixels>) -> Bounds<Pixels> {
     let height = sz::TABLE_PILL;
     let natural = sz::TABLE_PILL * 3.0;
@@ -1388,5 +1421,25 @@ mod tests {
             assert!(pad + width <= slot.size.width);
         }
         assert!(plus_arm(slot) <= slot.size.width);
+    }
+
+    #[test]
+    fn near_table_chrome_covers_pills_and_rejects_distant_points() {
+        let mut table = sample_table();
+        table.viewport = Some(bounds(0.0, 0.0, 800.0, 600.0));
+        let col_pill = column_pill(&table, table.columns[0].header_bounds);
+        let row_pill_0 = row_pill(&table, table.rows[0].bounds);
+        let corner = corner_pill(&table).expect("corner pill");
+        assert!(near_table_chrome(&table, center_of(col_pill)));
+        assert!(near_table_chrome(&table, center_of(row_pill_0)));
+        assert!(near_table_chrome(&table, center_of(corner)));
+        assert!(near_table_chrome(&table, center_of(table.bounds)));
+        assert!(!near_table_chrome(&table, point(px(10.0), px(550.0))));
+
+        // Scrolled table with header above viewport: column pill clamps to view top.
+        table.bounds.origin.y = px(-40.0);
+        table.columns[0].header_bounds.origin.y = px(-40.0);
+        let clamped_col = column_pill(&table, table.columns[0].header_bounds);
+        assert!(near_table_chrome(&table, center_of(clamped_col)));
     }
 }

@@ -2017,6 +2017,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
         }
 
         // WYSIWYG mode prepaint
+        let image_check_now = std::time::Instant::now();
         if rows.capacity() < self.parsed.lines.len() {
             rows.reserve(self.parsed.lines.len() - rows.capacity());
         }
@@ -2829,7 +2830,8 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         let mut natural = image_cache.size(path, false);
                         let guess = natural.map_or(placeholder_h, |n| fit(n).1);
                         if band.contains(cur_y, guess + IMAGE_MARGIN_Y * 2.0) || near_anchor {
-                            let (checked, changed) = image_cache.size_checked(path, true);
+                            let (checked, changed) =
+                                image_cache.size_checked_throttled(path, image_check_now);
                             natural = checked;
                             // Evict the old decoded texture so a file replaced
                             // on disk reloads cleanly and drops GPU memory.
@@ -3063,7 +3065,8 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                             image_paths.insert(p.clone());
                             natural = image_cache.size(p, false);
                             if on_screen(THUMB_HEIGHT + IMAGE_MARGIN_Y * 2.0) {
-                                let (checked, changed) = image_cache.size_checked(p, true);
+                                let (checked, changed) =
+                                    image_cache.size_checked_throttled(p, image_check_now);
                                 natural = checked;
                                 if changed {
                                     self.note_image_cache.update(cx, |cache, cx| {
