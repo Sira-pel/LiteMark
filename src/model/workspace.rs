@@ -17,6 +17,31 @@ pub struct DiskVersion {
     pub content_hash: u64,
 }
 
+impl DiskVersion {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self {
+            len: bytes.len() as u64,
+            content_hash: content_hash(bytes),
+        }
+    }
+
+    /// Hash `content` (with a leading UTF-8 BOM when `has_bom` is set) without
+    /// allocating a BOM-prefixed copy of the document.
+    pub fn from_parts(has_bom: bool, content: &str) -> Self {
+        const BOM: &[u8] = "\u{feff}".as_bytes();
+        let total_len = content.len() + if has_bom { BOM.len() } else { 0 };
+        let mut hasher = ContentHasher::new(total_len as u64);
+        if has_bom {
+            hasher.update(BOM);
+        }
+        hasher.update(content.as_bytes());
+        Self {
+            len: total_len as u64,
+            content_hash: hasher.finish(),
+        }
+    }
+}
+
 /// How the file behind a tab compares with what the tab last saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiskChange {

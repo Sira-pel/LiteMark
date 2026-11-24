@@ -147,7 +147,10 @@ impl EntityInputHandler for LiteMarkApp {
                 return;
             }
         }
-        if self.forward_keystroke_to_field(text, window, cx) || self.input_blocked() {
+        if self.forward_keystroke_to_field(text, window, cx)
+            || self.input_blocked()
+            || self.active_tab().is_some_and(|tab| tab.deferred_load)
+        {
             return;
         }
         if self.active_tab().is_some_and(|tab| tab.is_read_only()) {

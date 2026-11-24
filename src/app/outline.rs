@@ -1,27 +1,87 @@
 //! The note outline: which headings it lists, and jumping to one.
 
 use super::*;
-use crate::model::outline::{current_heading, outline_items, OutlineItem};
+use crate::model::outline::{
+    can_skip_outline_patch, current_heading, outline_items, outline_items_raw, patch_outline_items,
+    OutlineItem,
+};
 
 impl LiteMarkApp {
     /// Headings of the active tab, kept until the text changes. Empty for
     /// tabs that are not Markdown.
     fn outline_headings(&mut self) -> Arc<Vec<OutlineItem>> {
+        let view_mode = self.effective_view_mode();
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) else {
             return Arc::default();
         };
         if !tab.file_type.supports_markdown_features() {
             return Arc::default();
         }
-        let key = (tab.id.clone(), tab.revision);
-        if let Some((cached, items)) = &self.outline_cache {
-            if *cached == key {
-                return items.clone();
+        if view_mode == ViewMode::Raw {
+            if let Some(cache) = &self.outline_cache {
+                if cache.tab_id == tab.id
+                    && cache.revision == tab.revision
+                    && cache.parse_gen.is_none()
+                {
+                    return cache.items.clone();
+                }
+            }
+            let items = Arc::new(outline_items_raw(&tab.content));
+            self.outline_cache = Some(OutlineCache {
+                tab_id: tab.id.clone(),
+                revision: tab.revision,
+                parse_gen: None,
+                items: items.clone(),
+            });
+            return items;
+        }
+
+        if let Some(cache) = &self.outline_cache {
+            if cache.tab_id == tab.id && cache.revision == tab.revision && cache.parse_gen.is_some()
+            {
+                return cache.items.clone();
             }
         }
         let parsed = tab.parsed();
+        let parse_gen = parsed.meta.generation;
+        if let Some(cache) = &mut self.outline_cache {
+            if cache.tab_id == tab.id {
+                if let (Some(old_gen), Some((splice_gen, restart, removed, inserted))) =
+                    (cache.parse_gen, parsed.meta.last_splice)
+                {
+                    if old_gen == splice_gen {
+                        if !can_skip_outline_patch(
+                            &cache.items,
+                            &parsed,
+                            restart,
+                            removed,
+                            inserted,
+                            parsed.meta.last_byte_delta,
+                        ) {
+                            patch_outline_items(
+                                Arc::make_mut(&mut cache.items),
+                                &parsed,
+                                &tab.content,
+                                restart,
+                                removed,
+                                inserted,
+                                parsed.meta.last_byte_delta,
+                            );
+                        }
+                        cache.revision = tab.revision;
+                        cache.parse_gen = Some(parse_gen);
+                        return cache.items.clone();
+                    }
+                }
+            }
+        }
         let items = Arc::new(outline_items(&parsed, &tab.content));
-        self.outline_cache = Some((key, items.clone()));
+        self.outline_cache = Some(OutlineCache {
+            tab_id: tab.id.clone(),
+            revision: tab.revision,
+            parse_gen: Some(parse_gen),
+            items: items.clone(),
+        });
         items
     }
 

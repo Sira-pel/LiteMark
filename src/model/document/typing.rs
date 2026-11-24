@@ -784,7 +784,7 @@ impl DocumentTab {
                 None => {}
             }
             let mut target = crate::model::text_ops::word_right(&self.content, cursor);
-            if self.file_type.supports_markdown_features() {
+            if self.view_mode == ViewMode::Wysiwyg && self.file_type.supports_markdown_features() {
                 if let Some(line) = self.parsed().line_at_offset(cursor) {
                     let vend = visible_line_end(line, self.view_mode);
                     if vend < line.source.end && cursor <= vend && target > vend {
@@ -807,7 +807,9 @@ impl DocumentTab {
         } else {
             let cursor = self.cursor_offset();
             let target = crate::model::text_ops::home_offset(&self.content, cursor);
-            let end = if self.file_type.supports_markdown_features() {
+            let end = if self.view_mode == ViewMode::Wysiwyg
+                && self.file_type.supports_markdown_features()
+            {
                 let parsed = self.parsed();
                 match parsed.line_at_offset(cursor) {
                     Some(line) => {
@@ -838,7 +840,9 @@ impl DocumentTab {
         } else {
             let cursor = self.cursor_offset();
             let raw = crate::model::text_ops::line_end(&self.content, cursor);
-            let target = if self.file_type.supports_markdown_features() {
+            let target = if self.view_mode == ViewMode::Wysiwyg
+                && self.file_type.supports_markdown_features()
+            {
                 self.parsed().line_at_offset(cursor).map_or(raw, |line| {
                     let vend = visible_line_end(line, self.view_mode);
                     if cursor < vend {

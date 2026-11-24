@@ -8,7 +8,7 @@ const TAB_SETTINGS_SAVE_DELAY_MS: u64 = 1000;
 /// A big note waiting for its turn to be read in the background.
 pub(super) type PendingRead = (
     PathBuf,
-    Box<dyn FnOnce(&mut LiteMarkApp, Result<String, String>, &mut Context<LiteMarkApp>)>,
+    Box<dyn FnOnce(&mut LiteMarkApp, Result<LoadedNote, String>, &mut Context<LiteMarkApp>)>,
 );
 
 /// How a background save of one note ended.
@@ -47,10 +47,7 @@ impl LiteMarkApp {
     /// Remember the file as it is now, holding the tab's current text.
     pub(super) fn record_disk_version(&mut self, id: &str) {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
-            tab.disk_version = tab
-                .file_path
-                .as_deref()
-                .and_then(|path| disk_version(path, &tab.file_text_ref()));
+            tab.disk_version = tab.file_path.is_some().then(|| tab.compute_disk_version());
         }
     }
 
@@ -63,12 +60,11 @@ impl LiteMarkApp {
             .find(|tab| tab.id == id)
             .and_then(|tab| tab.file_path.clone())
             .ok_or_else(|| "This note has no file to reload.".to_string())?;
-        let content = read_note(&path)?;
+        let loaded = read_note_loaded(&path)?;
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
-            tab.reload(content);
+            tab.reload_loaded(loaded);
         }
         self.editor_paint.borrow_mut().images.mark_recheck_due();
-        self.record_disk_version(id);
         self.refresh_find();
         Ok(())
     }
@@ -82,7 +78,7 @@ impl LiteMarkApp {
         &mut self,
         path: PathBuf,
         cx: &mut Context<Self>,
-        then: impl FnOnce(&mut Self, Result<String, String>, &mut Context<Self>) + 'static,
+        then: impl FnOnce(&mut Self, Result<LoadedNote, String>, &mut Context<Self>) + 'static,
     ) {
         // A note already open with unsaved edits keeps them: opening it only
         // switches to it, so its file is not read at all.
@@ -90,12 +86,12 @@ impl LiteMarkApp {
             (tab.is_modified || self.saves_in_flight.contains(&tab.id))
                 && tab.file_path.as_deref() == Some(path.as_path())
         }) {
-            then(self, Ok(String::new()), cx);
+            then(self, Ok(LoadedNote::from_raw(String::new())), cx);
             return;
         }
         let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > self.async_read_bytes);
         if !big {
-            let result = read_note(&path);
+            let result = read_note_loaded(&path);
             then(self, result, cx);
             return;
         }
@@ -119,16 +115,16 @@ impl LiteMarkApp {
                 .background_executor()
                 .spawn({
                     let path = path.clone();
-                    async move { read_note(&path) }
+                    async move { read_note_loaded(&path) }
                 })
                 .await;
             this.update(cx, |this, cx| {
                 this.note_loading = None;
                 // Renamed or trashed while it loaded: opening it would point
                 // a tab at a path that is gone, and saving would recreate it.
-                let result = result.and_then(|text| {
+                let result = result.and_then(|loaded| {
                     if path.exists() {
-                        Ok(text)
+                        Ok(loaded)
                     } else {
                         Err(format!("{} no longer exists.", path.display()))
                     }
@@ -172,6 +168,9 @@ impl LiteMarkApp {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
             return false;
         };
+        if tab.deferred_load {
+            return false;
+        }
         let Some(path) = tab.file_path.clone() else {
             return false;
         };
@@ -208,7 +207,7 @@ impl LiteMarkApp {
                     match atomic_save(&path, &text) {
                         // The version is the text that was written, not
                         // whatever the tab holds by the time this finishes.
-                        Ok(()) => AsyncSave::Saved(disk_version(&path, &text)),
+                        Ok(()) => AsyncSave::Saved(Some(DiskVersion::from_bytes(text.as_bytes()))),
                         Err(err) => {
                             AsyncSave::Failed(format!("Couldn't save {}: {err}", path.display()))
                         }
@@ -315,6 +314,9 @@ impl LiteMarkApp {
             .iter()
             .find(|tab| tab.id == id)
             .ok_or_else(|| "No document to save.".to_string())?;
+        if tab.deferred_load {
+            return Err("This note is still loading.".to_string());
+        }
         let folder = tab
             .file_path
             .as_ref()
@@ -393,6 +395,16 @@ impl LiteMarkApp {
         path: Option<PathBuf>,
         workspace_file_id: Option<String>,
     ) {
+        self.open_loaded_note(name, LoadedNote::from_raw(content), path, workspace_file_id);
+    }
+
+    pub(super) fn open_loaded_note(
+        &mut self,
+        name: String,
+        loaded: LoadedNote,
+        path: Option<PathBuf>,
+        workspace_file_id: Option<String>,
+    ) {
         // Opening a note (sidebar click, creation, file open) selects it in
         // the sidebar and hands keyboard focus back to the editor.
         self.multi_selection = None;
@@ -406,34 +418,34 @@ impl LiteMarkApp {
                 .collect();
             if let Some(index) = tab_index_for_path(&paths, path) {
                 let id = self.tabs[index].id.clone();
+                if self.tabs[index].deferred_load {
+                    self.tabs[index].finish_deferred_load(loaded);
+                    self.activate_tab(id);
+                    self.refresh_find();
+                    return;
+                }
                 self.activate_tab(id.clone());
-                // `content` was just read from disk. A tab without edits
+                // `loaded` was just read from disk. A tab without edits
                 // shows it if it is newer; a tab with edits keeps them, and
                 // its next save asks because the file changed.
                 let tab = &mut self.tabs[index];
                 // (A note still being saved counts as modified: the file is
                 // about to be overwritten, so what's on disk is the old text.)
                 if !tab.is_modified && !self.saves_in_flight.contains(&id) {
-                    // `content` is the raw file, BOM included.
-                    if tab.file_text_ref() != content.as_str() {
-                        tab.reload(content);
+                    if !tab.equals_loaded(&loaded) {
+                        tab.reload_loaded(loaded);
                         self.editor_paint.borrow_mut().images.mark_recheck_due();
+                    } else {
+                        tab.disk_version = Some(loaded.disk_version);
                     }
-                    self.record_disk_version(&id);
                 }
                 self.refresh_find();
                 return;
             }
         }
         let id = self.tab_ids.alloc();
-        self.tabs.push(DocumentTab::new(
-            id.clone(),
-            name,
-            content,
-            path,
-            workspace_file_id,
-        ));
-        self.record_disk_version(&id);
+        let tab = DocumentTab::from_loaded(id.clone(), name, loaded, path, workspace_file_id);
+        self.tabs.push(tab);
         self.activate_tab(id);
         self.refresh_find();
     }
@@ -472,6 +484,7 @@ impl LiteMarkApp {
         if let Some(next) = target {
             if removing_active {
                 self.active_tab_id = next;
+                self.try_load_active_deferred_sync();
                 if self.effective_view_mode() == ViewMode::Wysiwyg {
                     if let Some(tab) = self.active_tab_mut() {
                         tab.snap_wysiwyg_table_delimiter();
@@ -639,53 +652,200 @@ impl LiteMarkApp {
     /// any that are gone or unreadable. With `keep_current` (a file passed on
     /// the command line) the current tab stays last and active; otherwise the
     /// welcome tab is replaced and the saved active note comes back active.
-    /// Returns how many notes were reopened; with none, nothing changes.
+    /// Only the active tab is read from disk at startup; background tabs stay
+    /// `deferred_load` until activated. Returns how many notes were reopened;
+    /// with none, nothing changes.
     pub(super) fn restore_saved_tabs(&mut self, keep_current: bool) -> usize {
         if !self.settings.reopen_tabs_on_startup {
             return 0;
         }
-        let mut restored: Vec<DocumentTab> = Vec::new();
+        let mut candidates: Vec<PathBuf> = Vec::new();
         for path in self.settings.open_tabs.clone() {
-            let already = |tabs: &[DocumentTab]| {
-                tabs.iter()
-                    .any(|tab| tab.file_path.as_deref() == Some(path.as_path()))
-            };
-            if is_pdf_path(&path) || already(&restored) || (keep_current && already(&self.tabs)) {
+            let already_candidates = candidates.iter().any(|p| p == &path);
+            let already_open = keep_current
+                && self
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.file_path.as_deref() == Some(path.as_path()));
+            if is_pdf_path(&path)
+                || already_candidates
+                || already_open
+                || !can_open_note_path(&path)
+            {
                 continue;
             }
-            let Ok(content) = read_note(&path) else {
-                continue;
-            };
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Untitled.md".into());
-            let mut tab = DocumentTab::new(self.tab_ids.alloc(), name, content, None, None);
-            tab.disk_version = disk_version(&path, &tab.file_text_ref());
-            tab.file_path = Some(path);
-            restored.push(tab);
+            candidates.push(path);
         }
-        let count = restored.len();
-        if count == 0 {
+        if candidates.is_empty() {
             return 0;
         }
+
+        let title_for = |path: &Path| -> String {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Untitled.md".into())
+        };
+
+        let mut restored: Vec<DocumentTab> = Vec::new();
         if keep_current {
+            for path in candidates {
+                let id = self.tab_ids.alloc();
+                let name = title_for(&path);
+                restored.push(DocumentTab::deferred(id, name, path, None));
+            }
+            let count = restored.len();
             restored.append(&mut self.tabs);
-        } else {
-            let active = self.settings.active_tab.as_deref();
-            self.active_tab_id = restored
-                .iter()
-                .find(|tab| active.is_some() && tab.file_path.as_deref() == active)
-                .unwrap_or(&restored[0])
-                .id
-                .clone();
+            self.tabs = restored;
+            self.refresh_workspace_ids();
+            self.multi_selection = None;
+            self.sync_selection_to_active_tab();
+            self.refresh_find();
+            return count;
         }
+
+        let preferred = self
+            .settings
+            .active_tab
+            .as_deref()
+            .and_then(|active| candidates.iter().position(|p| p.as_path() == active))
+            .unwrap_or(0);
+
+        let mut loaded_active: Option<(usize, LoadedNote)> = None;
+        for offset in 0..candidates.len() {
+            let idx = (preferred + offset) % candidates.len();
+            if let Ok(loaded) = read_note_loaded(&candidates[idx]) {
+                loaded_active = Some((idx, loaded));
+                break;
+            }
+        }
+        let Some((active_idx, active_loaded)) = loaded_active else {
+            return 0;
+        };
+
+        let mut active_id = String::new();
+        for (idx, path) in candidates.into_iter().enumerate() {
+            let id = self.tab_ids.alloc();
+            let name = title_for(&path);
+            if idx == active_idx {
+                active_id = id.clone();
+                restored.push(DocumentTab::from_loaded(
+                    id,
+                    name,
+                    active_loaded.clone(),
+                    Some(path),
+                    None,
+                ));
+            } else {
+                restored.push(DocumentTab::deferred(id, name, path, None));
+            }
+        }
+        let count = restored.len();
+        self.active_tab_id = active_id;
         self.tabs = restored;
         self.refresh_workspace_ids();
         self.multi_selection = None;
         self.sync_selection_to_active_tab();
         self.refresh_find();
         count
+    }
+
+    /// Synchronously load the active tab if it is a small deferred session tab.
+    /// Big (`> async_read_bytes`) tabs are left for [`Self::ensure_active_tab_loaded`].
+    /// Missing or unreadable files are closed (or replaced with Untitled when
+    /// it was the last tab) with a queued toast.
+    pub(super) fn try_load_active_deferred_sync(&mut self) {
+        let max_steps = self.tabs.len() + 1;
+        for _ in 0..max_steps {
+            let Some((id, path)) = self
+                .tabs
+                .iter()
+                .find(|t| t.id == self.active_tab_id)
+                .filter(|t| t.deferred_load)
+                .and_then(|t| t.file_path.clone().map(|p| (t.id.clone(), p)))
+            else {
+                break;
+            };
+            let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > self.async_read_bytes);
+            if big {
+                break;
+            }
+            match read_note_loaded(&path) {
+                Ok(loaded) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                        tab.finish_deferred_load(loaded);
+                    }
+                    if self.effective_view_mode() == ViewMode::Wysiwyg {
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.snap_wysiwyg_table_delimiter();
+                        }
+                    }
+                    self.refresh_find();
+                    break;
+                }
+                Err(err) => {
+                    self.pending_deferred_toast = Some(err);
+                    self.discard_tab(&id);
+                }
+            }
+        }
+    }
+
+    /// Ensure the active tab is loaded (synchronously if small, asynchronously
+    /// if `> async_read_bytes`), and flush any deferred load error toast.
+    pub(super) fn ensure_active_tab_loaded(&mut self, cx: &mut Context<Self>) {
+        if let Some(err) = self.pending_deferred_toast.take() {
+            self.show_toast(err, cx);
+        }
+        self.try_load_active_deferred_sync();
+        if let Some(err) = self.pending_deferred_toast.take() {
+            self.show_toast(err, cx);
+        }
+        let Some((id, path)) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == self.active_tab_id)
+            .filter(|t| t.deferred_load)
+            .and_then(|t| t.file_path.clone().map(|p| (t.id.clone(), p)))
+        else {
+            return;
+        };
+        if self.deferred_loading_tab.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.deferred_loading_tab = Some(id.clone());
+        let expected_path = path.clone();
+        self.read_note_then(path, cx, move |this, result, cx| {
+            if this.deferred_loading_tab.as_deref() == Some(id.as_str()) {
+                this.deferred_loading_tab = None;
+            }
+            let still_deferred = this.tabs.iter().any(|t| {
+                t.id == id
+                    && t.deferred_load
+                    && t.file_path.as_deref() == Some(expected_path.as_path())
+            });
+            if !still_deferred {
+                return;
+            }
+            match result {
+                Ok(loaded) => {
+                    if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == id) {
+                        tab.finish_deferred_load(loaded);
+                    }
+                    if this.active_tab_id == id && this.effective_view_mode() == ViewMode::Wysiwyg {
+                        if let Some(tab) = this.active_tab_mut() {
+                            tab.snap_wysiwyg_table_delimiter();
+                        }
+                    }
+                    this.refresh_find();
+                }
+                Err(err) => {
+                    this.show_toast(err, cx);
+                    this.discard_tab(&id);
+                    this.ensure_active_tab_loaded(cx);
+                }
+            }
+            cx.notify();
+        });
     }
 
     /// Open a note from the recent list. A note that is gone is dropped
@@ -708,14 +868,14 @@ impl LiteMarkApp {
             .unwrap_or_else(|| "Untitled.md".into());
         self.read_note_then(path.clone(), cx, move |this, result, cx| {
             match result {
-                Ok(content) => {
+                Ok(loaded) => {
                     let file_id = this
                         .workspace
                         .files
                         .iter()
                         .find(|file| file.path == path)
                         .map(|file| file.id.clone());
-                    this.open_loaded_tab(name, content, Some(path), file_id);
+                    this.open_loaded_note(name, loaded, Some(path), file_id);
                 }
                 Err(err) => this.show_error(err),
             }

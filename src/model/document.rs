@@ -18,6 +18,7 @@ use super::text_ops::{
     previous_grapheme, replace_all, snap_off_ending_interior, Caret, CountAnchor, DiffEdit,
     HistoryRestore, SelectionSnap, UndoHistory, TAB_DISPLAY_COLUMNS,
 };
+use super::workspace::{ContentHasher, DiskVersion};
 
 mod block_guard;
 mod blocks;
@@ -270,16 +271,131 @@ pub fn compute_stats(content: &str) -> DocumentStats {
 /// [`compute_stats`] plus the line endings it counted, which
 /// [`StagedStats`] keeps up to date from each edit.
 fn stats_and_line_endings(content: &str) -> (DocumentStats, usize) {
-    let chars = content.chars().count();
-    let words = content.split_whitespace().count();
-    let endings = count_line_endings(content.as_bytes());
+    scan_text_stats(content, None)
+}
+
+/// Single-pass scan over `body` in ~16 KiB UTF-8 chunks, counting characters,
+/// whitespace-delimited words, line endings (`\n`, `\r\n`, lone `\r`), and
+/// optionally feeding the same hot L1 slice into `hasher`.
+fn scan_text_stats(body: &str, mut hasher: Option<&mut ContentHasher>) -> (DocumentStats, usize) {
+    const CHUNK_BYTES: usize = 16 * 1024;
+    let bytes = body.as_bytes();
+    let mut chars = 0usize;
+    let mut words = 0usize;
+    let mut endings = 0usize;
+    let mut in_word = false;
+    let mut prev_cr = false;
+
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let mut end = (pos + CHUNK_BYTES).min(bytes.len());
+        while end > pos && end < bytes.len() && (bytes[end] & 0xC0) == 0x80 {
+            end -= 1;
+        }
+        if end == pos {
+            end = body[pos..]
+                .chars()
+                .next()
+                .map_or(bytes.len(), |c| pos + c.len_utf8());
+        }
+        let chunk = &body[pos..end];
+        let cbytes = chunk.as_bytes();
+        if let Some(h) = hasher.as_deref_mut() {
+            h.update(cbytes);
+        }
+        let mut i = 0usize;
+        while i < cbytes.len() {
+            let b = cbytes[i];
+            if b < 0x80 {
+                chars += 1;
+                // Match `char::is_whitespace` for ASCII (includes 0x0B vertical tab).
+                let is_ws = b == b' ' || (0x09..=0x0D).contains(&b);
+                if b == b'\r' {
+                    endings += 1;
+                    prev_cr = true;
+                } else if b == b'\n' {
+                    if !prev_cr {
+                        endings += 1;
+                    }
+                    prev_cr = false;
+                } else {
+                    prev_cr = false;
+                }
+                if is_ws {
+                    in_word = false;
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
+                i += 1;
+            } else {
+                let ch = chunk[i..].chars().next().unwrap();
+                i += ch.len_utf8();
+                chars += 1;
+                prev_cr = false;
+                if ch.is_whitespace() {
+                    in_word = false;
+                } else if !in_word {
+                    in_word = true;
+                    words += 1;
+                }
+            }
+        }
+        pos = end;
+    }
+
     let stats = DocumentStats {
         words,
         chars,
-        lines: line_total(content, endings),
+        lines: line_total(body, endings),
         reading_time_min: (words / 200).max(1),
     };
     (stats, endings)
+}
+
+/// Analyze `body` (BOM already stripped) in a single pass, returning its stats,
+/// line-ending count, and [`DiskVersion`] (including the BOM when `has_bom` is set).
+pub fn analyze_text(body: &str, has_bom: bool) -> (DocumentStats, usize, DiskVersion) {
+    const BOM: &[u8] = "\u{feff}".as_bytes();
+    let total_len = body.len() + if has_bom { BOM.len() } else { 0 };
+    let mut hasher = ContentHasher::new(total_len as u64);
+    if has_bom {
+        hasher.update(BOM);
+    }
+    let (stats, endings) = scan_text_stats(body, Some(&mut hasher));
+    let version = DiskVersion {
+        len: total_len as u64,
+        content_hash: hasher.finish(),
+    };
+    (stats, endings, version)
+}
+
+/// A note read from disk and analyzed in a single pass, ready to construct or
+/// finish loading a [`DocumentTab`] without re-scanning the text.
+#[derive(Debug, Clone)]
+pub struct LoadedNote {
+    pub content: String,
+    pub has_bom: bool,
+    pub stats: DocumentStats,
+    pub line_endings: usize,
+    pub disk_version: DiskVersion,
+}
+
+impl LoadedNote {
+    pub fn from_raw(mut raw: String) -> Self {
+        let has_bom = raw.starts_with('\u{feff}');
+        if has_bom {
+            raw.drain(..'\u{feff}'.len_utf8());
+        }
+        let (stats, line_endings, disk_version) = analyze_text(&raw, has_bom);
+        Self {
+            content: raw,
+            has_bom,
+            stats,
+            line_endings,
+            disk_version,
+        }
+    }
 }
 
 /// Lines in `content`, given its count of line endings (LF, CRLF or a lone
@@ -426,6 +542,9 @@ pub struct DocumentTab {
     /// Deferred on `DocumentTab::new` so background/restored tabs skip a full
     /// startup parse until activated or rendered.
     cursor_formats_ready: bool,
+    /// True for background tabs restored from settings whose file has not been
+    /// read yet; loaded on first activation.
+    pub deferred_load: bool,
     #[cfg(test)]
     pub(crate) parse_clone_count: usize,
     #[cfg(test)]
@@ -446,8 +565,90 @@ impl DocumentTab {
         }
         let file_type = FileType::from_filename(&title);
         let (stats, line_endings) = stats_and_line_endings(&content);
+        Self::build(
+            id,
+            title,
+            content,
+            file_type,
+            has_bom,
+            stats,
+            line_endings,
+            None,
+            file_path,
+            workspace_file_id,
+            false,
+        )
+    }
+
+    pub fn from_loaded(
+        id: String,
+        title: String,
+        loaded: LoadedNote,
+        file_path: Option<PathBuf>,
+        workspace_file_id: Option<String>,
+    ) -> Self {
+        let file_type = FileType::from_filename(&title);
+        Self::build(
+            id,
+            title,
+            loaded.content,
+            file_type,
+            loaded.has_bom,
+            loaded.stats,
+            loaded.line_endings,
+            Some(loaded.disk_version),
+            file_path,
+            workspace_file_id,
+            false,
+        )
+    }
+
+    /// Create a placeholder tab for a saved session path that will be read from
+    /// disk on first activation.
+    pub fn deferred(
+        id: String,
+        title: String,
+        file_path: PathBuf,
+        workspace_file_id: Option<String>,
+    ) -> Self {
+        let file_type = FileType::from_filename(&title);
+        let stats = DocumentStats {
+            words: 0,
+            chars: 0,
+            lines: 1,
+            reading_time_min: 1,
+        };
+        Self::build(
+            id,
+            title,
+            String::new(),
+            file_type,
+            false,
+            stats,
+            0,
+            None,
+            Some(file_path),
+            workspace_file_id,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        id: String,
+        title: String,
+        content: String,
+        file_type: FileType,
+        has_bom: bool,
+        stats: DocumentStats,
+        line_endings: usize,
+        disk_version: Option<DiskVersion>,
+        file_path: Option<PathBuf>,
+        workspace_file_id: Option<String>,
+        deferred_load: bool,
+    ) -> Self {
         let default_style = indent_style(&title, file_type);
-        let indent_style = if file_type.is_code() {
+        let indent_style = if !deferred_load && file_type.is_code() {
             detect_indent_style(&content, default_style)
         } else {
             default_style
@@ -461,7 +662,7 @@ impl DocumentTab {
             is_modified: false,
             file_path,
             workspace_file_id,
-            disk_version: None,
+            disk_version,
             has_bom,
             word_count: stats.words,
             char_count: stats.chars,
@@ -499,6 +700,7 @@ impl DocumentTab {
             next_undo_sel: None,
             next_redo_sel: None,
             cursor_formats_ready: !file_type.supports_markdown_features(),
+            deferred_load,
             #[cfg(test)]
             parse_clone_count: 0,
             #[cfg(test)]
@@ -506,11 +708,21 @@ impl DocumentTab {
         }
     }
 
+    /// Populate a deferred tab once its file has been read from disk.
+    pub fn finish_deferred_load(&mut self, loaded: LoadedNote) {
+        self.reload_loaded(loaded);
+    }
+
     /// Replace the text with a newer version read from disk. Undo history is
     /// dropped (it describes the old text); the view mode and, where it
     /// still fits, the caret are kept. The revision keeps counting up so
     /// caches keyed on it never mistake the new text for the old.
-    pub fn reload(&mut self, mut content: String) {
+    #[cfg(test)]
+    pub fn reload(&mut self, content: String) {
+        self.reload_loaded(LoadedNote::from_raw(content));
+    }
+
+    pub fn reload_loaded(&mut self, loaded: LoadedNote) {
         let prev_cursor = self.cursor_offset();
         // Drop old buffers before rebuilding so reload doesn't hold 2x the
         // document + parse cache + undo history in memory simultaneously.
@@ -520,30 +732,27 @@ impl DocumentTab {
         self.history = UndoHistory::default();
         self.count_anchors = Default::default();
 
-        let has_bom = content.starts_with('\u{feff}');
-        if has_bom {
-            content.drain(..'\u{feff}'.len_utf8());
-        }
         let file_type = FileType::from_filename(&self.title);
-        let (stats, line_endings) = stats_and_line_endings(&content);
         let default_style = indent_style(&self.title, file_type);
         let indent_style = if file_type.is_code() {
-            detect_indent_style(&content, default_style)
+            detect_indent_style(&loaded.content, default_style)
         } else {
             default_style
         };
 
         let next_revision = self.revision + 1;
-        let cursor = floor_boundary(&content, prev_cursor.min(content.len()));
+        let cursor = floor_boundary(&loaded.content, prev_cursor.min(loaded.content.len()));
 
-        self.content = content;
+        self.content = loaded.content;
         self.file_type = file_type;
         self.is_modified = false;
-        self.has_bom = has_bom;
-        self.word_count = stats.words;
-        self.char_count = stats.chars;
-        self.line_count = stats.lines;
-        self.reading_time_min = stats.reading_time_min;
+        self.deferred_load = false;
+        self.disk_version = Some(loaded.disk_version);
+        self.has_bom = loaded.has_bom;
+        self.word_count = loaded.stats.words;
+        self.char_count = loaded.stats.chars;
+        self.line_count = loaded.stats.lines;
+        self.reading_time_min = loaded.stats.reading_time_min;
         self.cursor_line = 1;
         self.cursor_col = 1;
         self.active_formats = ActiveFormats::default();
@@ -561,9 +770,9 @@ impl DocumentTab {
         self.stats_revision = Some(next_revision);
         self.staged_stats = Some(StagedStats {
             revision: next_revision,
-            words: stats.words,
-            chars: stats.chars,
-            line_endings,
+            words: loaded.stats.words,
+            chars: loaded.stats.chars,
+            line_endings: loaded.line_endings,
         });
         self.next_edit_opens_span_group = false;
         self.next_undo_caret = None;
@@ -577,6 +786,14 @@ impl DocumentTab {
             self.full_parse_count = 0;
         }
         self.refresh_cursor();
+    }
+
+    pub fn compute_disk_version(&self) -> DiskVersion {
+        DiskVersion::from_parts(self.has_bom, &self.content)
+    }
+
+    pub fn equals_loaded(&self, loaded: &LoadedNote) -> bool {
+        self.has_bom == loaded.has_bom && self.content == loaded.content
     }
 
     /// The text to write to the file: `content`, with the byte order mark
@@ -1150,6 +1367,46 @@ impl DocumentTab {
             self.cursor_line = line;
             self.cursor_col = col;
             self.active_formats = ActiveFormats::default();
+            return;
+        }
+        if self.view_mode == ViewMode::Raw {
+            // Raw mode on a Markdown tab only inspects the current line (plus
+            // immediate neighbors if it contains `|` for table detection) so
+            // editing never forces a full-document parse.
+            let (line, col) = self.line_col_at(cursor);
+            self.cursor_line = line;
+            self.cursor_col = col;
+            let ls = home_offset(&self.content, cursor);
+            let le = line_end(&self.content, cursor);
+            let (slice_start, slice_end) = if self.content[ls..le].contains('|') {
+                // Walk back over contiguous `|` lines (bounded) so any body row
+                // still includes its header + delimiter, and include one line
+                // below so a header row includes its delimiter.
+                let mut s = ls;
+                for _ in 0..64 {
+                    if s == 0 {
+                        break;
+                    }
+                    let prev_end = s.saturating_sub(line_ending_len_before(&self.content, s));
+                    let prev_start = home_offset(&self.content, prev_end);
+                    if prev_start == s || !self.content[prev_start..prev_end].contains('|') {
+                        break;
+                    }
+                    s = prev_start;
+                }
+                let next_start = le + line_ending_len(&self.content, le);
+                let e = if next_start <= self.content.len() && le < self.content.len() {
+                    line_end(&self.content, next_start)
+                } else {
+                    le
+                };
+                (s, e)
+            } else {
+                (ls, le)
+            };
+            let local = parse_document(&self.content[slice_start..slice_end]);
+            self.active_formats =
+                compute_active_formats(&local, cursor - slice_start, &self.pending_formats);
             return;
         }
         let parsed = self.parsed();

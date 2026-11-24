@@ -86,9 +86,37 @@ static GLOBAL: heap_counter::Counting = heap_counter::Counting;
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
+#[exclude = "fonts/*"]
 #[exclude = "icons/hicolor/*"]
 #[exclude = "windows/*"]
 struct Assets;
+
+const COMPRESSED_FONTS: &[&[u8]] = &[
+    include_bytes!(concat!(env!("OUT_DIR"), "/Ubuntu-R.ttf.deflate")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/Ubuntu-RI.ttf.deflate")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/Ubuntu-M.ttf.deflate")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/Ubuntu-B.ttf.deflate")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/Ubuntu-BI.ttf.deflate")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/UbuntuMono-R.ttf.deflate")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/UbuntuMono-RI.ttf.deflate")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/UbuntuMono-B.ttf.deflate")),
+    include_bytes!(concat!(env!("OUT_DIR"), "/UbuntuMono-BI.ttf.deflate")),
+];
+
+fn load_bundled_fonts() -> Vec<std::borrow::Cow<'static, [u8]>> {
+    use std::io::Read;
+    COMPRESSED_FONTS
+        .iter()
+        .filter_map(|compressed| {
+            let mut decoder = flate2::read::DeflateDecoder::new(*compressed);
+            let mut out = Vec::new();
+            decoder
+                .read_to_end(&mut out)
+                .ok()
+                .map(|_| std::borrow::Cow::Owned(out))
+        })
+        .collect()
+}
 
 struct EmbeddedAssets;
 
@@ -161,21 +189,7 @@ fn main() {
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
             // Register bundled Ubuntu fonts
-            let fonts: Vec<std::borrow::Cow<'static, [u8]>> = [
-                "fonts/Ubuntu-R.ttf",
-                "fonts/Ubuntu-RI.ttf",
-                "fonts/Ubuntu-M.ttf",
-                "fonts/Ubuntu-B.ttf",
-                "fonts/Ubuntu-BI.ttf",
-                "fonts/UbuntuMono-R.ttf",
-                "fonts/UbuntuMono-RI.ttf",
-                "fonts/UbuntuMono-B.ttf",
-                "fonts/UbuntuMono-BI.ttf",
-            ]
-            .iter()
-            .filter_map(|p| Assets::get(p).map(|f| f.data))
-            .collect();
-            let _ = cx.text_system().add_fonts(fonts);
+            let _ = cx.text_system().add_fonts(load_bundled_fonts());
 
             // Bind global key shortcuts
             cx.bind_keys([
@@ -516,5 +530,26 @@ mod crash_log_tests {
         assert!(log.starts_with("[unix ") && log.contains("panicked: third"));
         assert!(log.len() < 1024);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundled_fonts_decompress_bit_for_bit() {
+        let fonts = super::load_bundled_fonts();
+        let names = [
+            "Ubuntu-R.ttf",
+            "Ubuntu-RI.ttf",
+            "Ubuntu-M.ttf",
+            "Ubuntu-B.ttf",
+            "Ubuntu-BI.ttf",
+            "UbuntuMono-R.ttf",
+            "UbuntuMono-RI.ttf",
+            "UbuntuMono-B.ttf",
+            "UbuntuMono-BI.ttf",
+        ];
+        assert_eq!(fonts.len(), names.len());
+        for (font, name) in fonts.iter().zip(names) {
+            let raw = std::fs::read(std::path::Path::new("assets/fonts").join(name)).unwrap();
+            assert_eq!(font.as_ref(), raw.as_slice(), "font mismatch for {name}");
+        }
     }
 }

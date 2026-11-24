@@ -291,7 +291,10 @@ impl DocumentTab {
     /// and one inside a hidden closing-hash run moves to the visible end. A
     /// selection keeps both endpoints.
     pub(super) fn snap_caret_to_visible_line_end(&mut self) {
-        if !self.caret.range.is_empty() || !self.file_type.supports_markdown_features() {
+        if !self.caret.range.is_empty()
+            || !self.file_type.supports_markdown_features()
+            || self.view_mode == ViewMode::Raw
+        {
             return;
         }
         let offset = self.cursor_offset();
@@ -362,7 +365,10 @@ impl DocumentTab {
         self.pending_formats = ActiveFormats::default();
         let cursor = self.cursor_offset();
         let nl = crate::model::text_ops::line_end(&self.content, cursor);
-        let target = if extend || !self.file_type.supports_markdown_features() {
+        let target = if extend
+            || !self.file_type.supports_markdown_features()
+            || self.view_mode == ViewMode::Raw
+        {
             nl
         } else {
             self.parsed()
@@ -531,7 +537,7 @@ impl DocumentTab {
             None => {}
         }
         let mut target = crate::model::text_ops::word_right(&self.content, origin);
-        if self.file_type.supports_markdown_features() {
+        if self.view_mode == ViewMode::Wysiwyg && self.file_type.supports_markdown_features() {
             if let Some(block) = self.picture_block_at(target) {
                 if target > block.start && target < block.end {
                     target = if origin < block.start {
@@ -586,7 +592,7 @@ impl DocumentTab {
         let mut offset = floor_boundary(&self.content, offset);
         if !extend {
             offset = snap_off_ending_interior(&self.content, offset);
-            if self.file_type.supports_markdown_features() {
+            if self.view_mode == ViewMode::Wysiwyg && self.file_type.supports_markdown_features() {
                 if let Some(line) = self.parsed().line_at_offset(offset) {
                     let vend = visible_line_end(line, self.view_mode);
                     if offset > vend && offset <= line.source.end {

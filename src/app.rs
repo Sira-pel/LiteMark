@@ -130,8 +130,14 @@ pub struct EditorContextMenu {
     pub is_table: bool,
 }
 
-/// Headings of one tab revision: `((tab id, revision), headings)`.
-type OutlineCache = ((String, u64), Arc<Vec<crate::model::outline::OutlineItem>>);
+/// Headings of one tab revision, with the `ParseMeta::generation` used in
+/// WYSIWYG mode (`None` for Raw mode's lightweight scan).
+pub(crate) struct OutlineCache {
+    pub tab_id: String,
+    pub revision: u64,
+    pub parse_gen: Option<u64>,
+    pub items: Arc<Vec<crate::model::outline::OutlineItem>>,
+}
 
 pub struct LiteMarkApp {
     pub tabs: Vec<DocumentTab>,
@@ -216,6 +222,11 @@ pub struct LiteMarkApp {
     /// discard, workspace delete/move). The next render tells
     /// `note_image_cache` to release pictures no open tab references.
     pub(crate) closed_tab_ids: Vec<String>,
+    /// Error toast queued when a deferred tab fails synchronous load on
+    /// activation; flushed by `ensure_active_tab_loaded`.
+    pending_deferred_toast: Option<String>,
+    /// Tab id currently being loaded asynchronously after activation.
+    deferred_loading_tab: Option<String>,
     /// Word count of the selection, keyed by tab id, revision and range, so
     /// a frame (caret blink, hover) doesn't rescan a large selection.
     selection_words: Option<(String, u64, Range<usize>, Option<usize>)>,
@@ -350,12 +361,10 @@ impl LiteMarkApp {
                 .and_then(|f| f.to_str())
                 .unwrap_or("Untitled.md")
                 .to_string();
-            match read_note(&path) {
-                Ok(content) => {
-                    let mut tab = DocumentTab::new(first_id.clone(), name, content, None, None);
-                    let version = disk_version(&path, &tab.file_text_ref());
-                    tab.disk_version = version;
-                    tab.file_path = Some(path);
+            match read_note_loaded(&path) {
+                Ok(loaded) => {
+                    let tab =
+                        DocumentTab::from_loaded(first_id.clone(), name, loaded, Some(path), None);
                     opened_initial = true;
                     tab
                 }
@@ -650,6 +659,8 @@ impl LiteMarkApp {
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
             closed_tab_ids: Vec::new(),
+            pending_deferred_toast: None,
+            deferred_loading_tab: None,
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
@@ -861,6 +872,8 @@ impl LiteMarkApp {
             editor_paint: Rc::new(RefCell::new(EditorPaint::default())),
             note_image_cache: crate::ui::note_images::NoteImageCache::new(cx),
             closed_tab_ids: Vec::new(),
+            pending_deferred_toast: None,
+            deferred_loading_tab: None,
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
@@ -932,17 +945,14 @@ impl LiteMarkApp {
             .iter()
             .find(|file| file.name == "Welcome.md")
         {
-            if let Ok(content) = read_note(&file.path) {
-                let mut tab = DocumentTab::new(
+            if let Ok(loaded) = read_note_loaded(&file.path) {
+                return DocumentTab::from_loaded(
                     id,
                     file.name.clone(),
-                    content,
+                    loaded,
                     Some(file.path.clone()),
                     Some(file.id.clone()),
                 );
-                let version = disk_version(&file.path, &tab.file_text_ref());
-                tab.disk_version = version;
-                return tab;
             }
         }
         DocumentTab::new(

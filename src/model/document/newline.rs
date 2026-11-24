@@ -6,7 +6,7 @@ impl DocumentTab {
     /// Enter at the visible end of a closing-hash heading inserts after the
     /// closer, so the heading stays one line.
     pub(super) fn heading_newline_at(&mut self, range: &Range<usize>) -> Option<usize> {
-        if !range.is_empty() {
+        if !range.is_empty() || self.view_mode == ViewMode::Raw {
             return None;
         }
         let parsed = self.parsed();
@@ -204,6 +204,94 @@ impl DocumentTab {
         true
     }
 
+    /// Lightweight `Enter` handler for Markdown tabs in Raw mode: parses only
+    /// the current line for list/quote continuation instead of calling
+    /// `self.parsed()` on the entire document.
+    fn raw_markdown_newline(&mut self, range: Range<usize>, is_shift: bool) {
+        let nl = self.line_break(range.start);
+        if self.bare_cr_needs_extra_break(&range) {
+            self.edit(range.start..range.start, "\n\n");
+            return;
+        }
+        if is_shift {
+            self.edit(range, nl);
+            return;
+        }
+        let cursor = range.start;
+        let line_start = home_offset(&self.content, cursor);
+        let line_end_pos = line_end(&self.content, cursor);
+        let line = &self.content[line_start..line_end_pos];
+        let local = parse_document(line);
+
+        if let Some(item) = accepted_list_marker_in(&local, line, 0) {
+            let body = &line[item.prefix_end()..];
+            let ending_is_cr = self.content.as_bytes().get(line_end_pos) == Some(&b'\r');
+            let cr_keeps_item =
+                ending_is_cr && (item.punct == b')' || (item.ordered && item.task.is_some()));
+            let is_empty = body.trim().is_empty() && !cr_keeps_item;
+            if is_empty {
+                if !range.is_empty() {
+                    self.edit(range, nl);
+                    return;
+                }
+                if item.indent_bytes > 0 {
+                    let indent = &line[..item.indent_bytes];
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 {
+                        1
+                    } else {
+                        2
+                    };
+                    self.edit(line_start..line_start + outdent_len, "");
+                } else {
+                    let remove_end = if line_ending_len(&self.content, line_end_pos) == 2 {
+                        line_end_pos + 1
+                    } else {
+                        line_end_pos
+                    };
+                    self.edit(line_start..remove_end, "");
+                }
+            } else if range.is_empty() && cursor < line_start + item.prefix_end() {
+                self.edit(line_start..line_start, nl);
+                self.caret.move_to(cursor + nl.len());
+                self.refresh_cursor();
+            } else if item.ordered && item.number >= MAX_LIST_NUMBER {
+                self.edit(range, nl);
+            } else {
+                let kept = &line[..item.indent_bytes];
+                let cont = item.continuation(kept).replacen('\n', nl, 1);
+                self.edit(range, &cont);
+            }
+            return;
+        }
+
+        if let Some(prefix_len) = local
+            .lines
+            .first()
+            .filter(|l| l.kind == LineKind::Blockquote)
+            .map(|l| l.prefix_len as usize)
+        {
+            let body = &line[prefix_len..];
+            if body.trim().is_empty() {
+                if !range.is_empty() {
+                    self.edit(range, nl);
+                } else {
+                    self.edit(line_start..line_end_pos, "");
+                }
+            } else if range.is_empty() && cursor < line_start + prefix_len {
+                self.edit(line_start..line_start, nl);
+                self.caret.move_to(cursor + nl.len());
+                self.refresh_cursor();
+            } else {
+                let q_indent = &line[..crate::markdown::parser::split_indent(line).0];
+                let ins = format!("{nl}{q_indent}> ");
+                self.edit(range, &ins);
+            }
+            return;
+        }
+
+        self.edit(range, nl);
+    }
+
     pub fn smart_newline(&mut self, is_shift: bool) {
         if self.is_read_only() {
             return;
@@ -212,6 +300,10 @@ impl DocumentTab {
         let range = self.selection_range();
         if !self.file_type.supports_markdown_features() {
             self.code_newline(range);
+            return;
+        }
+        if self.view_mode == ViewMode::Raw {
+            self.raw_markdown_newline(range, is_shift);
             return;
         }
         if self.picture_newline() || self.block_marker_newline() {
@@ -744,7 +836,11 @@ impl DocumentTab {
             }
         }
 
-        let list_item = {
+        let list_item = if self.view_mode == ViewMode::Raw {
+            let line = &self.content[line_start..line_end(&self.content, cursor)];
+            let local = parse_document(line);
+            accepted_list_marker_in(&local, line, 0)
+        } else {
             let parsed = self.parsed();
             accepted_list_marker_in(&parsed, &self.content, line_start)
         };

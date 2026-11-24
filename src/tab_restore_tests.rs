@@ -230,3 +230,101 @@ fn tab_switches_are_written_once_after_a_pause_or_on_close() {
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[std_test]
+fn restore_defers_background_tabs_and_loads_on_activation() {
+    let root = temp_workspace("defer", &["a.md", "b.md", "c.md"]);
+    let (a, b, c) = (root.join("a.md"), root.join("b.md"), root.join("c.md"));
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, _cx| {
+        use_workspace(app, &root);
+        app.settings.open_tabs = vec![a.clone(), b.clone(), c.clone()];
+        app.settings.active_tab = Some(c.clone());
+
+        assert_eq!(app.restore_saved_tabs(false), 3);
+        assert_eq!(app.tabs.len(), 3);
+        assert!(!app.tabs[2].deferred_load, "active tab loads immediately");
+        assert_eq!(app.tabs[2].content, "# c.md\n");
+        assert!(app.tabs[0].deferred_load && app.tabs[0].content.is_empty());
+        assert!(app.tabs[1].deferred_load && app.tabs[1].content.is_empty());
+
+        let a_id = app.tabs[0].id.clone();
+        app.activate_tab(a_id);
+        assert!(!app.tabs[0].deferred_load, "activated tab loads on demand");
+        assert_eq!(app.tabs[0].content, "# a.md\n");
+        assert!(app.tabs[0].disk_version.is_some());
+        assert!(app.tabs[1].deferred_load, "unvisited tab stays deferred");
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
+fn activating_deleted_deferred_tab_closes_it_gracefully() {
+    let root = temp_workspace("defer-missing", &["a.md", "b.md"]);
+    let (a, b) = (root.join("a.md"), root.join("b.md"));
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, cx| {
+        use_workspace(app, &root);
+        app.settings.open_tabs = vec![a.clone(), b.clone()];
+        app.settings.active_tab = Some(b.clone());
+        assert_eq!(app.restore_saved_tabs(false), 2);
+        let a_id = app.tabs[0].id.clone();
+        assert!(app.tabs[0].deferred_load);
+
+        std::fs::remove_file(&a).unwrap();
+        app.activate_tab(a_id.clone());
+        app.ensure_active_tab_loaded(cx);
+        assert!(!app.tabs.iter().any(|t| t.id == a_id));
+        assert_eq!(
+            app.active_tab().unwrap().file_path.as_deref(),
+            Some(b.as_path())
+        );
+        assert!(app.saved_toast.is_some());
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
+fn deferred_tab_refuses_save_and_open_loaded_tab_finishes_it() {
+    let root = temp_workspace("defer-save", &["a.md", "b.md"]);
+    let (a, b) = (root.join("a.md"), root.join("b.md"));
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("", cx));
+    view.update(cx, |app, _cx| {
+        use_workspace(app, &root);
+        app.settings.open_tabs = vec![a.clone(), b.clone()];
+        app.settings.active_tab = Some(b.clone());
+        assert_eq!(app.restore_saved_tabs(false), 2);
+        let a_id = app.tabs[0].id.clone();
+        assert!(app.save_tab(&a_id).is_err());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "# a.md\n");
+
+        app.open_loaded_tab("a.md".into(), "# updated\n".into(), Some(a.clone()), None);
+        assert!(!app.active_tab().unwrap().deferred_load);
+        assert_eq!(app.active_tab().unwrap().content, "# updated\n");
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[std_test]
+fn clamped_zoom_skips_redundant_settings_save() {
+    let mut cx = TestAppContext::single();
+    let (view, cx) = cx.add_window_view(|_window, cx| LiteMarkApp::test_new("hi", cx));
+    view.update(cx, |app, cx| {
+        app.settings.zoom_level = 200;
+        app.settings_save_failed = false;
+        app.handle_zoom_in(cx);
+        assert_eq!(app.settings.zoom_level, 200);
+        assert!(!app.settings_save_failed);
+
+        app.settings.zoom_level = 50;
+        app.handle_zoom_out(cx);
+        assert_eq!(app.settings.zoom_level, 50);
+
+        app.settings.zoom_level = 100;
+        app.handle_reset_zoom(cx);
+        assert_eq!(app.settings.zoom_level, 100);
+    });
+}

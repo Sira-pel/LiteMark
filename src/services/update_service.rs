@@ -122,12 +122,73 @@ fn parse_release(body: &str) -> Option<ReleaseInfo> {
     Some(ReleaseInfo { url, version })
 }
 
+#[derive(Debug)]
+struct RustlsStream(rustls::StreamOwned<rustls::ClientConnection, Box<dyn ureq::ReadWrite>>);
+
+impl ureq::ReadWrite for RustlsStream {
+    fn socket(&self) -> Option<&std::net::TcpStream> {
+        self.0.get_ref().socket()
+    }
+}
+
+impl std::io::Read for RustlsStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl std::io::Write for RustlsStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+struct NativeTlsConnector(std::sync::Arc<rustls::ClientConfig>);
+
+impl ureq::TlsConnector for NativeTlsConnector {
+    fn connect(
+        &self,
+        dns_name: &str,
+        io: Box<dyn ureq::ReadWrite>,
+    ) -> Result<Box<dyn ureq::ReadWrite>, ureq::Error> {
+        let host = dns_name.trim_matches(['[', ']']).to_string();
+        let server_name = rustls::pki_types::ServerName::try_from(host)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+        let conn = rustls::ClientConnection::new(self.0.clone(), server_name)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        Ok(Box::new(RustlsStream(rustls::StreamOwned::new(conn, io))))
+    }
+}
+
+fn native_tls_connector() -> Option<NativeTlsConnector> {
+    let mut store = rustls::RootCertStore::empty();
+    let result = rustls_native_certs::load_native_certs();
+    let (valid, _) = store.add_parsable_certificates(result.certs);
+    if valid == 0 {
+        return None;
+    }
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .ok()?
+    .with_root_certificates(store)
+    .with_no_client_auth();
+    Some(NativeTlsConnector(std::sync::Arc::new(config)))
+}
+
 /// Ask GitHub for the latest release. Any failure (offline, rate limited,
 /// bad response) yields `None`. This blocks, so run it off the UI thread.
 pub fn fetch_latest_release() -> Option<ReleaseInfo> {
+    let connector = native_tls_connector()?;
     let agent = ureq::AgentBuilder::new()
         .timeout(REQUEST_TIMEOUT)
         .user_agent(concat!("litemark/", env!("CARGO_PKG_VERSION")))
+        .tls_connector(std::sync::Arc::new(connector))
         .build();
     let body = agent
         .get(LATEST_RELEASE_URL)

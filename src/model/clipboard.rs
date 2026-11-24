@@ -50,21 +50,31 @@ pub fn clipboard_image(item: &ClipboardItem) -> Option<&Image> {
     })
 }
 
-/// PNG bytes for a clipboard image: PNG as it is, JPEG, WebP, GIF and BMP
-/// re-encoded. Other formats (SVG, TIFF) are not supported.
+/// PNG bytes for a clipboard image: JPEG, WebP, GIF, BMP, and large PNGs are
+/// encoded with best deflate compression (keeping the smaller buffer for PNGs).
+/// Other formats (SVG, TIFF) are not supported.
 pub fn clipboard_image_png(image: &Image) -> Result<Vec<u8>, String> {
-    if image.format == ImageFormat::Png {
-        return Ok(image.bytes.clone());
-    }
+    use ::image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    const REENCODE_PNG_MIN_BYTES: usize = 64 * 1024;
+
     if matches!(image.format, ImageFormat::Svg | ImageFormat::Tiff) {
         return Err("This kind of image can't be pasted.".into());
     }
+    if image.format == ImageFormat::Png && image.bytes.len() <= REENCODE_PNG_MIN_BYTES {
+        return Ok(image.bytes.clone());
+    }
     let decoded = ::image::load_from_memory(&image.bytes).map_err(|err| err.to_string())?;
     let mut out = std::io::Cursor::new(Vec::new());
+    let encoder =
+        PngEncoder::new_with_quality(&mut out, CompressionType::Best, FilterType::Adaptive);
     decoded
-        .write_to(&mut out, ::image::ImageFormat::Png)
+        .write_with_encoder(encoder)
         .map_err(|err| err.to_string())?;
-    Ok(out.into_inner())
+    let reencoded = out.into_inner();
+    if image.format == ImageFormat::Png && image.bytes.len() <= reencoded.len() {
+        return Ok(image.bytes.clone());
+    }
+    Ok(reencoded)
 }
 
 /// The clipboard text as a link destination: one `http(s)://` URL with
@@ -173,5 +183,28 @@ mod tests {
             item.metadata().cloned().unwrap(),
         );
         assert_eq!(paste_text(&stale, true).as_deref(), Some("something else"));
+    }
+
+    #[test]
+    fn large_png_is_reencoded_smaller_with_identical_pixels() {
+        use ::image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        let img = ::image::RgbaImage::from_fn(256, 256, |x, y| {
+            ::image::Rgba([(x % 256) as u8, (y % 256) as u8, ((x ^ y) % 256) as u8, 255])
+        });
+        let mut raw = std::io::Cursor::new(Vec::new());
+        img.write_with_encoder(PngEncoder::new_with_quality(
+            &mut raw,
+            CompressionType::Fast,
+            FilterType::NoFilter,
+        ))
+        .unwrap();
+        let raw_bytes = raw.into_inner();
+        assert!(raw_bytes.len() > 64 * 1024);
+
+        let optimized =
+            clipboard_image_png(&Image::from_bytes(ImageFormat::Png, raw_bytes.clone())).unwrap();
+        assert!(optimized.len() < raw_bytes.len());
+        let decoded = ::image::load_from_memory(&optimized).unwrap().to_rgba8();
+        assert_eq!(decoded, img);
     }
 }
