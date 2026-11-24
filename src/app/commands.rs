@@ -1092,7 +1092,7 @@ impl LiteMarkApp {
         if let Some(tab) = self.active_tab_mut() {
             if !tab.cut_selected_picture() {
                 let range = tab.selection_range();
-                tab.edit(range, "");
+                tab.edit_removing(range);
             }
         }
         self.refresh_find();

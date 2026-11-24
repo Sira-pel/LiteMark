@@ -648,7 +648,7 @@ impl DocumentTab {
                     } else {
                         line_end_pos
                     };
-                    self.edit(line_start..remove_end, "");
+                    self.edit_removing(line_start..remove_end);
                 }
             } else {
                 if range.is_empty() && cursor < line_start + item.prefix_end() {
@@ -670,6 +670,9 @@ impl DocumentTab {
                 }
                 let kept = &line[..item.indent_bytes];
                 let cont = item.continuation(kept).replacen('\n', nl, 1);
+                if item.ordered && range.end <= line_end_pos {
+                    self.stage_renumber_after_enter(line_start, line_end_pos, item.number);
+                }
                 if self.split_inline_span_newline(&range, &cont) {
                     return;
                 }
@@ -861,7 +864,7 @@ impl DocumentTab {
         }
         let range = self.selection_range();
         if !range.is_empty() {
-            self.edit(range, "");
+            self.edit_removing(range);
             return true;
         }
 
@@ -949,7 +952,7 @@ impl DocumentTab {
                     };
                     self.edit(line_start..line_start + outdent_len, "");
                 } else {
-                    self.edit(line_start..cursor, "");
+                    self.edit_removing(line_start..cursor);
                 }
                 return true;
             }

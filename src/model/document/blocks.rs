@@ -118,17 +118,19 @@ impl DocumentTab {
     /// Tab or Shift+Tab, starting at `start_line` in the text before the
     /// edit) that were at `level` indent: they count up from `first`. Lines
     /// at other levels keep their numbers. Returns how much the first line
-    /// grew or shrank, for the caret.
+    /// grew or shrank, for the caret, the number the next item would get, and
+    /// the delimiter of the items renumbered.
     fn renumber_moved_items(
         &mut self,
         start_line: usize,
         lines: &mut [String],
         level: usize,
         first: usize,
-    ) -> isize {
+    ) -> (isize, usize, Option<u8>) {
         let parsed = self.parsed();
         let mut next = first;
         let mut first_delta = 0isize;
+        let mut punct = None;
         let mut at = start_line;
         for (i, line) in lines.iter_mut().enumerate() {
             let original_len = self.content[at..]
@@ -148,6 +150,7 @@ impl DocumentTab {
             if digits == 0 {
                 continue;
             }
+            punct.get_or_insert(marker.punct);
             let number = next.to_string();
             next = next.saturating_add(1);
             let before = line.len();
@@ -156,7 +159,7 @@ impl DocumentTab {
                 first_delta = line.len() as isize - before as isize;
             }
         }
-        first_delta
+        (first_delta, next, punct)
     }
 
     pub fn indent(&mut self) {
@@ -225,10 +228,17 @@ impl DocumentTab {
             modified.push(format!("{unit}{line}"));
         }
         if let Some(first) = numbering {
-            let delta = self.renumber_moved_items(start_line, &mut modified, level, first);
+            let (delta, next, punct) =
+                self.renumber_moved_items(start_line, &mut modified, level, first);
             // The caret only shifts with the number when it sits after it.
             if range.start > start_line + level {
                 first_added += delta;
+            }
+            if let Some(punct) = punct {
+                let new_level = level + unit.len();
+                let block = start_line..end_line;
+                let patches = self.moved_items_patches(block, new_level, punct, next);
+                self.stage_tail_patches(patches);
             }
         }
         let first_added = first_added.max(0) as usize;
@@ -291,7 +301,14 @@ impl DocumentTab {
             modified.push(stripped.to_string());
         }
         if let Some(first) = numbering {
-            let delta = self.renumber_moved_items(start_line, &mut modified, level, first);
+            let (delta, next, punct) =
+                self.renumber_moved_items(start_line, &mut modified, level, first);
+            if let Some(punct) = punct {
+                let new_level = level.saturating_sub(strip_spaces);
+                let block = start_line..end_line;
+                let patches = self.moved_items_patches(block, new_level, punct, next);
+                self.stage_tail_patches(patches);
+            }
             // Fold the number's change into the first line's shift, so a
             // caret after the number stays on the same text.
             if range.start > start_line + level {
@@ -373,6 +390,29 @@ impl DocumentTab {
                 }
             });
 
+        // Numbers continue the list right above the selection when it is in
+        // sequence, and the numbered items after the selection follow on.
+        let mut first_number = 1usize;
+        let mut list_level = 0usize;
+        let mut tail_patches = Vec::new();
+        if target == BlockFormatTarget::OrderedList && self.file_type.supports_markdown_features() {
+            let first = non_table_indices
+                .iter()
+                .copied()
+                .find(|&i| !split_lines[i].trim().is_empty() || split_lines.len() == 1);
+            if let Some(first) = first {
+                if all_match {
+                    tail_patches = self.left_list_patches(line_at[first], end_line);
+                } else {
+                    let line = split_lines[first];
+                    list_level = line.len() - line.trim_start_matches(' ').len();
+                    if let Some(head) = self.head_numbers(line_at[first], list_level, b'.') {
+                        first_number = head.last().map_or(1, |m| m.number.saturating_add(1));
+                    }
+                }
+            }
+        }
+
         let mut transformed = Vec::with_capacity(split_lines.len());
         let mut first_delta: isize = 0;
         let mut total_delta: isize = 0;
@@ -431,7 +471,9 @@ impl DocumentTab {
                     BlockFormatTarget::Heading(5) => "##### ".to_string(),
                     BlockFormatTarget::Heading(_) => "###### ".to_string(),
                     BlockFormatTarget::BulletList => "- ".to_string(),
-                    BlockFormatTarget::OrderedList => format!("{sequence}. "),
+                    BlockFormatTarget::OrderedList => {
+                        format!("{}. ", first_number.saturating_add(sequence - 1))
+                    }
                     BlockFormatTarget::TaskList => "- [ ] ".to_string(),
                     BlockFormatTarget::Blockquote => "> ".to_string(),
                 };
@@ -446,6 +488,11 @@ impl DocumentTab {
         }
 
         let replacement = transformed.join("\n");
+        if target == BlockFormatTarget::OrderedList && !all_match {
+            let next = first_number.saturating_add(sequence);
+            tail_patches = self.joined_list_patches(end_line, list_level, b'.', next);
+        }
+        self.stage_tail_patches(tail_patches);
         self.edit(start_line..end_line, &replacement);
         if range.is_empty() {
             let new_cursor = (range.start as isize + first_delta).max(start_line as isize) as usize;

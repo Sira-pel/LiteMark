@@ -434,7 +434,7 @@ impl DocumentTab {
         }
         if !self.selection_range().is_empty() {
             let range = self.selection_range();
-            self.edit(range, "");
+            self.edit_removing(range);
             return true;
         }
         let cursor = self.cursor_offset();
@@ -544,7 +544,7 @@ impl DocumentTab {
         }
         if !self.selection_range().is_empty() {
             let range = self.selection_range();
-            self.edit(range, "");
+            self.edit_removing(range);
             return;
         }
         let cursor = self.cursor_offset();
@@ -688,7 +688,7 @@ impl DocumentTab {
             match action {
                 DeleteAction::Done => return,
                 DeleteAction::JoinLines { range } => {
-                    self.edit(range, "");
+                    self.edit_removing(range);
                     return;
                 }
                 DeleteAction::DeleteSpan { start, end } => {
@@ -810,7 +810,7 @@ impl DocumentTab {
             return;
         }
         if !self.caret.range.is_empty() {
-            self.edit(self.selection_range(), "");
+            self.edit_removing(self.selection_range());
         } else {
             let cursor = self.cursor_offset();
             let target = crate::model::text_ops::home_offset(&self.content, cursor);
@@ -833,7 +833,7 @@ impl DocumentTab {
                 cursor
             };
             if target < end {
-                self.edit(target..end, "");
+                self.edit_removing(target..end);
             }
         }
     }

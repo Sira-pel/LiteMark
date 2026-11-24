@@ -337,7 +337,8 @@ fn w11_tab_renumbers_a_nested_numbered_item_from_one() {
     // reads as text of the item above, so Tab renumbers it.
     for (src, line, expect) in [
         ("1. a\n2. b", 1, "1. a\n   1. b"),
-        ("1. a\n2. b\n3. c", 1, "1. a\n   1. b\n3. c"),
+        // The items after it close the gap.
+        ("1. a\n2. b\n3. c", 1, "1. a\n   1. b\n2. c"),
         // A sub-list already under the item above is continued.
         ("1. a\n   1. x\n2. b", 2, "1. a\n   1. x\n   2. b"),
         // `)` delimiters stay as they are.
