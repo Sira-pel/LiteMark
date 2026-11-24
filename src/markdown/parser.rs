@@ -1106,6 +1106,9 @@ pub struct ParseMeta {
     /// lines removed, lines inserted)`. Lets caches keyed by line index
     /// follow the edit instead of starting over.
     pub last_splice: Option<(u64, usize, usize, usize)>,
+    /// Byte delta of the last incremental edit (`new_len - old_len`), used
+    /// by caches that also store byte offsets (e.g. `outline_cache`).
+    pub last_byte_delta: isize,
 }
 
 impl PartialEq for ParseMeta {
@@ -1527,34 +1530,13 @@ fn parse_inline_syntax_inner(input: &str, base: usize, in_table_cell: bool) -> I
     parse_inline_with_pulldown(input, base, in_table_cell)
 }
 
-/// Text pulldown-cmark would return as one unstyled run: it starts with a
-/// letter (so no list, heading, quote or indented code), has no edge
-/// whitespace to trim, no control characters, and no byte that can open
-/// inline syntax.
+/// Text pulldown-cmark would return as one unstyled run: no byte that can
+/// open inline syntax (`*`, `_`, `~`, `` ` ``, `[`, `<`, `\`).
 fn is_plain_inline(input: &str) -> bool {
-    let bytes = input.as_bytes();
-    let (Some(&first), Some(&last)) = (bytes.first(), bytes.last()) else {
-        return false;
-    };
-    (first.is_ascii_alphabetic() || !first.is_ascii())
-        && last != b' '
-        && !bytes.iter().any(|&b| {
-            b.is_ascii_control()
-                || matches!(
-                    b,
-                    b'*' | b'_'
-                        | b'~'
-                        | b'`'
-                        | b'['
-                        | b']'
-                        | b'<'
-                        | b'>'
-                        | b'\\'
-                        | b'&'
-                        | b'!'
-                        | b'|'
-                )
-        })
+    !input
+        .as_bytes()
+        .iter()
+        .any(|&b| matches!(b, b'*' | b'_' | b'~' | b'`' | b'[' | b'<' | b'\\'))
 }
 
 fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> InlineSyntax {
@@ -1927,6 +1909,32 @@ fn is_escaped_delim(input: &str, pos: usize) -> bool {
     backslashes % 2 == 1
 }
 
+/// Fast zero-alloc check whether `run` is already covered by `extra_blocked`,
+/// a `Code` span's inner range, or a parsed pair's `open_delim`/`close_delim`.
+fn delim_covered_fast(
+    run: &std::ops::Range<usize>,
+    inline_pairs: &[InlinePair],
+    extra_blocked: &[std::ops::Range<usize>],
+) -> bool {
+    if extra_blocked
+        .iter()
+        .any(|b| b.start < run.end && b.end > run.start)
+    {
+        return true;
+    }
+    for p in inline_pairs {
+        if p.kind == InlineTagKind::Code && p.inner.start < run.end && p.inner.end > run.start {
+            return true;
+        }
+        if (p.open_delim.start <= run.start && run.end <= p.open_delim.end)
+            || (p.close_delim.start <= run.start && run.end <= p.close_delim.end)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Delimiter runs that pulldown's emphasis matching rejected can still be
 /// what the user typed. Two rules reject valid-looking pairs: the flanking
 /// punctuation conditions (a closer after punctuation/symbol before a
@@ -1946,12 +1954,42 @@ fn synthesize_flanking_pairs(
 ) {
     let bytes = input.as_bytes();
     // Most lines carry no delimiter at all: one SIMD scan skips the rest.
-    if memchr::memchr3(b'*', b'~', b'`', bytes).is_none() {
+    let Some(first_delim) = memchr::memchr3(b'*', b'~', b'`', bytes) else {
+        return;
+    };
+    // Zero-alloc pre-pass: if fewer than 2 delimiter runs are uncovered by
+    // pulldown-cmark, synthesis cannot form a pair.
+    let mut uncovered = 0usize;
+    let mut scan = first_delim;
+    while scan < bytes.len() {
+        let b = bytes[scan];
+        if (b == b'*' || b == b'~' || b == b'`') && !is_escaped_delim(input, scan) {
+            let start = scan;
+            while scan < bytes.len() && bytes[scan] == b && !is_escaped_delim(input, scan) {
+                scan += 1;
+            }
+            let abs_run = (base + start)..(base + scan);
+            if !delim_covered_fast(&abs_run, inline_pairs, extra_blocked) {
+                uncovered += 1;
+                if uncovered >= 2 {
+                    break;
+                }
+            }
+        } else {
+            let next = memchr::memchr3(b'*', b'~', b'`', &bytes[scan + 1..]);
+            match next {
+                Some(rel) => scan = scan + 1 + rel,
+                None => break,
+            }
+        }
+    }
+    if uncovered < 2 {
         return;
     }
+
     // Runs of unescaped emphasis delimiters, in source order.
     let mut runs: Vec<(usize, usize, u8)> = Vec::new();
-    let mut i = 0usize;
+    let mut i = first_delim;
     while i < bytes.len() {
         let b = bytes[i];
         if (b == b'*' || b == b'~' || b == b'`') && !is_escaped_delim(input, i) {
@@ -1960,8 +1998,10 @@ fn synthesize_flanking_pairs(
                 i += 1;
             }
             runs.push((start, i, b));
+        } else if let Some(rel) = memchr::memchr3(b'*', b'~', b'`', &bytes[i + 1..]) {
+            i = i + 1 + rel;
         } else {
-            i += 1;
+            break;
         }
     }
     if runs.len() < 2 {
@@ -1969,14 +2009,22 @@ fn synthesize_flanking_pairs(
     }
     // A run is out of play when it overlaps a code span, HTML tag/comment,
     // inline image, or was consumed as the opener or closer of a parsed pair.
-    let mut blocked_list: Vec<std::ops::Range<usize>> = inline_pairs
-        .iter()
-        .filter(|p| p.kind == InlineTagKind::Code)
-        .map(|p| p.inner.clone())
-        .collect();
-    blocked_list.extend(extra_blocked.iter().cloned());
-    let blocked_spans = merge_ranges(blocked_list);
+    let has_code_pair = inline_pairs.iter().any(|p| p.kind == InlineTagKind::Code);
+    let blocked_spans = if !has_code_pair && extra_blocked.is_empty() {
+        Vec::new()
+    } else {
+        let mut blocked_list: Vec<std::ops::Range<usize>> = inline_pairs
+            .iter()
+            .filter(|p| p.kind == InlineTagKind::Code)
+            .map(|p| p.inner.clone())
+            .collect();
+        blocked_list.extend(extra_blocked.iter().cloned());
+        merge_ranges(blocked_list)
+    };
     let overlaps_blocked = |run: &std::ops::Range<usize>| {
+        if blocked_spans.is_empty() {
+            return false;
+        }
         let after = blocked_spans.partition_point(|b| b.start < run.end);
         after > 0 && blocked_spans[after - 1].end > run.start
     };
@@ -1997,6 +2045,9 @@ fn synthesize_flanking_pairs(
             overlaps_blocked(&run) || consumed(run)
         })
         .collect();
+    if blocked.iter().filter(|&&b| !b).count() < 2 {
+        return;
+    }
     // Closer candidates by delimiter: emphasis keyed by exact run length,
     // backticks (any length) under length 0. Relaxed flanking: only the
     // whitespace conditions apply, so a closer cannot follow whitespace. The
@@ -2297,6 +2348,7 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             generation: next_generation(),
             table_line_count,
             last_splice: None,
+            last_byte_delta: 0,
         },
     }
 }
@@ -2556,6 +2608,7 @@ impl ParsedDocument {
             generation: next_generation(),
             table_line_count,
             last_splice: Some((old_generation, restart, removed, inserted)),
+            last_byte_delta: delta,
         };
     }
 }
@@ -2686,6 +2739,7 @@ fn parse_lines(
     mut on_line: impl FnMut(usize, usize, &ParseState) -> Step,
 ) -> Option<usize> {
     let mut next_local = 0usize;
+    let mut pending_header_cells: Option<Vec<std::ops::Range<usize>>> = None;
     while let Some(sline) = raw_lines.get(next_local) {
         let local = next_local;
         next_local += 1;
@@ -2918,6 +2972,7 @@ fn parse_lines(
         // consume, and the block follows the delimiter row's column shape.
         if table.as_ref().is_none_or(|t| i > t.last) {
             *table = table_block(raw_lines, local).map(|block| {
+                pending_header_cells = Some(block.header_cells);
                 let byte_start = sline.start;
                 let last_line = raw_lines.get(block.last).expect("table line");
                 DetectedTable {
@@ -2932,6 +2987,7 @@ fn parse_lines(
         if let Some(tbl) = table.as_ref().filter(|tbl| i >= tbl.first && i <= tbl.last) {
             list_walk.note_block(line);
             if i == tbl.delimiter {
+                pending_header_cells = None;
                 let hidden = vec![line_start..line_end];
                 push_line!(ParsedLine {
                     line_index: i as u32,
@@ -2951,7 +3007,14 @@ fn parse_lines(
                 let mut row_hidden = Vec::new();
                 let mut row_pairs = Vec::new();
                 let mut row_segments = Vec::new();
-                for raw in table_cell_ranges(line).into_iter().take(cols) {
+                let cell_ranges = if is_header {
+                    pending_header_cells
+                        .take()
+                        .unwrap_or_else(|| table_cell_ranges(line))
+                } else {
+                    table_cell_ranges(line)
+                };
+                for raw in cell_ranges.into_iter().take(cols) {
                     let raw_abs = (line_start + raw.start)..(line_start + raw.end);
                     let cell_slice = &line[raw.clone()];
                     let lead = usize::from(cell_slice.starts_with(' '));

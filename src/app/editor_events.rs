@@ -745,7 +745,9 @@ impl LiteMarkApp {
         let (content_key, last_edit, parsed, selection, marked, line_count, cursor_line) =
             if let Some(tab) = self.active_tab_mut() {
                 tab.ensure_stats();
-                let parsed = if tab.file_type.supports_markdown_features() {
+                let parsed = if view_mode == ViewMode::Wysiwyg
+                    && tab.file_type.supports_markdown_features()
+                {
                     tab.parsed()
                 } else {
                     empty_parsed_document()

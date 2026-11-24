@@ -22,6 +22,9 @@ impl LiteMarkApp {
     /// current workspace (the only kind that can be copied to a new one).
     pub(super) fn migratable_note_path(&self) -> Option<PathBuf> {
         let tab = self.active_tab()?;
+        if tab.deferred_load {
+            return None;
+        }
         if !matches!(
             tab.file_type,
             FileType::Markdown | FileType::PlainText | FileType::Code
@@ -71,8 +74,8 @@ impl LiteMarkApp {
                 if let Some(name) = new_path.file_name().and_then(|n| n.to_str()) {
                     tab.title = name.to_string();
                 }
-                let version = disk_version(&new_path, &tab.file_text_ref());
-                tab.disk_version = version;
+                let version = tab.compute_disk_version();
+                tab.disk_version = Some(version);
                 tab.file_path = Some(new_path);
                 tab.is_modified = false;
             }

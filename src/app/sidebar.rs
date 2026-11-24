@@ -335,9 +335,9 @@ impl LiteMarkApp {
                 };
                 self.read_note_then(file.path.clone(), cx, move |this, result, cx| {
                     match result {
-                        Ok(content) => this.open_loaded_tab(
+                        Ok(loaded) => this.open_loaded_note(
                             file.name.clone(),
-                            content,
+                            loaded,
                             Some(file.path.clone()),
                             Some(file.id.clone()),
                         ),

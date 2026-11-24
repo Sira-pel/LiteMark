@@ -164,8 +164,64 @@ fn expanded_outline_with_many_headings_renders_with_uniform_list() {
     view.read_with(&cx, |app, _| {
         assert!(app.outline_expanded());
         assert_eq!(
-            app.outline_cache.as_ref().map(|(_, items)| items.len()),
+            app.outline_cache.as_ref().map(|c| c.items.len()),
             Some(5_000)
+        );
+    });
+}
+
+#[std_test]
+fn raw_mode_outline_and_render_never_trigger_full_parse() {
+    let (view, mut cx) = harness("# First\n\nbody\n\n## Second\n");
+    view.update(&mut cx, |app, cx| {
+        app.handle_set_view_mode(ViewMode::Raw);
+        app.active_tab_mut().unwrap().full_parse_count = 0;
+        cx.notify();
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    view.update(&mut cx, |app, cx| {
+        let tab = app.active_tab_mut().unwrap();
+        assert_eq!(tab.full_parse_count, 0);
+        assert!(!tab.has_cached_parse());
+        let pos = tab.content.len();
+        tab.edit(pos..pos, "\n### Third\n");
+        cx.notify();
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    view.read_with(&cx, |app, _| {
+        let tab = app.active_tab().unwrap();
+        assert_eq!(tab.full_parse_count, 0);
+        assert!(!tab.has_cached_parse());
+        let cache = app.outline_cache.as_ref().unwrap();
+        assert!(cache.parse_gen.is_none());
+        assert_eq!(cache.items.len(), 3);
+        assert_eq!(cache.items[2].text, "Third");
+    });
+}
+
+#[std_test]
+fn wysiwyg_paragraph_edit_patches_outline_cache_incrementally() {
+    let (view, mut cx) = harness("# First\n\nbody\n\n## Second\n");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    view.update(&mut cx, |app, cx| {
+        let before_gen = app.outline_cache.as_ref().and_then(|c| c.parse_gen);
+        assert!(before_gen.is_some());
+        let tab = app.active_tab_mut().unwrap();
+        let pos = tab.content.find("body").unwrap();
+        tab.edit(pos..pos, "more ");
+        cx.notify();
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    view.read_with(&cx, |app, _| {
+        let cache = app.outline_cache.as_ref().unwrap();
+        assert_eq!(cache.items.len(), 2);
+        assert_eq!(
+            cache.items[1].offset,
+            app.active_tab().unwrap().content.find("## Second").unwrap()
         );
     });
 }

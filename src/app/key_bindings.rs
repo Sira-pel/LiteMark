@@ -551,11 +551,12 @@ impl LiteMarkApp {
                 {
                     return;
                 }
-                let parsed = if tab.file_type.supports_markdown_features() {
-                    tab.parsed()
-                } else {
-                    empty_parsed_document()
-                };
+                let parsed =
+                    if mode == ViewMode::Wysiwyg && tab.file_type.supports_markdown_features() {
+                        tab.parsed()
+                    } else {
+                        empty_parsed_document()
+                    };
                 if move_vertical_visual_in(
                     &p,
                     &parsed,
@@ -585,11 +586,12 @@ impl LiteMarkApp {
                 {
                     return;
                 }
-                let parsed = if tab.file_type.supports_markdown_features() {
-                    tab.parsed()
-                } else {
-                    empty_parsed_document()
-                };
+                let parsed =
+                    if mode == ViewMode::Wysiwyg && tab.file_type.supports_markdown_features() {
+                        tab.parsed()
+                    } else {
+                        empty_parsed_document()
+                    };
                 if move_vertical_visual_in(
                     &p,
                     &parsed,
@@ -625,11 +627,12 @@ impl LiteMarkApp {
             let mode = this.effective_view_mode();
             this.editor_move(cx, |tab| {
                 let p = paint.borrow();
-                let parsed = if tab.file_type.supports_markdown_features() {
-                    tab.parsed()
-                } else {
-                    empty_parsed_document()
-                };
+                let parsed =
+                    if mode == ViewMode::Wysiwyg && tab.file_type.supports_markdown_features() {
+                        tab.parsed()
+                    } else {
+                        empty_parsed_document()
+                    };
                 if move_vertical_visual_in(
                     &p,
                     &parsed,
@@ -653,11 +656,12 @@ impl LiteMarkApp {
             let mode = this.effective_view_mode();
             this.editor_move(cx, |tab| {
                 let p = paint.borrow();
-                let parsed = if tab.file_type.supports_markdown_features() {
-                    tab.parsed()
-                } else {
-                    empty_parsed_document()
-                };
+                let parsed =
+                    if mode == ViewMode::Wysiwyg && tab.file_type.supports_markdown_features() {
+                        tab.parsed()
+                    } else {
+                        empty_parsed_document()
+                    };
                 if move_vertical_visual_in(&p, &parsed, &tab.content, &mut tab.caret, 1, true, mode)
                 {
                     tab.pending_formats = ActiveFormats::default();

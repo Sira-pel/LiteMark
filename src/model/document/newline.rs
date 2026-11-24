@@ -6,7 +6,7 @@ impl DocumentTab {
     /// Enter at the visible end of a closing-hash heading inserts after the
     /// closer, so the heading stays one line.
     pub(super) fn heading_newline_at(&mut self, range: &Range<usize>) -> Option<usize> {
-        if !range.is_empty() {
+        if !range.is_empty() || self.view_mode == ViewMode::Raw {
             return None;
         }
         let parsed = self.parsed();
@@ -31,7 +31,17 @@ impl DocumentTab {
         if cursor != line_end(&self.content, cursor) {
             return false;
         }
-        let closed = {
+        let closed = if self.view_mode == ViewMode::Raw {
+            // Raw view never parses the whole note: scan the text instead.
+            let line = &self.content[line_start..cursor];
+            let Some((ch, run, _)) = fence_run(line) else {
+                return false;
+            };
+            if open_fence_above(&self.content, line_start).is_some() {
+                return false;
+            }
+            fence_closed_below(&self.content, cursor, ch, run)
+        } else {
             let parsed = self.parsed();
             let Some(line) = parsed.line_at_offset(cursor) else {
                 return false;
@@ -204,6 +214,105 @@ impl DocumentTab {
         true
     }
 
+    /// Lightweight `Enter` handler for Markdown tabs in Raw mode: parses only
+    /// the current line for list/quote continuation instead of calling
+    /// `self.parsed()` on the entire document.
+    fn raw_markdown_newline(&mut self, range: Range<usize>, is_shift: bool) {
+        let nl = self.line_break(range.start);
+        if self.bare_cr_needs_extra_break(&range) {
+            self.edit(range.start..range.start, "\n\n");
+            return;
+        }
+        if is_shift {
+            self.edit(range, nl);
+            return;
+        }
+        let cursor = range.start;
+        let line_start = home_offset(&self.content, cursor);
+        // Inside a fenced code block, `- `, `1. ` and `> ` are code: no
+        // continuation. A scan of the text above, not a full parse, and only
+        // for a line that could continue a list or quote or open a fence.
+        let line_text = &self.content[line_start..line_end(&self.content, cursor)];
+        if may_continue_block(line_text) && open_fence_above(&self.content, line_start).is_some() {
+            self.edit(range, nl);
+            return;
+        }
+        if self.unclosed_fence_newline(&range, nl) {
+            return;
+        }
+        let line_end_pos = line_end(&self.content, cursor);
+        let line = &self.content[line_start..line_end_pos];
+        let local = parse_document(line);
+
+        if let Some(item) = accepted_list_marker_in(&local, line, 0) {
+            let body = &line[item.prefix_end()..];
+            let ending_is_cr = self.content.as_bytes().get(line_end_pos) == Some(&b'\r');
+            let cr_keeps_item =
+                ending_is_cr && (item.punct == b')' || (item.ordered && item.task.is_some()));
+            let is_empty = body.trim().is_empty() && !cr_keeps_item;
+            if is_empty {
+                if !range.is_empty() {
+                    self.edit(range, nl);
+                    return;
+                }
+                if item.indent_bytes > 0 {
+                    let indent = &line[..item.indent_bytes];
+                    let outdent_len = if indent.ends_with('\t') || indent.len() < 2 {
+                        1
+                    } else {
+                        2
+                    };
+                    self.edit(line_start..line_start + outdent_len, "");
+                } else {
+                    let remove_end = if line_ending_len(&self.content, line_end_pos) == 2 {
+                        line_end_pos + 1
+                    } else {
+                        line_end_pos
+                    };
+                    self.edit(line_start..remove_end, "");
+                }
+            } else if range.is_empty() && cursor < line_start + item.prefix_end() {
+                self.edit(line_start..line_start, nl);
+                self.caret.move_to(cursor + nl.len());
+                self.refresh_cursor();
+            } else if item.ordered && item.number >= MAX_LIST_NUMBER {
+                self.edit(range, nl);
+            } else {
+                let kept = &line[..item.indent_bytes];
+                let cont = item.continuation(kept).replacen('\n', nl, 1);
+                self.edit(range, &cont);
+            }
+            return;
+        }
+
+        if let Some(prefix_len) = local
+            .lines
+            .first()
+            .filter(|l| l.kind == LineKind::Blockquote)
+            .map(|l| l.prefix_len as usize)
+        {
+            let body = &line[prefix_len..];
+            if body.trim().is_empty() {
+                if !range.is_empty() {
+                    self.edit(range, nl);
+                } else {
+                    self.edit(line_start..line_end_pos, "");
+                }
+            } else if range.is_empty() && cursor < line_start + prefix_len {
+                self.edit(line_start..line_start, nl);
+                self.caret.move_to(cursor + nl.len());
+                self.refresh_cursor();
+            } else {
+                let q_indent = &line[..crate::markdown::parser::split_indent(line).0];
+                let ins = format!("{nl}{q_indent}> ");
+                self.edit(range, &ins);
+            }
+            return;
+        }
+
+        self.edit(range, nl);
+    }
+
     pub fn smart_newline(&mut self, is_shift: bool) {
         if self.is_read_only() {
             return;
@@ -212,6 +321,10 @@ impl DocumentTab {
         let range = self.selection_range();
         if !self.file_type.supports_markdown_features() {
             self.code_newline(range);
+            return;
+        }
+        if self.view_mode == ViewMode::Raw {
+            self.raw_markdown_newline(range, is_shift);
             return;
         }
         if self.picture_newline() || self.block_marker_newline() {
@@ -744,7 +857,14 @@ impl DocumentTab {
             }
         }
 
-        let list_item = {
+        let list_item = if self.view_mode == ViewMode::Raw {
+            let line = &self.content[line_start..line_end(&self.content, cursor)];
+            let local = parse_document(line);
+            // `- ` inside a code block is code, not a list item. The scan of
+            // the text above runs only when the line has a marker.
+            accepted_list_marker_in(&local, line, 0)
+                .filter(|_| open_fence_above(&self.content, line_start).is_none())
+        } else {
             let parsed = self.parsed();
             accepted_list_marker_in(&parsed, &self.content, line_start)
         };
@@ -788,4 +908,62 @@ impl DocumentTab {
         self.edit(prev..cursor, "");
         true
     }
+}
+
+/// An opening or closing fence line outside any container: up to three
+/// spaces, then three or more backticks or tildes. Returns the fence
+/// character, the run length and the text after the run. A backtick fence's
+/// info string can't contain a backtick.
+fn fence_run(line: &str) -> Option<(u8, usize, &str)> {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let ch = *rest.as_bytes().first()?;
+    if ch != b'`' && ch != b'~' {
+        return None;
+    }
+    let run = rest.bytes().take_while(|&b| b == ch).count();
+    let after = &rest[run..];
+    (run >= 3 && !(ch == b'`' && after.contains('`'))).then_some((ch, run, after))
+}
+
+/// Whether `line` closes a fence of `ch` at least `run` long.
+fn closes_fence(line: &str, ch: u8, run: usize) -> bool {
+    fence_run(line).is_some_and(|(c, n, after)| c == ch && n >= run && after.trim().is_empty())
+}
+
+/// The fence still open at `line_start` (its character and run length),
+/// found by scanning the lines above. Raw view uses this instead of a full
+/// parse; fences inside quotes or list items are not seen.
+pub(super) fn open_fence_above(content: &str, line_start: usize) -> Option<(u8, usize)> {
+    let mut open = None;
+    // LF, CRLF and a lone CR all end a line. CRLF yields an extra empty
+    // piece, which neither opens nor closes a fence.
+    for line in content[..line_start].split(['\n', '\r']) {
+        open = match open {
+            Some((ch, run)) if closes_fence(line, ch, run) => None,
+            Some(fence) => Some(fence),
+            None => fence_run(line).map(|(ch, run, _)| (ch, run)),
+        };
+    }
+    open
+}
+
+/// Whether a line after `from` closes a fence of `ch` at least `run` long.
+fn fence_closed_below(content: &str, from: usize, ch: u8, run: usize) -> bool {
+    content[from..]
+        .split(['\n', '\r'])
+        .skip(1)
+        .any(|line| closes_fence(line, ch, run))
+}
+
+/// Whether Enter on `line` could continue a list or quote or open a fence:
+/// its first non-blank byte is a list, quote or fence marker or a digit.
+fn may_continue_block(line: &str) -> bool {
+    line.bytes()
+        .find(|&b| b != b' ' && b != b'\t')
+        .is_some_and(|b| matches!(b, b'-' | b'*' | b'+' | b'>' | b'`' | b'~') || b.is_ascii_digit())
 }

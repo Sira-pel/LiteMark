@@ -1,6 +1,8 @@
+#[cfg(test)]
+use crate::model::content_hash;
 use crate::model::{
-    content_hash, copy_name, file_dialog_block_reason, looks_binary, unique_name, ContentHasher,
-    DiskChange, DiskVersion, FileType, PortalProbe, WorkspaceDirectory, WorkspaceFile,
+    copy_name, file_dialog_block_reason, looks_binary, unique_name, ContentHasher, DiskChange,
+    DiskVersion, FileType, LoadedNote, PortalProbe, WorkspaceDirectory, WorkspaceFile,
     WorkspaceFolder, CODE_EXTENSIONS, TEXT_EXTENSIONS,
 };
 #[cfg(target_os = "linux")]
@@ -461,11 +463,12 @@ pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
 
 /// Record what `path` looks like now, holding `content` (the text just read
 /// from it or written to it). `None` when the file can't be inspected.
+#[cfg(test)]
 pub fn disk_version(path: &Path, content: &str) -> Option<DiskVersion> {
     fs::metadata(path).ok()?;
     Some(DiskVersion {
         len: content.len() as u64,
-        content_hash: content_hash(content.as_bytes()),
+        content_hash: crate::model::content_hash(content.as_bytes()),
     })
 }
 
@@ -752,6 +755,20 @@ pub fn read_note(path: &Path) -> Result<String, String> {
         return Err(fail(&"file is too large"));
     }
     String::from_utf8(bytes).map_err(|err| fail(&err))
+}
+
+/// Quick metadata-only check that `path` exists, is a regular file, and fits
+/// under `MAX_NOTE_BYTES` (used when deferring background session tabs).
+pub fn can_open_note_path(path: &Path) -> bool {
+    fs::metadata(path)
+        .ok()
+        .is_some_and(|meta| note_open_block(&meta).is_none())
+}
+
+/// Read a note and compute its stats, line endings, and [`DiskVersion`] in a
+/// single pass.
+pub fn read_note_loaded(path: &Path) -> Result<LoadedNote, String> {
+    read_note(path).map(LoadedNote::from_raw)
 }
 
 pub fn move_to_trash(path: &Path) -> Result<(), String> {

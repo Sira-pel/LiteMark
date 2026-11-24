@@ -7097,3 +7097,87 @@ fn undo_and_redo_leave_the_cursor_state_current() {
         check(&tab, "redo");
     }
 }
+
+#[test]
+fn single_pass_loaded_note_matches_naive_stats_and_hash() {
+    let big_body = "word\u{000B}next\r\nline2\rcr\nÜnïcödé 😀\n".repeat(700);
+    let cases = [
+        "".to_string(),
+        "\u{feff}# BOM\r\nhello world\r".to_string(),
+        "plain\x0bvertical\ttab\n".to_string(),
+        big_body,
+        format!("\u{feff}{}", "a ".repeat(10_000)),
+    ];
+    for raw in cases {
+        let expected_hash = crate::model::content_hash(raw.as_bytes());
+        let expected_len = raw.len() as u64;
+        let has_bom = raw.starts_with('\u{feff}');
+        let body = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+        let expected_chars = body.chars().count();
+        let expected_words = body.split_whitespace().count();
+        let expected_endings = count_line_endings(body.as_bytes());
+        let expected_lines = super::line_total(body, expected_endings);
+
+        let loaded = super::LoadedNote::from_raw(raw.clone());
+        assert_eq!(loaded.has_bom, has_bom);
+        assert_eq!(loaded.content, body);
+        assert_eq!(loaded.stats.chars, expected_chars);
+        assert_eq!(loaded.stats.words, expected_words);
+        assert_eq!(loaded.line_endings, expected_endings);
+        assert_eq!(loaded.stats.lines, expected_lines);
+        assert_eq!(loaded.disk_version.len, expected_len);
+        assert_eq!(loaded.disk_version.content_hash, expected_hash);
+
+        let tab = DocumentTab::from_loaded("t".into(), "t.md".into(), loaded, None, None);
+        assert_eq!(tab.compute_disk_version().len, expected_len);
+        assert_eq!(tab.compute_disk_version().content_hash, expected_hash);
+    }
+}
+
+#[test]
+fn raw_mode_markdown_tab_skips_full_parse_across_edits_and_navigation() {
+    let src =
+        "# Heading\n\n**bold** text\n\n- item one\n> quote\n\n| a | b |\n| - | - |\n| 1 | 2 |\n";
+    let mut tab = DocumentTab::new("t".into(), "notes.md".into(), src.into(), None, None);
+    tab.set_view_mode(ViewMode::Raw);
+    assert!(!tab.has_cached_parse());
+    assert_eq!(tab.full_parse_count, 0);
+
+    // Inline bold format on current line is still detected without full parse.
+    let bold_pos = tab.content.find("bold").unwrap() + 1;
+    tab.place(bold_pos, false);
+    assert!(tab.active_formats.bold);
+    assert_eq!(tab.full_parse_count, 0);
+
+    // Table format on table row is detected via local 3-line slice.
+    let cell_pos = tab.content.find("| 1 |").unwrap() + 2;
+    tab.place(cell_pos, false);
+    assert!(tab.active_formats.table);
+    assert_eq!(tab.full_parse_count, 0);
+
+    // Editing, Enter (list & quote continuation), Backspace, Delete, nav, undo/redo.
+    let item_end = tab.content.find("item one").unwrap() + "item one".len();
+    tab.place(item_end, false);
+    tab.smart_newline(false);
+    assert!(tab.content.contains("- item one\n- "));
+    tab.insert_text_in_mode(
+        tab.cursor_offset()..tab.cursor_offset(),
+        "two",
+        ViewMode::Raw,
+    );
+    tab.smart_backspace_in_mode(ViewMode::Raw);
+    tab.delete_forward_in_mode(ViewMode::Raw);
+    tab.move_up(false);
+    tab.move_down(false);
+    tab.move_end(false);
+    tab.move_word_right(false);
+    tab.delete_word_right();
+    tab.delete_to_line_end();
+    tab.delete_to_line_start();
+    tab.undo();
+    tab.redo();
+    tab.smart_newline(true);
+
+    assert_eq!(tab.full_parse_count, 0);
+    assert!(!tab.has_cached_parse());
+}

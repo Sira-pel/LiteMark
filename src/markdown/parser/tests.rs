@@ -6,6 +6,12 @@ fn plain_inline_shortcut_matches_pulldown() {
         "Plain prose, with commas; colons: and (parens).",
         "Smoke  test with  double spaces",
         "a 1. b",
+        "1. item",
+        " lead",
+        "trail ",
+        "# h",
+        "Q&A",
+        "- x",
         "word #tag and x = y",
         "a -- b - c + d",
         "see http://example.com/path?q=1 or www.example.com",
@@ -13,6 +19,7 @@ fn plain_inline_shortcut_matches_pulldown() {
         "Ünïcödé text with ß and 😀 emoji",
         "tail ends with a period.",
         "a",
+        "x | y > z & ! ]",
     ];
     let mut checked = 0usize;
     for text in named {
@@ -23,12 +30,17 @@ fn plain_inline_shortcut_matches_pulldown() {
                 parse_inline_with_pulldown(text, base, false),
                 "{text:?}"
             );
+            assert_eq!(
+                parse_inline_syntax_cell(text, base),
+                parse_inline_with_pulldown(text, base, true),
+                "cell {text:?}"
+            );
         }
         checked += 1;
     }
 
     let alphabet: Vec<char> =
-        "aZ 09.,;:-+#=()/?'\"$%^{}@é😀ßhtp:w1)\u{a0}\u{3000}\u{2003}\u{c}\u{b}"
+        "aZ 09.,;:-+#=()/?'\"$%^{}@é😀ßhtp:w1)]>&!|\t\u{a0}\u{3000}\u{2003}\u{c}\u{b}"
             .chars()
             .collect();
     let mut seed = 0x2545_f491_4f6c_dd1du64;
@@ -51,6 +63,11 @@ fn plain_inline_shortcut_matches_pulldown() {
                 parse_inline_with_pulldown(&text, 3, false),
                 "{text:?}"
             );
+            assert_eq!(
+                parse_inline_syntax_cell(&text, 3),
+                parse_inline_with_pulldown(&text, 3, true),
+                "cell {text:?}"
+            );
             checked += 1;
         }
     }
@@ -59,9 +76,7 @@ fn plain_inline_shortcut_matches_pulldown() {
         "only {checked} inputs exercised the shortcut"
     );
 
-    for text in [
-        "1. item", " lead", "trail ", "# h", "*a*", "a_b", "x\\y", "Q&A", "<b>", "[l](u)", "- x",
-    ] {
+    for text in ["*a*", "a_b", "x\\y", "<b>", "[l](u)", "~s~", "`c`"] {
         assert!(!is_plain_inline(text), "{text:?} must use pulldown");
     }
 }
@@ -3922,4 +3937,29 @@ fn zero_alloc_line_lookups_match_row_offset_map() {
             }
         }
     }
+}
+
+#[test]
+fn table_helpers_edge_cases() {
+    assert!(tables::is_empty_table_row(""));
+    assert!(tables::is_empty_table_row("  \t\x0b\x0c\r  "));
+    assert!(tables::is_empty_table_row(" | "));
+    assert!(!tables::is_empty_table_row("| |"));
+    assert!(!tables::is_empty_table_row("| a |"));
+
+    let (ranges, has_pipe) = tables::table_cell_ranges_with_pipe("| `a|b` | c\\|d |");
+    assert!(has_pipe);
+    assert_eq!(ranges.len(), 2);
+    assert!(tables::delimiter_alignments("| :--- | :---: | ---: |").is_some());
+    assert!(tables::delimiter_alignments("no pipes").is_none());
+}
+
+#[test]
+fn synthesize_flanking_pairs_matches_expected_cases() {
+    let doc = parse_document("**bold** and ***both*** and **bold**.word");
+    assert_eq!(doc.lines[0].inline_pairs().len(), 4);
+    assert_eq!(
+        doc.lines[0].display_text("**bold** and ***both*** and **bold**.word"),
+        "bold and both and bold.word"
+    );
 }

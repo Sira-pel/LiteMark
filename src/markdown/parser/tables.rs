@@ -88,6 +88,10 @@ pub fn unescaped_pipe_offsets(line: &str) -> Vec<usize> {
 }
 
 pub(crate) fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
+    table_cell_ranges_with_pipe(line).0
+}
+
+pub(super) fn table_cell_ranges_with_pipe(line: &str) -> (Vec<std::ops::Range<usize>>, bool) {
     let bytes = line.as_bytes();
     let code = code_span_ranges(line);
     let mut start = 0;
@@ -99,9 +103,11 @@ pub(crate) fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
         end -= 1;
     }
     if start >= end {
-        return Vec::new();
+        return (Vec::new(), false);
     }
+    let mut has_pipe = false;
     if separator_pipe(bytes, &code, start) {
+        has_pipe = true;
         start += 1;
     }
     let mut ranges = Vec::new();
@@ -117,6 +123,7 @@ pub(crate) fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
         let cell_end = start.min(end);
         ranges.push(cell_start..cell_end);
         if start < end && separator_pipe(bytes, &code, start) {
+            has_pipe = true;
             start += 1;
             if start >= end {
                 break;
@@ -125,7 +132,7 @@ pub(crate) fn table_cell_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
             break;
         }
     }
-    ranges
+    (ranges, has_pipe)
 }
 
 /// Cell text between unescaped pipes. `\|` stays inside the cell.
@@ -187,11 +194,8 @@ pub(super) fn is_delimiter_cell(cell: &str) -> bool {
 }
 
 pub(crate) fn delimiter_alignments(line: &str) -> Option<Vec<TableColumnAlign>> {
-    if unescaped_pipe_offsets(line).is_empty() {
-        return None;
-    }
-    let ranges = table_cell_ranges(line);
-    if ranges.is_empty() {
+    let (ranges, has_pipe) = table_cell_ranges_with_pipe(line);
+    if !has_pipe || ranges.is_empty() {
         return None;
     }
     let mut alignments = Vec::with_capacity(ranges.len());
@@ -206,11 +210,16 @@ pub(crate) fn delimiter_alignments(line: &str) -> Option<Vec<TableColumnAlign>> 
 }
 
 pub(super) fn is_empty_table_row(line: &str) -> bool {
-    // The cheap whitespace test first; it often settles the answer without
-    // building the cell ranges.
-    line.bytes()
+    // A line is an empty table row iff it is all ASCII whitespace (plus
+    // vertical tab `0x0b`) or a lone unescaped `|` surrounded by ASCII whitespace.
+    if line
+        .bytes()
         .all(|byte| matches!(byte, b' ' | b'\t' | 0x0b | 0x0c | b'\r'))
-        || table_cell_ranges(line).is_empty()
+    {
+        return true;
+    }
+    let trimmed = line.trim_matches(|c: char| c.is_ascii_whitespace());
+    trimmed.is_empty() || trimmed == "|"
 }
 
 pub(crate) fn line_breaks_table(line: &str) -> bool {
@@ -231,6 +240,7 @@ pub(super) struct TableBlock {
     pub(super) last: usize,
     pub(super) delimiter: usize,
     pub(super) alignments: Vec<TableColumnAlign>,
+    pub(super) header_cells: Vec<std::ops::Range<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -249,15 +259,18 @@ pub(super) fn table_block(lines: &mut LineSource<'_>, start: usize) -> Option<Ta
         return None;
     }
     let delimiter = lines.get(start + 1)?.text;
-    if leading_column(header) >= 4 || unescaped_pipe_offsets(header).is_empty() {
+    if leading_column(header) >= 4 {
         return None;
     }
-    let header_cells = table_cell_ranges(header);
+    let (header_cells, has_pipe) = table_cell_ranges_with_pipe(header);
+    if !has_pipe || header_cells.is_empty() {
+        return None;
+    }
     if leading_column(delimiter) >= 4 {
         return None;
     }
     let alignments = delimiter_alignments(delimiter)?;
-    if header_cells.is_empty() || alignments.len() != header_cells.len() {
+    if alignments.len() != header_cells.len() {
         return None;
     }
     let mut last = start + 1;
@@ -273,5 +286,6 @@ pub(super) fn table_block(lines: &mut LineSource<'_>, start: usize) -> Option<Ta
         last,
         delimiter: start + 1,
         alignments,
+        header_cells,
     })
 }

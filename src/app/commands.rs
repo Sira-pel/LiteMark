@@ -43,6 +43,7 @@ impl LiteMarkApp {
         self.drop_painted_document_data();
         self.outline_cache = None;
         self.active_tab_id = id;
+        self.try_load_active_deferred_sync();
         if self.effective_view_mode() == ViewMode::Wysiwyg {
             if let Some(tab) = self.active_tab_mut() {
                 tab.snap_wysiwyg_table_delimiter();
@@ -410,6 +411,9 @@ impl LiteMarkApp {
 
     pub fn handle_save(&mut self, cx: &mut Context<Self>) {
         let id = self.active_tab_id.clone();
+        if self.tabs.iter().any(|t| t.id == id && t.deferred_load) {
+            return;
+        }
         // Untitled quick notes (Ctrl+T) are named at save time.
         if self
             .tabs
@@ -474,7 +478,7 @@ impl LiteMarkApp {
         } else {
             self.read_note_then(path.clone(), cx, move |this, result, cx| {
                 match result {
-                    Ok(content) => this.open_loaded_tab(name, content, Some(path), None),
+                    Ok(loaded) => this.open_loaded_note(name, loaded, Some(path), None),
                     Err(err) => this.show_error(err),
                 }
                 cx.notify();
@@ -568,6 +572,9 @@ impl LiteMarkApp {
         let Some(tab) = self.active_tab() else {
             return;
         };
+        if tab.deferred_load {
+            return;
+        }
         // Unsupported formats fail before the file dialog opens.
         if !matches!(format, "html" | "md" | "markdown" | "txt" | "text") {
             self.show_error(format!("Unsupported export format: {format}"));
@@ -750,6 +757,10 @@ impl LiteMarkApp {
         // The geometry under the pointer changes with the edit; the next move
         // relights whichever control it lands on.
         self.table_hot = None;
+        if self.effective_view_mode() != ViewMode::Wysiwyg {
+            self.table_hover = None;
+            return;
+        }
         let Some(hover) = self.table_hover.clone() else {
             return;
         };
@@ -817,20 +828,28 @@ impl LiteMarkApp {
     }
 
     pub fn handle_zoom_in(&mut self, cx: &mut Context<Self>) {
-        self.settings.zoom_level = (self.settings.zoom_level + 10).min(200);
-        self.save_settings();
+        let next = (self.settings.zoom_level + 10).min(200);
+        if next != self.settings.zoom_level {
+            self.settings.zoom_level = next;
+            self.save_settings();
+        }
         self.flash_zoom(cx);
     }
 
     pub fn handle_zoom_out(&mut self, cx: &mut Context<Self>) {
-        self.settings.zoom_level = self.settings.zoom_level.saturating_sub(10).max(50);
-        self.save_settings();
+        let next = self.settings.zoom_level.saturating_sub(10).max(50);
+        if next != self.settings.zoom_level {
+            self.settings.zoom_level = next;
+            self.save_settings();
+        }
         self.flash_zoom(cx);
     }
 
     pub fn handle_reset_zoom(&mut self, cx: &mut Context<Self>) {
-        self.settings.zoom_level = 100;
-        self.save_settings();
+        if self.settings.zoom_level != 100 {
+            self.settings.zoom_level = 100;
+            self.save_settings();
+        }
         self.flash_zoom(cx);
     }
 
@@ -839,10 +858,12 @@ impl LiteMarkApp {
             return;
         }
         self.reset_editor_transient_state();
+        self.outline_cache = None;
         self.settings.view_mode = mode;
         if let Some(tab) = self.active_tab_mut() {
-            if mode == ViewMode::Wysiwyg {
-                tab.snap_wysiwyg_table_delimiter();
+            match mode {
+                ViewMode::Wysiwyg => tab.snap_wysiwyg_table_delimiter(),
+                ViewMode::Raw => tab.release_parse_cache(),
             }
         }
         self.save_settings();
@@ -898,8 +919,8 @@ impl LiteMarkApp {
                     }
                     type_changed = tab.set_file_type(FileType::from_filename(&tab.title));
                     tab.is_modified = false;
-                    let version = disk_version(&path, &tab.file_text_ref());
-                    tab.disk_version = version;
+                    let version = tab.compute_disk_version();
+                    tab.disk_version = Some(version);
                     let title = tab.title.clone();
                     self.show_toast(format!("Saved {title}"), cx);
                 }
@@ -1054,7 +1075,10 @@ impl LiteMarkApp {
     pub fn handle_cut(&mut self, cx: &mut App) {
         // A prompt or the quick-open pop-up is in front of the note: the
         // keys must not change the note behind it.
-        if self.input_blocked() || self.block_table_drag_edit() {
+        if self.input_blocked()
+            || self.block_table_drag_edit()
+            || self.active_tab().is_some_and(|tab| tab.deferred_load)
+        {
             return;
         }
         let Some(item) = self.selection_clipboard_item() else {
@@ -1083,7 +1107,10 @@ impl LiteMarkApp {
     pub fn handle_paste(&mut self, cx: &mut Context<Self>) {
         // As for cut: nothing goes into the note behind a pop-up (a pasted
         // image would also write a file).
-        if self.input_blocked() || self.block_table_drag_edit() {
+        if self.input_blocked()
+            || self.block_table_drag_edit()
+            || self.active_tab().is_some_and(|tab| tab.deferred_load)
+        {
             return;
         }
         if let Some(item) = cx.read_from_clipboard() {
