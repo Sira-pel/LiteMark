@@ -358,3 +358,48 @@ fn w12a_ordered_list_numbers_lines_in_sequence() {
     assert!(d.content.starts_with("1. x\n| h | i |"));
     assert!(d.content.ends_with("| j | k |\n2. y"), "{:?}", d.content);
 }
+
+// ---- W14c (document level): backspace and delete coalescing ----
+
+#[test]
+fn w14c_consecutive_backspaces_are_one_undo_step() {
+    let mut d = doc("hello world");
+    d.place(11, false);
+    for _ in 0..5 {
+        d.smart_backspace_in_mode(ViewMode::Wysiwyg);
+    }
+    assert_eq!(d.content, "hello ");
+    assert!(d.undo());
+    assert_eq!(d.content, "hello world");
+    assert_eq!(d.cursor_offset(), 11);
+    assert!(d.redo());
+    assert_eq!(d.content, "hello ");
+}
+
+#[test]
+fn w14c_consecutive_deletes_are_one_undo_step() {
+    let mut d = doc("hello world");
+    d.place(6, false);
+    for _ in 0..5 {
+        d.delete_forward_in_mode(ViewMode::Wysiwyg);
+    }
+    assert_eq!(d.content, "hello ");
+    assert!(d.undo());
+    assert_eq!(d.content, "hello world");
+}
+
+#[test]
+fn w14a_spaces_stay_separate_steps_when_backspacing() {
+    let mut d = doc("ab cd");
+    d.place(5, false);
+    for _ in 0..5 {
+        d.smart_backspace_in_mode(ViewMode::Wysiwyg);
+    }
+    assert_eq!(d.content, "");
+    assert!(d.undo());
+    assert_eq!(d.content, "ab");
+    assert!(d.undo());
+    assert_eq!(d.content, "ab ");
+    assert!(d.undo());
+    assert_eq!(d.content, "ab cd");
+}

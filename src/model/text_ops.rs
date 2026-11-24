@@ -153,6 +153,65 @@ pub fn coalesce_typing(previous: &DiffEdit, next: &DiffEdit, elapsed_ms: u64) ->
     previous_is_word && next_is_word
 }
 
+/// True when what an edit really adds or removes holds whitespace. A span
+/// rewrite replaces the whole `**...**` run, so the shared text at both ends
+/// of `deleted` and `inserted` is left out first.
+fn net_change_has_whitespace(edit: &DiffEdit) -> bool {
+    let (old, new) = (&*edit.deleted, edit.inserted.as_str());
+    let prefix: usize = old
+        .chars()
+        .zip(new.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    let (old, new) = (&old[prefix..], &new[prefix..]);
+    let suffix: usize = old
+        .chars()
+        .rev()
+        .zip(new.chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum();
+    old[..old.len() - suffix]
+        .chars()
+        .chain(new[..new.len() - suffix].chars())
+        .any(char::is_whitespace)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeleteRun {
+    /// Backspace: the new edit sits right before the previous one.
+    Backward,
+    /// Delete: the new edit starts where the previous one did.
+    Forward,
+}
+
+/// Group a run of single-character Backspace or Delete presses into the
+/// previous undo step, with the same limits as typing: inside the burst
+/// window, no whitespace, one grapheme at a time, no stored selections.
+fn coalesce_deletion(previous: &DiffEdit, next: &DiffEdit, elapsed_ms: u64) -> Option<DeleteRun> {
+    if elapsed_ms >= TYPING_BURST_MS
+        || !previous.inserted.is_empty()
+        || !next.inserted.is_empty()
+        || previous.deleted.is_empty()
+        || next.deleted.is_empty()
+        || previous.sels.is_some()
+        || next.sels.is_some()
+        || previous.deleted.chars().any(char::is_whitespace)
+        || next.deleted.chars().any(char::is_whitespace)
+        || next.deleted.graphemes(true).count() != 1
+    {
+        return None;
+    }
+    if next.start() + next.deleted.len() == previous.start() {
+        Some(DeleteRun::Backward)
+    } else if next.start() == previous.start() {
+        Some(DeleteRun::Forward)
+    } else {
+        None
+    }
+}
+
 /// Compose `edit` into `previous` when it only rewrites bytes the group
 /// itself inserted. The group's entry replaces an originally empty gap, so
 /// its `deleted` stays empty and undo removes everything the span typing
@@ -211,6 +270,21 @@ impl UndoHistory {
             return;
         }
         if self.span_group_open {
+            // The group follows the typing rules: a pause, a space or other
+            // word break in the typed change, or a group that would outgrow
+            // the undo budget ends it.
+            let elapsed = self
+                .last_edit
+                .map(|then| now.saturating_duration_since(then).as_millis() as u64)
+                .unwrap_or(u64::MAX);
+            if elapsed >= TYPING_BURST_MS
+                || net_change_has_whitespace(&edit)
+                || edit.cost() > UNDO_BYTE_BUDGET
+            {
+                self.span_group_open = false;
+            }
+        }
+        if self.span_group_open {
             let mut resized = None;
             let absorbed = match self.undo.back_mut() {
                 Some(previous) => {
@@ -237,6 +311,12 @@ impl UndoHistory {
                     }
                     self.span_group_open = false;
                 }
+                while self.undo_bytes > UNDO_BYTE_BUDGET && self.undo.len() > 1 {
+                    let Some(dropped) = self.undo.pop_front() else {
+                        break;
+                    };
+                    self.undo_bytes = self.undo_bytes.saturating_sub(dropped.cost());
+                }
                 self.redo.clear();
                 self.redo_bytes = 0;
                 self.last_edit = Some(now);
@@ -252,6 +332,13 @@ impl UndoHistory {
             .undo
             .back()
             .is_some_and(|previous| coalesce_typing(previous, &edit, elapsed));
+        let delete_run = if merge {
+            None
+        } else {
+            self.undo
+                .back()
+                .and_then(|previous| coalesce_deletion(previous, &edit, elapsed))
+        };
         if merge {
             if let Some(previous) = self.undo.back_mut() {
                 let before = previous.cost();
@@ -260,6 +347,25 @@ impl UndoHistory {
                 let after = previous.cost();
                 self.undo_bytes = (self.undo_bytes + after).saturating_sub(before);
             }
+        } else if let (Some(run), Some(previous)) = (delete_run, self.undo.back_mut()) {
+            let before = previous.cost();
+            // An undo caret at the end of the restored text stays there.
+            let undo_at_end = previous.undo_caret() == previous.start() + previous.deleted.len();
+            let mut deleted = String::from(std::mem::take(&mut previous.deleted));
+            match run {
+                DeleteRun::Backward => {
+                    deleted.insert_str(0, &edit.deleted);
+                    previous.start = edit.start;
+                }
+                DeleteRun::Forward => deleted.push_str(&edit.deleted),
+            }
+            previous.deleted = deleted.into_boxed_str();
+            if undo_at_end {
+                previous.undo_caret = saturating_u32(previous.start() + previous.deleted.len());
+            }
+            previous.redo_caret = previous.start;
+            let after = previous.cost();
+            self.undo_bytes = (self.undo_bytes + after).saturating_sub(before);
         } else {
             if let Some(previous) = self.undo.back_mut() {
                 let before = previous.cost();
@@ -2797,3 +2903,6 @@ mod update_matches_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod m8_undo_tests;
