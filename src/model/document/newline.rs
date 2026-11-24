@@ -11,6 +11,22 @@ fn quoted_continuation_prefix(line: &str, quote_prefix_len: usize) -> String {
     }
 }
 
+/// What Enter inserts after a list item inside a quote: the quote prefix and
+/// the next item's marker. An ordered item at the largest number ends the
+/// list (`1000000000.` is not a marker) but stays in the quote.
+fn quoted_item_continuation(
+    item: &crate::markdown::ListMarker,
+    inner_indent: &str,
+    nl: &str,
+    q_cont: &str,
+) -> String {
+    if item.ordered && item.number >= MAX_LIST_NUMBER {
+        return format!("{nl}{q_cont}");
+    }
+    let inner_cont = item.continuation(inner_indent);
+    format!("{nl}{q_cont}{}", inner_cont.trim_start_matches('\n'))
+}
+
 impl DocumentTab {
     /// Enter at the visible end of a closing-hash heading inserts after the
     /// closer, so the heading stays one line.
@@ -313,8 +329,7 @@ impl DocumentTab {
                         self.refresh_cursor();
                     } else {
                         let inner_indent = &line[q_len..q_len + item.indent_bytes];
-                        let inner_cont = item.continuation(inner_indent);
-                        let ins = format!("{nl}{q_cont}{}", inner_cont.trim_start_matches('\n'));
+                        let ins = quoted_item_continuation(&item, inner_indent, nl, &q_cont);
                         self.edit(range, &ins);
                     }
                     return;
@@ -713,8 +728,7 @@ impl DocumentTab {
                         self.refresh_cursor();
                     } else {
                         let inner_indent = &line[q_len..q_len + item.indent_bytes];
-                        let inner_cont = item.continuation(inner_indent);
-                        let ins = format!("{nl}{q_cont}{}", inner_cont.trim_start_matches('\n'));
+                        let ins = quoted_item_continuation(&item, inner_indent, nl, &q_cont);
                         if !self.split_inline_span_newline(&range, &ins) {
                             self.edit(range, &ins);
                         }
