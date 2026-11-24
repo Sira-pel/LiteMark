@@ -693,6 +693,7 @@ impl RowOffsetMap {
     /// Slice a sub-map for a wrapped visual row covering `disp_range` in `display_text`.
     /// `(line_start, line_end)` of `slice_display(disp_range)`, without
     /// building the sliced map.
+    #[cfg(test)]
     pub fn slice_bounds(&self, disp_range: std::ops::Range<usize>) -> (usize, usize) {
         let mut first = None;
         let mut last = None;
@@ -905,37 +906,120 @@ impl ParsedLine {
     }
 
     #[inline]
-    pub fn source_to_display(&self, source_offset: usize) -> usize {
-        if let Some(map) = self.offset_map_cached() {
-            map.source_to_display(source_offset)
-        } else {
-            let vis = self.prefix_end().min(self.source.end);
-            source_offset
-                .saturating_sub(vis)
-                .min(self.source.end.saturating_sub(vis))
+    fn has_only_prefix_hidden(&self) -> bool {
+        let prefix_end = self.prefix_end().min(self.source.end);
+        (self.hidden_ranges.is_empty() && self.prefix_len == 0)
+            || (self.hidden_ranges.len() == 1
+                && self.hidden_ranges[0].start == self.source.start
+                && self.hidden_ranges[0].end == prefix_end)
+    }
+
+    #[inline]
+    fn visit_visible_segments(
+        &self,
+        mut f: impl FnMut(std::ops::Range<usize>, std::ops::Range<usize>) -> bool,
+    ) {
+        let line_start = self.source.start;
+        let line_end = self.source.end;
+        let mut disp = 0usize;
+        let mut cursor = line_start;
+        let mut emitted = false;
+        for h in &self.hidden_ranges {
+            let h_start = h.start.clamp(line_start, line_end);
+            let h_end = h.end.clamp(line_start, line_end);
+            if h_start > cursor {
+                let start = disp;
+                disp += h_start - cursor;
+                emitted = true;
+                if !f(start..disp, cursor..h_start) {
+                    return;
+                }
+            }
+            cursor = cursor.max(h_end);
         }
+        if cursor < line_end {
+            let start = disp;
+            disp += line_end - cursor;
+            emitted = true;
+            let _ = f(start..disp, cursor..line_end);
+        }
+        if !emitted {
+            let anchor = self.prefix_end().clamp(line_start, line_end);
+            let _ = f(0..0, anchor..anchor);
+        }
+    }
+
+    #[inline]
+    pub fn source_to_display(&self, source_offset: usize) -> usize {
+        if self.has_only_prefix_hidden() {
+            let vis = self.prefix_end().min(self.source.end);
+            return source_offset
+                .saturating_sub(vis)
+                .min(self.source.end.saturating_sub(vis));
+        }
+        let mut result = 0usize;
+        self.visit_visible_segments(|d, s| {
+            if source_offset < s.start {
+                result = d.start;
+                return false;
+            }
+            if source_offset <= s.end {
+                result = d.start + (source_offset - s.start).min(d.len());
+                return false;
+            }
+            result = d.end;
+            true
+        });
+        result
     }
 
     #[inline]
     pub fn display_to_source(&self, display_offset: usize) -> usize {
-        if let Some(map) = self.offset_map_cached() {
-            map.display_to_source(display_offset)
-        } else {
+        if self.has_only_prefix_hidden() {
             let vis = self.prefix_end().min(self.source.end);
-            (vis + display_offset).min(self.source.end)
+            return (vis + display_offset).min(self.source.end);
         }
+        let mut result = self.prefix_end().clamp(self.source.start, self.source.end);
+        self.visit_visible_segments(|d, s| {
+            if display_offset < d.end {
+                let offset_in_seg = display_offset.saturating_sub(d.start).min(s.len());
+                result = s.start + offset_in_seg;
+                return false;
+            }
+            result = s.end;
+            true
+        });
+        result
     }
 
     #[inline]
     pub fn slice_bounds(&self, disp_range: std::ops::Range<usize>) -> (usize, usize) {
-        if let Some(map) = self.offset_map_cached() {
-            map.slice_bounds(disp_range)
-        } else {
-            (
+        if self.has_only_prefix_hidden() {
+            return (
                 self.display_to_source(disp_range.start),
                 self.display_to_source(disp_range.end),
-            )
+            );
         }
+        let mut first = None;
+        let mut last = None;
+        self.visit_visible_segments(|d, s| {
+            if d.end <= disp_range.start || d.start >= disp_range.end {
+                return true;
+            }
+            let overlap_start = d.start.max(disp_range.start);
+            let overlap_end = d.end.min(disp_range.end);
+            if overlap_end > overlap_start
+                || (d.start == d.end && d.start >= disp_range.start && d.start <= disp_range.end)
+            {
+                first.get_or_insert_with(|| s.start + (overlap_start - d.start));
+                last = Some(s.start + (overlap_end - d.start));
+            }
+            true
+        });
+        (
+            first.unwrap_or_else(|| self.display_to_source(disp_range.start)),
+            last.unwrap_or_else(|| self.display_to_source(disp_range.end)),
+        )
     }
 
     pub fn slice_display(&self, disp_range: std::ops::Range<usize>) -> RowOffsetMap {
@@ -1016,6 +1100,8 @@ pub struct ParseMeta {
     pub(crate) checkpoints: Vec<(usize, ParseState)>,
     /// Changes whenever the lines change, so caches can tell parses apart.
     pub generation: u64,
+    /// Number of [`LineKind::TableRow`] lines in the document.
+    pub(crate) table_line_count: usize,
     /// The last incremental update: `(generation before it, first line,
     /// lines removed, lines inserted)`. Lets caches keyed by line index
     /// follow the edit instead of starting over.
@@ -2199,12 +2285,17 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
         Step::Parse
     });
     let code_blocks = code_blocks_of(&lines, markdown.len());
+    let table_line_count = lines
+        .iter()
+        .filter(|l| matches!(l.kind, LineKind::TableRow { .. }))
+        .count();
     ParsedDocument {
         lines,
         code_blocks,
         meta: ParseMeta {
             checkpoints,
             generation: next_generation(),
+            table_line_count,
             last_splice: None,
         },
     }
@@ -2413,10 +2504,16 @@ impl ParsedDocument {
         let mut later_checkpoints = checkpoints.split_off(cut);
         checkpoints.extend(new_checkpoints);
         let is_fence = |line: &ParsedLine| matches!(line.kind, LineKind::CodeFence { .. });
+        let is_table = |line: &ParsedLine| matches!(line.kind, LineKind::TableRow { .. });
         let new_fences = new_lines.iter().any(is_fence);
-        let (removed, old_fences, shift) = match resync {
+        let new_tables = new_lines.iter().filter(|l| is_table(l)).count();
+        let (removed, old_fences, old_tables, shift) = match resync {
             Some((_, k, ix, shift)) => {
                 let old_fences = self.lines[restart..k].iter().any(is_fence);
+                let old_tables = self.lines[restart..k]
+                    .iter()
+                    .filter(|l| is_table(l))
+                    .count();
                 self.lines.splice(restart..k, new_lines);
                 shift.parsed_lines(&mut self.lines[restart + inserted..]);
                 let mut kept = later_checkpoints.split_off(ix - cut);
@@ -2425,11 +2522,12 @@ impl ParsedDocument {
                     shift.state_in_place(state);
                 }
                 checkpoints.extend(kept);
-                (k - restart, old_fences, shift)
+                (k - restart, old_fences, old_tables, shift)
             }
             None => {
                 let removed = self.lines.len() - restart;
                 let old_fences = self.lines[restart..].iter().any(is_fence);
+                let old_tables = self.lines[restart..].iter().filter(|l| is_table(l)).count();
                 self.lines.truncate(restart);
                 self.lines.extend(new_lines);
                 let shift = Shift {
@@ -2438,7 +2536,7 @@ impl ParsedDocument {
                     old_line: 0,
                     line_delta: 0,
                 };
-                (removed, old_fences, shift)
+                (removed, old_fences, old_tables, shift)
             }
         };
         if old_fences || new_fences {
@@ -2452,9 +2550,11 @@ impl ParsedDocument {
                 shift.range(close);
             }
         }
+        let table_line_count = self.meta.table_line_count - old_tables + new_tables;
         self.meta = ParseMeta {
             checkpoints,
             generation: next_generation(),
+            table_line_count,
             last_splice: Some((old_generation, restart, removed, inserted)),
         };
     }

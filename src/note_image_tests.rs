@@ -311,6 +311,9 @@ fn swapping_animated_gif_with_static_png_on_same_line_does_not_panic() {
         redraw(&mut cx);
     }
     write_static_png(&gif);
+    view.update(&mut cx, |app, _| {
+        app.editor_paint.borrow_mut().images.mark_recheck_due();
+    });
     redraw(&mut cx);
     redraw(&mut cx);
 
@@ -732,4 +735,57 @@ fn editor_content_without_a_tab_is_the_fallback_welcome_text() {
         use crate::ui::text_editor::EditorContentSource;
         assert_eq!(app.editor_content(), INITIAL_MARKDOWN);
     });
+}
+
+#[std_test]
+fn typing_inside_viewport_follows_caret_in_single_render_frame() {
+    let dir = fixture_dir("follow-caret-single-frame");
+    let (view, mut cx) = harness("hello world\nsecond line\n", &dir);
+    let before_renders = view.read_with(&cx, |app, _| app.render_count);
+    let before_offset = view.read_with(&cx, |app, _| app.editor_scroll.offset());
+
+    view.update(&mut cx, |app, cx| {
+        let tab = app.active_tab_mut().expect("tab");
+        tab.place(5, false);
+        tab.insert_text_in_mode(5..5, "!", ViewMode::Wysiwyg);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    view.read_with(&cx, |app, _| {
+        assert_eq!(
+            app.render_count,
+            before_renders + 1,
+            "in-viewport keystroke must not trigger a second render frame"
+        );
+        assert!(
+            !app.needs_follow_caret_check(),
+            "caret_followed should be settled after the single paint"
+        );
+        assert_eq!(app.editor_scroll.offset(), before_offset);
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[std_test]
+fn placing_caret_off_screen_scrolls_into_view_after_paint() {
+    let dir = fixture_dir("follow-caret-offscreen");
+    let doc: String = (0..120).map(|i| format!("line {i}\n")).collect();
+    let line_90 = doc.find("line 90").unwrap();
+    let (view, mut cx) = harness(&doc, &dir);
+
+    view.update(&mut cx, |app, cx| {
+        app.active_tab_mut().expect("tab").place(line_90, false);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    view.read_with(&cx, |app, _| {
+        assert!(
+            app.editor_scroll.offset().y < px(0.0),
+            "off-screen caret must scroll the viewport down"
+        );
+        assert!(!app.needs_follow_caret_check());
+    });
+    let _ = std::fs::remove_dir_all(&dir);
 }

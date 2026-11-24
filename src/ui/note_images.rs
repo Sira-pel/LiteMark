@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
     point, px, size, App, AppContext, Asset, AssetLogger, Bounds, Context, ElementId, Entity,
@@ -20,6 +20,8 @@ pub const MAX_IMAGE_HEIGHT: Pixels = px(480.0);
 pub const IMAGE_MARGIN_Y: Pixels = px(6.0);
 /// Corner radius of the picture and of its placeholder.
 pub const IMAGE_RADIUS: Pixels = px(6.0);
+/// Minimum interval between disk `stat()` re-checks for a cached visible image.
+pub const IMAGE_RECHECK_TTL: Duration = Duration::from_secs(4);
 
 /// What a file looked like when its size was read.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,15 +37,19 @@ struct Entry {
     size: Option<(u32, u32)>,
     /// Incremented each time this path is loaded or reloaded after changing on disk.
     generation: u64,
+    checked_at: Instant,
+    checked_epoch: u64,
 }
 
 /// Decoded sizes by path, so a frame never reads a file it has already seen.
 /// A visible image is re-checked against the file's modified time and length
-/// (one `stat`), so replacing a picture on disk shows the new one.
+/// (one `stat`), throttled by [`IMAGE_RECHECK_TTL`] unless [`Self::mark_recheck_due`]
+/// was called (e.g. window activation or tab reload).
 #[derive(Clone, Default)]
 pub struct ImageSizeCache {
     entries: HashMap<PathBuf, Entry>,
     next_generation: u64,
+    recheck_epoch: u64,
 }
 
 /// Element ID for a rendered image slot. Hashing the slot, resolved file path,
@@ -65,6 +71,35 @@ pub fn image_element_id(
 }
 
 impl ImageSizeCache {
+    /// Cached size without any filesystem access, even on a cache miss.
+    #[cfg(test)]
+    pub fn cached_size(&self, path: &Path) -> Option<(u32, u32)> {
+        self.entries.get(path).and_then(|e| e.size)
+    }
+
+    /// Force the next visible check of any cached image to re-stat on disk
+    /// (e.g. when the window regains focus or a tab is reloaded).
+    pub fn mark_recheck_due(&mut self) {
+        self.recheck_epoch = self.recheck_epoch.wrapping_add(1);
+    }
+
+    /// Throttled [`Self::size_checked`]: skips disk `stat()` calls for cached
+    /// entries checked within [`IMAGE_RECHECK_TTL`] in the current epoch.
+    pub fn size_checked_throttled(
+        &mut self,
+        path: &Path,
+        now: Instant,
+    ) -> (Option<(u32, u32)>, bool) {
+        if let Some(entry) = self.entries.get(path) {
+            if entry.checked_epoch == self.recheck_epoch
+                && now.saturating_duration_since(entry.checked_at) < IMAGE_RECHECK_TTL
+            {
+                return (entry.size, false);
+            }
+        }
+        self.size_checked_at(path, true, now)
+    }
+
     /// The size of the image at `path`. With `recheck`, a changed or newly
     /// created file is read again; without it a cached answer is trusted, so
     /// images far off screen cost no file access after the first read.
@@ -75,11 +110,23 @@ impl ImageSizeCache {
     /// [`Self::size`], and whether the file changed since it was last read,
     /// so the caller can drop the stale picture from gpui's image cache.
     pub fn size_checked(&mut self, path: &Path, recheck: bool) -> (Option<(u32, u32)>, bool) {
-        let stamp = match self.entries.get(path) {
+        self.size_checked_at(path, recheck, Instant::now())
+    }
+
+    fn size_checked_at(
+        &mut self,
+        path: &Path,
+        recheck: bool,
+        now: Instant,
+    ) -> (Option<(u32, u32)>, bool) {
+        let epoch = self.recheck_epoch;
+        let stamp = match self.entries.get_mut(path) {
             Some(entry) if !recheck => return (entry.size, false),
             Some(entry) => {
                 let stamp = stamp_of(path);
                 if entry.stamp == stamp {
+                    entry.checked_at = now;
+                    entry.checked_epoch = epoch;
                     return (entry.size, false);
                 }
                 stamp
@@ -96,6 +143,8 @@ impl ImageSizeCache {
                 stamp,
                 size,
                 generation,
+                checked_at: now,
+                checked_epoch: epoch,
             },
         );
         (size, changed)
@@ -1244,6 +1293,50 @@ mod tests {
         assert_ne!(
             id_gif, id_gif_reloaded,
             "disk replacement must rotate ElementId"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_size_misses_without_io_and_throttled_recheck_respects_ttl_and_epoch() {
+        let dir = std::env::temp_dir().join(format!("litemark-img-ttl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let svg = dir.join("a.svg");
+        std::fs::write(&svg, r#"<svg width="10" height="20">"#).unwrap();
+
+        let mut cache = ImageSizeCache::default();
+        assert_eq!(cache.cached_size(&svg), None);
+        assert_eq!(cache.len(), 0);
+
+        let t0 = Instant::now();
+        assert_eq!(
+            cache.size_checked_throttled(&svg, t0),
+            (Some((10, 20)), false)
+        );
+        assert_eq!(cache.cached_size(&svg), Some((10, 20)));
+
+        // Overwrite on disk: within TTL, throttled check returns cached size without statting.
+        std::fs::write(&svg, r#"<svg width="300" height="40">"#).unwrap();
+        assert_eq!(
+            cache.size_checked_throttled(&svg, t0 + Duration::from_secs(1)),
+            (Some((10, 20)), false)
+        );
+
+        // mark_recheck_due forces immediate re-stat even within TTL.
+        cache.mark_recheck_due();
+        let t1 = t0 + Duration::from_secs(1);
+        assert_eq!(
+            cache.size_checked_throttled(&svg, t1),
+            (Some((300, 40)), true)
+        );
+
+        // Past TTL, throttled check also notices disk changes. A different
+        // length, so the change shows even when the write lands in the same
+        // file-time tick as the one above (coarse mtimes on CI).
+        std::fs::write(&svg, r#"<svg width="4000" height="50">"#).unwrap();
+        assert_eq!(
+            cache.size_checked_throttled(&svg, t1 + IMAGE_RECHECK_TTL),
+            (Some((4000, 50)), true)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

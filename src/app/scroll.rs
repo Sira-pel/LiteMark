@@ -56,34 +56,48 @@ impl LiteMarkApp {
         }
     }
 
-    /// Keeps the caret on screen after typing, Enter, mode switches, or caret moves.
-    /// Waits for a paint of the current text and view mode before measuring.
-    /// `Some(true)` means that paint has not happened yet and another frame should be asked for.
-    pub(super) fn follow_caret(&mut self) -> Option<bool> {
+    fn follow_caret_key(&self) -> Option<(String, ViewMode, Range<usize>, usize)> {
         let view_mode = self.effective_view_mode();
         let tab = self.active_tab()?;
-        let key = (
+        Some((
             tab.id.clone(),
             view_mode,
             tab.selection_range(),
             tab.content.len(),
-        );
+        ))
+    }
+
+    pub(crate) fn needs_follow_caret_check(&self) -> bool {
+        let Some(key) = self.follow_caret_key() else {
+            return false;
+        };
+        self.caret_followed.as_ref() != Some(&key)
+    }
+
+    /// Keeps the caret on screen after typing, Enter, mode switches, or caret moves.
+    /// Runs after `EditorElement::paint` has updated `editor_paint`, so an in-viewport
+    /// keystroke resolves immediately with zero extra frames. Returns `true` only when
+    /// the scroll offset actually changed and a redraw is needed.
+    pub(super) fn follow_caret_after_paint_impl(&mut self, _window: &mut Window) -> bool {
+        let Some(key) = self.follow_caret_key() else {
+            return false;
+        };
         if self.caret_followed.as_ref() == Some(&key) {
-            return None;
+            return false;
         }
-        let cursor = tab.caret.cursor();
+        let Some(cursor) = self.active_tab().map(|tab| tab.caret.cursor()) else {
+            return false;
+        };
         let paint = self.editor_paint.borrow();
-        if (paint.painted_len != key.3
+        if paint.painted_len != key.3
             || paint.painted_selection != key.2
-            || paint.painted_view_mode != key.1)
-            && self.caret_follow_waits < 3
+            || paint.painted_view_mode != key.1
         {
-            self.caret_follow_waits += 1;
-            return Some(true); // geometry is from an older frame; look again
+            return false;
         }
-        self.caret_follow_waits = 0;
         let row = row_at_or_before(&paint.rows, cursor);
         let view = self.editor_scroll.bounds();
+        let mut scrolled = false;
         if let Some(row) = row {
             if let Some(delta) = follow_caret_delta(
                 row.origin.y,
@@ -95,12 +109,15 @@ impl LiteMarkApp {
                 let offset = self.editor_scroll.offset();
                 let max = self.editor_scroll.max_offset().height;
                 let y = (offset.y - delta).clamp(-max, px(0.0));
-                self.editor_scroll.set_offset(point(offset.x, y));
+                if (y - offset.y).abs() > px(0.01) {
+                    self.editor_scroll.set_offset(point(offset.x, y));
+                    scrolled = true;
+                }
             }
         }
         drop(paint);
         self.caret_followed = Some(key);
-        Some(false)
+        scrolled
     }
 
     /// Scrolls so the row holding the caret sits near the top of the view

@@ -67,6 +67,7 @@ impl LiteMarkApp {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
             tab.reload(content);
         }
+        self.editor_paint.borrow_mut().images.mark_recheck_due();
         self.record_disk_version(id);
         self.refresh_find();
         Ok(())
@@ -416,6 +417,7 @@ impl LiteMarkApp {
                     // `content` is the raw file, BOM included.
                     if tab.file_text_ref() != content.as_str() {
                         tab.reload(content);
+                        self.editor_paint.borrow_mut().images.mark_recheck_due();
                     }
                     self.record_disk_version(&id);
                 }
@@ -439,9 +441,10 @@ impl LiteMarkApp {
     /// Free what the editor kept for the tab on screen (laid-out rows, the
     /// raw-row cache keyed by its id, table geometry), so a closed note's
     /// text-sized buffers do not wait for the next frame to be replaced.
-    fn drop_painted_document_data(&mut self) {
+    pub(super) fn drop_painted_document_data(&mut self) {
         let mut paint = self.editor_paint.borrow_mut();
         paint.layout_cache = Default::default();
+        paint.table_width_cache.clear_and_shrink();
         paint.rows = Vec::new();
         paint.tables = Vec::new();
         paint.painted_len = 0;
@@ -454,6 +457,7 @@ impl LiteMarkApp {
         if removing_active {
             self.reset_editor_transient_state();
             self.drop_painted_document_data();
+            self.outline_cache = None;
         }
         self.tabs.retain(|tab| tab.id != id);
         if pos.is_some() {
@@ -486,6 +490,7 @@ impl LiteMarkApp {
         if only {
             self.reset_editor_transient_state();
             self.drop_painted_document_data();
+            self.outline_cache = None;
             let new_id = self.tab_ids.alloc();
             let number = new_id.trim_start_matches("tab-");
             let title = format!("Untitled-{number}.md");

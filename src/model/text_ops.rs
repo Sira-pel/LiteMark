@@ -46,37 +46,77 @@ pub struct HistoryRestore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionPair {
+    pub undo: Option<SelectionSnap>,
+    pub redo: Option<SelectionSnap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffEdit {
-    pub start: usize,
-    pub deleted: String,
-    pub inserted: String,
+    pub start: u32,
     /// Caret restored when this edit is applied. Defaults to the end of the
     /// deleted range (the document after the inverse write).
-    pub undo_caret: usize,
+    pub undo_caret: u32,
     /// Caret restored when this edit is inverted again. Defaults to the end
     /// of the inserted text.
-    pub redo_caret: usize,
-    pub undo_sel: Option<SelectionSnap>,
-    pub redo_sel: Option<SelectionSnap>,
+    pub redo_caret: u32,
+    pub deleted: Box<str>,
+    pub inserted: String,
+    pub sels: Option<Box<SelectionPair>>,
+}
+
+const _: () = assert!(std::mem::size_of::<DiffEdit>() <= 64);
+
+fn saturating_u32(v: usize) -> u32 {
+    u32::try_from(v).unwrap_or(u32::MAX)
 }
 
 impl DiffEdit {
     pub fn cost(&self) -> usize {
-        self.deleted.len() + self.inserted.len()
+        std::mem::size_of::<Self>()
+            + self.deleted.len()
+            + self.inserted.capacity()
+            + if self.sels.is_some() {
+                std::mem::size_of::<SelectionPair>()
+            } else {
+                0
+            }
     }
 
     pub fn new(start: usize, deleted: String, inserted: String) -> Self {
-        let undo_caret = start + deleted.len();
-        let redo_caret = start + inserted.len();
+        let undo_caret = saturating_u32(start + deleted.len());
+        let redo_caret = saturating_u32(start + inserted.len());
         Self {
-            start,
-            deleted,
-            inserted,
+            start: saturating_u32(start),
             undo_caret,
             redo_caret,
-            undo_sel: None,
-            redo_sel: None,
+            deleted: deleted.into_boxed_str(),
+            inserted,
+            sels: None,
         }
+    }
+
+    #[inline]
+    pub fn start(&self) -> usize {
+        self.start as usize
+    }
+
+    #[inline]
+    pub fn undo_caret(&self) -> usize {
+        self.undo_caret as usize
+    }
+
+    pub fn set_carets(&mut self, undo: usize, redo: usize) {
+        self.undo_caret = saturating_u32(undo);
+        self.redo_caret = saturating_u32(redo);
+    }
+
+    pub fn set_selections(&mut self, undo: Option<SelectionSnap>, redo: Option<SelectionSnap>) {
+        self.sels = if undo.is_none() && redo.is_none() {
+            None
+        } else {
+            Some(Box::new(SelectionPair { undo, redo }))
+        };
     }
 }
 
@@ -105,7 +145,7 @@ pub fn coalesce_typing(previous: &DiffEdit, next: &DiffEdit, elapsed_ms: u64) ->
     if previous.inserted.is_empty() || next.inserted.is_empty() {
         return false;
     }
-    if next.start != previous.start + previous.inserted.len() {
+    if next.start() != previous.start() + previous.inserted.len() {
         return false;
     }
     let previous_is_word = !previous.inserted.chars().any(char::is_whitespace);
@@ -121,15 +161,17 @@ fn absorb_into_span_group(previous: &mut DiffEdit, edit: &DiffEdit) -> bool {
     if !previous.deleted.is_empty() {
         return false;
     }
-    let end = previous.start + previous.inserted.len();
-    if edit.start < previous.start || edit.start > end || edit.start + edit.deleted.len() > end {
+    let p_start = previous.start();
+    let e_start = edit.start();
+    let end = p_start + previous.inserted.len();
+    if e_start < p_start || e_start > end || e_start + edit.deleted.len() > end {
         return false;
     }
-    let offset = edit.start - previous.start;
+    let offset = e_start - p_start;
     previous
         .inserted
         .replace_range(offset..offset + edit.deleted.len(), &edit.inserted);
-    previous.redo_caret = previous.start + previous.inserted.len();
+    previous.redo_caret = saturating_u32(p_start + previous.inserted.len());
     true
 }
 
@@ -156,9 +198,15 @@ impl UndoHistory {
     pub fn seal(&mut self) {
         self.last_edit = None;
         self.span_group_open = false;
+        if let Some(last) = self.undo.back_mut() {
+            let before = last.cost();
+            last.inserted.shrink_to_fit();
+            let after = last.cost();
+            self.undo_bytes = self.undo_bytes.saturating_sub(before.saturating_sub(after));
+        }
     }
 
-    pub fn push_at(&mut self, edit: DiffEdit, now: Instant) {
+    pub fn push_at(&mut self, mut edit: DiffEdit, now: Instant) {
         if edit.deleted.is_empty() && edit.inserted.is_empty() {
             return;
         }
@@ -184,7 +232,9 @@ impl UndoHistory {
                     .back()
                     .is_some_and(|p| p.deleted.is_empty() && p.inserted.is_empty())
                 {
-                    self.undo.pop_back();
+                    if let Some(dropped) = self.undo.pop_back() {
+                        self.undo_bytes = self.undo_bytes.saturating_sub(dropped.cost());
+                    }
                     self.span_group_open = false;
                 }
                 self.redo.clear();
@@ -204,11 +254,20 @@ impl UndoHistory {
             .is_some_and(|previous| coalesce_typing(previous, &edit, elapsed));
         if merge {
             if let Some(previous) = self.undo.back_mut() {
+                let before = previous.cost();
                 previous.inserted.push_str(&edit.inserted);
-                previous.redo_caret = previous.start + previous.inserted.len();
+                previous.redo_caret = saturating_u32(previous.start() + previous.inserted.len());
+                let after = previous.cost();
+                self.undo_bytes = (self.undo_bytes + after).saturating_sub(before);
             }
-            self.undo_bytes += edit.cost();
         } else {
+            if let Some(previous) = self.undo.back_mut() {
+                let before = previous.cost();
+                previous.inserted.shrink_to_fit();
+                let after = previous.cost();
+                self.undo_bytes = self.undo_bytes.saturating_sub(before.saturating_sub(after));
+            }
+            edit.inserted.shrink_to_fit();
             self.undo_bytes += edit.cost();
             self.undo.push_back(edit);
         }
@@ -228,29 +287,49 @@ impl UndoHistory {
     /// The caret is the edit's `undo_caret`, which defaults to the end of the
     /// restored (previously deleted) text. A stored selection is returned with
     /// it and is not snapped by this function.
+    pub fn peek_undo_replace(&self) -> Option<(Range<usize>, &str)> {
+        let edit = self.undo.back()?;
+        let start = edit.start();
+        Some((start..start + edit.inserted.len(), &edit.deleted))
+    }
+
+    pub fn peek_redo_replace(&self) -> Option<(Range<usize>, &str)> {
+        let edit = self.redo.last()?;
+        let start = edit.start();
+        Some((start..start + edit.inserted.len(), &edit.deleted))
+    }
+
     pub fn undo(&mut self, content: &mut String) -> Option<HistoryRestore> {
         let edit = self.undo.pop_back()?;
         self.last_edit = None;
         self.span_group_open = false;
         self.undo_bytes = self.undo_bytes.saturating_sub(edit.cost());
-        let end = edit.start + edit.inserted.len();
-        if end > content.len() || content.get(edit.start..end).is_none() {
+        let start = edit.start();
+        let end = start + edit.inserted.len();
+        if end > content.len() || content.get(start..end).is_none() {
             return None;
         }
-        let inserted = edit.deleted;
-        content.replace_range(edit.start..end, &inserted);
-        let replaced = (edit.start..end, inserted.len());
-        let caret = edit.undo_caret.min(content.len());
-        let selection = edit.undo_sel.clone();
-        let inverse = DiffEdit {
+        let caret = edit
+            .undo_caret()
+            .min(content.len() - edit.inserted.len() + edit.deleted.len());
+        let inserted = edit.deleted.into_string();
+        content.replace_range(start..end, &inserted);
+        let replaced = (start..end, inserted.len());
+        let caret = caret.min(content.len());
+        let (undo_sel, redo_sel) = match edit.sels {
+            Some(pair) => (pair.undo, pair.redo),
+            None => (None, None),
+        };
+        let selection = undo_sel.clone();
+        let mut inverse = DiffEdit {
             start: edit.start,
-            deleted: edit.inserted,
-            inserted,
             undo_caret: edit.redo_caret,
             redo_caret: edit.undo_caret,
-            undo_sel: edit.redo_sel,
-            redo_sel: edit.undo_sel,
+            deleted: edit.inserted.into_boxed_str(),
+            inserted,
+            sels: None,
         };
+        inverse.set_selections(redo_sel, undo_sel);
         self.redo_bytes += inverse.cost();
         self.redo.push(inverse);
         Some(HistoryRestore {
@@ -269,24 +348,32 @@ impl UndoHistory {
         self.last_edit = None;
         self.span_group_open = false;
         self.redo_bytes = self.redo_bytes.saturating_sub(edit.cost());
-        let end = edit.start + edit.inserted.len();
-        if end > content.len() || content.get(edit.start..end).is_none() {
+        let start = edit.start();
+        let end = start + edit.inserted.len();
+        if end > content.len() || content.get(start..end).is_none() {
             return None;
         }
-        let inserted = edit.deleted;
-        content.replace_range(edit.start..end, &inserted);
-        let replaced = (edit.start..end, inserted.len());
-        let caret = edit.undo_caret.min(content.len());
-        let selection = edit.undo_sel.clone();
-        let inverse = DiffEdit {
+        let caret = edit
+            .undo_caret()
+            .min(content.len() - edit.inserted.len() + edit.deleted.len());
+        let inserted = edit.deleted.into_string();
+        content.replace_range(start..end, &inserted);
+        let replaced = (start..end, inserted.len());
+        let caret = caret.min(content.len());
+        let (undo_sel, redo_sel) = match edit.sels {
+            Some(pair) => (pair.undo, pair.redo),
+            None => (None, None),
+        };
+        let selection = undo_sel.clone();
+        let mut inverse = DiffEdit {
             start: edit.start,
-            deleted: edit.inserted,
-            inserted,
             undo_caret: edit.redo_caret,
             redo_caret: edit.undo_caret,
-            undo_sel: edit.redo_sel,
-            redo_sel: edit.undo_sel,
+            deleted: edit.inserted.into_boxed_str(),
+            inserted,
+            sels: None,
         };
+        inverse.set_selections(redo_sel, undo_sel);
         self.undo_bytes += inverse.cost();
         self.undo.push_back(inverse);
         Some(HistoryRestore {
@@ -1124,7 +1211,35 @@ pub fn update_matches(
         content,
         start.saturating_sub(matcher.max_len()),
     ));
+    let max_old_end = old[kept..suffix_from.max(kept)]
+        .last()
+        .map_or(old_end, |h| h.end.max(old_end));
+    let resync_boundary = shift(max_old_end);
+    let mut scan_limit = resync_boundary
+        .saturating_add(matcher.max_len())
+        .min(content.len());
+    while scan_limit < content.len() && !content.is_char_boundary(scan_limit) {
+        scan_limit += 1;
+    }
+    let window = &content[..scan_limit];
     let mut pos = from;
+    while pos < resync_boundary {
+        let Some(hit) = matcher.next(window, pos) else {
+            break;
+        };
+        if hit.start >= resync_boundary {
+            break;
+        }
+        pos = hit.end;
+        out.push(hit);
+    }
+    if suffix.is_empty() {
+        return out;
+    }
+    if pos <= shift(suffix[0].start) {
+        out.extend(suffix.iter().map(|o| shift(o.start)..shift(o.end)));
+        return out;
+    }
     while let Some(hit) = matcher.next(content, pos) {
         if hit.start >= new_end {
             // Old coordinates of this hit, if it is one of the old ones.
@@ -2208,12 +2323,38 @@ mod tests {
         assert_eq!(history.undo_bytes, sum);
         // The newest entry survives at the back, the oldest kept one is later than 0.
         assert_eq!(
-            history.undo.back().map(|e| e.start),
+            history.undo.back().map(|e| e.start()),
             Some((total - 1) * 10_000_000)
         );
-        let oldest = history.undo.front().map(|e| e.start).unwrap();
+        let oldest = history.undo.front().map(|e| e.start()).unwrap();
         assert!(oldest > 0);
         assert_eq!(oldest, (total - history.undo.len()) * 10_000_000);
+    }
+
+    #[test]
+    fn many_small_non_coalesced_edits_stay_within_undo_byte_budget() {
+        let mut history = UndoHistory::default();
+        for i in 0..200_000usize {
+            history.push(DiffEdit::new(i * 10, String::new(), "a".into()));
+        }
+        assert!(history.stored_bytes() <= UNDO_BYTE_BUDGET);
+        let sum: usize = history.undo.iter().map(DiffEdit::cost).sum();
+        assert_eq!(history.undo_bytes, sum);
+    }
+
+    #[test]
+    fn update_matches_on_large_buffer_with_no_hits_stops_near_edit() {
+        let mut content = "abcdef ".repeat(200_000);
+        let old = Vec::new();
+        content.replace_range(10..11, "Z");
+        let t0 = Instant::now();
+        let hits = update_matches(&old, &content, "notfound", false, 10..11, 1);
+        assert!(hits.is_empty());
+        assert!(
+            t0.elapsed().as_millis() < 50,
+            "update_matches scanned too far: {:?}",
+            t0.elapsed()
+        );
     }
 
     #[test]

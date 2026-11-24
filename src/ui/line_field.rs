@@ -113,9 +113,11 @@ impl LineField {
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         let (range, reversed) =
             extend_selection(self.selected_range.clone(), self.selection_reversed, offset);
-        self.selected_range = range;
-        self.selection_reversed = reversed;
-        cx.notify();
+        if self.selected_range != range || self.selection_reversed != reversed {
+            self.selected_range = range;
+            self.selection_reversed = reversed;
+            cx.notify();
+        }
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -432,8 +434,10 @@ impl LineField {
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.selecting = false;
-        cx.notify();
+        if self.selecting {
+            self.selecting = false;
+            cx.notify();
+        }
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {

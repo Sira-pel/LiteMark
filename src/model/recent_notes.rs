@@ -1,5 +1,6 @@
 //! The recent-notes list: newest first, no duplicates, capped.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// Most notes the recent list keeps.
@@ -63,22 +64,32 @@ pub fn dedupe_recent(list: &mut Vec<PathBuf>) {
 }
 
 /// Menu text for a recent note: its file name, and the folder it is in,
-/// relative to the workspace when inside it.
-pub fn recent_note_label(path: &Path, workspace: &Path) -> (String, String) {
+/// relative to the workspace when inside it, borrowing zero-copy when valid UTF-8.
+pub fn recent_note_label_parts<'a>(
+    path: &'a Path,
+    workspace: &'a Path,
+) -> (Cow<'a, str>, Cow<'a, str>) {
     let name = path
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_else(|| Cow::Owned(path.display().to_string()));
     let parent = path.parent().unwrap_or(Path::new(""));
     let folder = match parent.strip_prefix(workspace) {
         Ok(rest) if rest.as_os_str().is_empty() => workspace
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
+            .map(|n| n.to_string_lossy())
             .unwrap_or_default(),
-        Ok(rest) => rest.display().to_string(),
-        Err(_) => parent.display().to_string(),
+        Ok(rest) => rest.to_string_lossy(),
+        Err(_) => parent.to_string_lossy(),
     };
     (name, folder)
+}
+
+/// Menu text for a recent note: its file name, and the folder it is in,
+/// relative to the workspace when inside it.
+pub fn recent_note_label(path: &Path, workspace: &Path) -> (String, String) {
+    let (name, folder) = recent_note_label_parts(path, workspace);
+    (name.into_owned(), folder.into_owned())
 }
 
 #[cfg(test)]

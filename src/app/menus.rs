@@ -522,8 +522,9 @@ impl LiteMarkApp {
         if self.activation_subscription.is_none() {
             self.activation_subscription =
                 Some(cx.observe_window_activation(window, |this, window, cx| {
-                    if !window.is_window_active() {
-                        this.handle_window_deactivated();
+                    if window.is_window_active() {
+                        this.editor_paint.borrow_mut().images.mark_recheck_due();
+                    } else if this.handle_window_deactivated() {
                         cx.notify();
                     }
                 }));

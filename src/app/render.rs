@@ -22,6 +22,10 @@ impl LiteMarkApp {
 
 impl Render for LiteMarkApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.render_count += 1;
+        }
         let theme = Theme::resolve(self.settings.theme, window.appearance());
         self.sync_frame_state(&theme, window, cx);
         self.sync_tab_settings();
@@ -564,8 +568,10 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |cols: usize, rows: usize, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    this.table_picker_size = (cols, rows);
-                    cx.notify();
+                    if this.table_picker_size != (cols, rows) {
+                        this.table_picker_size = (cols, rows);
+                        cx.notify();
+                    }
                 });
             }
         };
@@ -1408,8 +1414,9 @@ impl Render for LiteMarkApp {
                 }),
             )
             .on_mouse_down_out(cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                this.handle_mouse_down_out();
-                cx.notify();
+                if this.handle_mouse_down_out() {
+                    cx.notify();
+                }
             }))
             .child({
                 let view = cx.weak_entity();
@@ -1421,8 +1428,9 @@ impl Render for LiteMarkApp {
                                 return;
                             }
                             let _ = view.update(cx, |this, cx| {
-                                this.handle_mouse_exit(event);
-                                cx.notify();
+                                if this.handle_mouse_exit(event) {
+                                    cx.notify();
+                                }
                             });
                         });
                     },
@@ -2100,9 +2108,6 @@ impl LiteMarkApp {
     /// Per-frame state sync before the tree is built: window close, caret
     /// follow, which focus slot owns the keyboard, and line-field colors.
     fn sync_frame_state(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) {
-        if self.follow_caret() == Some(true) {
-            window.request_animation_frame();
-        }
         self.coast_scroll(window);
         self.install_close_hook(window, cx);
         if self.allow_window_close {

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ui::note_images::{handle_at, ImageDrag};
+use crate::ui::table_chrome::near_table_chrome;
 
 impl LiteMarkApp {
     pub(super) fn editor_backspace(&mut self, _cx: &mut App) {
@@ -261,14 +262,18 @@ impl LiteMarkApp {
         let previous = self.table_hover.clone();
         let (hover, hot) = {
             let paint = self.editor_paint.borrow();
-            let occupied = if paint.tables.is_empty() {
-                Vec::new()
+            let near_any = paint
+                .tables
+                .iter()
+                .any(|table| near_table_chrome(table, at));
+            if !near_any {
+                (None, None)
             } else {
-                occupied_content(&paint.rows)
-            };
-            let hit = hit_test_occupied(&paint.tables, at, &occupied);
-            let hover = hover_from_hit(&paint.tables, at, previous.as_ref(), hit.as_ref());
-            (hover, hit.as_ref().map(TableHot::from))
+                let occupied = occupied_content(&paint.rows);
+                let hit = hit_test_occupied(&paint.tables, at, &occupied);
+                let hover = hover_from_hit(&paint.tables, at, previous.as_ref(), hit.as_ref());
+                (hover, hit.as_ref().map(TableHot::from))
+            }
         };
         if self.table_hover != hover || self.table_hot != hot {
             self.table_hover = hover;
@@ -283,9 +288,13 @@ impl LiteMarkApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_table_drag_press();
+        let mut changed = self.clear_table_drag_press();
         // Another button letting go does not end a resize by the left one.
         if self.image_drag.is_some() && event.button != MouseButton::Left {
+            if changed {
+                window.refresh();
+                cx.notify();
+            }
             return;
         }
         if let Some(drag) = self.image_drag.take() {
@@ -309,6 +318,7 @@ impl LiteMarkApp {
             return;
         }
         if let Some(drag) = self.table_drag.take() {
+            changed = true;
             let tables = self.editor_paint.borrow().tables.clone();
             let moved = self
                 .active_tab_mut()
@@ -325,14 +335,19 @@ impl LiteMarkApp {
             && self
                 .active_tab()
                 .is_some_and(|tab| tab.selection_range().is_empty() && !tab.is_read_only())
+            && !self.pointer_hidden
         {
             self.pointer_hidden = true;
+            changed = true;
         }
         if self.selecting {
             self.selecting = false;
+            changed = true;
         }
-        window.refresh();
-        cx.notify();
+        if changed {
+            window.refresh();
+            cx.notify();
+        }
     }
 
     /// Ends a picture resize without changing the note. True when one was
