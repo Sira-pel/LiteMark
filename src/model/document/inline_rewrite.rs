@@ -126,7 +126,7 @@ pub(super) fn longest_shared_flag_run(slices: &[WorkSlice]) -> Option<(SharedKin
     best.map(|(k, i, j, _)| (k, i, j))
 }
 
-pub(super) fn segment_flags(seg: &StyledSegment) -> FormatFlags {
+pub(super) fn segment_flags(seg: &AbsStyledSegment) -> FormatFlags {
     FormatFlags {
         bold: seg.bold,
         italic: seg.italic,
@@ -850,8 +850,7 @@ pub(super) fn verify_inline_rewrites(
             }
             let mut any = false;
             let all_match = new_line
-                .styled_segments()
-                .iter()
+                .abs_styled_segments()
                 .filter(|s| {
                     s.source.start < sel.end
                         && s.source.end > sel.start
@@ -859,7 +858,7 @@ pub(super) fn verify_inline_rewrites(
                 })
                 .all(|s| {
                     any = true;
-                    segment_flags(s).get(kind) == on
+                    segment_flags(&s).get(kind) == on
                 });
             // Turning off only needs no segment left formatted: a line may show
             // nothing once its markers go (`~~~`, a `[^1]: note` definition).
@@ -879,12 +878,12 @@ pub(super) fn apply_toggle(flags: &mut FormatFlags, kind: InlineTagKind, on: boo
     }
 }
 
-pub(super) fn segment_flags_at(segs: &[&StyledSegment], pos: usize) -> Option<FormatFlags> {
+pub(super) fn segment_flags_at(segs: &[AbsStyledSegment], pos: usize) -> Option<FormatFlags> {
     let i = segs.partition_point(|s| s.source.start <= pos);
     if i == 0 {
         return None;
     }
-    let s = segs[i - 1];
+    let s = &segs[i - 1];
     if pos < s.source.end {
         Some(segment_flags(s))
     } else {
@@ -939,7 +938,7 @@ pub(super) struct FlagSweep {
 }
 
 impl FlagSweep {
-    pub(super) fn new(pairs: &[&InlinePair]) -> Self {
+    pub(super) fn new(pairs: &[InlinePair]) -> Self {
         let mut events = Vec::with_capacity(pairs.len() * 2);
         for p in pairs {
             if p.kind == InlineTagKind::Link {
@@ -1047,7 +1046,7 @@ pub(super) fn skip_end_at(skips: &[Range<usize>], pos: usize) -> Option<usize> {
 }
 
 pub(super) fn selected_link_markup_ranges(
-    pairs: &[&InlinePair],
+    pairs: &[InlinePair],
     p_range: Range<usize>,
 ) -> Vec<Range<usize>> {
     let mut rs = Vec::new();
@@ -1074,8 +1073,8 @@ pub(super) fn selected_link_markup_ranges(
 /// delimiter runs in `skip` (the emphasis markers being rewritten).
 pub(super) fn collect_rewrite_slices(
     content: &str,
-    pairs: &[&InlinePair],
-    segs: &[&StyledSegment],
+    pairs: &[InlinePair],
+    segs: &[AbsStyledSegment],
     replace: Range<usize>,
     p_range: Range<usize>,
     skip: &[Range<usize>],
@@ -1352,7 +1351,7 @@ pub(super) fn splice_for_anchor(
                     .bytes()
                     .all(|b| b == delim)
             {
-                range_start = range_start.min(span_open_start(parsed, p));
+                range_start = range_start.min(span_open_start(parsed, &p));
             }
         }
     }
@@ -1393,10 +1392,9 @@ pub(super) fn splice_for_anchor(
 
     let seg_end_limit = if inside { caret } else { closer_end };
     let pline = parsed.line_at_offset(range_start);
-    let existing_segs: Vec<&StyledSegment> = pline
+    let existing_segs: Vec<AbsStyledSegment> = pline
         .map(|l| {
-            l.styled_segments()
-                .iter()
+            l.abs_styled_segments()
                 .filter(|s| s.source.start >= range_start && s.source.end <= seg_end_limit)
                 .collect()
         })
@@ -1504,6 +1502,9 @@ pub(super) fn compute_active_formats(
             LineKind::CodeFence { .. } | LineKind::CodeLine => fmt.code = true,
             LineKind::TableRow { .. } | LineKind::TableDelimiter => fmt.table = true,
             _ => {}
+        }
+        if line.quote_depth > 0 {
+            fmt.quote = true;
         }
         for pair in line.inline_pairs() {
             let (lo, hi) = if pair.kind == InlineTagKind::Link {

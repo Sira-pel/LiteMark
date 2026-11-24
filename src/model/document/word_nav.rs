@@ -94,8 +94,7 @@ impl DocumentTab {
             for (off, ch) in slice.char_indices() {
                 let start = span.start + off;
                 if line
-                    .hidden_ranges
-                    .iter()
+                    .hidden_ranges_abs()
                     .any(|r| r.start <= start && start < r.end)
                 {
                     continue;
@@ -146,12 +145,12 @@ impl DocumentTab {
         {
             let parsed = self.parsed();
             if let Some(line) = parsed.line_at_offset(start) {
-                if line.hidden_ranges.iter().any(|r| r.start == end) {
+                if line.hidden_ranges_abs().any(|r| r.start == end) {
                     while self.content[..start].ends_with([' ', '\t']) {
                         start -= 1;
                     }
                 }
-                if line.hidden_ranges.iter().any(|r| r.end == range.start) {
+                if line.hidden_ranges_abs().any(|r| r.end == range.start) {
                     while self.content[end..].starts_with([' ', '\t']) {
                         end += 1;
                     }

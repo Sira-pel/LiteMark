@@ -65,15 +65,16 @@ fn observe(content: &str) -> Observed {
     for (li, line) in parsed.lines.iter().enumerate() {
         display_len += line.display_len();
         for seg in line.styled_segments() {
-            let text = content.get(seg.source.start..seg.source.end).unwrap_or("");
-            let link = seg.link_url.as_deref().unwrap_or("-");
+            let src = seg.source(line.source.start);
+            let text = content.get(src.start..src.end).unwrap_or("");
+            let link = line.segment_link_url(seg).unwrap_or("-");
             flags.push_str(&format!(
                 "{li}:{text}:b{}i{}u{}s{}c{}:{link};",
-                u8::from(seg.bold),
-                u8::from(seg.italic),
-                u8::from(seg.underline),
-                u8::from(seg.strike),
-                u8::from(seg.code),
+                u8::from(seg.bold()),
+                u8::from(seg.italic()),
+                u8::from(seg.underline()),
+                u8::from(seg.strike()),
+                u8::from(seg.code()),
             ));
         }
     }

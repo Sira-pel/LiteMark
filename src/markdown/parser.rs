@@ -376,7 +376,7 @@ pub enum LineKind {
         checkbox_offset: u16,
     },
     CodeFence {
-        language: Option<Box<str>>,
+        language: Option<Box<Box<str>>>,
         opening: bool,
     },
     CodeLine,
@@ -402,21 +402,126 @@ pub struct TableRowBody {
     pub table_source: std::ops::Range<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Line-relative byte range (`u32` offsets from `ParsedLine::source.start`).
+/// Supports lines up to 4 GB without `u16` overflow, while keeping `ParsedLine`
+/// compact and making `Shift::parsed_line` skip all per-line inline vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LineRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl LineRange {
+    #[inline]
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    #[inline]
+    pub fn from_rel(range: std::ops::Range<usize>) -> Self {
+        Self {
+            start: u32::try_from(range.start).unwrap_or(u32::MAX),
+            end: u32::try_from(range.end).unwrap_or(u32::MAX),
+        }
+    }
+
+    #[inline]
+    pub const fn to_abs(self, line_start: usize) -> std::ops::Range<usize> {
+        (line_start + self.start as usize)..(line_start + self.end as usize)
+    }
+}
+
+pub const STYLE_BOLD: u8 = 1 << 0;
+pub const STYLE_ITALIC: u8 = 1 << 1;
+pub const STYLE_UNDERLINE: u8 = 1 << 2;
+pub const STYLE_STRIKE: u8 = 1 << 3;
+pub const STYLE_CODE: u8 = 1 << 4;
+pub const STYLE_LINK: u8 = 1 << 5;
+
+/// Compact line-relative styled segment (`12 B`, `Copy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StyledSegment {
-    /// Byte range in the original markdown `content`
+    pub range: LineRange,
+    pub flags: u8,
+    pub link_index: u16,
+}
+
+impl StyledSegment {
+    #[inline]
+    pub const fn source(&self, line_start: usize) -> std::ops::Range<usize> {
+        self.range.to_abs(line_start)
+    }
+
+    #[inline]
+    pub const fn bold(&self) -> bool {
+        (self.flags & STYLE_BOLD) != 0
+    }
+
+    #[inline]
+    pub const fn italic(&self) -> bool {
+        (self.flags & STYLE_ITALIC) != 0
+    }
+
+    #[inline]
+    pub const fn underline(&self) -> bool {
+        (self.flags & STYLE_UNDERLINE) != 0
+    }
+
+    #[inline]
+    pub const fn strike(&self) -> bool {
+        (self.flags & STYLE_STRIKE) != 0
+    }
+
+    #[inline]
+    pub const fn code(&self) -> bool {
+        (self.flags & STYLE_CODE) != 0
+    }
+
+    #[inline]
+    pub const fn is_link(&self) -> bool {
+        (self.flags & STYLE_LINK) != 0
+    }
+
+    #[inline]
+    pub const fn to_abs(self, line_start: usize) -> AbsStyledSegment {
+        AbsStyledSegment {
+            source: self.range.to_abs(line_start),
+            bold: self.bold(),
+            italic: self.italic(),
+            underline: self.underline(),
+            strike: self.strike(),
+            code: self.code(),
+            is_link: self.is_link(),
+        }
+    }
+}
+
+/// Document-absolute view of a [`StyledSegment`] for multi-line editing helpers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbsStyledSegment {
     pub source: std::ops::Range<usize>,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
     pub code: bool,
-    pub link_url: Option<Arc<str>>,
+    pub is_link: bool,
 }
 
-impl StyledSegment {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RawStyledSegment {
+    pub(super) source: std::ops::Range<usize>,
+    pub(super) bold: bool,
+    pub(super) italic: bool,
+    pub(super) underline: bool,
+    pub(super) strike: bool,
+    pub(super) code: bool,
+    pub(super) link_url: Option<Arc<str>>,
+}
+
+impl RawStyledSegment {
     #[inline]
-    pub fn is_plain(&self) -> bool {
+    pub(super) fn is_plain(&self) -> bool {
         !self.bold
             && !self.italic
             && !self.underline
@@ -468,6 +573,43 @@ impl InlinePair {
     }
 }
 
+/// Line-relative stored representation of [`InlinePair`] (`36 B`, `Copy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineInlinePair {
+    pub kind: InlineTagKind,
+    pub open_delim: LineRange,
+    pub inner: LineRange,
+    pub close_delim: LineRange,
+    pub group_open_start: u32,
+    pub group_close_end: u32,
+}
+
+impl LineInlinePair {
+    #[inline]
+    pub fn from_rel(pair: &InlinePair) -> Self {
+        Self {
+            kind: pair.kind,
+            open_delim: LineRange::from_rel(pair.open_delim.clone()),
+            inner: LineRange::from_rel(pair.inner.clone()),
+            close_delim: LineRange::from_rel(pair.close_delim.clone()),
+            group_open_start: u32::try_from(pair.group_open_start).unwrap_or(u32::MAX),
+            group_close_end: u32::try_from(pair.group_close_end).unwrap_or(u32::MAX),
+        }
+    }
+
+    #[inline]
+    pub const fn to_abs(self, line_start: usize) -> InlinePair {
+        InlinePair {
+            kind: self.kind,
+            open_delim: self.open_delim.to_abs(line_start),
+            inner: self.inner.to_abs(line_start),
+            close_delim: self.close_delim.to_abs(line_start),
+            group_open_start: line_start + self.group_open_start as usize,
+            group_close_end: line_start + self.group_close_end as usize,
+        }
+    }
+}
+
 /// Maps between a visible WYSIWYG display string and original source byte offsets.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RowOffsetMap {
@@ -496,7 +638,8 @@ impl RowOffsetMap {
         line_start: usize,
         line_end: usize,
         visible_start: usize,
-        hidden: &[std::ops::Range<usize>],
+        hidden_base: usize,
+        hidden: &[LineRange],
     ) -> Self {
         let mut segments = Vec::with_capacity(hidden.len() + 1);
         let mut disp = 0usize;
@@ -506,9 +649,10 @@ impl RowOffsetMap {
             segments.push((start..disp, src));
         };
         let mut cursor = line_start;
-        for h in hidden {
-            let h_start = h.start.clamp(line_start, line_end);
-            let h_end = h.end.clamp(line_start, line_end);
+        for &h in hidden {
+            let abs = h.to_abs(hidden_base);
+            let h_start = abs.start.clamp(line_start, line_end);
+            let h_end = abs.end.clamp(line_start, line_end);
             if h_start > cursor {
                 push(cursor..h_start);
             }
@@ -534,16 +678,18 @@ impl RowOffsetMap {
         line_text: &str,
         line_start: usize,
         visible_start: usize,
-        hidden: &[std::ops::Range<usize>],
+        hidden_base: usize,
+        hidden: &[LineRange],
     ) -> (String, Self) {
         let line_end = line_start + line_text.len();
         // Walk the visible gaps twice: once to size the buffers exactly, once
         // to fill them, so no temporary list is allocated.
         let for_each_visible = |f: &mut dyn FnMut(std::ops::Range<usize>)| {
             let mut cursor = line_start;
-            for h in hidden {
-                let h_start = h.start.clamp(line_start, line_end);
-                let h_end = h.end.clamp(line_start, line_end);
+            for &h in hidden {
+                let abs = h.to_abs(hidden_base);
+                let h_start = abs.start.clamp(line_start, line_end);
+                let h_end = abs.end.clamp(line_start, line_end);
                 if h_start > cursor {
                     f(cursor..h_start);
                 }
@@ -754,63 +900,106 @@ impl RowOffsetMap {
     }
 }
 
-/// Shared empty `link_hits`, so lines without links don't each allocate one.
-type LinkHits = Arc<Vec<(std::ops::Range<usize>, Arc<str>)>>;
-
-fn no_links() -> &'static LinkHits {
-    static EMPTY: std::sync::OnceLock<LinkHits> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(Arc::default)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedLine {
     pub line_index: u32,
     /// Full byte range of the line (excluding `\n`)
     pub source: std::ops::Range<usize>,
     /// Heading content end relative to `source.start` (before any closing-hash
-    /// run); `source.len()` for every other line kind.
+    /// run or trailing hard-break `\`); `source.len()` for every other line.
     pub content_end: u32,
     /// Byte length of block prefix hidden in WYSIWYG (e.g. `# `, `- [ ] `, `> `)
     pub prefix_len: u32,
+    /// Blockquote nesting depth (`0` = not inside a blockquote, `1` = `> `,
+    /// `2` = `> > `, etc.). Fits in existing tail padding (`72 B` total).
+    pub quote_depth: u8,
     pub kind: LineKind,
-    /// All byte ranges hidden in WYSIWYG on this line (sorted, non-overlapping)
-    pub hidden_ranges: Box<[std::ops::Range<usize>]>,
+    /// All byte ranges hidden in WYSIWYG on this line, relative to `source.start`
+    /// (sorted, non-overlapping).
+    pub hidden_ranges: Box<[LineRange]>,
     /// Inline markup data; `None` for lines that carry none (blank, heading,
     /// list, code and plain-text lines), so they cost no extra allocation.
     inline: Option<Box<LineInline>>,
 }
 
+pub type LineLinkHits = Arc<[(LineRange, Arc<str>)]>;
+
 /// The inline data of a line that has any: styled text, links or hidden
 /// inline markup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineInline {
-    /// Paired inline delimiter ranges for atomic backspace & smart toggle-off
-    pub inline_pairs: Box<[InlinePair]>,
+    /// Paired inline delimiter ranges (line-relative) for atomic backspace & smart toggle-off
+    pub inline_pairs: Box<[LineInlinePair]>,
     /// Visible text in WYSIWYG mode when it differs from `&content[prefix_end()..source.end]`
     /// (e.g. inline hidden markup). `None` borrows zero-copy from the document.
     display_text_owned: Option<Box<str>>,
     pub styled_segments: Box<[StyledSegment]>,
-    /// Link spans `(source, url)`, filled once when the document is parsed so
+    /// Line-relative link spans `(range, url)`, filled once when sealed so
     /// painting can share them instead of rebuilding them every frame.
-    pub link_hits: Arc<Vec<(std::ops::Range<usize>, Arc<str>)>>,
+    pub link_hits: Option<LineLinkHits>,
 }
 
 impl LineInline {
-    /// The inline data for a line, or `None` when it is all empty (so equal
-    /// parses always agree on whether a line has a box).
+    /// Seal line-relative inline data into a [`LineInline`] box, or `None` when
+    /// it is all empty (so equal parses always agree on whether a line has a box).
     pub(super) fn boxed(
-        inline_pairs: Box<[InlinePair]>,
-        styled_segments: Box<[StyledSegment]>,
+        inline_pairs: Vec<InlinePair>,
+        raw_segments: Vec<RawStyledSegment>,
         display_text_owned: Option<Box<str>>,
     ) -> Option<Box<Self>> {
-        if inline_pairs.is_empty() && styled_segments.is_empty() && display_text_owned.is_none() {
+        if inline_pairs.is_empty() && raw_segments.is_empty() && display_text_owned.is_none() {
             return None;
         }
+        let inline_pairs: Box<[LineInlinePair]> =
+            inline_pairs.iter().map(LineInlinePair::from_rel).collect();
+        let mut links: Vec<(LineRange, Arc<str>)> = Vec::new();
+        let mut styled_segments: Vec<StyledSegment> = Vec::with_capacity(raw_segments.len());
+        for seg in raw_segments {
+            let range = LineRange::from_rel(seg.source.clone());
+            let mut flags = 0u8;
+            if seg.bold {
+                flags |= STYLE_BOLD;
+            }
+            if seg.italic {
+                flags |= STYLE_ITALIC;
+            }
+            if seg.underline {
+                flags |= STYLE_UNDERLINE;
+            }
+            if seg.strike {
+                flags |= STYLE_STRIKE;
+            }
+            if seg.code {
+                flags |= STYLE_CODE;
+            }
+            let link_index = if let Some(url) = seg.link_url {
+                flags |= STYLE_LINK;
+                if seg.source.end > seg.source.start {
+                    let idx = links.len();
+                    links.push((range, url));
+                    u16::try_from(idx).unwrap_or(u16::MAX)
+                } else {
+                    u16::MAX
+                }
+            } else {
+                u16::MAX
+            };
+            styled_segments.push(StyledSegment {
+                range,
+                flags,
+                link_index,
+            });
+        }
+        let link_hits = if links.is_empty() {
+            None
+        } else {
+            Some(Arc::from(links))
+        };
         Some(Box::new(Self {
             inline_pairs,
             display_text_owned,
-            styled_segments,
-            link_hits: Arc::clone(no_links()),
+            styled_segments: styled_segments.into(),
+            link_hits,
         }))
     }
 }
@@ -831,10 +1020,28 @@ impl ParsedLine {
         self.inline.is_some()
     }
 
-    /// Paired inline delimiter ranges for atomic backspace & smart toggle-off.
+    /// Document-absolute hidden ranges for this line.
     #[inline]
-    pub fn inline_pairs(&self) -> &[InlinePair] {
+    pub fn hidden_ranges_abs(
+        &self,
+    ) -> impl ExactSizeIterator<Item = std::ops::Range<usize>> + DoubleEndedIterator + '_ {
+        let base = self.source.start;
+        self.hidden_ranges.iter().map(move |r| r.to_abs(base))
+    }
+
+    /// Line-relative paired inline delimiter ranges.
+    #[inline]
+    pub fn line_inline_pairs(&self) -> &[LineInlinePair] {
         self.inline.as_deref().map_or(&[], |i| &i.inline_pairs)
+    }
+
+    /// Paired inline delimiter ranges (converted to document-absolute offsets).
+    #[inline]
+    pub fn inline_pairs(
+        &self,
+    ) -> impl ExactSizeIterator<Item = InlinePair> + DoubleEndedIterator + '_ {
+        let base = self.source.start;
+        self.line_inline_pairs().iter().map(move |p| p.to_abs(base))
     }
 
     #[inline]
@@ -842,13 +1049,47 @@ impl ParsedLine {
         self.inline.as_deref().map_or(&[], |i| &i.styled_segments)
     }
 
-    /// Link spans `(source, url)`; the shared empty value for lines without any.
+    /// Styled segments converted to document-absolute [`AbsStyledSegment`]s.
     #[inline]
-    pub fn link_hits(&self) -> &Arc<Vec<(std::ops::Range<usize>, Arc<str>)>> {
-        match self.inline.as_deref() {
-            Some(i) => &i.link_hits,
-            None => no_links(),
+    pub fn abs_styled_segments(
+        &self,
+    ) -> impl ExactSizeIterator<Item = AbsStyledSegment> + DoubleEndedIterator + '_ {
+        let base = self.source.start;
+        self.styled_segments().iter().map(move |s| s.to_abs(base))
+    }
+
+    /// Line-relative link spans `(range, url)`.
+    #[cfg(test)]
+    #[inline]
+    pub fn link_hits(&self) -> &[(LineRange, Arc<str>)] {
+        self.inline
+            .as_deref()
+            .and_then(|i| i.link_hits.as_deref())
+            .unwrap_or(&[])
+    }
+
+    /// Shared `Arc` of line-relative link spans, if this line has any links.
+    #[inline]
+    pub fn link_hits_arc(&self) -> Option<&LineLinkHits> {
+        self.inline.as_deref()?.link_hits.as_ref()
+    }
+
+    /// Resolve the link URL for a [`StyledSegment`] on this line.
+    #[cfg(test)]
+    #[inline]
+    pub fn segment_link_url(&self, seg: &StyledSegment) -> Option<&str> {
+        if !seg.is_link() {
+            return None;
         }
+        let hits = self.link_hits();
+        if seg.link_index != u16::MAX {
+            if let Some((_, url)) = hits.get(seg.link_index as usize) {
+                return Some(url.as_ref());
+            }
+        }
+        hits.iter()
+            .find(|(r, _)| *r == seg.range)
+            .map(|(_, url)| url.as_ref())
     }
 
     #[inline]
@@ -866,15 +1107,9 @@ impl ParsedLine {
             self.source.start,
             self.source.end,
             self.prefix_end(),
+            self.source.start,
             &self.hidden_ranges,
         ))
-    }
-
-    /// Mutable inline data, if the line has any. Only the parser's builders
-    /// and the tail shift of `apply_edit` mutate it.
-    #[inline]
-    pub(super) fn inline_mut(&mut self) -> Option<&mut LineInline> {
-        self.inline.as_deref_mut()
     }
 
     /// Byte offset where the hidden block prefix ends.
@@ -907,11 +1142,10 @@ impl ParsedLine {
 
     #[inline]
     fn has_only_prefix_hidden(&self) -> bool {
-        let prefix_end = self.prefix_end().min(self.source.end);
         (self.hidden_ranges.is_empty() && self.prefix_len == 0)
             || (self.hidden_ranges.len() == 1
-                && self.hidden_ranges[0].start == self.source.start
-                && self.hidden_ranges[0].end == prefix_end)
+                && self.hidden_ranges[0].start == 0
+                && self.hidden_ranges[0].end as usize == self.prefix_len as usize)
     }
 
     #[inline]
@@ -924,9 +1158,10 @@ impl ParsedLine {
         let mut disp = 0usize;
         let mut cursor = line_start;
         let mut emitted = false;
-        for h in &self.hidden_ranges {
-            let h_start = h.start.clamp(line_start, line_end);
-            let h_end = h.end.clamp(line_start, line_end);
+        for &h in &self.hidden_ranges {
+            let abs = h.to_abs(line_start);
+            let h_start = abs.start.clamp(line_start, line_end);
+            let h_end = abs.end.clamp(line_start, line_end);
             if h_start > cursor {
                 let start = disp;
                 disp += h_start - cursor;
@@ -1067,17 +1302,15 @@ impl ParsedLine {
 /// allocations). The offset map is rebuilt from `hidden` when needed.
 pub(super) fn build_display(
     line: &str,
-    line_start: usize,
     prefix_len: usize,
-    hidden: &[std::ops::Range<usize>],
+    hidden: &[LineRange],
 ) -> Option<Box<str>> {
-    let prefix_end = line_start + prefix_len;
     let only_prefix = (hidden.is_empty() && prefix_len == 0)
-        || (hidden.len() == 1 && hidden[0].start == line_start && hidden[0].end == prefix_end);
+        || (hidden.len() == 1 && hidden[0].start == 0 && hidden[0].end as usize == prefix_len);
     if only_prefix {
         return None;
     }
-    let (display, _) = RowOffsetMap::from_hidden(line, line_start, prefix_end, hidden);
+    let (display, _) = RowOffsetMap::from_hidden(line, 0, prefix_len, 0, hidden);
     Some(display.into_boxed_str())
 }
 
@@ -1122,8 +1355,8 @@ impl ParsedDocument {
     /// Every inline delimiter pair in the document, line by line. Only the
     /// tests want the flat view; the editor looks pairs up by line.
     #[cfg(test)]
-    pub fn all_inline_pairs(&self) -> impl Iterator<Item = &InlinePair> {
-        self.lines.iter().flat_map(|l| l.inline_pairs().iter())
+    pub fn all_inline_pairs(&self) -> impl Iterator<Item = InlinePair> + '_ {
+        self.lines.iter().flat_map(|l| l.inline_pairs())
     }
 
     /// Index of the line whose source range contains `offset` (inclusive end,
@@ -1226,7 +1459,8 @@ impl ParsedDocument {
                         }
                     }
                     let mut cursor = clip.start;
-                    for hidden in &line.hidden_ranges {
+                    for &h in &line.hidden_ranges {
+                        let hidden = h.to_abs(line.source.start);
                         if hidden.end <= cursor || hidden.start >= clip.end {
                             continue;
                         }
@@ -1244,6 +1478,13 @@ impl ParsedDocument {
         }
         out
     }
+}
+
+pub(super) fn merge_line_ranges(ranges: Vec<std::ops::Range<usize>>) -> Vec<LineRange> {
+    merge_ranges(ranges)
+        .into_iter()
+        .map(LineRange::from_rel)
+        .collect()
 }
 
 fn merge_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
@@ -1501,18 +1742,27 @@ pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
 type InlineSyntax = (
     Vec<std::ops::Range<usize>>,
     Vec<InlinePair>,
-    Vec<StyledSegment>,
+    Vec<RawStyledSegment>,
 );
 
 fn parse_inline_syntax(input: &str, base: usize) -> InlineSyntax {
-    parse_inline_syntax_inner(input, base, false)
+    parse_inline_syntax_inner(input, base, false, false)
+}
+
+fn parse_inline_syntax_line(input: &str, base: usize, allow_hard_break: bool) -> InlineSyntax {
+    parse_inline_syntax_inner(input, base, false, allow_hard_break)
 }
 
 fn parse_inline_syntax_cell(input: &str, base: usize) -> InlineSyntax {
-    parse_inline_syntax_inner(input, base, true)
+    parse_inline_syntax_inner(input, base, true, false)
 }
 
-fn parse_inline_syntax_inner(input: &str, base: usize, in_table_cell: bool) -> InlineSyntax {
+fn parse_inline_syntax_inner(
+    input: &str,
+    base: usize,
+    in_table_cell: bool,
+    allow_hard_break: bool,
+) -> InlineSyntax {
     if input.is_empty() {
         return (Vec::new(), Vec::new(), Vec::new());
     }
@@ -1522,12 +1772,12 @@ fn parse_inline_syntax_inner(input: &str, base: usize, in_table_cell: bool) -> I
     let body = input.trim_start_matches([' ', '\t']);
     if body.len() < input.len() {
         let lead = input.len() - body.len();
-        return parse_inline_syntax_inner(body, base + lead, in_table_cell);
+        return parse_inline_syntax_inner(body, base + lead, in_table_cell, allow_hard_break);
     }
     if is_plain_inline(input) {
         return (Vec::new(), Vec::new(), Vec::new());
     }
-    parse_inline_with_pulldown(input, base, in_table_cell)
+    parse_inline_with_pulldown(input, base, in_table_cell, allow_hard_break)
 }
 
 /// Text pulldown-cmark would return as one unstyled run: no byte that can
@@ -1539,7 +1789,12 @@ fn is_plain_inline(input: &str) -> bool {
         .any(|&b| matches!(b, b'*' | b'_' | b'~' | b'`' | b'[' | b'<' | b'\\'))
 }
 
-fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> InlineSyntax {
+fn parse_inline_with_pulldown(
+    input: &str,
+    base: usize,
+    in_table_cell: bool,
+    allow_hard_break: bool,
+) -> InlineSyntax {
     let prepared = prepare_for_pulldown(input);
     let owned_prefixed;
     let (parse_input, offset_shift) = if in_table_cell {
@@ -1584,7 +1839,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
                             last_link.2 = last_link.2.max(abs_end);
                         }
                         if !link_stack.is_empty() && abs_end > open_start {
-                            styled_segments.push(StyledSegment {
+                            styled_segments.push(RawStyledSegment {
                                 source: open_start..abs_end,
                                 bold: !bold_stack.is_empty(),
                                 italic: !italic_stack.is_empty(),
@@ -1730,7 +1985,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
                     close_d,
                 ));
                 if inner.end > inner.start {
-                    styled_segments.push(StyledSegment {
+                    styled_segments.push(RawStyledSegment {
                         source: inner,
                         bold: !bold_stack.is_empty(),
                         italic: !italic_stack.is_empty(),
@@ -1746,7 +2001,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
                     last_link.2 = last_link.2.max(abs_end);
                 }
                 if abs_end > abs_start {
-                    styled_segments.push(StyledSegment {
+                    styled_segments.push(RawStyledSegment {
                         source: abs_start..abs_end,
                         bold: !bold_stack.is_empty(),
                         italic: !italic_stack.is_empty(),
@@ -1810,6 +2065,17 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
                     escapes.push(abs);
                 }
                 i += 2;
+            } else if allow_hard_break
+                && !in_table_cell
+                && bytes[i] == b'\\'
+                && i + 1 == bytes.len()
+            {
+                let abs = base + i;
+                if !index_in_ranges(&code_inner, abs) {
+                    raw_hidden.push(abs..abs + 1);
+                    escapes.push(abs);
+                }
+                i += 1;
             } else {
                 i += 1;
             }
@@ -1817,7 +2083,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
         if !escapes.is_empty() {
             // The text segment covering an escape keeps the escaped character
             // only; the backslash is cut out of it.
-            let mut rebuilt: Vec<StyledSegment> = Vec::with_capacity(styled_segments.len());
+            let mut rebuilt: Vec<RawStyledSegment> = Vec::with_capacity(styled_segments.len());
             for s in styled_segments.drain(..) {
                 let first = escapes.partition_point(|&e| e < s.source.start);
                 let inside = &escapes[first..];
@@ -1829,7 +2095,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
                 let mut cursor = s.source.start;
                 for &e in &inside[..count] {
                     if e > cursor {
-                        rebuilt.push(StyledSegment {
+                        rebuilt.push(RawStyledSegment {
                             source: cursor..e,
                             ..s.clone()
                         });
@@ -1837,7 +2103,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
                     cursor = e + 1;
                 }
                 if s.source.end > cursor {
-                    rebuilt.push(StyledSegment {
+                    rebuilt.push(RawStyledSegment {
                         source: cursor..s.source.end,
                         ..s
                     });
@@ -1848,7 +2114,7 @@ fn parse_inline_with_pulldown(input: &str, base: usize, in_table_cell: bool) -> 
     }
 
     finalize_pair_groups(&mut inline_pairs);
-    if styled_segments.iter().all(StyledSegment::is_plain) {
+    if styled_segments.iter().all(RawStyledSegment::is_plain) {
         styled_segments.clear();
         styled_segments.shrink_to_fit();
     }
@@ -1950,7 +2216,7 @@ fn synthesize_flanking_pairs(
     extra_blocked: &[std::ops::Range<usize>],
     raw_hidden: &mut Vec<std::ops::Range<usize>>,
     inline_pairs: &mut Vec<InlinePair>,
-    styled_segments: &mut Vec<StyledSegment>,
+    styled_segments: &mut Vec<RawStyledSegment>,
 ) {
     let bytes = input.as_bytes();
     // Most lines carry no delimiter at all: one SIMD scan skips the rest.
@@ -2162,7 +2428,7 @@ fn synthesize_flanking_pairs(
             inner.clone(),
             base + closer_start..base + c_end,
         ));
-        let or_kind = |s: &mut StyledSegment| match kind {
+        let or_kind = |s: &mut RawStyledSegment| match kind {
             InlineTagKind::Bold => s.bold = true,
             InlineTagKind::Italic => s.italic = true,
             InlineTagKind::Underline => s.underline = true,
@@ -2173,12 +2439,12 @@ fn synthesize_flanking_pairs(
         // Keep segments already inside the new span (nested bold, underline,
         // links) and OR the synthesized style onto each. Only fill a gap
         // when the inner range had no segments at all.
-        let mut rebuilt: Vec<StyledSegment> = Vec::new();
+        let mut rebuilt: Vec<RawStyledSegment> = Vec::new();
         let mut inner_covered = false;
         for s in styled_segments.drain(..) {
             if s.source.start < inner.end && s.source.end > inner.start {
                 if s.source.start < inner.start {
-                    rebuilt.push(StyledSegment {
+                    rebuilt.push(RawStyledSegment {
                         source: s.source.start..inner.start,
                         ..s.clone()
                     });
@@ -2193,7 +2459,7 @@ fn synthesize_flanking_pairs(
                     inner_covered = true;
                 }
                 if s.source.end > inner.end {
-                    rebuilt.push(StyledSegment {
+                    rebuilt.push(RawStyledSegment {
                         source: inner.end..s.source.end,
                         ..s
                     });
@@ -2213,13 +2479,13 @@ fn synthesize_flanking_pairs(
             for s in std::mem::take(&mut rebuilt) {
                 if s.source.start < run.end && s.source.end > run.start {
                     if s.source.start < run.start {
-                        next.push(StyledSegment {
+                        next.push(RawStyledSegment {
                             source: s.source.start..run.start,
                             ..s.clone()
                         });
                     }
                     if s.source.end > run.end {
-                        next.push(StyledSegment {
+                        next.push(RawStyledSegment {
                             source: run.end..s.source.end,
                             ..s
                         });
@@ -2249,7 +2515,7 @@ fn synthesize_flanking_pairs(
             styled_segments.push(s);
         }
         if !inner_covered {
-            let mut seg = StyledSegment {
+            let mut seg = RawStyledSegment {
                 source: inner.clone(),
                 bold: false,
                 italic: false,
@@ -2437,33 +2703,15 @@ impl Shift {
     }
 
     /// Move a line that comes after the edit. Its text is unchanged, so
-    /// every position in it moves by the same amount.
+    /// every position in it moves by the same amount. Because hidden ranges,
+    /// inline pairs, styled segments, and link hits are stored relative to
+    /// `line.source.start`, none of them need to be touched here.
     fn parsed_line(self, line: &mut ParsedLine) {
         line.line_index = self.line(line.line_index as usize) as u32;
         if self.delta == 0 {
             return;
         }
         self.range(&mut line.source);
-        for r in &mut line.hidden_ranges {
-            self.range(r);
-        }
-        if let Some(inline) = line.inline_mut() {
-            for pair in &mut inline.inline_pairs {
-                self.range(&mut pair.open_delim);
-                self.range(&mut pair.inner);
-                self.range(&mut pair.close_delim);
-                pair.group_open_start = self.pos(pair.group_open_start);
-                pair.group_close_end = self.pos(pair.group_close_end);
-            }
-            for seg in &mut inline.styled_segments {
-                self.range(&mut seg.source);
-            }
-            if !inline.link_hits.is_empty() {
-                for (r, _) in Arc::make_mut(&mut inline.link_hits) {
-                    self.range(r);
-                }
-            }
-        }
         if let LineKind::TableRow { body, .. } = &mut line.kind {
             for r in body.cells.iter_mut().chain(body.raw_cells.iter_mut()) {
                 self.range(r);
@@ -2679,25 +2927,6 @@ fn next_generation() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-fn fill_link_hits(line: &mut ParsedLine) {
-    let Some(inline) = line.inline_mut() else {
-        return;
-    };
-    let links: Vec<_> = inline
-        .styled_segments
-        .iter()
-        .filter_map(|seg| match &seg.link_url {
-            Some(url) if seg.source.end > seg.source.start => {
-                Some((seg.source.clone(), url.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    if !links.is_empty() {
-        inline.link_hits = Arc::new(links);
-    }
-}
-
 /// Fenced code blocks `(opening line incl. ending, closing line incl.
 /// ending)`; an unclosed fence runs to the end of the document.
 fn code_blocks_of(
@@ -2731,6 +2960,72 @@ fn code_blocks_of(
 /// in `raw_lines`.
 // The line loop moved here from parse_document, with its allow.
 #[allow(clippy::single_range_in_vec_init)]
+/// Parse one or more leading blockquote `>` markers on `line`.
+/// Returns `(depth, prefix_byte_len)` if the outermost `>` has at most
+/// `max_first_indent` leading columns. Subsequent nested `>` markers allow up
+/// to 3 columns of leading indent each.
+pub fn strip_blockquote_markers(line: &str, max_first_indent: usize) -> Option<(u8, usize)> {
+    let (indent_bytes, indent_cols) = split_indent(line);
+    if indent_cols > max_first_indent {
+        return None;
+    }
+    let after = &line[indent_bytes..];
+    if !after.starts_with('>') {
+        return None;
+    }
+    let space = usize::from(matches!(after.as_bytes().get(1), Some(b' ' | b'\t')));
+    let mut pos = indent_bytes + 1 + space;
+    let mut depth = 1u8;
+    loop {
+        let rest = &line[pos..];
+        let (sub_bytes, sub_cols) = split_indent(rest);
+        if sub_cols > 3 {
+            break;
+        }
+        let sub_after = &rest[sub_bytes..];
+        if !sub_after.starts_with('>') {
+            break;
+        }
+        let sub_space = usize::from(matches!(sub_after.as_bytes().get(1), Some(b' ' | b'\t')));
+        pos += sub_bytes + 1 + sub_space;
+        depth = depth.saturating_add(1);
+    }
+    Some((depth, pos))
+}
+
+/// Byte length of the outermost `>` marker (with up to 3 columns of indent and
+/// optional trailing space/tab) on `line`.
+pub fn strip_first_blockquote_marker_end(line: &str) -> Option<usize> {
+    let (indent_bytes, indent_cols) = split_indent(line);
+    if indent_cols > 3 {
+        return None;
+    }
+    let after = &line[indent_bytes..];
+    if !after.starts_with('>') {
+        return None;
+    }
+    let space = usize::from(matches!(after.as_bytes().get(1), Some(b' ' | b'\t')));
+    Some(indent_bytes + 1 + space)
+}
+
+/// Given a blockquote prefix slice (such as `"> > "` or `">   > "`), return
+/// the byte offset of the start of its innermost `>` marker (including any
+/// leading spaces/tabs before that `>`).
+pub fn strip_last_blockquote_marker_start(prefix: &str) -> Option<usize> {
+    let gt = prefix.rfind('>')?;
+    let mut start = gt;
+    while start > 0 && matches!(prefix.as_bytes()[start - 1], b' ' | b'\t') {
+        start -= 1;
+    }
+    // If the whitespace right before `gt` belongs to the previous `>`'s single
+    // separator space (e.g. `"> >"` where `gt == 2` and byte 1 is `' '`), keep
+    // that separator space on the outer quote!
+    if start > 0 && prefix.as_bytes()[start - 1] == b'>' && gt - start >= 1 {
+        start += 1;
+    }
+    Some(start)
+}
+
 fn parse_lines(
     raw_lines: &mut LineSource<'_>,
     base: usize,
@@ -2763,8 +3058,12 @@ fn parse_lines(
         } = &mut *state;
         macro_rules! push_line {
             ($line:expr) => {{
-                let mut p = $line;
-                list_quote_tracker.push(&p.kind);
+                let p = $line;
+                if p.quote_depth > 0 {
+                    list_quote_tracker.push(&LineKind::Blockquote);
+                } else {
+                    list_quote_tracker.push(&p.kind);
+                }
                 *prev_ends_block = matches!(
                     p.kind,
                     LineKind::Empty
@@ -2776,7 +3075,6 @@ fn parse_lines(
                 if !matches!(p.kind, LineKind::Empty) {
                     *last_content_is_code = matches!(p.kind, LineKind::CodeLine);
                 }
-                fill_link_hits(&mut p);
                 lines.push(p);
             }};
         }
@@ -2844,7 +3142,7 @@ fn parse_lines(
                 line_source,
                 line,
                 LineKind::CodeFence {
-                    language: language.map(String::into_boxed_str),
+                    language: language.map(|s| Box::new(s.into_boxed_str())),
                     opening: true,
                 },
             );
@@ -2881,7 +3179,7 @@ fn parse_lines(
                 .strip_prefix("```")
                 .map(|info| info.trim())
                 .filter(|info| !info.is_empty())
-                .map(Box::<str>::from);
+                .map(|info| Box::new(Box::<str>::from(info)));
             *open_fence = Some(OpenFence {
                 strict: false,
                 marker: b'`',
@@ -2908,7 +3206,7 @@ fn parse_lines(
             list_walk.note_block(line);
             let lang = Some(trimmed.trim_start_matches('~').trim())
                 .filter(|info| !info.is_empty())
-                .map(Box::<str>::from);
+                .map(|info| Box::new(Box::<str>::from(info)));
             *open_fence = Some(OpenFence {
                 strict: false,
                 marker: b'~',
@@ -2936,6 +3234,7 @@ fn parse_lines(
                 source: line_source,
                 content_end: line.len() as u32,
                 prefix_len: 0,
+                quote_depth: 0,
                 kind: LineKind::Empty,
                 hidden_ranges: Box::default(),
                 inline: None,
@@ -2955,12 +3254,17 @@ fn parse_lines(
         // open list item (document level rejects four spaces and a tab).
         if exact_thematic_break(line, list_walk.thematic_parent_col(line)) {
             list_walk.note_block(line);
-            let hidden = vec![line_start..line_end];
+            let hidden = if line.is_empty() {
+                Vec::new()
+            } else {
+                vec![LineRange::new(0, line.len() as u32)]
+            };
             push_line!(ParsedLine {
                 line_index: i as u32,
                 source: line_source,
                 content_end: line.len() as u32,
                 prefix_len: line.len() as u32,
+                quote_depth: 0,
                 kind: LineKind::HorizontalRule,
                 hidden_ranges: hidden.into(),
                 inline: None,
@@ -2988,12 +3292,17 @@ fn parse_lines(
             list_walk.note_block(line);
             if i == tbl.delimiter {
                 pending_header_cells = None;
-                let hidden = vec![line_start..line_end];
+                let hidden = if line.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![LineRange::new(0, line.len() as u32)]
+                };
                 push_line!(ParsedLine {
                     line_index: i as u32,
                     source: line_source,
                     content_end: line.len() as u32,
                     prefix_len: line.len() as u32,
+                    quote_depth: 0,
                     kind: LineKind::TableDelimiter,
                     hidden_ranges: hidden.into(),
                     inline: None,
@@ -3020,14 +3329,16 @@ fn parse_lines(
                     let lead = usize::from(cell_slice.starts_with(' '));
                     let rem = &cell_slice[lead..];
                     let trail = usize::from(rem.ends_with(' '));
-                    let c_start = raw_abs.start + lead;
-                    let c_end = raw_abs.end - trail;
+                    let c_start_rel = raw.start + lead;
+                    let c_end_rel = raw.end - trail;
+                    let c_start = line_start + c_start_rel;
+                    let c_end = line_start + c_end_rel;
                     raw_cells.push(raw_abs);
                     cells.push(c_start..c_end);
-                    if c_end > c_start {
-                        let inner_slice = &line[(c_start - line_start)..(c_end - line_start)];
+                    if c_end_rel > c_start_rel {
+                        let inner_slice = &line[c_start_rel..c_end_rel];
                         let (c_hid, c_pairs, c_segs) =
-                            parse_inline_syntax_cell(inner_slice, c_start);
+                            parse_inline_syntax_cell(inner_slice, c_start_rel);
                         row_hidden.extend(c_hid);
                         row_pairs.extend(c_pairs);
                         row_segments.extend(c_segs);
@@ -3037,12 +3348,13 @@ fn parse_lines(
                     cells.push(line_end..line_end);
                     raw_cells.push(line_end..line_end);
                 }
-                let merged_hidden = merge_ranges(row_hidden);
+                let merged_hidden = merge_line_ranges(row_hidden);
                 push_line!(ParsedLine {
                     line_index: i as u32,
                     source: line_source,
                     content_end: line.len() as u32,
                     prefix_len: 0,
+                    quote_depth: 0,
                     kind: LineKind::TableRow {
                         is_header,
                         body: Box::new(TableRowBody {
@@ -3053,7 +3365,7 @@ fn parse_lines(
                         }),
                     },
                     hidden_ranges: merged_hidden.into(),
-                    inline: LineInline::boxed(row_pairs.into(), row_segments.into(), None),
+                    inline: LineInline::boxed(row_pairs, row_segments, None),
                 });
                 continue;
             }
@@ -3069,6 +3381,9 @@ fn parse_lines(
         // Determine block kind & prefix length
         let mut kind = LineKind::Paragraph;
         let mut prefix_len = 0usize;
+        let mut quote_depth = 0u8;
+        let mut content_end = line.len();
+        let mut extra_hidden: Option<std::ops::Range<usize>> = None;
 
         if let Some(item) = list_walk.take_list(line) {
             let checkbox_offset = item
@@ -3085,43 +3400,109 @@ fn parse_lines(
                 checkbox_offset,
             };
             prefix_len = item.prefix_end();
-        } else if after_indent.starts_with('>')
-            && indent_cols.saturating_sub(list_walk.thematic_parent_col(line)) <= 3
+        } else if let Some((depth, q_len)) =
+            strip_blockquote_markers(line, list_walk.thematic_parent_col(line) + 3)
         {
             list_walk.note_block(line);
-            kind = LineKind::Blockquote;
-            let space_or_tab =
-                usize::from(matches!(after_indent.as_bytes().get(1), Some(b' ' | b'\t')));
-            prefix_len = indent_bytes + 1 + space_or_tab;
+            quote_depth = depth;
+            let inner = &line[q_len..];
+            if let Some((level, content)) = atx_display_content_range(inner) {
+                kind = LineKind::Heading { level };
+                prefix_len = q_len + content.start;
+                content_end = q_len + content.end;
+                if content_end < line.len() {
+                    extra_hidden = Some(content_end..line.len());
+                }
+            } else if exact_thematic_break(inner, 0) {
+                let hidden = if line.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![LineRange::new(0, line.len() as u32)]
+                };
+                push_line!(ParsedLine {
+                    line_index: i as u32,
+                    source: line_source,
+                    content_end: line.len() as u32,
+                    prefix_len: line.len() as u32,
+                    quote_depth,
+                    kind: LineKind::HorizontalRule,
+                    hidden_ranges: hidden.into(),
+                    inline: None,
+                });
+                continue;
+            } else if split_indent(inner).1 <= 3 {
+                if let Some(item) = scan_list_marker(inner) {
+                    let checkbox_offset = item
+                        .task
+                        .as_ref()
+                        .and_then(|task| u16::try_from(q_len + task.checkbox_at).ok())
+                        .filter(|&off| off != u16::MAX)
+                        .unwrap_or(u16::MAX);
+                    kind = LineKind::ListItem {
+                        ordered: item.ordered,
+                        number: item.number.min(u32::MAX as usize) as u32,
+                        task: item.task.as_ref().map(|task| task.checked),
+                        indent_cols: split_indent(inner).1.min(u16::MAX as usize) as u16,
+                        checkbox_offset,
+                    };
+                    prefix_len = q_len + item.prefix_end();
+                } else {
+                    kind = LineKind::Blockquote;
+                    prefix_len = q_len;
+                }
+            } else {
+                kind = LineKind::Blockquote;
+                prefix_len = q_len;
+            }
         } else {
+            let _ = after_indent;
+            let _ = indent_bytes;
             list_walk.note_paragraph();
         }
 
-        let prefix_range = line_start..(line_start + prefix_len);
-        let body = &line[prefix_len..];
-        let body_base = line_start + prefix_len;
+        let allow_hard_break = matches!(
+            kind,
+            LineKind::Paragraph | LineKind::Blockquote | LineKind::ListItem { .. }
+        ) && raw_lines.get(local + 1).is_some_and(|next| {
+            if quote_depth > 0 {
+                strip_blockquote_markers(next.text, 3)
+                    .map(|(_, q)| !next.text[q..].trim().is_empty())
+                    .unwrap_or(false)
+            } else {
+                !next.text.trim().is_empty()
+            }
+        });
+        let prefix_range = 0..prefix_len;
+        let body = &line[prefix_len..content_end];
         let (mut inline_hidden, inline_pairs, styled_segments) =
-            parse_inline_syntax(body, body_base);
+            parse_inline_syntax_line(body, prefix_len, allow_hard_break);
 
+        if allow_hard_break
+            && inline_hidden
+                .iter()
+                .any(|r| r.start + 1 == line.len() && r.end == line.len())
+        {
+            content_end = line.len() - 1;
+        }
         if prefix_len > 0 {
             inline_hidden.push(prefix_range);
         }
-        let merged_hidden = merge_ranges(inline_hidden);
+        if let Some(trail) = extra_hidden {
+            inline_hidden.push(trail);
+        }
+        let merged_hidden = merge_line_ranges(inline_hidden);
 
-        let display_text_owned = build_display(line, line_start, prefix_len, &merged_hidden);
+        let display_text_owned = build_display(line, prefix_len, &merged_hidden);
 
         push_line!(ParsedLine {
             line_index: i as u32,
             source: line_source,
-            content_end: line.len() as u32,
+            content_end: content_end as u32,
             prefix_len: prefix_len as u32,
+            quote_depth,
             kind,
             hidden_ranges: merged_hidden.into(),
-            inline: LineInline::boxed(
-                inline_pairs.into(),
-                styled_segments.into(),
-                display_text_owned,
-            ),
+            inline: LineInline::boxed(inline_pairs, styled_segments, display_text_owned),
         });
     }
     None

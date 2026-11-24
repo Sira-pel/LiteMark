@@ -650,7 +650,15 @@ pub(super) fn skip_hidden_interior_left(parsed: &ParsedDocument, mut pos: usize)
 /// hides the closer, so this is the click, End, and Right target. Raw paints
 /// the source, and every other line keeps the source end.
 pub(crate) fn visible_line_end(line: &ParsedLine, mode: ViewMode) -> usize {
-    if mode != ViewMode::Raw && matches!(line.kind, LineKind::Heading { .. }) {
+    if mode != ViewMode::Raw
+        && matches!(
+            line.kind,
+            LineKind::Heading { .. }
+                | LineKind::Paragraph
+                | LineKind::Blockquote
+                | LineKind::ListItem { .. }
+        )
+    {
         line.source.start + line.content_end as usize
     } else {
         line.source.end

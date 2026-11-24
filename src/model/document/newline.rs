@@ -2,6 +2,15 @@
 
 use super::*;
 
+fn quoted_continuation_prefix(line: &str, quote_prefix_len: usize) -> String {
+    let prefix = &line[..quote_prefix_len.min(line.len())];
+    if prefix.ends_with([' ', '\t']) {
+        prefix.to_string()
+    } else {
+        format!("{prefix} ")
+    }
+}
+
 impl DocumentTab {
     /// Enter at the visible end of a closing-hash heading inserts after the
     /// closer, so the heading stays one line.
@@ -264,27 +273,62 @@ impl DocumentTab {
             return;
         }
 
-        if let Some(prefix_len) = local
+        if let Some((quote_depth, q_len)) = local
             .lines
             .first()
-            .filter(|l| l.kind == LineKind::Blockquote)
-            .map(|l| l.prefix_len as usize)
+            .filter(|l| l.quote_depth > 0)
+            .and_then(|l| {
+                crate::markdown::strip_blockquote_markers(line, 64).map(|(_, q)| (l.quote_depth, q))
+            })
         {
-            let body = &line[prefix_len..];
+            let q_cont = quoted_continuation_prefix(line, q_len);
+            if matches!(local.lines[0].kind, LineKind::ListItem { .. }) {
+                if let Some(item) = crate::markdown::scan_list_marker(&line[q_len..]) {
+                    let body = &line[q_len + item.prefix_end()..];
+                    if body.trim().is_empty() && range.is_empty() {
+                        self.edit(line_start + q_len..line_end_pos, "");
+                    } else if range.is_empty() && cursor < line_start + q_len + item.prefix_end() {
+                        self.edit(line_start..line_start, nl);
+                        self.caret.move_to(cursor + nl.len());
+                        self.refresh_cursor();
+                    } else {
+                        let inner_indent = &line[q_len..q_len + item.indent_bytes];
+                        let inner_cont = item.continuation(inner_indent);
+                        let ins = format!("{nl}{q_cont}{}", inner_cont.trim_start_matches('\n'));
+                        self.edit(range, &ins);
+                    }
+                    return;
+                }
+            }
+            if matches!(local.lines[0].kind, LineKind::Heading { .. }) {
+                let pfx = local.lines[0].prefix_len as usize;
+                if range.is_empty() && cursor <= line_start + pfx && !line[pfx..].trim().is_empty()
+                {
+                    self.edit(line_start..line_start, nl);
+                    self.caret.move_to(cursor + nl.len());
+                    self.refresh_cursor();
+                } else {
+                    self.edit(range, &format!("{nl}{q_cont}"));
+                }
+                return;
+            }
+            let body = &line[q_len..];
             if body.trim().is_empty() {
                 if !range.is_empty() {
                     self.edit(range, nl);
+                } else if quote_depth >= 2 {
+                    let cut = crate::markdown::strip_last_blockquote_marker_start(&line[..q_len])
+                        .unwrap_or(0);
+                    self.edit(line_start + cut..line_end_pos, "");
                 } else {
                     self.edit(line_start..line_end_pos, "");
                 }
-            } else if range.is_empty() && cursor < line_start + prefix_len {
+            } else if range.is_empty() && cursor < line_start + q_len {
                 self.edit(line_start..line_start, nl);
                 self.caret.move_to(cursor + nl.len());
                 self.refresh_cursor();
             } else {
-                let q_indent = &line[..crate::markdown::parser::split_indent(line).0];
-                let ins = format!("{nl}{q_indent}> ");
-                self.edit(range, &ins);
+                self.edit(range, &format!("{nl}{q_cont}"));
             }
             return;
         }
@@ -532,13 +576,23 @@ impl DocumentTab {
             return;
         }
 
-        let (list_item, heading_prefix_len, exit_indented_code, quote_prefix_len, is_hr) = {
+        let (list_item, heading_prefix_len, exit_indented_code, quote_info, is_hr) = {
             let parsed = self.parsed();
-            let list_item = accepted_list_marker_in(&parsed, &self.content, line_start);
             let line = &self.content[line_start..line_end_pos];
+            let parsed_line = parsed.line_at_offset(line_start);
+            let quote_info = parsed_line.filter(|l| l.quote_depth > 0).and_then(|l| {
+                crate::markdown::strip_blockquote_markers(line, 64)
+                    .map(|(_, q)| (l.quote_depth, q, l.kind.clone(), l.prefix_len as usize))
+            });
+            let list_item = if quote_info.is_none() {
+                accepted_list_marker_in(&parsed, &self.content, line_start)
+            } else {
+                None
+            };
             let trimmed_start = line.trim_start();
             let indent = &line[..line.len() - trimmed_start.len()];
-            let is_heading = indent.len() <= 3
+            let is_heading = quote_info.is_none()
+                && indent.len() <= 3
                 && ["###### ", "##### ", "#### ", "### ", "## ", "# "]
                     .iter()
                     .any(|p| trimmed_start.starts_with(p));
@@ -547,23 +601,16 @@ impl DocumentTab {
             let exit_indented_code = trimmed_start.is_empty()
                 && !indent.is_empty()
                 && range.is_empty()
-                && parsed
-                    .line_at_offset(line_start)
+                && parsed_line
                     .and_then(|line| line.line_index.checked_sub(1))
                     .and_then(|index| parsed.lines.get(index as usize))
                     .is_some_and(|line| is_indented_code(&parsed, line));
-            let quote_prefix_len = parsed
-                .line_at_offset(line_start)
-                .filter(|l| l.kind == LineKind::Blockquote)
-                .map(|l| l.prefix_len as usize);
-            let is_hr = parsed
-                .line_at_offset(line_start)
-                .is_some_and(|l| matches!(l.kind, LineKind::HorizontalRule));
+            let is_hr = parsed_line.is_some_and(|l| matches!(l.kind, LineKind::HorizontalRule));
             (
                 list_item,
                 heading_prefix_len,
                 exit_indented_code,
-                quote_prefix_len,
+                quote_info,
                 is_hr,
             )
         };
@@ -631,23 +678,64 @@ impl DocumentTab {
             return;
         }
 
-        // Blockquotes: ">", "> ", ">\t", or ">text" (up to 3 columns of indent)
-        if let Some(prefix_len) = quote_prefix_len {
-            let body = &line[prefix_len..];
+        // Blockquotes: ">", "> ", "> > ", including inner lists and headings
+        if let Some((quote_depth, q_len, q_kind, full_pfx)) = quote_info {
+            let q_cont = quoted_continuation_prefix(line, q_len);
+            if matches!(q_kind, LineKind::ListItem { .. }) {
+                if let Some(item) = crate::markdown::scan_list_marker(&line[q_len..]) {
+                    let inner_pfx = q_len + item.prefix_end();
+                    let body = &line[inner_pfx..];
+                    if body.trim().is_empty() && range.is_empty() {
+                        self.edit(line_start + q_len..line_end_pos, "");
+                    } else if range.is_empty() && cursor < line_start + inner_pfx {
+                        self.edit(line_start..line_start, nl);
+                        self.caret.move_to(cursor + nl.len());
+                        self.refresh_cursor();
+                    } else {
+                        let inner_indent = &line[q_len..q_len + item.indent_bytes];
+                        let inner_cont = item.continuation(inner_indent);
+                        let ins = format!("{nl}{q_cont}{}", inner_cont.trim_start_matches('\n'));
+                        if !self.split_inline_span_newline(&range, &ins) {
+                            self.edit(range, &ins);
+                        }
+                    }
+                    return;
+                }
+            }
+            if matches!(q_kind, LineKind::Heading { .. }) {
+                if range.is_empty()
+                    && cursor <= line_start + full_pfx
+                    && !line[full_pfx..].trim().is_empty()
+                {
+                    self.edit(line_start..line_start, nl);
+                    self.caret.move_to(cursor + nl.len());
+                    self.refresh_cursor();
+                    return;
+                }
+                let ins = format!("{nl}{q_cont}");
+                if !self.split_inline_span_newline(&range, &ins) {
+                    self.edit(range, &ins);
+                }
+                return;
+            }
+            let body = &line[q_len..];
             let is_empty_quote = body.trim().is_empty();
             if is_empty_quote {
                 if !range.is_empty() {
                     self.edit(range, nl);
+                } else if quote_depth >= 2 {
+                    let cut = crate::markdown::strip_last_blockquote_marker_start(&line[..q_len])
+                        .unwrap_or(0);
+                    self.edit(line_start + cut..line_end_pos, "");
                 } else {
                     self.edit(line_start..line_end_pos, "");
                 }
-            } else if range.is_empty() && cursor < line_start + prefix_len {
+            } else if range.is_empty() && cursor < line_start + q_len {
                 self.edit(line_start..line_start, nl);
                 self.caret.move_to(cursor + nl.len());
                 self.refresh_cursor();
             } else {
-                let q_indent = &line[..crate::markdown::parser::split_indent(line).0];
-                let ins = format!("{nl}{q_indent}> ");
+                let ins = format!("{nl}{q_cont}");
                 if self.split_inline_span_newline(&range, &ins) {
                     return;
                 }
@@ -867,10 +955,39 @@ impl DocumentTab {
             }
         }
 
-        // Blockquote prefix at cursor boundary
-        if line_before == "> " {
-            self.edit(line_start..cursor, "");
-            return true;
+        // Blockquote prefix at cursor boundary (including nested `> > ` and inner headings/lists)
+        if let Some((_, q_len)) = crate::markdown::strip_blockquote_markers(line_before, 3) {
+            if q_len == line_before.len() {
+                let cut =
+                    crate::markdown::strip_last_blockquote_marker_start(line_before).unwrap_or(0);
+                self.edit(line_start + cut..cursor, "");
+                return true;
+            }
+            let inner_before = &line_before[q_len..];
+            for (prefix, demoted) in [
+                ("###### ", "##### "),
+                ("##### ", "#### "),
+                ("#### ", "### "),
+                ("### ", "## "),
+                ("## ", "# "),
+                ("# ", ""),
+            ] {
+                if inner_before == prefix {
+                    self.edit(line_start + q_len..cursor, demoted);
+                    return true;
+                }
+            }
+            if let Some(item) = crate::markdown::scan_list_marker(inner_before) {
+                if item.prefix_end() == inner_before.len() {
+                    if item.task.is_some() {
+                        let start = line_start + q_len + item.marker_end;
+                        self.edit(start..cursor, "");
+                    } else {
+                        self.edit(line_start + q_len..cursor, "");
+                    }
+                    return true;
+                }
+            }
         }
 
         // 7. Indentation spaces deletion (outdent 2 spaces if only spaces before cursor on this line)

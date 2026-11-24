@@ -27,12 +27,12 @@ fn plain_inline_shortcut_matches_pulldown() {
         for base in [0, 7] {
             assert_eq!(
                 parse_inline_syntax(text, base),
-                parse_inline_with_pulldown(text, base, false),
+                parse_inline_with_pulldown(text, base, false, false),
                 "{text:?}"
             );
             assert_eq!(
                 parse_inline_syntax_cell(text, base),
-                parse_inline_with_pulldown(text, base, true),
+                parse_inline_with_pulldown(text, base, true, false),
                 "cell {text:?}"
             );
         }
@@ -60,12 +60,12 @@ fn plain_inline_shortcut_matches_pulldown() {
         if is_plain_inline(&text) {
             assert_eq!(
                 parse_inline_syntax(&text, 3),
-                parse_inline_with_pulldown(&text, 3, false),
+                parse_inline_with_pulldown(&text, 3, false, false),
                 "{text:?}"
             );
             assert_eq!(
                 parse_inline_syntax_cell(&text, 3),
-                parse_inline_with_pulldown(&text, 3, true),
+                parse_inline_with_pulldown(&text, 3, true, false),
                 "cell {text:?}"
             );
             checked += 1;
@@ -164,6 +164,7 @@ fn test_in_list_or_quote_tracker_exhaustive() {
                 source: 0..0,
                 content_end: 0,
                 prefix_len: 0,
+                quote_depth: 0,
                 kind: kind.clone(),
                 hidden_ranges: Box::default(),
                 inline: None,
@@ -220,19 +221,26 @@ fn test_headings_and_hr() {
 fn test_spans_formatting() {
     let input = "Normal **bold** *italic* <u>underlined</u> ~~strike~~ `code`";
     let doc = parse_document(input);
-    let segs = &doc.lines[0].styled_segments();
+    let line = &doc.lines[0];
+    let segs = line.styled_segments();
     let styled = |word: &str, pick: fn(&StyledSegment) -> bool| {
         segs.iter()
-            .any(|s| pick(s) && input[s.source.clone()].contains(word))
+            .any(|s| pick(s) && input[s.source(line.source.start)].contains(word))
     };
-    assert!(styled("bold", |s| s.bold), "Expected bold span");
-    assert!(styled("italic", |s| s.italic), "Expected italic span");
+    assert!(styled("bold", StyledSegment::bold), "Expected bold span");
     assert!(
-        styled("underlined", |s| s.underline),
+        styled("italic", StyledSegment::italic),
+        "Expected italic span"
+    );
+    assert!(
+        styled("underlined", StyledSegment::underline),
         "Expected underline span"
     );
-    assert!(styled("strike", |s| s.strike), "Expected strike span");
-    assert!(styled("code", |s| s.code), "Expected code span");
+    assert!(
+        styled("strike", StyledSegment::strike),
+        "Expected strike span"
+    );
+    assert!(styled("code", StyledSegment::code), "Expected code span");
 }
 
 #[test]
@@ -251,7 +259,7 @@ fn test_styled_segments_bold() {
     let line = &doc.lines[0];
     println!("display: {:?}", line.display_text(input));
     println!("segments: {:?}", line.styled_segments());
-    let bold_seg = line.styled_segments().iter().find(|s| s.bold);
+    let bold_seg = line.styled_segments().iter().find(|s| s.bold());
     assert!(bold_seg.is_some(), "Expected bold styled segment");
 }
 
@@ -343,14 +351,15 @@ fn test_parse_document_table() {
     let bold_segs: Vec<_> = doc.lines[0]
         .styled_segments()
         .iter()
-        .filter(|s| s.bold)
+        .filter(|s| s.bold())
         .collect();
     assert!(!bold_segs.is_empty());
     let col2_start = md.find("Col 2").unwrap();
-    let col2_bold = doc.lines[0]
-        .styled_segments()
-        .iter()
-        .any(|s| s.bold && s.source.start < col2_start + 5 && s.source.end > col2_start);
+    let base0 = doc.lines[0].source.start;
+    let col2_bold = doc.lines[0].styled_segments().iter().any(|s| {
+        let src = s.source(base0);
+        s.bold() && src.start < col2_start + 5 && src.end > col2_start
+    });
     assert!(!col2_bold);
 }
 
@@ -361,11 +370,12 @@ fn rendered_click_maps_to_source_and_strike_is_marked() {
     // Display column 1 of the heading ("Hi" without "# ") is the "i".
     let offset = doc.lines[0].display_to_source(1);
     assert_eq!(&md[offset..offset + 1], "i");
+    let base2 = doc.lines[2].source.start;
     let strike = doc.lines[2]
         .styled_segments()
         .iter()
-        .find(|s| md[s.source.clone()].contains("gone"));
-    assert!(strike.unwrap().strike);
+        .find(|s| md[s.source(base2)].contains("gone"));
+    assert!(strike.unwrap().strike());
 
     let bullet_doc = parse_document("- alpha");
     let bullet = bullet_doc.lines[0].display_to_source(0);
@@ -505,24 +515,24 @@ fn leaf_dump(md: &str) -> Result<String, String> {
         }
         for segment in line.styled_segments() {
             let mut flags = String::new();
-            if segment.bold {
+            if segment.bold() {
                 flags.push('B');
             }
-            if segment.italic {
+            if segment.italic() {
                 flags.push('I');
             }
-            if segment.code {
+            if segment.code() {
                 flags.push('C');
             }
-            if segment.strike {
+            if segment.strike() {
                 flags.push('S');
             }
-            let text = md.get(segment.source.clone()).unwrap_or("");
+            let text = md.get(segment.source(line.source.start)).unwrap_or("");
             if !flags.is_empty() && !text.is_empty() {
                 marks.push(format!("{flags}:{text}"));
             }
-            if let Some(url) = &segment.link_url {
-                links.push(url.clone());
+            if let Some(url) = line.segment_link_url(segment) {
+                links.push(url.to_string());
             }
         }
         let marks = if marks.is_empty() {
@@ -1342,8 +1352,8 @@ fn kind_report(md: &str, line: &ParsedLine) -> String {
 fn strike_report(md: &str, line: &ParsedLine) -> String {
     let mut parts = Vec::new();
     for segment in line.styled_segments() {
-        if segment.strike {
-            parts.push(format!("{:?}", &md[segment.source.clone()]));
+        if segment.strike() {
+            parts.push(format!("{:?}", &md[segment.source(line.source.start)]));
         }
     }
     if parts.is_empty() {
@@ -1356,7 +1366,7 @@ fn strike_report(md: &str, line: &ParsedLine) -> String {
 fn link_report(line: &ParsedLine) -> String {
     let mut urls = Vec::new();
     for segment in line.styled_segments() {
-        if let Some(url) = &segment.link_url {
+        if let Some(url) = line.segment_link_url(segment) {
             urls.push(format!("{url:?}"));
         }
     }
@@ -1947,11 +1957,12 @@ fn four_space_text_lines_parse_every_inline_format() {
             "{src:?}: {:?}",
             line.kind
         );
+        let base = line.source.start;
         let flags = |text: &str| {
             line.styled_segments()
                 .iter()
-                .find(|s| &src[s.source.clone()] == text)
-                .map(|s| (s.underline, s.code, s.strike, s.italic))
+                .find(|s| &src[s.source(base)] == text)
+                .map(|s| (s.underline(), s.code(), s.strike(), s.italic()))
         };
         assert_eq!(flags("x"), Some((true, false, false, false)), "{src:?}");
         assert_eq!(flags("y"), Some((false, true, false, false)), "{src:?}");
@@ -2058,8 +2069,8 @@ fn shape_of(markdown: &str) -> String {
         let mut code = line
             .styled_segments()
             .iter()
-            .filter(|segment| segment.code)
-            .map(|segment| markdown[segment.source.clone()].to_string())
+            .filter(|segment| segment.code())
+            .map(|segment| markdown[segment.source(line.source.start)].to_string())
             .collect::<Vec<_>>();
         let disp = line.display_text(markdown);
         if matches!(line.kind, LineKind::CodeLine) && !disp.is_empty() {
@@ -3438,7 +3449,7 @@ fn word_style(md: &str, word: &str) -> (bool, bool, bool, bool, bool) {
     let segs: Vec<_> = doc
         .lines
         .iter()
-        .flat_map(|line| line.styled_segments().iter())
+        .flat_map(|line| line.abs_styled_segments())
         .filter(|s| s.source.start < end && s.source.end > start)
         .collect();
     let Some(s) = segs.first() else {
@@ -3537,7 +3548,7 @@ fn synthesize_ors_style_onto_nested_segments() {
                 .find(|l| {
                     l.styled_segments()
                         .iter()
-                        .any(|s| md.get(s.source.clone()) == Some("b"))
+                        .any(|s| md.get(s.source(l.source.start)) == Some("b"))
                 })
                 .unwrap_or(&doc.lines[0]);
             assert!(
@@ -3663,7 +3674,6 @@ fn link_stack_advances_across_nested_closers_and_linked_images() {
     let doc = parse_document(bold_link);
     let pair = doc.lines[0]
         .inline_pairs()
-        .iter()
         .find(|p| p.kind == InlineTagKind::Link)
         .expect("link pair");
     assert_eq!(&bold_link[pair.open_delim.clone()], "[");
@@ -3677,7 +3687,6 @@ fn link_stack_advances_across_nested_closers_and_linked_images() {
     let u_doc = parse_document(u_link);
     let u_pair = u_doc.lines[0]
         .inline_pairs()
-        .iter()
         .find(|p| p.kind == InlineTagKind::Link)
         .expect("underline link pair");
     assert_eq!(&u_link[u_pair.inner.clone()], "under");
@@ -3690,7 +3699,6 @@ fn link_stack_advances_across_nested_closers_and_linked_images() {
     let img_doc = parse_document(img_link);
     let img_pair = img_doc.lines[0]
         .inline_pairs()
-        .iter()
         .find(|p| p.kind == InlineTagKind::Link)
         .expect("linked image pair");
     assert_eq!(&img_link[img_pair.open_delim.clone()], "[");
@@ -3702,7 +3710,7 @@ fn link_stack_advances_across_nested_closers_and_linked_images() {
     assert!(img_doc.lines[0]
         .styled_segments()
         .iter()
-        .any(|s| s.link_url.as_deref() == Some("https://example.com")));
+        .any(|s| img_doc.lines[0].segment_link_url(s) == Some("https://example.com")));
 }
 
 #[test]
@@ -3724,25 +3732,25 @@ fn prepare_for_pulldown_preserves_link_destinations() {
 #[test]
 fn synthesize_flanking_pairs_respects_html_comments_images_and_existing_pairs() {
     let comment = parse_document("<!-- *not italic* -->");
-    assert!(comment.lines[0].inline_pairs().is_empty());
+    assert_eq!(comment.lines[0].inline_pairs().len(), 0);
     assert!(comment.lines[0]
         .styled_segments()
         .iter()
-        .all(|s| !s.italic && !s.bold));
+        .all(|s| !s.italic() && !s.bold()));
 
     let tag = parse_document(r#"<span data-x="*a*">hi</span>"#);
-    assert!(tag.lines[0].inline_pairs().is_empty());
-    assert!(tag.lines[0].styled_segments().iter().all(|s| !s.italic));
+    assert_eq!(tag.lines[0].inline_pairs().len(), 0);
+    assert!(tag.lines[0].styled_segments().iter().all(|s| !s.italic()));
 
     let inline_img = parse_document("foo ![alt](https://example.com/*a*_b*c.png) bar");
-    assert!(inline_img.lines[0].inline_pairs().is_empty());
+    assert_eq!(inline_img.lines[0].inline_pairs().len(), 0);
     assert!(inline_img.lines[0]
         .styled_segments()
         .iter()
-        .all(|s| !s.italic && !s.bold));
+        .all(|s| !s.italic() && !s.bold()));
 
     let crossing = parse_document("**a *b** c*");
-    let pairs = &crossing.lines[0].inline_pairs();
+    let pairs: Vec<InlinePair> = crossing.lines[0].inline_pairs().collect();
     for (i, a) in pairs.iter().enumerate() {
         for b in &pairs[i + 1..] {
             let disjoint =
@@ -3763,22 +3771,23 @@ fn unclosed_underline_tag_does_not_underline_trailing_text() {
     assert!(unclosed.lines[0]
         .styled_segments()
         .iter()
-        .all(|s| !s.underline));
+        .all(|s| !s.underline()));
 
     let mixed_src = "<u>closed</u> and <u>unclosed";
     let mixed = parse_document(mixed_src);
+    let base = mixed.lines[0].source.start;
     let closed_seg = mixed.lines[0]
         .styled_segments()
         .iter()
-        .find(|s| &mixed_src[s.source.clone()] == "closed")
+        .find(|s| &mixed_src[s.source(base)] == "closed")
         .expect("closed segment");
     let unclosed_seg = mixed.lines[0]
         .styled_segments()
         .iter()
-        .find(|s| &mixed_src[s.source.clone()] == "unclosed")
+        .find(|s| &mixed_src[s.source(base)] == "unclosed")
         .expect("unclosed segment");
-    assert!(closed_seg.underline);
-    assert!(!unclosed_seg.underline);
+    assert!(closed_seg.underline());
+    assert!(!unclosed_seg.underline());
 }
 
 #[test]
@@ -3826,7 +3835,7 @@ fn prepare_for_pulldown_handles_many_unclosed_links_and_backticks() {
     }
     line.push_str("*ok*");
     let doc = parse_document(&line);
-    assert!(doc.lines[0].styled_segments().iter().any(|s| s.italic));
+    assert!(doc.lines[0].styled_segments().iter().any(|s| s.italic()));
     assert_eq!(
         prepare_for_pulldown(&"]([a](foo_*bar)".repeat(500)).as_ref(),
         &"]([a](foo_*bar)".repeat(500)
@@ -3889,6 +3898,7 @@ fn rebuilt_offset_map_matches_from_hidden() {
             text,
             line.source.start,
             line.prefix_end(),
+            line.source.start,
             &line.hidden_ranges,
         );
         assert_eq!(map, expected, "{text:?}");
@@ -3907,6 +3917,7 @@ fn zero_alloc_line_lookups_match_row_offset_map() {
             line.source.start,
             line.source.end,
             line.prefix_end(),
+            line.source.start,
             &line.hidden_ranges,
         );
         for src in line.source.start.saturating_sub(2)..=line.source.end + 2 {
@@ -3962,4 +3973,175 @@ fn synthesize_flanking_pairs_matches_expected_cases() {
         doc.lines[0].display_text("**bold** and ***both*** and **bold**.word"),
         "bold and both and bold.word"
     );
+}
+
+#[test]
+fn ast_struct_sizes_stay_compact() {
+    assert_eq!(std::mem::size_of::<LineKind>(), 16);
+    assert_eq!(std::mem::size_of::<ParsedLine>(), 72);
+    assert_eq!(std::mem::size_of::<LineRange>(), 8);
+    assert_eq!(std::mem::size_of::<LineInlinePair>(), 36);
+    assert_eq!(std::mem::size_of::<StyledSegment>(), 12);
+}
+
+#[test]
+fn long_single_line_past_64k_preserves_inline_spans() {
+    let prefix = "a".repeat(70_000);
+    let tail = "**bold** _italic_ [link](https://example.com)";
+    let md = format!("{prefix}{tail}");
+    let doc = parse_document(&md);
+    assert_eq!(doc.lines.len(), 1);
+    let line = &doc.lines[0];
+    assert_eq!(line.inline_pairs().len(), 3);
+    assert!(line
+        .styled_segments()
+        .iter()
+        .any(|s| s.bold() && &md[s.source(0)] == "bold"));
+    assert!(line
+        .styled_segments()
+        .iter()
+        .any(|s| s.italic() && &md[s.source(0)] == "italic"));
+    let link_seg = line
+        .styled_segments()
+        .iter()
+        .find(|s| s.is_link() && &md[s.source(0)] == "link")
+        .expect("link segment past 64k");
+    assert_eq!(line.segment_link_url(link_seg), Some("https://example.com"));
+    assert_eq!(line.display_text(&md), format!("{prefix}bold italic link"));
+    let link_src = md.find("link]").unwrap();
+    let disp = line.source_to_display(link_src);
+    assert_eq!(line.display_to_source(disp), link_src);
+}
+
+#[test]
+fn incremental_shift_preserves_line_relative_links_and_styles() {
+    let mut text = String::from("top\n\n");
+    for i in 0..40 {
+        text.push_str(&format!(
+            "line {i} **bold** *italic* `code` [site{i}](https://example.com/{i})\n"
+        ));
+    }
+    let mut doc = parse_document(&text);
+    text.insert_str(0, "inserted header\n");
+    doc.apply_edit(&text, 0..0, "inserted header\n".len());
+    let fresh = parse_document(&text);
+    assert_eq!(doc, fresh);
+    let last_styled = &doc.lines[doc.lines.len() - 2];
+    assert_eq!(last_styled.link_hits().len(), 1);
+    let link_seg = last_styled
+        .styled_segments()
+        .iter()
+        .find(|s| s.is_link())
+        .expect("link seg");
+    assert!(last_styled
+        .segment_link_url(link_seg)
+        .is_some_and(|u| u.starts_with("https://example.com/")));
+}
+
+#[test]
+fn w1_nested_blockquotes_and_inner_blocks() {
+    let md = "> > nested\n>>> deep\n>   > spaced\n> # Heading\n> > ## Sub ##\n> - bullet\n> - [x] task\n> 1. ordered\n> ---";
+    let doc = parse_document(md);
+    assert_eq!(doc.lines[0].quote_depth, 2);
+    assert_eq!(doc.lines[0].kind, LineKind::Blockquote);
+    assert_eq!(doc.lines[0].display_text(md), "nested");
+
+    assert_eq!(doc.lines[1].quote_depth, 3);
+    assert_eq!(doc.lines[1].display_text(md), "deep");
+
+    assert_eq!(doc.lines[2].quote_depth, 2);
+    assert_eq!(doc.lines[2].display_text(md), "spaced");
+
+    assert_eq!(doc.lines[3].quote_depth, 1);
+    assert_eq!(doc.lines[3].kind, LineKind::Heading { level: 1 });
+    assert_eq!(doc.lines[3].display_text(md), "Heading");
+
+    assert_eq!(doc.lines[4].quote_depth, 2);
+    assert_eq!(doc.lines[4].kind, LineKind::Heading { level: 2 });
+    assert_eq!(doc.lines[4].display_text(md), "Sub");
+
+    assert_eq!(doc.lines[5].quote_depth, 1);
+    assert!(matches!(
+        doc.lines[5].kind,
+        LineKind::ListItem {
+            ordered: false,
+            task: None,
+            ..
+        }
+    ));
+    assert_eq!(doc.lines[5].display_text(md), "bullet");
+
+    assert_eq!(doc.lines[6].quote_depth, 1);
+    assert!(matches!(
+        doc.lines[6].kind,
+        LineKind::ListItem {
+            ordered: false,
+            task: Some(true),
+            ..
+        }
+    ));
+    assert_eq!(doc.lines[6].display_text(md), "task");
+    let cb = doc.lines[6].checkbox_source().expect("checkbox range");
+    assert_eq!(&md[cb], "[x]");
+
+    assert_eq!(doc.lines[7].quote_depth, 1);
+    assert!(matches!(
+        doc.lines[7].kind,
+        LineKind::ListItem {
+            ordered: true,
+            number: 1,
+            ..
+        }
+    ));
+    assert_eq!(doc.lines[7].display_text(md), "ordered");
+
+    assert_eq!(doc.lines[8].quote_depth, 1);
+    assert_eq!(doc.lines[8].kind, LineKind::HorizontalRule);
+    assert_eq!(doc.lines[8].display_text(md), "");
+}
+
+#[test]
+fn w3_hidden_trailing_hard_break_backslash() {
+    let md1 = "hello\\\nworld";
+    let d1 = parse_document(md1);
+    assert_eq!(d1.lines[0].display_text(md1), "hello");
+    assert_eq!(d1.lines[0].content_end, 5);
+
+    let md2 = "hello\\\\\nworld";
+    let d2 = parse_document(md2);
+    assert_eq!(d2.lines[0].display_text(md2), "hello\\");
+    assert_eq!(d2.lines[0].content_end as usize, d2.lines[0].source.len());
+
+    let md3 = "hello\\\\\\\nworld";
+    let d3 = parse_document(md3);
+    assert_eq!(d3.lines[0].display_text(md3), "hello\\");
+    assert_eq!(d3.lines[0].content_end, 7);
+
+    let md4 = "**bold**\\\nworld";
+    let d4 = parse_document(md4);
+    assert_eq!(d4.lines[0].display_text(md4), "bold");
+    assert_eq!(d4.lines[0].content_end, 8);
+    assert!(d4.lines[0].styled_segments().iter().any(|s| s.bold()));
+
+    // EOF, before blank line, and headings keep trailing `\` visible.
+    let eof = "hello\\";
+    assert_eq!(parse_document(eof).lines[0].display_text(eof), "hello\\");
+    let blank_after = "hello\\\n\nworld";
+    assert_eq!(
+        parse_document(blank_after).lines[0].display_text(blank_after),
+        "hello\\"
+    );
+    let heading = "# Title\\\nworld";
+    assert_eq!(
+        parse_document(heading).lines[0].display_text(heading),
+        "Title\\"
+    );
+
+    // Incremental edit: deleting the blank line after `hello\\` activates hard-break hiding.
+    let mut text = String::from("hello\\\n\nworld");
+    let mut inc = parse_document(&text);
+    text.replace_range(7..8, "");
+    inc.apply_edit(&text, 7..8, 0);
+    assert_eq!(inc, parse_document(&text));
+    assert_eq!(inc.lines[0].display_text(&text), "hello");
 }

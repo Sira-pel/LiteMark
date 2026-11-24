@@ -15,7 +15,7 @@ use crate::markdown::image::{
     is_image_block, parse_image_line, parse_image_row, resolve_image_target, ImageLine, ImageTarget,
 };
 use crate::markdown::{
-    LineKind, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
+    LineKind, LineRange, ParsedDocument, ParsedLine, RowOffsetMap, StyledSegment, TableColumnAlign,
     TableRowBody,
 };
 use crate::model::document::visible_line_end;
@@ -49,7 +49,7 @@ pub struct PaintCell {
     pub lines: Vec<CellLine>,
 }
 
-pub type LinkHits = Arc<Vec<(Range<usize>, Arc<str>)>>;
+pub type LinkHits = Arc<[(LineRange, Arc<str>)]>;
 
 #[derive(Clone)]
 pub struct PaintRow {
@@ -64,7 +64,9 @@ pub struct PaintRow {
     /// inline (about 3 KB), and every off-screen row shares one empty line.
     pub shaped: Rc<ShapedLine>,
     pub offset_map: Option<Arc<RowOffsetMap>>,
-    pub link_hits: Option<LinkHits>,
+    /// `(line_source_start, line_relative_link_hits)` so `link_hits` shares
+    /// the line's `Arc` without shifting it on edits above.
+    pub link_hits: Option<Box<(u32, LinkHits)>>,
     /// Empty (no allocation) on every row that is not a table row.
     pub cells: Box<[PaintCell]>,
 }
@@ -75,9 +77,6 @@ impl PaintRow {
     }
     pub fn byte_end(&self) -> usize {
         self.byte_end as usize
-    }
-    pub fn link_hits(&self) -> &[(Range<usize>, Arc<str>)] {
-        self.link_hits.as_deref().map_or(&[], Vec::as_slice)
     }
     pub fn source_to_display(&self, src: usize) -> usize {
         self.offset_map
@@ -129,6 +128,10 @@ pub struct TableGeom {
     pub viewport: Option<Bounds<Pixels>>,
 }
 
+pub const WRAPPED_CELL_CACHE_MAX: usize = 2048;
+
+pub type WrappedCellLines = Rc<[(usize, usize, Rc<ShapedLine>)]>;
+
 /// Measured tables, keyed by `table_width_key` (the table's text and fonts).
 /// Not keyed by byte range: an edit above a table moves its range without
 /// changing it, and must not force it to be measured and shaped again.
@@ -143,6 +146,14 @@ pub struct TableWidthCache {
     /// widths it was wrapped to). Lets rows away from the caret and outside
     /// the shaping band skip shaping even right after an edit.
     pub row_heights: std::collections::HashMap<u64, Pixels>,
+    /// Cached wrapped lines of a table cell: `(d_start, d_end, Rc<ShapedLine>)`.
+    /// Never stores `RowOffsetMap` (whose absolute offsets shift across edits
+    /// above the table).
+    pub wrapped_cells: std::collections::HashMap<u64, WrappedCellLines>,
+    /// Environment hash `(fonts, font_size, scale_factor, colors)` for
+    /// `wrapped_cells`; when it changes (theme toggle, zoom, DPI),
+    /// `wrapped_cells` is cleared immediately so stale shaped lines are freed.
+    pub wrapped_env: u64,
 }
 
 impl TableWidthCache {
@@ -159,6 +170,11 @@ impl TableWidthCache {
             self.row_heights.clear();
             self.row_heights.shrink_to_fit();
         }
+        if !self.wrapped_cells.is_empty() || self.wrapped_cells.capacity() > 0 {
+            self.wrapped_cells.clear();
+            self.wrapped_cells.shrink_to_fit();
+        }
+        self.wrapped_env = 0;
     }
 }
 
@@ -167,7 +183,8 @@ impl TableWidthCache {
 fn table_cell_key(
     raw: &str,
     cell_start: usize,
-    hidden: &[Range<usize>],
+    line_start: usize,
+    hidden: &[LineRange],
     font: &str,
     mono_font: &str,
     font_size: Pixels,
@@ -176,7 +193,8 @@ fn table_cell_key(
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     raw.hash(&mut hasher);
     let cell_end = cell_start + raw.len();
-    for range in hidden {
+    for &h in hidden {
+        let range = h.to_abs(line_start);
         if range.end > cell_start && range.start < cell_end {
             (
                 range.start.saturating_sub(cell_start),
@@ -193,10 +211,12 @@ fn table_cell_key(
 
 /// Key for one row's height: its text and hidden markup (relative to the
 /// row), the column widths it wraps to, and the font and size.
+#[allow(clippy::too_many_arguments)]
 fn table_row_key(
     raw: &str,
     row_start: usize,
-    hidden: &[Range<usize>],
+    line_start: usize,
+    hidden: &[LineRange],
     col_widths: &[Pixels],
     font: &str,
     mono_font: &str,
@@ -204,9 +224,85 @@ fn table_row_key(
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    table_cell_key(raw, row_start, hidden, font, mono_font, font_size).hash(&mut hasher);
+    table_cell_key(
+        raw, row_start, line_start, hidden, font, mono_font, font_size,
+    )
+    .hash(&mut hasher);
     for width in col_widths {
         f32::from(*width).to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn hash_hsla(c: Hsla, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    [c.h.to_bits(), c.s.to_bits(), c.l.to_bits(), c.a.to_bits()].hash(hasher);
+}
+
+fn table_wrapped_env_hash(
+    font: &str,
+    mono_font: &str,
+    font_size: Pixels,
+    scale_factor: f32,
+    colors: &EditorColors,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    font.hash(&mut hasher);
+    mono_font.hash(&mut hasher);
+    f32::from(font_size).to_bits().hash(&mut hasher);
+    scale_factor.to_bits().hash(&mut hasher);
+    hash_hsla(colors.text_color, &mut hasher);
+    hash_hsla(colors.strong_color, &mut hasher);
+    hash_hsla(colors.muted_color, &mut hasher);
+    hash_hsla(colors.h1_color, &mut hasher);
+    hash_hsla(colors.h2_color, &mut hasher);
+    hash_hsla(colors.code_color, &mut hasher);
+    hash_hsla(colors.code_bg, &mut hasher);
+    hash_hsla(colors.link_color, &mut hasher);
+    hash_hsla(colors.border_color, &mut hasher);
+    hasher.finish()
+}
+
+fn table_wrapped_cell_key(
+    raw: &str,
+    cell_range: &Range<usize>,
+    parsed_line: &ParsedLine,
+    is_header: bool,
+    row_font_size: Pixels,
+    avail_inner: Pixels,
+    env_hash: u64,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    env_hash.hash(&mut hasher);
+    is_header.hash(&mut hasher);
+    f32::from(row_font_size).to_bits().hash(&mut hasher);
+    f32::from(avail_inner).to_bits().hash(&mut hasher);
+    raw.hash(&mut hasher);
+    let line_start = parsed_line.source.start;
+    let cell_start = cell_range.start;
+    let cell_end = cell_range.end;
+    for &h in &parsed_line.hidden_ranges {
+        let r = h.to_abs(line_start);
+        if r.end > cell_start && r.start < cell_end {
+            (
+                r.start.saturating_sub(cell_start),
+                r.end.min(cell_end) - cell_start,
+            )
+                .hash(&mut hasher);
+        }
+    }
+    for seg in parsed_line.styled_segments() {
+        let r = seg.source(line_start);
+        if r.end > cell_start && r.start < cell_end {
+            (
+                r.start.saturating_sub(cell_start),
+                r.end.min(cell_end) - cell_start,
+                seg.flags,
+            )
+                .hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -899,8 +995,10 @@ pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<Stri
         if row.byte_start() > source_offset {
             break;
         }
-        {
-            for (range, url) in row.link_hits().iter() {
+        if let Some((base, links)) = row.link_hits.as_deref() {
+            let base = *base as usize;
+            for (r, url) in links.iter() {
+                let range = r.to_abs(base);
                 if source_offset >= range.start && source_offset <= range.end {
                     return Some(url.to_string());
                 }
@@ -1583,7 +1681,8 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 if matches!(line.kind, LineKind::TableDelimiter) {
                     return 0.0;
                 }
-                let (_, line_h, top_gap, _) = wysiwyg_line_metrics(&line.kind, font_size);
+                let (_, line_h, top_gap, _) =
+                    wysiwyg_line_metrics(&line.kind, line.quote_depth, font_size);
                 let disp = line.display_text(content);
                 let wrapped = if disp.is_empty() {
                     1
@@ -2146,6 +2245,21 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             std::collections::HashMap::new();
 
         let colors = self.colors();
+        let wrapped_env = table_wrapped_env_hash(
+            &self.font_family,
+            &self.mono_font_family,
+            self.font_size,
+            window.scale_factor(),
+            &colors,
+        );
+        if table_width_cache.wrapped_env != wrapped_env {
+            table_width_cache.wrapped_cells.clear();
+            table_width_cache.wrapped_env = wrapped_env;
+        }
+        let wrapped_cap = (2 * live_table_cells + 128).min(WRAPPED_CELL_CACHE_MAX);
+        if table_width_cache.wrapped_cells.len() > wrapped_cap {
+            table_width_cache.wrapped_cells.clear();
+        }
         let anchor_lines: Vec<usize> = anchors
             .iter()
             .map(|&offset| {
@@ -2169,7 +2283,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 continue;
             }
             let (row_font_size, row_line_height, top_gap, indent_x) =
-                wysiwyg_line_metrics(&parsed_line.kind, self.font_size);
+                wysiwyg_line_metrics(&parsed_line.kind, parsed_line.quote_depth, self.font_size);
             cur_y += top_gap;
 
             if let LineKind::TableRow {
@@ -2202,7 +2316,8 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         return true;
                     };
                     let extent = lines.iter().zip(heights).fold(px(0.0), |acc, (line, h)| {
-                        acc + wysiwyg_line_metrics(&line.kind, self.font_size).2 + *h
+                        acc + wysiwyg_line_metrics(&line.kind, line.quote_depth, self.font_size).2
+                            + *h
                     });
                     let first = lines.first().map_or(line_idx, |l| l.line_index as usize);
                     let last = lines.last().map_or(line_idx, |l| l.line_index as usize);
@@ -2249,8 +2364,11 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                             let cell_widths = &mut table_width_cache.cell_widths;
                             let mut measure =
                                 |pline: &ParsedLine, cell_range: &Range<usize>| -> Pixels {
-                                    let (row_fs, _, _, _) =
-                                        wysiwyg_line_metrics(&pline.kind, self.font_size);
+                                    let (row_fs, _, _, _) = wysiwyg_line_metrics(
+                                        &pline.kind,
+                                        pline.quote_depth,
+                                        self.font_size,
+                                    );
                                     let raw = self
                                         .entity
                                         .read(cx)
@@ -2260,6 +2378,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                                     let key = table_cell_key(
                                         raw,
                                         cell_range.start,
+                                        pline.source.start,
                                         &pline.hidden_ranges,
                                         &self.font_family,
                                         &self.mono_font_family,
@@ -2273,6 +2392,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                                             raw,
                                             cell_range.start,
                                             cell_range.start,
+                                            pline.source.start,
                                             &pline.hidden_ranges,
                                         );
                                         if display.is_empty() {
@@ -2326,6 +2446,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 let row_key = table_row_key(
                     content.get(parsed_line.source.clone()).unwrap_or(""),
                     parsed_line.source.start,
+                    parsed_line.source.start,
                     &parsed_line.hidden_ranges,
                     col_widths,
                     &self.font_family,
@@ -2342,6 +2463,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         let key = table_cell_key(
                             raw,
                             cell_range.start,
+                            parsed_line.source.start,
                             &parsed_line.hidden_ranges,
                             &self.font_family,
                             &self.mono_font_family,
@@ -2425,7 +2547,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     raw_range: Range<usize>,
                     cell_x: Pixels,
                     col_w: Pixels,
-                    lines: Vec<(usize, usize, RowOffsetMap, ShapedLine, Pixels)>,
+                    lines: Vec<(usize, usize, RowOffsetMap, Rc<ShapedLine>, Pixels)>,
                 }
 
                 let mut cell_preps = Vec::with_capacity(num_cols);
@@ -2457,41 +2579,107 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         cell_raw_str,
                         cell_range.start,
                         cell_range.start,
+                        parsed_line.source.start,
                         &parsed_line.hidden_ranges,
                     );
                     let disp_len = cell_display.len();
-                    let full_slice: SharedString = if disp_len == 0 {
-                        SharedString::from(" ")
+                    let cell_has_marked = self
+                        .marked
+                        .as_ref()
+                        .is_some_and(|m| m.end > cell_range.start && m.start < cell_range.end);
+                    let wrap_key = (!cell_has_marked).then(|| {
+                        table_wrapped_cell_key(
+                            cell_raw_str,
+                            &cell_range,
+                            parsed_line,
+                            is_header,
+                            row_font_size,
+                            avail_inner,
+                            wrapped_env,
+                        )
+                    });
+                    let cached_wrapped =
+                        wrap_key.and_then(|key| table_width_cache.wrapped_cells.get(&key).cloned());
+                    let wrapped_shaped: Rc<[(usize, usize, Rc<ShapedLine>)]> = if let Some(hit) =
+                        cached_wrapped
+                    {
+                        hit
                     } else {
-                        SharedString::from(cell_display.clone())
+                        let full_slice: SharedString = if disp_len == 0 {
+                            SharedString::from(" ")
+                        } else {
+                            SharedString::from(cell_display.clone())
+                        };
+                        let runs = wysiwyg_cell_runs(
+                            parsed_line,
+                            disp_len,
+                            full_slice.len(),
+                            &cell_map,
+                            self.marked.as_ref(),
+                            &base_font,
+                            &mono_font,
+                            &colors,
+                        );
+                        let full_shaped = Rc::new(window.text_system().shape_line(
+                            full_slice,
+                            row_font_size,
+                            &runs,
+                            None,
+                        ));
+                        let wrapped_slices =
+                            wrap_cell_text(&cell_display, avail_inner, &full_shaped);
+                        let mut built = Vec::with_capacity(wrapped_slices.len());
+                        for (d_start, d_end) in wrapped_slices {
+                            let sub_len = d_end.saturating_sub(d_start);
+                            let shaped_sub = if d_start == 0 && d_end == disp_len {
+                                full_shaped.clone()
+                            } else {
+                                let mut sub_map = cell_map.slice_display(d_start..d_end);
+                                sub_map.line_start = sub_map.line_start.max(cell_map.line_start);
+                                sub_map.line_end = sub_map.line_end.max(sub_map.line_start);
+                                let sub_slice: SharedString = if sub_len == 0 {
+                                    SharedString::from(" ")
+                                } else {
+                                    SharedString::from(cell_display[d_start..d_end].to_string())
+                                };
+                                let sub_runs = wysiwyg_cell_runs(
+                                    parsed_line,
+                                    sub_len,
+                                    sub_slice.len(),
+                                    &sub_map,
+                                    self.marked.as_ref(),
+                                    &base_font,
+                                    &mono_font,
+                                    &colors,
+                                );
+                                Rc::new(window.text_system().shape_line(
+                                    sub_slice,
+                                    row_font_size,
+                                    &sub_runs,
+                                    None,
+                                ))
+                            };
+                            built.push((d_start, d_end, shaped_sub));
+                        }
+                        let built: Rc<[(usize, usize, Rc<ShapedLine>)]> = built.into();
+                        if let Some(key) = wrap_key {
+                            table_width_cache.wrapped_cells.insert(key, built.clone());
+                        }
+                        built
                     };
 
-                    let runs = wysiwyg_cell_runs(
-                        parsed_line,
-                        disp_len,
-                        full_slice.len(),
-                        &cell_map,
-                        self.marked.as_ref(),
-                        &base_font,
-                        &mono_font,
-                        &colors,
-                    );
-                    let full_shaped =
-                        window
-                            .text_system()
-                            .shape_line(full_slice, row_font_size, &runs, None);
-
-                    let wrapped_slices = wrap_cell_text(&cell_display, avail_inner, &full_shaped);
-                    let mut lines = Vec::with_capacity(wrapped_slices.len());
-
-                    let total_slices = wrapped_slices.len();
+                    let mut lines = Vec::with_capacity(wrapped_shaped.len());
+                    let total_slices = wrapped_shaped.len();
                     let mut prev_cell_end = cell_map.line_start;
-                    for (sub_idx, (d_start, d_end)) in wrapped_slices.into_iter().enumerate() {
+                    for (sub_idx, (d_start, d_end, shaped_sub)) in wrapped_shaped.iter().enumerate()
+                    {
+                        let d_start = *d_start;
+                        let d_end = *d_end;
                         let is_last = sub_idx + 1 == total_slices;
                         let sub_len = d_end.saturating_sub(d_start);
-                        let (sub_map, shaped_sub) = if d_start == 0 && d_end == disp_len {
+                        let sub_map = if d_start == 0 && d_end == disp_len {
                             prev_cell_end = cell_map.line_end;
-                            (cell_map.clone(), full_shaped.clone())
+                            cell_map.clone()
                         } else {
                             let mut sub_map = cell_map.slice_display(d_start..d_end);
                             sub_map.line_start = if sub_idx == 0 {
@@ -2505,28 +2693,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                                 sub_map.line_end = sub_map.line_end.max(sub_map.line_start);
                             }
                             prev_cell_end = sub_map.line_end;
-                            let sub_slice: SharedString = if sub_len == 0 {
-                                SharedString::from(" ")
-                            } else {
-                                SharedString::from(cell_display[d_start..d_end].to_string())
-                            };
-                            let sub_runs = wysiwyg_cell_runs(
-                                parsed_line,
-                                sub_len,
-                                sub_slice.len(),
-                                &sub_map,
-                                self.marked.as_ref(),
-                                &base_font,
-                                &mono_font,
-                                &colors,
-                            );
-                            let shaped_sub = window.text_system().shape_line(
-                                sub_slice,
-                                row_font_size,
-                                &sub_runs,
-                                None,
-                            );
-                            (sub_map, shaped_sub)
+                            sub_map
                         };
 
                         let text_w = if sub_len == 0 {
@@ -2543,7 +2710,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                                 cell_x + pad_x + (avail_inner - text_w).max(px(0.0))
                             }
                         };
-                        lines.push((d_start, d_end, sub_map, shaped_sub, line_text_x));
+                        lines.push((d_start, d_end, sub_map, shaped_sub.clone(), line_text_x));
                     }
 
                     cell_preps.push(CellPrep {
@@ -2638,17 +2805,21 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         }
 
                         // Strikethrough inside cell
+                        let line_start = parsed_line.source.start;
                         for seg in parsed_line.styled_segments() {
-                            if !seg.strike
-                                || seg.source.end <= sub_map.line_start
-                                || seg.source.start >= sub_map.line_end
+                            if !seg.strike() {
+                                continue;
+                            }
+                            let seg_src = seg.source(line_start);
+                            if seg_src.end <= sub_map.line_start
+                                || seg_src.start >= sub_map.line_end
                             {
                                 continue;
                             }
                             let s_start =
-                                sub_map.source_to_display(seg.source.start.max(sub_map.line_start));
+                                sub_map.source_to_display(seg_src.start.max(sub_map.line_start));
                             let s_end =
-                                sub_map.source_to_display(seg.source.end.min(sub_map.line_end));
+                                sub_map.source_to_display(seg_src.end.min(sub_map.line_end));
                             if s_end > s_start {
                                 let x1 = shaped_sub.x_for_index(s_start);
                                 let x2 = shaped_sub.x_for_index(s_end);
@@ -2661,12 +2832,12 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                                         / 2.0;
                                 let strike_y =
                                     line_origin.y + (pad + shaped_sub.ascent * 1.5) * 0.5;
-                                let color = if seg.bold || seg.italic {
+                                let color = if seg.bold() || seg.italic() {
                                     self.strong_color
                                 } else {
                                     self.text_color
                                 };
-                                let thickness = if seg.bold { px(2.0) } else { px(1.75) };
+                                let thickness = if seg.bold() { px(2.0) } else { px(1.75) };
                                 strike_quads.push(fill(
                                     Bounds::new(
                                         point(strike_x, strike_y),
@@ -2680,7 +2851,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         cell_lines.push(CellLine {
                             text_origin: line_origin,
                             line_height: row_line_height,
-                            shaped: Rc::new(shaped_sub),
+                            shaped: shaped_sub,
                             offset_map: sub_map,
                         });
                     }
@@ -2769,10 +2940,9 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     line_height: row_height,
                     shaped: unshaped.clone(),
                     offset_map: Some(parsed_line.to_offset_map()),
-                    link_hits: {
-                        let links = parsed_line.link_hits();
-                        (!links.is_empty()).then(|| links.clone())
-                    },
+                    link_hits: parsed_line.link_hits_arc().map(|links| {
+                        Box::new((row_u32(parsed_line.source.start), Arc::clone(links)))
+                    }),
                     cells: paint_cells.into_boxed_slice(),
                 });
                 cur_y += row_height;
@@ -3387,6 +3557,13 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 };
 
                 // Block backgrounds / decorations
+                for d in 0..parsed_line.quote_depth {
+                    let bar_x = base_x + px(4.0 + 16.0 * d as f32);
+                    bg_quads.push(fill(
+                        Bounds::new(point(bar_x, cur_y), size(px(3.0), row_line_height)),
+                        self.border_color,
+                    ));
+                }
                 match &parsed_line.kind {
                     LineKind::CodeFence {
                         language,
@@ -3447,17 +3624,13 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                             self.border_color,
                         ));
                     }
-                    LineKind::Blockquote => {
-                        let bar_x = base_x + px(4.0);
-                        bg_quads.push(fill(
-                            Bounds::new(point(bar_x, cur_y), size(px(3.0), row_line_height)),
-                            self.border_color,
-                        ));
-                    }
                     LineKind::HorizontalRule => {
                         let mid_y = cur_y + row_line_height * 0.5;
                         bg_quads.push(fill(
-                            Bounds::new(point(base_x, mid_y), size(content_width, px(1.5))),
+                            Bounds::new(
+                                point(base_x + indent_x, mid_y),
+                                size((content_width - indent_x).max(px(0.0)), px(1.5)),
+                            ),
                             self.border_color,
                         ));
                     }
@@ -3610,12 +3783,14 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 }
 
                 // Strikethrough lines (bright, solid, and slightly extended past the words)
+                let line_start = parsed_line.source.start;
                 for seg in parsed_line.styled_segments() {
-                    if !seg.strike {
+                    if !seg.strike() {
                         continue;
                     }
-                    let seg_disp_start = parsed_line.source_to_display(seg.source.start);
-                    let seg_disp_end = parsed_line.source_to_display(seg.source.end);
+                    let seg_src = seg.source(line_start);
+                    let seg_disp_start = parsed_line.source_to_display(seg_src.start);
+                    let seg_disp_end = parsed_line.source_to_display(seg_src.end);
                     if seg_disp_end <= d_start || seg_disp_start >= d_end {
                         continue;
                     }
@@ -3641,12 +3816,12 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                         let pad =
                             (row_line_height - shaped.ascent - shaped.descent).max(px(0.0)) / 2.0;
                         let strike_y = row_origin.y + (pad + shaped.ascent * 1.5) * 0.5;
-                        let color = if seg.bold || seg.italic {
+                        let color = if seg.bold() || seg.italic() {
                             self.strong_color
                         } else {
                             self.text_color
                         };
-                        let thickness = if seg.bold { px(2.0) } else { px(1.75) };
+                        let thickness = if seg.bold() { px(2.0) } else { px(1.75) };
                         strike_quads.push(fill(
                             Bounds::new(point(strike_x, strike_y), size(strike_w, thickness)),
                             color,
@@ -3709,10 +3884,9 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     line_height: row_line_height,
                     shaped: Rc::new(shaped),
                     offset_map: Some(sub_map),
-                    link_hits: {
-                        let links = parsed_line.link_hits();
-                        (!links.is_empty()).then(|| links.clone())
-                    },
+                    link_hits: parsed_line.link_hits_arc().map(|links| {
+                        Box::new((row_u32(parsed_line.source.start), Arc::clone(links)))
+                    }),
                     cells: Box::default(),
                 });
 
@@ -4023,9 +4197,11 @@ fn check_mark_color(fill: Hsla) -> Hsla {
 
 fn wysiwyg_line_metrics(
     kind: &LineKind,
+    quote_depth: u8,
     base_font_size: Pixels,
 ) -> (Pixels, Pixels, Pixels, Pixels) {
-    match kind {
+    let quote_indent = px(16.0 * quote_depth as f32);
+    let (fs, lh, top, inner_indent) = match kind {
         // Each level is a clear step above body text at every zoom, since
         // headings no longer get an automatic bold. The gap above scales with
         // the font so sections stay separated when zoomed.
@@ -4060,7 +4236,12 @@ fn wysiwyg_line_metrics(
             px(0.0),
             px(24.0 + (*indent_cols / 2) as f32 * 18.0),
         ),
-        LineKind::Blockquote => (base_font_size, base_font_size * 1.65, px(0.0), px(16.0)),
+        LineKind::Blockquote => (
+            base_font_size,
+            base_font_size * 1.65,
+            px(0.0),
+            if quote_depth == 0 { px(16.0) } else { px(0.0) },
+        ),
         LineKind::CodeFence { .. } => {
             let fs = base_font_size * 0.78;
             (fs, base_font_size * 1.1, px(0.0), px(12.0))
@@ -4085,7 +4266,8 @@ fn wysiwyg_line_metrics(
         LineKind::Paragraph | LineKind::Empty => {
             (base_font_size, base_font_size * 1.65, px(0.0), px(0.0))
         }
-    }
+    };
+    (fs, lh, top, quote_indent + inner_indent)
 }
 
 fn find_task_bracket_range(content: &str, line_range: &Range<usize>) -> Option<Range<usize>> {
@@ -4172,9 +4354,11 @@ fn wysiwyg_slice_runs(
     let mut runs: Vec<TextRun> = Vec::new();
     let mut covered = display_slice.start;
 
+    let line_start = parsed_line.source.start;
     for seg in parsed_line.styled_segments() {
-        let seg_disp_start = parsed_line.source_to_display(seg.source.start);
-        let seg_disp_end = parsed_line.source_to_display(seg.source.end);
+        let seg_src = seg.source(line_start);
+        let seg_disp_start = parsed_line.source_to_display(seg_src.start);
+        let seg_disp_end = parsed_line.source_to_display(seg_src.end);
         if seg_disp_end <= display_slice.start || seg_disp_start >= display_slice.end {
             continue;
         }
@@ -4279,15 +4463,17 @@ fn wysiwyg_cell_runs(
     let mut runs: Vec<TextRun> = Vec::new();
     let mut covered = 0usize;
 
+    let line_start = parsed_line.source.start;
     for seg in parsed_line.styled_segments() {
-        if seg.source.end <= cell_map.line_start || seg.source.start >= cell_map.line_end {
+        let seg_src = seg.source(line_start);
+        if seg_src.end <= cell_map.line_start || seg_src.start >= cell_map.line_end {
             continue;
         }
         let seg_start = cell_map
-            .source_to_display(seg.source.start.max(cell_map.line_start))
+            .source_to_display(seg_src.start.max(cell_map.line_start))
             .min(disp_len);
         let seg_end = cell_map
-            .source_to_display(seg.source.end.min(cell_map.line_end))
+            .source_to_display(seg_src.end.min(cell_map.line_end))
             .min(disp_len);
         if seg_end <= seg_start {
             continue;
@@ -4358,33 +4544,37 @@ fn segment_to_run(
     mono_font: &Font,
     colors: &EditorColors,
 ) -> TextRun {
-    let mut font = if seg.code || use_mono {
+    let mut font = if seg.code() || use_mono {
         mono_font.clone()
     } else {
         base_font.clone()
     };
-    font.weight = if seg.bold {
+    font.weight = if seg.bold() {
         FontWeight::BOLD
     } else {
         default_weight
     };
-    if seg.italic || matches!(line_kind, LineKind::Blockquote) {
+    if seg.italic() || matches!(line_kind, LineKind::Blockquote) {
         font.style = FontStyle::Italic;
     }
 
-    let color = if seg.code {
+    let color = if seg.code() {
         colors.code_color
-    } else if seg.link_url.is_some() {
+    } else if seg.is_link() {
         colors.link_color
-    } else if (seg.bold || seg.italic) && default_color == colors.text_color {
+    } else if (seg.bold() || seg.italic()) && default_color == colors.text_color {
         colors.strong_color
     } else {
         default_color
     };
 
-    let background_color = if seg.code { Some(colors.code_bg) } else { None };
+    let background_color = if seg.code() {
+        Some(colors.code_bg)
+    } else {
+        None
+    };
 
-    let underline = if seg.underline || seg.link_url.is_some() {
+    let underline = if seg.underline() || seg.is_link() {
         Some(UnderlineStyle {
             thickness: px(1.0),
             color: Some(color),
@@ -5650,10 +5840,12 @@ mod tests {
     fn heading_sizes_step_clearly_above_body_text_at_every_zoom() {
         use crate::markdown::LineKind;
         for base in [14.0_f32, 16.0, 24.0] {
-            let size =
-                |level: u8| super::wysiwyg_line_metrics(&LineKind::Heading { level }, px(base)).0;
-            let gap =
-                |level: u8| super::wysiwyg_line_metrics(&LineKind::Heading { level }, px(base)).2;
+            let size = |level: u8| {
+                super::wysiwyg_line_metrics(&LineKind::Heading { level }, 0, px(base)).0
+            };
+            let gap = |level: u8| {
+                super::wysiwyg_line_metrics(&LineKind::Heading { level }, 0, px(base)).2
+            };
             // Strictly decreasing, and each at least 10% above the next level.
             for level in 1..4u8 {
                 assert!(size(level) >= size(level + 1) * 1.1, "base {base} h{level}");
@@ -5725,5 +5917,10 @@ mod tests {
             gpui::hsla(0.0, 0.0, 0.0, 1.0),
         );
         assert!(runs.iter().all(|r| r.underline.is_none()));
+    }
+
+    #[test]
+    fn paint_row_size_stays_compact() {
+        assert_eq!(std::mem::size_of::<super::PaintRow>(), 64);
     }
 }

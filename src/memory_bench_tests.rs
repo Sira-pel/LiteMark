@@ -6,7 +6,7 @@ use super::*;
 use crate::heap_counter::live_bytes;
 use gpui::{TestAppContext, VisualTestContext};
 
-use ::core::prelude::v1::test as std_test;
+use core::prelude::v1::test as std_test;
 
 fn sample_note(blocks: usize) -> String {
     (0..blocks)
@@ -97,10 +97,29 @@ fn bench_note_heap() {
             let doc = tab.parsed();
             let n = doc.lines.len();
             let sz = |b: usize| mib(b as isize);
-            let hidden: usize = doc.lines.iter().map(|l| l.hidden_ranges.len() * 16).sum();
-            let pairs: usize = doc.lines.iter().map(|l| std::mem::size_of_val(l.inline_pairs())).sum();
-            let segs: usize = doc.lines.iter().map(|l| std::mem::size_of_val(l.styled_segments())).sum();
-            let links: usize = doc.lines.iter().map(|l| if l.has_inline_for_bench() { 16 + 24 + l.link_hits().capacity() * 24 } else { 0 }).sum();
+            let hidden: usize = doc
+                .lines
+                .iter()
+                .map(|l| std::mem::size_of_val(&*l.hidden_ranges))
+                .sum();
+            let pairs: usize = doc
+                .lines
+                .iter()
+                .map(|l| std::mem::size_of_val(l.line_inline_pairs()))
+                .sum();
+            let segs: usize = doc
+                .lines
+                .iter()
+                .map(|l| std::mem::size_of_val(l.styled_segments()))
+                .sum();
+            let links: usize = doc
+                .lines
+                .iter()
+                .map(|l| {
+                    l.link_hits_arc()
+                        .map_or(0, |a| 16 + std::mem::size_of_val(&**a))
+                })
+                .sum();
             let boxed = doc.lines.iter().filter(|l| l.has_inline_for_bench()).count();
             let maps: usize = doc.lines.iter().filter_map(|l| l.offset_map_for_bench()).map(|m| 64 + m.segments.capacity() * 32).sum();
             let disp: usize = doc.lines.iter().map(|l| l.display_owned_len_for_bench()).sum();
@@ -147,7 +166,11 @@ fn bench_note_heap() {
                 let shaped: HashSet<usize> = rows.iter().map(|r| std::rc::Rc::as_ptr(&r.shaped) as usize).collect();
                 let links: HashSet<usize> = rows
                     .iter()
-                    .filter_map(|r| r.link_hits.as_ref().map(|l| std::sync::Arc::as_ptr(l) as usize))
+                    .filter_map(|r| {
+                        r.link_hits
+                            .as_ref()
+                            .map(|l| std::sync::Arc::as_ptr(&l.1) as *const () as usize)
+                    })
                     .collect();
                 let with_cells = rows.iter().filter(|r| !r.cells.is_empty()).count();
                 eprintln!(

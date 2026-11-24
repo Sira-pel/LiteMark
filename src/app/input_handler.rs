@@ -12,13 +12,15 @@ fn ordered_range(range: Range<usize>) -> Range<usize> {
 }
 
 fn line_has_block_prefix(line: &crate::markdown::ParsedLine) -> bool {
-    matches!(
-        line.kind,
-        LineKind::Heading { .. }
-            | LineKind::ListItem { .. }
-            | LineKind::Blockquote
-            | LineKind::CodeLine
-    ) && line.prefix_end() > line.source.start
+    (line.quote_depth > 0
+        || matches!(
+            line.kind,
+            LineKind::Heading { .. }
+                | LineKind::ListItem { .. }
+                | LineKind::Blockquote
+                | LineKind::CodeLine
+        ))
+        && line.prefix_end() > line.source.start
 }
 
 fn widen_wysiwyg_wrap_range(
@@ -179,12 +181,14 @@ impl EntityInputHandler for LiteMarkApp {
                 if tab.file_type.supports_markdown_features() {
                     let parsed = tab.parsed();
                     if let Some(pline) = parsed.line_at_offset(cursor) {
-                        if matches!(
-                            pline.kind,
-                            LineKind::Heading { .. }
-                                | LineKind::ListItem { .. }
-                                | LineKind::Blockquote
-                        ) && cursor < pline.prefix_end()
+                        if (pline.quote_depth > 0
+                            || matches!(
+                                pline.kind,
+                                LineKind::Heading { .. }
+                                    | LineKind::ListItem { .. }
+                                    | LineKind::Blockquote
+                            ))
+                            && cursor < pline.prefix_end()
                         {
                             let target = pline.prefix_end();
                             range = target..target;
@@ -248,7 +252,7 @@ impl EntityInputHandler for LiteMarkApp {
                             let parsed = tab.parsed();
                             if ch == '`'
                                 && parsed.lines_overlapping(range.clone()).iter().any(|line| {
-                                    line.inline_pairs().iter().any(|p| {
+                                    line.inline_pairs().any(|p| {
                                         p.kind == InlineTagKind::Code
                                             && range.start >= p.open_delim.start
                                             && range.end <= p.close_delim.end
@@ -291,24 +295,21 @@ impl EntityInputHandler for LiteMarkApp {
                             .line_at_offset(cursor)
                             .map_or((false, false), |line| {
                                 let in_hidden_interior = line
-                                    .hidden_ranges
-                                    .iter()
+                                    .hidden_ranges_abs()
                                     .any(|h| cursor > h.start && cursor < h.end);
-                                let at_link_or_multi_code_closer =
-                                    line.inline_pairs().iter().any(|p| {
-                                        (p.kind == InlineTagKind::Link
-                                            || (p.kind == InlineTagKind::Code
-                                                && p.close_delim.len() > 1))
-                                            && cursor >= p.close_delim.start
-                                            && cursor < p.close_delim.end
-                                    });
-                                let at_any_link_or_code_closer =
-                                    line.inline_pairs().iter().any(|p| {
-                                        matches!(p.kind, InlineTagKind::Link | InlineTagKind::Code)
-                                            && cursor >= p.close_delim.start
-                                            && cursor < p.close_delim.end
-                                    });
-                                let in_code_span = line.inline_pairs().iter().any(|p| {
+                                let at_link_or_multi_code_closer = line.inline_pairs().any(|p| {
+                                    (p.kind == InlineTagKind::Link
+                                        || (p.kind == InlineTagKind::Code
+                                            && p.close_delim.len() > 1))
+                                        && cursor >= p.close_delim.start
+                                        && cursor < p.close_delim.end
+                                });
+                                let at_any_link_or_code_closer = line.inline_pairs().any(|p| {
+                                    matches!(p.kind, InlineTagKind::Link | InlineTagKind::Code)
+                                        && cursor >= p.close_delim.start
+                                        && cursor < p.close_delim.end
+                                });
+                                let in_code_span = line.inline_pairs().any(|p| {
                                     p.kind == InlineTagKind::Code
                                         && cursor >= p.inner.start
                                         && cursor <= p.inner.end

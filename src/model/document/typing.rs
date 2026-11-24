@@ -332,10 +332,10 @@ impl DocumentTab {
                 .iter()
                 .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
                 .collect();
-            let segs: Vec<&StyledSegment> = parsed
+            let segs: Vec<AbsStyledSegment> = parsed
                 .lines_overlapping(replace_start..replace_end)
                 .iter()
-                .flat_map(|l| l.styled_segments().iter())
+                .flat_map(|l| l.abs_styled_segments())
                 .collect();
             let local_pairs = nearby_pair_refs(&parsed, replace_start..replace_end);
             let slices = collect_rewrite_slices(
@@ -628,8 +628,15 @@ impl DocumentTab {
                             } else {
                                 0
                             };
+                            let join_start = if !matches!(pline.kind, LineKind::Heading { .. })
+                                && vend < pline.source.end
+                            {
+                                vend
+                            } else {
+                                after
+                            };
                             DeleteAction::JoinLines {
-                                range: after..after + break_len + strip,
+                                range: join_start..after + break_len + strip,
                             }
                         } else {
                             DeleteAction::Done

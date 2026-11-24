@@ -456,10 +456,10 @@ impl DocumentTab {
                                     .iter()
                                     .flat_map(|p| [p.open_delim.clone(), p.close_delim.clone()])
                                     .collect();
-                                let segs: Vec<&StyledSegment> = parsed
+                                let segs: Vec<AbsStyledSegment> = parsed
                                     .lines_overlapping(replace_start..replace_end)
                                     .iter()
-                                    .flat_map(|l| l.styled_segments().iter())
+                                    .flat_map(|l| l.abs_styled_segments())
                                     .collect();
                                 let local_pairs =
                                     nearby_pair_refs(&parsed, replace_start..replace_end);
@@ -519,7 +519,7 @@ impl DocumentTab {
                         let Some(pline) = parsed.line_at_offset(p_range.start) else {
                             return false;
                         };
-                        let mut segs = pline.styled_segments().iter().filter(|s| {
+                        let mut segs = pline.abs_styled_segments().filter(|s| {
                             s.source.start < p_range.end
                                 && s.source.end > p_range.start
                                 && !self.content[s.source.clone()].trim().is_empty()
@@ -527,7 +527,7 @@ impl DocumentTab {
                         let mut any = false;
                         segs.all(|s| {
                             any = true;
-                            segment_flags(s).get(tag_kind)
+                            segment_flags(&s).get(tag_kind)
                         }) && any
                     });
                 let should_turn_on = self.force_inline_toggle.unwrap_or(!global_all_have_format);
@@ -885,15 +885,17 @@ impl DocumentTab {
     pub(super) fn range_has_format(&mut self, range: &Range<usize>, kind: InlineTagKind) -> bool {
         let parsed = self.parsed();
         parsed.lines_overlapping(range.clone()).iter().any(|line| {
+            let base = line.source.start;
             line.styled_segments().iter().any(|seg| {
-                seg.source.start < range.end
-                    && seg.source.end > range.start
+                let src = seg.source(base);
+                src.start < range.end
+                    && src.end > range.start
                     && match kind {
-                        InlineTagKind::Bold => seg.bold,
-                        InlineTagKind::Italic => seg.italic,
-                        InlineTagKind::Underline => seg.underline,
-                        InlineTagKind::Strike => seg.strike,
-                        InlineTagKind::Code => seg.code,
+                        InlineTagKind::Bold => seg.bold(),
+                        InlineTagKind::Italic => seg.italic(),
+                        InlineTagKind::Underline => seg.underline(),
+                        InlineTagKind::Strike => seg.strike(),
+                        InlineTagKind::Code => seg.code(),
                         InlineTagKind::Link => false,
                     }
             })
@@ -993,7 +995,8 @@ impl DocumentTab {
 /// neighboring span with matching flags can merge across that gap.
 pub(super) fn gap_is_ws_and_markers(
     content: &str,
-    hidden: &[Range<usize>],
+    line_start: usize,
+    hidden: &[LineRange],
     from: usize,
     to: usize,
 ) -> bool {
@@ -1005,7 +1008,11 @@ pub(super) fn gap_is_ws_and_markers(
         if content[i..].starts_with('\n') {
             return false;
         }
-        if let Some(h) = hidden.iter().find(|r| i >= r.start && i < r.end) {
+        if let Some(h) = hidden
+            .iter()
+            .map(|r| r.to_abs(line_start))
+            .find(|r| i >= r.start && i < r.end)
+        {
             if !is_delimiter_markup(&content[h.start..h.end]) {
                 return false;
             }
@@ -1035,11 +1042,10 @@ pub(super) fn is_delimiter_markup(s: &str) -> bool {
 pub(super) fn covering_span(
     parsed: &ParsedDocument,
     pline: &ParsedLine,
-    seg: &StyledSegment,
+    seg: &AbsStyledSegment,
 ) -> (usize, usize) {
-    let overlapping: Vec<&InlinePair> = pline
+    let overlapping: Vec<InlinePair> = pline
         .inline_pairs()
-        .iter()
         .filter(|p| {
             p.kind != InlineTagKind::Link
                 && p.inner.start <= seg.source.start
@@ -1078,21 +1084,17 @@ pub(super) fn expand_replace_to_matching_neighbors(
     }
     let p_start = p_range.start;
     let p_end = p_range.end;
-    let overlapping: Vec<&StyledSegment> = pline
-        .styled_segments()
-        .iter()
+    let overlapping: Vec<AbsStyledSegment> = pline
+        .abs_styled_segments()
         .filter(|s| s.source.start < p_end && s.source.end > p_start)
         .collect();
     if overlapping
         .windows(2)
-        .any(|w| segment_flags(w[0]) != segment_flags(w[1]))
+        .any(|w| segment_flags(&w[0]) != segment_flags(&w[1]))
     {
         return (replace.start, replace.end);
     }
-    let mut target = overlapping
-        .first()
-        .map(|s| segment_flags(s))
-        .unwrap_or_default();
+    let mut target = overlapping.first().map(segment_flags).unwrap_or_default();
     match tag_kind {
         InlineTagKind::Bold => target.bold = true,
         InlineTagKind::Italic => target.italic = true,
@@ -1105,18 +1107,25 @@ pub(super) fn expand_replace_to_matching_neighbors(
         return (replace.start, replace.end);
     }
 
+    let line_start = pline.source.start;
     let mut left_front = p_start;
     let mut right_front = p_end;
     loop {
         let mut changed = false;
-        for seg in pline.styled_segments() {
-            if segment_flags(seg) != target {
+        for seg in pline.abs_styled_segments() {
+            if segment_flags(&seg) != target {
                 continue;
             }
             if seg.source.end <= left_front
-                && gap_is_ws_and_markers(content, &pline.hidden_ranges, seg.source.end, left_front)
+                && gap_is_ws_and_markers(
+                    content,
+                    line_start,
+                    &pline.hidden_ranges,
+                    seg.source.end,
+                    left_front,
+                )
             {
-                let (open, close) = covering_span(parsed, pline, seg);
+                let (open, close) = covering_span(parsed, pline, &seg);
                 if open < replace.start || close > replace.end || seg.source.start < left_front {
                     replace.start = replace.start.min(open);
                     replace.end = replace.end.max(close);
@@ -1127,12 +1136,13 @@ pub(super) fn expand_replace_to_matching_neighbors(
             if seg.source.start >= right_front
                 && gap_is_ws_and_markers(
                     content,
+                    line_start,
                     &pline.hidden_ranges,
                     right_front,
                     seg.source.start,
                 )
             {
-                let (open, close) = covering_span(parsed, pline, seg);
+                let (open, close) = covering_span(parsed, pline, &seg);
                 if close > replace.end || open < replace.start || seg.source.end > right_front {
                     replace.start = replace.start.min(open);
                     replace.end = replace.end.max(close);
@@ -1161,11 +1171,11 @@ pub(super) fn span_open_start(_parsed: &ParsedDocument, pair: &InlinePair) -> us
     pair.group_open_start
 }
 
-pub(super) fn nearby_pair_refs(parsed: &ParsedDocument, range: Range<usize>) -> Vec<&InlinePair> {
+pub(super) fn nearby_pair_refs(parsed: &ParsedDocument, range: Range<usize>) -> Vec<InlinePair> {
     parsed
         .lines_near(range)
         .iter()
-        .flat_map(|l| l.inline_pairs().iter())
+        .flat_map(|l| l.inline_pairs())
         .collect()
 }
 
@@ -1211,11 +1221,11 @@ pub(super) fn indented_code_block_at(
     Some(&lines[first..=last])
 }
 
-pub(super) fn line_pair_refs(parsed: &ParsedDocument, offset: usize) -> &[InlinePair] {
+pub(super) fn line_pair_refs(parsed: &ParsedDocument, offset: usize) -> Vec<InlinePair> {
     parsed
         .line_at_offset(offset)
-        .map(|l| l.inline_pairs())
-        .unwrap_or(&[])
+        .map(|l| l.inline_pairs().collect())
+        .unwrap_or_default()
 }
 
 pub(super) fn pair_id(p: &InlinePair) -> (usize, usize, InlineTagKind) {
@@ -1225,16 +1235,15 @@ pub(super) fn pair_id(p: &InlinePair) -> (usize, usize, InlineTagKind) {
 /// Connected component of overlapping non-link pairs on one line. Pairs on
 /// different lines have disjoint source ranges, so a document-wide expansion
 /// is the union of per-line expansions.
-pub(super) fn expand_line_group_pairs<'a>(
-    line: &'a ParsedLine,
+pub(super) fn expand_line_group_pairs(
+    line: &ParsedLine,
     parsed: &ParsedDocument,
     range: Range<usize>,
-    group_pairs: &mut Vec<&'a InlinePair>,
+    group_pairs: &mut Vec<InlinePair>,
     seen: &mut HashSet<(usize, usize, InlineTagKind)>,
 ) {
-    let mut cands: Vec<&InlinePair> = line
+    let mut cands: Vec<InlinePair> = line
         .inline_pairs()
-        .iter()
         .filter(|p| p.kind != InlineTagKind::Link)
         .collect();
     if cands.is_empty() {
@@ -1262,19 +1271,17 @@ pub(super) fn expand_line_group_pairs<'a>(
     }
     group_pairs.reserve(cands.len());
     let lim = cands.partition_point(|p| p.open_delim.start < hi);
-    for p in cands[..lim].iter().copied() {
-        if span_close_end(parsed, p) > lo && seen.insert(pair_id(p)) {
+    for p in cands.into_iter().take(lim) {
+        if span_close_end(parsed, &p) > lo && seen.insert(pair_id(&p)) {
             group_pairs.push(p);
         }
     }
 }
 
-pub(super) fn collect_group_pairs(
-    parsed: &ParsedDocument,
-    range: Range<usize>,
-) -> Vec<&InlinePair> {
+pub(super) fn collect_group_pairs(parsed: &ParsedDocument, range: Range<usize>) -> Vec<InlinePair> {
     let lines = parsed.lines_near(range.clone());
-    let mut group_pairs = Vec::with_capacity(lines.iter().map(|l| l.inline_pairs().len()).sum());
+    let mut group_pairs =
+        Vec::with_capacity(lines.iter().map(|l| l.line_inline_pairs().len()).sum());
     let mut seen = HashSet::with_capacity(group_pairs.capacity());
     for line in lines {
         expand_line_group_pairs(line, parsed, range.clone(), &mut group_pairs, &mut seen);
@@ -1282,21 +1289,21 @@ pub(super) fn collect_group_pairs(
     group_pairs
 }
 
-pub(super) fn add_contained_pairs<'a>(
-    parsed: &'a ParsedDocument,
+pub(super) fn add_contained_pairs(
+    parsed: &ParsedDocument,
     replace: Range<usize>,
-    group_pairs: &mut Vec<&'a InlinePair>,
+    group_pairs: &mut Vec<InlinePair>,
 ) {
     let mut seen: HashSet<(usize, usize, InlineTagKind)> =
-        group_pairs.iter().copied().map(pair_id).collect();
+        group_pairs.iter().map(pair_id).collect();
     for line in parsed.lines_near(replace.clone()) {
         for p in line.inline_pairs() {
             if p.kind == InlineTagKind::Link {
                 continue;
             }
             if p.open_delim.start >= replace.start
-                && span_close_end(parsed, p) <= replace.end
-                && seen.insert(pair_id(p))
+                && span_close_end(parsed, &p) <= replace.end
+                && seen.insert(pair_id(&p))
             {
                 group_pairs.push(p);
             }
@@ -1338,10 +1345,8 @@ pub(super) fn hidden_range_at(
 ) -> Option<std::ops::Range<usize>> {
     parsed
         .line_at_offset(pos)?
-        .hidden_ranges
-        .iter()
+        .hidden_ranges_abs()
         .find(|r| pred(r))
-        .cloned()
 }
 
 pub(super) fn outer_is_delimited(
