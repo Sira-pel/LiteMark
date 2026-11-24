@@ -9,6 +9,8 @@ impl DocumentTab {
     }
 
     pub fn apply_format_in_mode(&mut self, cmd: &str, mode: ViewMode) {
+        // The hint is for this press only, whatever happens to it.
+        let link_url = self.link_url_hint.take();
         if self.is_read_only() || !self.file_type.supports_markdown_features() {
             return;
         }
@@ -72,13 +74,17 @@ impl DocumentTab {
         }
 
         // 3. Inline styling & Link: bold, italic, underline, strike, code, link
+        let link_suffix = match &link_url {
+            Some(url) => format!("]({url})"),
+            None => "](https://)".to_string(),
+        };
         let inline_spec = match cmd {
             "bold" => Some((InlineTagKind::Bold, "**", "**", "bold text")),
             "italic" => Some((InlineTagKind::Italic, "*", "*", "italic text")),
             "underline" => Some((InlineTagKind::Underline, "<u>", "</u>", "underlined")),
             "strike" => Some((InlineTagKind::Strike, "~~", "~~", "strikethrough")),
             "code" => Some((InlineTagKind::Code, "`", "`", "code")),
-            "link" => Some((InlineTagKind::Link, "[", "](https://)", "link")),
+            "link" => Some((InlineTagKind::Link, "[", link_suffix.as_str(), "link")),
             _ => None,
         };
 

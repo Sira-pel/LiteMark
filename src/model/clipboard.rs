@@ -67,6 +67,32 @@ pub fn clipboard_image_png(image: &Image) -> Result<Vec<u8>, String> {
     Ok(out.into_inner())
 }
 
+/// The clipboard text as a link destination: one `http(s)://` URL with
+/// nothing else around it. Characters that would end or break a Markdown
+/// link destination are percent-encoded.
+pub fn clipboard_http_url(text: &str) -> Option<String> {
+    let url = text.trim();
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("HTTPS://"))
+        .or_else(|| url.strip_prefix("HTTP://"))?;
+    if rest.is_empty() || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let mut out = String::with_capacity(url.len());
+    for c in url.chars() {
+        match c {
+            '(' => out.push_str("%28"),
+            ')' => out.push_str("%29"),
+            '<' => out.push_str("%3C"),
+            '>' => out.push_str("%3E"),
+            _ => out.push(c),
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

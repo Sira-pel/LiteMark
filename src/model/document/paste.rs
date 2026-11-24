@@ -1,6 +1,7 @@
 //! Pasting text into a note.
 
 use super::*;
+use crate::model::clipboard::clipboard_http_url;
 
 /// Characters that start or end inline Markdown. Pasted text with any of them
 /// goes in verbatim, as it always did, so a Markdown copy keeps its markers.
@@ -67,6 +68,38 @@ impl DocumentTab {
         })
     }
 
+    /// Turn the selected single line of text into a link to `url`. False
+    /// (nothing changed) when the selection cannot become a new link: empty,
+    /// several lines, blank, part of a link already, or across table cells.
+    fn link_selection_to_url(&mut self, range: &Range<usize>, url: String) -> bool {
+        let Some(selected) = self.content.get(range.clone()) else {
+            return false;
+        };
+        if range.is_empty() || selected.trim().is_empty() || selected.contains(['\r', '\n']) {
+            return false;
+        }
+        let multi_cell = selected.contains('|');
+        {
+            let parsed = self.parsed();
+            let in_link = nearby_pair_refs(&parsed, range.clone()).iter().any(|p| {
+                p.kind == InlineTagKind::Link
+                    && p.open_delim.start < range.end
+                    && p.close_delim.end > range.start
+            });
+            let in_row = parsed
+                .line_at_offset(range.start)
+                .is_some_and(|line| matches!(line.kind, LineKind::TableRow { .. }));
+            if in_link || (in_row && multi_cell) {
+                return false;
+            }
+        }
+        let len_before = self.content.len();
+        self.link_url_hint = Some(url);
+        self.apply_format_in_mode("link", ViewMode::Wysiwyg);
+        self.link_url_hint = None;
+        self.content.len() != len_before
+    }
+
     /// Paste `text` over `range`. Raw view and non-Markdown files only get
     /// their line breaks matched to the note. WYSIWYG also keeps a table row
     /// intact when pasting into a cell and rewrites the styled spans around
@@ -79,6 +112,11 @@ impl DocumentTab {
         if mode != ViewMode::Wysiwyg || !self.file_type.supports_markdown_features() {
             self.edit(range, &text);
             return;
+        }
+        if let Some(url) = clipboard_http_url(&text) {
+            if self.link_selection_to_url(&range, url) {
+                return;
+            }
         }
         if self.range_in_table_row(&range) {
             let cell_text = sanitize_table_cell_paste(&text);

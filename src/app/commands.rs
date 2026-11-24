@@ -769,7 +769,18 @@ impl LiteMarkApp {
     }
 
     pub fn handle_insert_link(&mut self, cx: &mut App) {
+        // A URL on the clipboard becomes the link's destination.
+        let url = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .and_then(|text| clipboard_http_url(&text));
+        if let Some(tab) = self.active_tab_mut() {
+            tab.link_url_hint = url;
+        }
         self.handle_format_cmd("link", cx);
+        if let Some(tab) = self.active_tab_mut() {
+            tab.link_url_hint = None;
+        }
     }
 
     pub fn handle_toggle_show_code_files(&mut self) {

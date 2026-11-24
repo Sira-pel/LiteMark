@@ -1,6 +1,7 @@
 //! Regression tests for Milestone 8 paste and link items (W7, W13, W15a).
 
 use super::*;
+use crate::model::clipboard::clipboard_http_url;
 
 fn doc(content: &str) -> DocumentTab {
     DocumentTab::new("m8p".into(), "m8p.md".into(), content.into(), None, None)
@@ -108,4 +109,105 @@ fn w13_paste_into_a_missing_table_cell_fills_it_and_escapes_the_pipe() {
     d.pending_table_col = Some(1);
     paste(&mut d, "x|y\nz", ViewMode::Wysiwyg);
     assert_eq!(d.content, "| a | b |\n| --- | --- |\n| 1 | x\\|y z |");
+}
+// ---- W7: URL on the clipboard ----
+
+const URL: &str = "https://example.com/a";
+
+#[test]
+fn w7_paste_url_over_selection_makes_a_link() {
+    let mut d = doc("see docs now");
+    d.caret.range = 4..8;
+    d.caret.reversed = false;
+    paste(&mut d, URL, ViewMode::Wysiwyg);
+    assert_eq!(d.content, "see [docs](https://example.com/a) now");
+}
+
+#[test]
+fn w7_paste_url_with_no_selection_inserts_the_url_text() {
+    let mut d = doc("see ");
+    d.place(4, false);
+    paste(&mut d, URL, ViewMode::Wysiwyg);
+    assert_eq!(d.content, "see https://example.com/a");
+}
+
+#[test]
+fn w7_paste_url_in_raw_mode_is_plain() {
+    let mut d = doc("see docs now");
+    d.caret.range = 4..8;
+    d.caret.reversed = false;
+    paste(&mut d, URL, ViewMode::Raw);
+    assert_eq!(d.content, "see https://example.com/a now");
+}
+
+#[test]
+fn w7_paste_url_over_an_existing_link_replaces_text_not_unwraps() {
+    let mut d = doc("[docs](https://old.example)");
+    d.caret.range = 1..5;
+    d.caret.reversed = false;
+    paste(&mut d, URL, ViewMode::Wysiwyg);
+    assert!(
+        d.content.contains("https://example.com/a"),
+        "{:?}",
+        d.content
+    );
+}
+
+#[test]
+fn w7_paste_url_over_multiline_selection_is_plain() {
+    let mut d = doc("one\ntwo");
+    d.caret.range = 0..7;
+    d.caret.reversed = false;
+    paste(&mut d, URL, ViewMode::Wysiwyg);
+    assert_eq!(d.content, URL);
+}
+
+#[test]
+fn w7_ctrl_k_with_url_fills_destination() {
+    let mut d = doc("see docs now");
+    d.caret.range = 4..8;
+    d.caret.reversed = false;
+    d.link_url_hint = Some(URL.into());
+    d.apply_format_in_mode("link", ViewMode::Wysiwyg);
+    assert_eq!(d.content, "see [docs](https://example.com/a) now");
+    assert!(d.link_url_hint.is_none());
+}
+
+#[test]
+fn w7_ctrl_k_without_selection_uses_placeholder_with_url() {
+    let mut d = doc("see ");
+    d.place(4, false);
+    d.link_url_hint = Some(URL.into());
+    d.apply_format_in_mode("link", ViewMode::Wysiwyg);
+    assert_eq!(d.content, "see [link](https://example.com/a)");
+    assert_eq!(&d.content[d.selection_range()], "link");
+}
+
+#[test]
+fn w7_ctrl_k_twice_restores_the_text() {
+    let mut d = doc("see docs now");
+    d.caret.range = 4..8;
+    d.caret.reversed = false;
+    d.link_url_hint = Some(URL.into());
+    d.apply_format_in_mode("link", ViewMode::Wysiwyg);
+    d.link_url_hint = Some(URL.into());
+    d.apply_format_in_mode("link", ViewMode::Wysiwyg);
+    assert_eq!(d.content, "see docs now");
+}
+
+#[test]
+fn w7_clipboard_url_detection() {
+    assert_eq!(
+        clipboard_http_url(" https://a.b/c\n"),
+        Some("https://a.b/c".into())
+    );
+    assert_eq!(clipboard_http_url("http://a.b"), Some("http://a.b".into()));
+    assert_eq!(clipboard_http_url("https://"), None);
+    assert_eq!(clipboard_http_url("ftp://a.b"), None);
+    assert_eq!(clipboard_http_url("https://a.b c"), None);
+    assert_eq!(clipboard_http_url("see https://a.b"), None);
+    assert_eq!(
+        clipboard_http_url("https://a.b/x_(y)"),
+        Some("https://a.b/x_%28y%29".into())
+    );
 }
