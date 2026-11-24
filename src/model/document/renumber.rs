@@ -139,7 +139,45 @@ fn classify_run_line(
     }
 }
 
+/// An open code fence: its character and run length.
+type Fence = (u8, usize);
+
+/// The fence state after `line`, given the state before it.
+fn fence_step(state: Option<Fence>, line: &str) -> Option<Fence> {
+    let t = line.trim_start_matches([' ', '\t', '>']);
+    let Some(&ch) = t.as_bytes().first().filter(|&&c| c == b'`' || c == b'~') else {
+        return state;
+    };
+    let run = t.bytes().take_while(|&c| c == ch).count();
+    if run < 3 {
+        return state;
+    }
+    let rest = &t[run..];
+    match state {
+        Some((open, len)) if open == ch && run >= len && rest.trim().is_empty() => None,
+        Some(_) => state,
+        None if ch == b'`' && rest.contains('`') => None,
+        None => Some((ch, run)),
+    }
+}
+
 impl DocumentTab {
+    /// The code fence open at the start of the line at `offset`, found by
+    /// reading the lines above it (cheap text checks, no parse). Raw view
+    /// has no full parse to ask.
+    fn fence_before_local(&self, offset: usize) -> Option<Fence> {
+        let mut state = None;
+        let mut at = Some(0);
+        while let Some(line_start) = at.filter(|&s| s < offset) {
+            state = fence_step(
+                state,
+                &self.content[line_start..line_end(&self.content, line_start)],
+            );
+            at = self.next_line_start(line_start);
+        }
+        state
+    }
+
     /// Raw view never parses the whole note (Milestone 9), so there list
     /// lines are read one at a time, each parsed on its own, as Raw Enter
     /// does. Code fences and other context above a line are not seen.
@@ -273,7 +311,7 @@ impl DocumentTab {
             let (text, local) = self.local_line(line_start);
             let line = local.lines.first()?;
             let (_, marker) = line_marker(text, &local, line)?;
-            if !marker.ordered {
+            if !marker.ordered || self.fence_before_local(line_start).is_some() {
                 return None;
             }
             let (level, punct, depth) = (marker.indent_bytes, marker.punct, line.quote_depth);
@@ -343,13 +381,17 @@ impl DocumentTab {
         let first = if self.reads_lines_locally() {
             let mut at = Some(home_offset(&self.content, range.start));
             let mut found = None;
+            let mut fence = at.and_then(|s| self.fence_before_local(s));
             while let Some(line_start) = at.filter(|&s| s < range.end) {
                 let (text, local) = self.local_line(line_start);
-                if local
-                    .lines
-                    .first()
-                    .and_then(|line| line_marker(text, &local, line))
-                    .is_some_and(|m| takes_marker(line_start, m))
+                let fenced = fence.is_some();
+                fence = fence_step(fence, text);
+                if !fenced
+                    && local
+                        .lines
+                        .first()
+                        .and_then(|line| line_marker(text, &local, line))
+                        .is_some_and(|m| takes_marker(line_start, m))
                 {
                     found = Some(line_start);
                     break;

@@ -435,3 +435,31 @@ fn enter_on_an_empty_quoted_item_shifts_the_rest_down() {
         assert_eq!(d.content, "> 1. a\n> \n> 2. c", "{mode:?}");
     }
 }
+
+#[test]
+fn removing_a_numbered_line_inside_a_code_fence_renumbers_nothing() {
+    for mode in MODES {
+        for fence in ["```", "~~~~"] {
+            let src = format!("{fence}\n1. a\n2. b\n3. c\n{fence}\n");
+            let mut d = doc(&src, mode);
+            let s = src.find("2. b").unwrap();
+            d.edit_removing(s..s + 5);
+            assert_eq!(
+                d.content,
+                format!("{fence}\n1. a\n3. c\n{fence}\n"),
+                "{mode:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_list_after_a_closed_fence_still_renumbers() {
+    for mode in MODES {
+        let src = "```\n1. x\n```\n\n1. a\n2. b\n3. c\n";
+        let mut d = doc(src, mode);
+        let s = src.find("2. b").unwrap();
+        d.edit_removing(s..s + 5);
+        assert_eq!(d.content, "```\n1. x\n```\n\n1. a\n2. c\n", "{mode:?}");
+    }
+}
