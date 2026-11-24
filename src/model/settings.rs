@@ -321,9 +321,105 @@ impl EditorSettings {
     }
 }
 
+/// Writes settings on a background thread so `fsync` never blocks the UI.
+/// Snapshots sent while a write runs are coalesced: only the newest is saved.
+/// After each write the thread sends `()` on the receiver [`Self::spawn`]
+/// returns, so the UI can report that write's outcome as soon as it lands.
+pub struct SettingsWriter {
+    tx: std::sync::mpsc::Sender<WriterMsg>,
+    result: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+}
+
+enum WriterMsg {
+    Save(Box<EditorSettings>),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+impl SettingsWriter {
+    pub fn spawn() -> (Self, futures::channel::mpsc::UnboundedReceiver<()>) {
+        let (tx, rx) = std::sync::mpsc::channel::<WriterMsg>();
+        let (written_tx, written_rx) = futures::channel::mpsc::unbounded::<()>();
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let shared = result.clone();
+        let spawned = std::thread::Builder::new()
+            .name("settings-writer".into())
+            .spawn(move || {
+                while let Ok(first) = rx.recv() {
+                    let mut latest = None;
+                    let mut acks = Vec::new();
+                    let mut next = Some(first);
+                    while let Some(msg) = next.take().or_else(|| rx.try_recv().ok()) {
+                        match msg {
+                            WriterMsg::Save(settings) => latest = Some(settings),
+                            WriterMsg::Flush(ack) => acks.push(ack),
+                        }
+                    }
+                    if let Some(settings) = latest {
+                        if let Ok(mut slot) = shared.lock() {
+                            *slot = Some(settings.save());
+                        }
+                        // Nobody listening (window gone) is fine.
+                        let _ = written_tx.unbounded_send(());
+                    }
+                    for ack in acks {
+                        let _ = ack.send(());
+                    }
+                }
+            });
+        if spawned.is_err() {
+            eprintln!("litemark: could not start the settings writer thread");
+        }
+        (Self { tx, result }, written_rx)
+    }
+
+    /// Queue `settings` for writing.
+    pub fn save(&self, settings: &EditorSettings) {
+        let _ = self.tx.send(WriterMsg::Save(Box::new(settings.clone())));
+    }
+
+    /// The outcome of the latest finished write, once.
+    pub fn take_result(&self) -> Option<Result<(), String>> {
+        self.result.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// Wait until every queued write has reached the disk.
+    pub fn flush(&self) {
+        let (ack, done) = std::sync::mpsc::channel();
+        if self.tx.send(WriterMsg::Flush(ack)).is_ok() {
+            let _ = done.recv_timeout(std::time::Duration::from_secs(5));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_writer_wakes_with_each_writes_own_result() {
+        // A blocked save fails without touching the disk.
+        let blocked = EditorSettings {
+            save_blocked: Some("blocked for test".into()),
+            ..EditorSettings::default()
+        };
+        let (writer, mut written) = SettingsWriter::spawn();
+        assert!(writer.take_result().is_none());
+        writer.save(&blocked);
+        // The wake-up comes after the write, carrying that write's outcome.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match written.try_recv() {
+                Ok(()) => break,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                Err(_) => panic!("writer never woke the UI after a write"),
+            }
+        }
+        assert_eq!(writer.take_result(), Some(Err("blocked for test".into())));
+        // Reported once.
+        assert_eq!(writer.take_result(), None);
+    }
 
     #[test]
     fn test_content_alignment_serde() {

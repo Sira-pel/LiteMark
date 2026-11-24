@@ -1,6 +1,7 @@
 //! Scrolling: momentum, caret follow, selection reveal.
 
 use super::*;
+use crate::ui::text_editor::row_at_or_before;
 
 impl LiteMarkApp {
     /// Feeds touchpad movement to the momentum tracker; wheel notches reset it.
@@ -81,12 +82,7 @@ impl LiteMarkApp {
             return Some(true); // geometry is from an older frame; look again
         }
         self.caret_follow_waits = 0;
-        let row = paint
-            .rows
-            .iter()
-            .rev()
-            .find(|row| row.byte_start <= cursor)
-            .or_else(|| paint.rows.first());
+        let row = row_at_or_before(&paint.rows, cursor);
         let view = self.editor_scroll.bounds();
         if let Some(row) = row {
             if let Some(delta) = follow_caret_delta(
@@ -114,13 +110,7 @@ impl LiteMarkApp {
             return;
         };
         let paint = self.editor_paint.borrow();
-        let Some(row) = paint
-            .rows
-            .iter()
-            .rev()
-            .find(|row| row.byte_start <= cursor)
-            .or_else(|| paint.rows.first())
-        else {
+        let Some(row) = row_at_or_before(&paint.rows, cursor) else {
             return;
         };
         let view = self.editor_scroll.bounds();
@@ -147,13 +137,7 @@ impl LiteMarkApp {
             return;
         };
         let paint = self.editor_paint.borrow();
-        let Some(row) = paint
-            .rows
-            .iter()
-            .rev()
-            .find(|row| row.byte_start <= start)
-            .or_else(|| paint.rows.first())
-        else {
+        let Some(row) = row_at_or_before(&paint.rows, start) else {
             return;
         };
         let view = self.editor_scroll.bounds();

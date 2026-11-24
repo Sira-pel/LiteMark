@@ -26,6 +26,7 @@ impl Render for LiteMarkApp {
         self.sync_frame_state(&theme, window, cx);
         self.sync_tab_settings();
         self.schedule_tab_settings_save(cx);
+        self.start_requested_rescan(cx);
 
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
             tab.ensure_stats();
@@ -690,19 +691,21 @@ impl Render for LiteMarkApp {
             let view = view.clone();
             move |file: WorkspaceFile, cx: &mut App| {
                 let _ = view.update(cx, |this, cx| {
-                    match read_note(&file.path) {
-                        Ok(content) => this.open_loaded_tab(
-                            file.name.clone(),
-                            content,
-                            Some(file.path.clone()),
-                            Some(file.id.clone()),
-                        ),
-                        Err(err) => this.show_error(err),
-                    }
-                    // A sidebar click keeps arrow navigation in the tree, like
-                    // clicking a folder; clicking the editor hands it back.
-                    this.sidebar_keyboard = true;
-                    cx.notify();
+                    this.read_note_then(file.path.clone(), cx, move |this, result, cx| {
+                        match result {
+                            Ok(content) => this.open_loaded_tab(
+                                file.name.clone(),
+                                content,
+                                Some(file.path.clone()),
+                                Some(file.id.clone()),
+                            ),
+                            Err(err) => this.show_error(err),
+                        }
+                        // A sidebar click keeps arrow navigation in the tree, like
+                        // clicking a folder; clicking the editor hands it back.
+                        this.sidebar_keyboard = true;
+                        cx.notify();
+                    });
                 });
             }
         };
@@ -1518,7 +1521,7 @@ impl Render for LiteMarkApp {
                                     SidebarProps {
                                         app: cx.entity(),
                                         workspace: &self.workspace,
-                                        tree: self.sidebar_tree(),
+                                        tree: self.sidebar_rows(),
                                         width: crate::theme::sidebar_width(window_width),
                                         selected_file_id: match &self.selected_target {
                                             Some(SidebarTarget::File(id)) => Some(id.clone()),
@@ -2103,8 +2106,13 @@ impl LiteMarkApp {
         self.coast_scroll(window);
         self.install_close_hook(window, cx);
         if self.allow_window_close {
-            self.flush_tab_settings();
-            window.remove_window();
+            if self.flush_settings_for_exit() {
+                window.remove_window();
+            } else {
+                // The settings write failed: stay open to show why.
+                self.allow_window_close = false;
+                cx.notify();
+            }
         }
         if self.show_find_replace
             && !self.show_replace_row
@@ -2194,6 +2202,12 @@ impl LiteMarkApp {
         let placeholder_color = theme.placeholder;
         let field_bg = theme.bg_input;
         let field_border = theme.border_primary;
+        // The colours only change with the theme; skip six entity updates a frame.
+        let colors = [text_color, placeholder_color, field_bg, field_border];
+        if self.field_colors == Some(colors) {
+            return;
+        }
+        self.field_colors = Some(colors);
         // The find panel draws its own input boxes, so the find and replace
         // fields stay transparent.
         self.find_field.update(cx, |field, _cx| {

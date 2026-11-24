@@ -139,7 +139,15 @@ pub struct LiteMarkApp {
     pub workspace: Tracked<WorkspaceDirectory>,
     /// The sidebar tree for a workspace generation and pending create row,
     /// so a render (each keystroke, hover or scroll) doesn't rebuild it.
+    /// Theme colours the input fields were last given.
+    field_colors: Option<[Rgba; 4]>,
+    /// Bumped by every rescan; a background scan applies only if unchanged.
+    scan_generation: u64,
+    rescan_requested: bool,
     sidebar_tree: RefCell<Option<SidebarTreeCache>>,
+    /// Search results for one `(workspace generation, query)`.
+    #[allow(clippy::type_complexity)]
+    sidebar_search: RefCell<Option<(u64, String, std::rc::Rc<Vec<SidebarTreeItem>>)>>,
     pub settings: EditorSettings,
     pub show_sidebar: bool,
     pub show_find_replace: bool,
@@ -193,6 +201,10 @@ pub struct LiteMarkApp {
     pub error_message: Option<String>,
     /// The last settings save failed; the error was shown once already.
     settings_save_failed: bool,
+    settings_writer: crate::model::settings::SettingsWriter,
+    /// The window is closing and its last settings write failed: the
+    /// error has been shown, and the next close quits regardless.
+    settings_exit_warned: bool,
     pub prompt: Option<Prompt>,
     pub prompt_focus_handle: FocusHandle,
     pub prompt_selected_ix: usize,
@@ -227,6 +239,20 @@ pub struct LiteMarkApp {
     pub applied_focus: Option<FocusSlot>,
     pub close_hook_installed: bool,
     pub allow_window_close: bool,
+    /// Notes bigger than this are read on a background thread when opened.
+    async_read_bytes: u64,
+    /// The big note being read in the background, if any.
+    note_loading: Option<PathBuf>,
+    /// Big notes waiting for the one being read.
+    read_queue: std::collections::VecDeque<tabs::PendingRead>,
+    /// Tabs whose Ctrl+S is writing on a background thread.
+    saves_in_flight: std::collections::HashSet<String>,
+    /// Tabs that got another Ctrl+S while saving: write again afterwards.
+    resave_after: std::collections::HashSet<String>,
+    /// Tabs to close as soon as their save has landed (closed mid-write).
+    close_after_save: std::collections::HashSet<String>,
+    /// The user asked to close while a save was still writing.
+    close_when_saved: bool,
     pub selecting: bool,
     pub zoom_epoch: u64,
     pub toast_epoch: u64,
@@ -592,6 +618,8 @@ impl LiteMarkApp {
 
         let initial_selected = initial_tab.workspace_file_id.clone();
 
+        let (settings_writer, settings_written) = crate::model::settings::SettingsWriter::spawn();
+        Self::watch_settings_writes(settings_written, cx);
         let mut app = Self {
             tabs: vec![initial_tab],
             active_tab_id: first_id,
@@ -600,7 +628,11 @@ impl LiteMarkApp {
             sidebar_clipboard: Vec::new(),
             sidebar_clipboard_cut: false,
             workspace: workspace.into(),
+            field_colors: None,
+            scan_generation: 0,
+            rescan_requested: false,
             sidebar_tree: RefCell::new(None),
+            sidebar_search: RefCell::new(None),
             settings,
             show_sidebar,
             show_find_replace: false,
@@ -635,6 +667,8 @@ impl LiteMarkApp {
             tab_ids,
             error_message,
             settings_save_failed,
+            settings_writer,
+            settings_exit_warned: false,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -656,6 +690,13 @@ impl LiteMarkApp {
             applied_focus: None,
             close_hook_installed: false,
             allow_window_close: false,
+            async_read_bytes: ASYNC_READ_BYTES,
+            note_loading: None,
+            read_queue: Default::default(),
+            saves_in_flight: Default::default(),
+            resave_after: Default::default(),
+            close_after_save: Default::default(),
+            close_when_saved: false,
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
@@ -732,6 +773,8 @@ impl LiteMarkApp {
             None,
             None,
         );
+        let (settings_writer, settings_written) = crate::model::settings::SettingsWriter::spawn();
+        Self::watch_settings_writes(settings_written, cx);
         Self {
             tabs: vec![tab],
             active_tab_id: first_id,
@@ -748,7 +791,11 @@ impl LiteMarkApp {
                 scan_truncated: false,
             }
             .into(),
+            field_colors: None,
+            scan_generation: 0,
+            rescan_requested: false,
             sidebar_tree: RefCell::new(None),
+            sidebar_search: RefCell::new(None),
             // Never touch the real settings file from a test.
             settings: EditorSettings {
                 check_for_updates: false,
@@ -788,6 +835,8 @@ impl LiteMarkApp {
             tab_ids,
             error_message: None,
             settings_save_failed: true,
+            settings_writer,
+            settings_exit_warned: false,
             prompt: None,
             prompt_selected_ix: 0,
             save_as_tab: None,
@@ -809,6 +858,13 @@ impl LiteMarkApp {
             applied_focus: None,
             close_hook_installed: false,
             allow_window_close: false,
+            async_read_bytes: ASYNC_READ_BYTES,
+            note_loading: None,
+            read_queue: Default::default(),
+            saves_in_flight: Default::default(),
+            resave_after: Default::default(),
+            close_after_save: Default::default(),
+            close_when_saved: false,
             selecting: false,
             zoom_epoch: 0,
             toast_epoch: 0,
@@ -902,14 +958,59 @@ impl LiteMarkApp {
     fn save_settings(&mut self) {
         // Every write includes the tab settings, so none are pending after it.
         self.tab_settings_dirty = false;
-        match self.settings.save() {
-            Ok(()) => self.settings_save_failed = false,
-            Err(err) => {
-                if !self.settings_save_failed {
+        // A blocked save fails at once without touching the disk.
+        if let Some(reason) = self.settings.save_blocked.clone() {
+            if !self.settings_save_failed {
+                self.show_error(reason);
+            }
+            self.settings_save_failed = true;
+            return;
+        }
+        // The outcome arrives through `watch_settings_writes` once written.
+        self.settings_writer.save(&self.settings);
+    }
+
+    /// Report each background settings write as soon as it lands, instead
+    /// of waiting for the next save to look.
+    fn watch_settings_writes(
+        mut written: futures::channel::mpsc::UnboundedReceiver<()>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while written.next().await.is_some() {
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.report_settings_result() {
+                            cx.notify();
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Show the outcome of the last background settings write. Returns
+    /// whether an error was newly shown.
+    pub(crate) fn report_settings_result(&mut self) -> bool {
+        match self.settings_writer.take_result() {
+            Some(Ok(())) => {
+                self.settings_save_failed = false;
+                false
+            }
+            Some(Err(err)) => {
+                let shown = !self.settings_save_failed;
+                if shown {
                     self.show_error(err);
                 }
                 self.settings_save_failed = true;
+                shown
             }
+            None => false,
         }
     }
 
@@ -1016,6 +1117,17 @@ impl crate::ui::text_editor::EditorContentSource for LiteMarkApp {
 #[cfg(test)]
 #[path = "pdf_open_tests.rs"]
 mod pdf_open_tests;
+
+/// Notes above this size (1 MB) are read off the UI thread.
+const ASYNC_READ_BYTES: u64 = 1024 * 1024;
+
+#[cfg(test)]
+#[path = "async_save_tests.rs"]
+mod async_save_tests;
+
+#[cfg(test)]
+#[path = "background_scan_tests.rs"]
+mod background_scan_tests;
 
 #[cfg(test)]
 #[path = "sidebar_render_tests.rs"]

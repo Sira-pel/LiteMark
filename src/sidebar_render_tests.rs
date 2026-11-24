@@ -32,7 +32,6 @@ fn big_workspace(folders: usize, files_per_folder: usize) -> WorkspaceDirectory 
                 folder_id: Some(id.clone()),
                 path: root.join(format!("Folder {d}")).join(name),
                 file_type: crate::model::FileType::Markdown,
-                updated_at: 0,
             });
         }
     }

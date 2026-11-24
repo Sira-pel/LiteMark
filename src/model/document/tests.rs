@@ -6987,3 +6987,86 @@ fn huge_deletion_shrinks_content_capacity() {
         doc.content.capacity()
     );
 }
+
+#[test]
+fn window_line_endings_matches_the_buffered_count() {
+    use crate::model::text_ops::count_line_endings;
+    let bytes: [Option<u8>; 4] = [None, Some(b'\r'), Some(b'\n'), Some(b'a')];
+    let mids = [
+        "", "a", "\r", "\n", "\r\n", "\n\r", "a\r", "\ra", "\r\r", "\n\n",
+    ];
+    for before in bytes {
+        for after in bytes {
+            for mid in mids {
+                let mut window = Vec::new();
+                window.extend(before);
+                window.extend_from_slice(mid.as_bytes());
+                window.extend(after);
+                assert_eq!(
+                    super::window_line_endings(before, mid, after),
+                    count_line_endings(&window),
+                    "{before:?} {mid:?} {after:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cursor_line_and_col_follow_every_caret_move_without_a_view_mode_sync() {
+    // `set_view_mode` no longer re-syncs the cursor on every call, so each
+    // caret-moving method must leave Ln/Col (and the gutter line) current.
+    for (name, file) in [
+        ("a.txt", "one\ntwo two two\nthree\n"),
+        ("a.md", "one\ntwo two two\nthree\n"),
+    ] {
+        let mut tab = DocumentTab::new("t".into(), name.into(), file.into(), None, None);
+        tab.set_view_mode(ViewMode::Raw);
+        let check = |tab: &DocumentTab, what: &str| {
+            let (line, col) = super::line_col(&tab.content, tab.cursor_offset());
+            assert_eq!(
+                (tab.cursor_line, tab.cursor_col),
+                (line, col),
+                "{name}: {what}"
+            );
+        };
+        tab.place(6, false);
+        check(&tab, "place");
+        tab.place(14, true);
+        check(&tab, "extend");
+        tab.select_word();
+        check(&tab, "select_word");
+        tab.select_line();
+        check(&tab, "select_line");
+        tab.select_all();
+        check(&tab, "select_all");
+        tab.place(0, false);
+        tab.move_down(false);
+        check(&tab, "down");
+        tab.move_up(false);
+        check(&tab, "up");
+        // Switching to the same mode again is a no-op and must not matter.
+        tab.set_view_mode(ViewMode::Raw);
+        check(&tab, "same mode");
+    }
+}
+
+#[test]
+fn undo_and_redo_leave_the_cursor_state_current() {
+    let mut tab = DocumentTab::new("t".into(), "t.md".into(), "one\ntwo\n".into(), None, None);
+    tab.place(8, false);
+    tab.edit(8..8, "three\nfour");
+    tab.edit(0..0, "zero\n");
+    let check = |tab: &DocumentTab, what: &str| {
+        let (line, col) = super::line_col(&tab.content, tab.cursor_offset());
+        assert_eq!((tab.cursor_line, tab.cursor_col), (line, col), "{what}");
+    };
+    for _ in 0..2 {
+        assert!(tab.undo());
+        check(&tab, "undo");
+    }
+    for _ in 0..2 {
+        assert!(tab.redo());
+        check(&tab, "redo");
+    }
+}

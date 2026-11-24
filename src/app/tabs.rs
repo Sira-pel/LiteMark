@@ -5,6 +5,20 @@ use super::*;
 /// How long after a tab switch the tab list is written to settings.json.
 const TAB_SETTINGS_SAVE_DELAY_MS: u64 = 1000;
 
+/// A big note waiting for its turn to be read in the background.
+pub(super) type PendingRead = (
+    PathBuf,
+    Box<dyn FnOnce(&mut LiteMarkApp, Result<String, String>, &mut Context<LiteMarkApp>)>,
+);
+
+/// How a background save of one note ended.
+pub(super) enum AsyncSave {
+    Saved(Option<DiskVersion>),
+    /// The file changed (or, with `true`, was deleted) since the note last saw it.
+    Conflict(bool),
+    Failed(String),
+}
+
 impl LiteMarkApp {
     /// Save a tab. Refuses, with an error, when another program changed or
     /// deleted the file since the tab last read or wrote it; `handle_save`
@@ -58,7 +72,223 @@ impl LiteMarkApp {
         Ok(())
     }
 
+    /// Read a note and hand it to `then`. Small notes are read on the spot
+    /// (under a millisecond); a big one is read on a background thread, with
+    /// a toast, so opening it doesn't freeze the window. Big reads run one
+    /// at a time and wait their turn, so several notes opened together all
+    /// open.
+    pub(super) fn read_note_then(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, Result<String, String>, &mut Context<Self>) + 'static,
+    ) {
+        // A note already open with unsaved edits keeps them: opening it only
+        // switches to it, so its file is not read at all.
+        if self.tabs.iter().any(|tab| {
+            (tab.is_modified || self.saves_in_flight.contains(&tab.id))
+                && tab.file_path.as_deref() == Some(path.as_path())
+        }) {
+            then(self, Ok(String::new()), cx);
+            return;
+        }
+        let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > self.async_read_bytes);
+        if !big {
+            let result = read_note(&path);
+            then(self, result, cx);
+            return;
+        }
+        let job: PendingRead = (path, Box::new(then));
+        if self.note_loading.is_some() {
+            self.read_queue.push_back(job);
+            return;
+        }
+        self.start_big_read(job, cx);
+    }
+
+    fn start_big_read(&mut self, (path, then): PendingRead, cx: &mut Context<Self>) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.note_loading = Some(path.clone());
+        self.show_toast(format!("Opening {name}…"), cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { read_note(&path) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.note_loading = None;
+                // Renamed or trashed while it loaded: opening it would point
+                // a tab at a path that is gone, and saving would recreate it.
+                let result = result.and_then(|text| {
+                    if path.exists() {
+                        Ok(text)
+                    } else {
+                        Err(format!("{} no longer exists.", path.display()))
+                    }
+                });
+                then(this, result, cx);
+                if let Some(next) = this.read_queue.pop_front() {
+                    this.start_big_read(next, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A note at or under `path` is being written by a background save.
+    /// Renaming, moving or trashing it now would let the write bring the old
+    /// path back, so those wait.
+    pub(super) fn is_saving_under(&self, path: &Path) -> bool {
+        self.tabs.iter().any(|tab| {
+            self.saves_in_flight.contains(&tab.id)
+                && tab
+                    .file_path
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with(path))
+        })
+    }
+
+    /// Ctrl+S on a note that already has its file: check the file and write
+    /// it on a background thread, so the UI never waits on the disk or
+    /// `fsync`. Returns `false` when this save needs the synchronous path
+    /// (an untitled note, a rename, a new file), which the caller then runs.
+    ///
+    /// The note shows as saved at once. A later edit marks it modified again;
+    /// a conflict or a failed write marks it modified and says so.
+    pub(super) fn start_async_save(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        if self.saves_in_flight.contains(id) {
+            // One write per note at a time, so an older write can't land last.
+            self.resave_after.insert(id.to_string());
+            return true;
+        }
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return false;
+        };
+        let Some(path) = tab.file_path.clone() else {
+            return false;
+        };
+        let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let same_file = plan_save(
+            tab.file_type,
+            tab.file_path.as_deref(),
+            &tab.title,
+            &folder,
+            |name| folder.join(name).exists(),
+        )
+        .is_ok_and(|planned| planned.path == path && path.exists());
+        if !same_file {
+            return false;
+        }
+        let text = tab.file_text();
+        let seen = tab.disk_version.clone();
+        let title = tab.title.clone();
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            tab.is_modified = false;
+        }
+        self.saves_in_flight.insert(id.to_string());
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let job = {
+                let path = path.clone();
+                cx.background_executor().spawn(async move {
+                    if let Some(seen) = &seen {
+                        match disk_change(&path, seen) {
+                            DiskChange::Unchanged => {}
+                            change => return AsyncSave::Conflict(change == DiskChange::Deleted),
+                        }
+                    }
+                    match atomic_save(&path, &text) {
+                        // The version is the text that was written, not
+                        // whatever the tab holds by the time this finishes.
+                        Ok(()) => AsyncSave::Saved(disk_version(&path, &text)),
+                        Err(err) => {
+                            AsyncSave::Failed(format!("Couldn't save {}: {err}", path.display()))
+                        }
+                    }
+                })
+            };
+            let outcome = job.await;
+            this.update(cx, |this, cx| {
+                this.finish_async_save(&id, &path, &title, outcome, cx)
+            })
+            .ok();
+        })
+        .detach();
+        true
+    }
+
+    fn finish_async_save(
+        &mut self,
+        id: &str,
+        path: &Path,
+        title: &str,
+        outcome: AsyncSave,
+        cx: &mut Context<Self>,
+    ) {
+        self.saves_in_flight.remove(id);
+        let saved = matches!(outcome, AsyncSave::Saved(_));
+        // The note may have been closed or renamed meanwhile; the write
+        // itself still happened, so only update a tab that is still that file.
+        let still_there = self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == id && tab.file_path.as_deref() == Some(path));
+        match outcome {
+            AsyncSave::Saved(version) => {
+                if still_there {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                        tab.disk_version = version;
+                    }
+                    self.show_toast(format!("Saved {title}"), cx);
+                }
+            }
+            AsyncSave::Conflict(deleted) => {
+                if still_there {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                        tab.is_modified = true;
+                    }
+                    self.show_prompt(Prompt::ExternalChange {
+                        id: id.to_string(),
+                        deleted,
+                    });
+                }
+                self.resave_after.remove(id);
+            }
+            AsyncSave::Failed(err) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                    tab.is_modified = true;
+                }
+                self.show_file_error(err);
+                self.resave_after.remove(id);
+            }
+        }
+        // A tab closed mid-write closes now if the write landed; on a
+        // conflict or failure it stays open with its text.
+        // A re-save queued meanwhile keeps the close pending until it lands.
+        let resave = self.resave_after.remove(id) && still_there && saved;
+        if resave && self.start_async_save(id, cx) {
+            // Its own finish decides the close.
+        } else if self.close_after_save.remove(id) && saved {
+            self.handle_close_tab(id.to_string());
+        }
+        if self.close_when_saved && self.saves_in_flight.is_empty() {
+            self.close_when_saved = false;
+            self.request_close_window();
+        }
+        cx.notify();
+    }
+
     fn save_tab_with(&mut self, id: &str, overwrite: bool) -> Result<String, String> {
+        if self.saves_in_flight.contains(id) {
+            return Err("Still saving this note. Try again in a moment.".into());
+        }
         if !overwrite {
             let change = self.disk_change_for(id);
             if change != DiskChange::Unchanged {
@@ -131,19 +361,14 @@ impl LiteMarkApp {
         }
         self.record_disk_version(id);
         // Re-saving a file the sidebar already lists changes nothing in the
-        // tree, so update its timestamp instead of rescanning the whole
-        // workspace on the UI thread on every Ctrl+S.
-        let listed = (previous_path.as_ref() == Some(&saved_path))
-            .then(|| {
-                self.workspace
-                    .files
-                    .iter_mut()
-                    .find(|file| file.path == saved_path)
-            })
-            .flatten();
-        if let Some(file) = listed {
-            file.updated_at = modified_secs(&saved_path).unwrap_or(file.updated_at);
-        } else {
+        // tree, so skip rescanning the workspace on every Ctrl+S.
+        let listed = previous_path.as_ref() == Some(&saved_path)
+            && self
+                .workspace
+                .files
+                .iter()
+                .any(|file| file.path == saved_path);
+        if !listed {
             self.rescan_workspace();
         }
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
@@ -185,7 +410,9 @@ impl LiteMarkApp {
                 // shows it if it is newer; a tab with edits keeps them, and
                 // its next save asks because the file changed.
                 let tab = &mut self.tabs[index];
-                if !tab.is_modified {
+                // (A note still being saved counts as modified: the file is
+                // about to be overwritten, so what's on disk is the old text.)
+                if !tab.is_modified && !self.saves_in_flight.contains(&id) {
                     // `content` is the raw file, BOM included.
                     if tab.file_text_ref() != content.as_str() {
                         tab.reload(content);
@@ -295,16 +522,22 @@ impl LiteMarkApp {
     /// [`Self::schedule_tab_settings_save`] or [`Self::flush_tab_settings`].
     /// Returns whether anything changed.
     pub(super) fn sync_tab_settings(&mut self) -> bool {
-        let open: Vec<PathBuf> = self
-            .tabs
-            .iter()
-            .filter(|tab| tab.file_type != FileType::Pdf)
-            .filter_map(|tab| tab.file_path.clone())
-            .collect();
+        let open_paths = || {
+            self.tabs
+                .iter()
+                .filter(|tab| tab.file_type != FileType::Pdf)
+                .filter_map(|tab| tab.file_path.as_ref())
+        };
+        // Runs every frame: compare in place and only allocate on a change.
+        let open_changed = !open_paths().eq(self.settings.open_tabs.iter());
+        let new_open: Option<Vec<PathBuf>> = open_changed.then(|| open_paths().cloned().collect());
         let active_path = self.active_tab().and_then(|tab| tab.file_path.clone());
-        let active = active_path.clone().filter(|path| open.contains(path));
+        let active = {
+            let open: &[PathBuf] = new_open.as_deref().unwrap_or(&self.settings.open_tabs);
+            active_path.clone().filter(|path| open.contains(path))
+        };
         let mut changed = false;
-        if open != self.settings.open_tabs {
+        if let Some(open) = new_open {
             self.settings.open_tabs = open;
             changed = true;
         }
@@ -352,6 +585,34 @@ impl LiteMarkApp {
         self.sync_tab_settings();
         if self.tab_settings_dirty {
             self.save_settings();
+        }
+    }
+
+    /// [`Self::flush_tab_settings`], then wait until every queued settings
+    /// write is on disk. Only for when the window is closing; the 1 s timer
+    /// must never wait on the disk.
+    ///
+    /// Returns whether the window may close. When the last write failed, the
+    /// error is shown in the still-open window and `false` is returned once;
+    /// closing again quits without the settings.
+    pub(super) fn flush_settings_for_exit(&mut self) -> bool {
+        self.flush_tab_settings();
+        self.settings_writer.flush();
+        match self.settings_writer.take_result() {
+            Some(Err(err)) if !self.settings_exit_warned => {
+                self.settings_exit_warned = true;
+                self.settings_save_failed = true;
+                self.show_error(format!(
+                    "{err}\nClose the window again to quit without saving your settings."
+                ));
+                false
+            }
+            Some(Err(_)) => true,
+            Some(Ok(())) => {
+                self.settings_save_failed = false;
+                true
+            }
+            None => true,
         }
     }
 
@@ -426,18 +687,21 @@ impl LiteMarkApp {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled.md".into());
-        match read_note(&path) {
-            Ok(content) => {
-                let file_id = self
-                    .workspace
-                    .files
-                    .iter()
-                    .find(|file| file.path == path)
-                    .map(|file| file.id.clone());
-                self.open_loaded_tab(name, content, Some(path), file_id);
+        self.read_note_then(path.clone(), cx, move |this, result, cx| {
+            match result {
+                Ok(content) => {
+                    let file_id = this
+                        .workspace
+                        .files
+                        .iter()
+                        .find(|file| file.path == path)
+                        .map(|file| file.id.clone());
+                    this.open_loaded_tab(name, content, Some(path), file_id);
+                }
+                Err(err) => this.show_error(err),
             }
-            Err(err) => self.show_error(err),
-        }
+            cx.notify();
+        });
     }
 
     /// Recent notes that still exist, for the File menu. Missing ones are

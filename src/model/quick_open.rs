@@ -250,8 +250,21 @@ pub fn match_notes(
             ))
         })
         .collect();
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.path.cmp(&b.1.path)));
-    scored.into_iter().take(limit).map(|(_, hit)| hit).collect()
+    let order = |a: &((Tier, usize, usize, String), NoteHit),
+                 b: &((Tier, usize, usize, String), NoteHit)| {
+        a.0.cmp(&b.0).then_with(|| a.1.path.cmp(&b.1.path))
+    };
+    // Only `limit` rows are shown: partition them out in O(n), then sort
+    // just those. The order is total, so the result is the same.
+    if limit == 0 {
+        return Vec::new();
+    }
+    if scored.len() > limit {
+        scored.select_nth_unstable_by(limit - 1, order);
+        scored.truncate(limit);
+    }
+    scored.sort_by(order);
+    scored.into_iter().map(|(_, hit)| hit).collect()
 }
 
 /// A line of a note that contains the query.
@@ -315,10 +328,10 @@ fn snippet(line: &str, hits: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
 /// Line number (1-based), first match in the line, shown text and its highlights.
 type LineMatch = (usize, Range<usize>, String, Vec<Range<usize>>);
 
-fn lines_matching(text: &str, query: &str, max: usize) -> Vec<LineMatch> {
+fn lines_matching(text: &str, needle: &str, max: usize) -> Vec<LineMatch> {
     let mut out = Vec::new();
     for (index, line) in text.split('\n').enumerate() {
-        let hits = super::text_ops::find_matches(line, query, false);
+        let hits = super::text_ops::find_matches_lowered(line, needle);
         let Some(first) = hits.first().cloned() else {
             continue;
         };
@@ -342,8 +355,8 @@ pub fn search_contents(
     files: &[PathBuf],
     workspace: &Path,
     query: &str,
-    read: impl Fn(&Path) -> Option<String>,
-    stop: impl Fn() -> bool,
+    read: impl Fn(&Path) -> Option<String> + Sync,
+    stop: impl Fn() -> bool + Sync,
     per_note: usize,
     max_total: usize,
 ) -> Vec<ContentHit> {
@@ -351,32 +364,79 @@ pub fn search_contents(
     if query.is_empty() {
         return out;
     }
-    for path in files {
-        if out.len() >= max_total || stop() {
-            break;
+    let needle = query.to_lowercase();
+    let search = |path: &PathBuf| read(path).map(|text| lines_matching(&text, &needle, per_note));
+    // A few workers pull note indices off a counter and fill one slot per
+    // note; this thread takes the slots in the order given and applies the
+    // caps, so the result is the same as a sequential search, with the
+    // reading and matching overlapped and no thread spawned per note.
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8)
+        .min(files.len());
+    let slots: std::sync::Mutex<Vec<Option<Option<Vec<LineMatch>>>>> =
+        std::sync::Mutex::new((0..files.len()).map(|_| None).collect());
+    let filled = std::sync::Condvar::new();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let quit = std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::Ordering::Relaxed;
+    std::thread::scope(|scope| {
+        if workers > 1 {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    while !quit.load(Relaxed) {
+                        let index = next.fetch_add(1, Relaxed);
+                        let Some(path) = files.get(index) else { break };
+                        // A panicking reader must still fill its slot, or the
+                        // consumer would wait for it forever.
+                        let found =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| search(path)))
+                                .unwrap_or(None);
+                        if let Ok(mut slots) = slots.lock() {
+                            slots[index] = Some(found);
+                        }
+                        filled.notify_all();
+                    }
+                });
+            }
         }
-        let Some(text) = read(path) else {
-            continue;
-        };
-        let room = per_note.min(max_total - out.len());
-        let found = lines_matching(&text, query, room);
-        if found.is_empty() {
-            continue;
+        for (index, path) in files.iter().enumerate() {
+            if out.len() >= max_total || stop() {
+                break;
+            }
+            let lines = if workers > 1 {
+                let Ok(guard) = slots.lock() else { break };
+                let Ok(mut guard) = filled.wait_while(guard, |slots| slots[index].is_none()) else {
+                    break;
+                };
+                guard[index].take().flatten()
+            } else {
+                search(path)
+            };
+            let Some(mut lines) = lines else {
+                continue;
+            };
+            lines.truncate(per_note.min(max_total - out.len()));
+            if lines.is_empty() {
+                continue;
+            }
+            let (name, folder) = recent_note_label(path, workspace);
+            for (line, first, snippet, snippet_hits) in lines {
+                out.push(ContentHit {
+                    path: path.clone(),
+                    name: name.clone(),
+                    folder: folder.clone(),
+                    line,
+                    col: first.start,
+                    len: first.end - first.start,
+                    snippet,
+                    snippet_hits,
+                });
+            }
         }
-        let (name, folder) = recent_note_label(path, workspace);
-        for (line, first, snippet, snippet_hits) in found {
-            out.push(ContentHit {
-                path: path.clone(),
-                name: name.clone(),
-                folder: folder.clone(),
-                line,
-                col: first.start,
-                len: first.end - first.start,
-                snippet,
-                snippet_hits,
-            });
-        }
-    }
+        // Tell the workers to stop claiming notes; the scope joins them.
+        quit.store(true, Relaxed);
+    });
     out
 }
 
@@ -502,6 +562,86 @@ mod tests {
             names(&hits),
             vec!["ab-long.md", "a-b.md", "a-long-name-b.md"]
         );
+    }
+
+    #[test]
+    fn batched_content_search_equals_a_sequential_one() {
+        // 37 notes (not a multiple of any batch size); every third has
+        // several matches, some are unreadable, and the caps bite.
+        let names: Vec<String> = (0..37).map(|i| format!("n{i:02}.md")).collect();
+        let list: Vec<PathBuf> = names.iter().map(|n| root().join(n)).collect();
+        let text_of = |path: &Path| -> Option<String> {
+            let i: usize = path.file_stem()?.to_str()?[1..].parse().ok()?;
+            match i % 5 {
+                4 => None,
+                _ if i.is_multiple_of(3) => Some("Hit one\nx\nhit two\nHIT three\nhit four".into()),
+                _ => Some(format!("line {i}\nno match here")),
+            }
+        };
+        for (per_note, max_total) in [(3, 200), (2, 7), (1, 1), (4, 5), (3, 0)] {
+            let got = search_contents(
+                &list,
+                &root(),
+                "hit",
+                text_of,
+                || false,
+                per_note,
+                max_total,
+            );
+            // Reference: one note at a time, caps applied as notes come.
+            let mut want: Vec<(PathBuf, usize)> = Vec::new();
+            for path in &list {
+                if want.len() >= max_total {
+                    break;
+                }
+                let Some(text) = text_of(path) else { continue };
+                let room = per_note.min(max_total - want.len());
+                for (line, ..) in lines_matching(&text, "hit", room) {
+                    want.push((path.clone(), line));
+                }
+            }
+            let got: Vec<(PathBuf, usize)> = got.into_iter().map(|h| (h.path, h.line)).collect();
+            assert_eq!(got, want, "per_note {per_note} max_total {max_total}");
+        }
+    }
+
+    /// `cargo test --release -- --ignored content_search_timing --nocapture`
+    #[test]
+    #[ignore]
+    fn content_search_timing() {
+        let dir = std::env::temp_dir().join(format!("litemark-qo-timing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let list: Vec<PathBuf> = (0..2000)
+            .map(|i| {
+                let p = dir.join(format!("n{i}.md"));
+                std::fs::write(
+                    &p,
+                    format!(
+                        "# Note {i}\n{}\nneedle {i}\n",
+                        "lorem ipsum dolor sit amet\n".repeat(40)
+                    ),
+                )
+                .unwrap();
+                p
+            })
+            .collect();
+        let read = |p: &Path| std::fs::read_to_string(p).ok();
+        let t = std::time::Instant::now();
+        let mut sequential = 0;
+        for p in &list {
+            if let Some(text) = read(p) {
+                sequential += lines_matching(&text, "needle", 3).len();
+            }
+        }
+        let sequential_time = t.elapsed();
+        let t = std::time::Instant::now();
+        let pooled = search_contents(&list, &dir, "needle", read, || false, 3, usize::MAX).len();
+        println!(
+            "sequential {sequential_time:?} ({sequential} hits), pooled {:?} ({pooled} hits)",
+            t.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -8,7 +8,7 @@ impl LiteMarkApp {
     /// new one before switching; otherwise switch right away.
     pub(super) fn prepare_workspace_switch(&mut self, new_dir: PathBuf) {
         if new_dir == self.workspace.folder_path {
-            self.rescan_workspace();
+            self.request_rescan();
             return;
         }
         if self.migratable_note_path().is_some() {
@@ -391,6 +391,11 @@ impl LiteMarkApp {
             self.show_error("That item is no longer in the folder.");
             return;
         };
+        if self.is_saving_under(&old) {
+            self.show_error("Still saving a note there. Try again in a moment.");
+            self.rename_target = Some(target);
+            return;
+        }
         match safe_rename(&old, &name) {
             Ok(new_path) => {
                 self.rename_value.clear();
@@ -529,11 +534,17 @@ impl LiteMarkApp {
             self.report_missing("That note is no longer in the folder.", bulk);
             return;
         };
+        if self.is_saving_under(&file.path) {
+            self.report_missing("Still saving a note there. Try again in a moment.", bulk);
+            return;
+        }
         // Optimistic removal: the note vanishes and its tabs close the same
         // frame, while the (slow, portal-backed) trash runs in the
         // background. On failure the closed tabs are restored and the
         // rescan brings the note back — trashing is a rename, so a failed
         // trash loses nothing.
+        // A scan that started before this is out of date: it would list the note again.
+        self.scan_generation += 1;
         self.workspace.files.retain(|f| f.path != file.path);
         let closed = self.optimistic_close_tabs(|path| path == file.path.as_path());
         // The selection pointed at the removed note — clear it (restored on
@@ -573,7 +584,13 @@ impl LiteMarkApp {
             // the rows finish in no set order.
             self.restore_optimistic_close(closed, bulk.is_none(), cx);
         }
-        self.rescan_workspace();
+        // A bulk trash rescans once, after its last row, not once per row.
+        if bulk
+            .as_ref()
+            .is_none_or(|bulk| bulk.report.borrow().is_last_pending())
+        {
+            self.request_rescan();
+        }
         match bulk {
             Some(bulk) => self.record_bulk(&bulk, result, cx),
             None => {
@@ -624,8 +641,17 @@ impl LiteMarkApp {
     pub(super) fn report_missing(&mut self, message: &str, bulk: Option<BulkReport>) {
         match bulk {
             Some(bulk) => {
-                if let Some(message) = bulk.report.borrow_mut().record(Err(message.into())) {
+                let (message, finished) = {
+                    let mut report = bulk.report.borrow_mut();
+                    (report.record(Err(message.into())), report.is_finished())
+                };
+                if let Some(message) = message {
                     self.show_error(message);
+                }
+                // Earlier rows skipped their rescan expecting a later row to
+                // do it; a missing last row must not leave the tree stale.
+                if finished {
+                    self.request_rescan();
                 }
             }
             None => self.show_error(message),
@@ -648,8 +674,13 @@ impl LiteMarkApp {
             self.report_missing("That folder is no longer available.", bulk);
             return;
         };
+        if self.is_saving_under(&folder.path) {
+            self.report_missing("Still saving a note there. Try again in a moment.", bulk);
+            return;
+        }
         // Same optimistic removal as trash_file, for the whole subtree.
         let prefix = folder.path.clone();
+        self.scan_generation += 1;
         self.workspace
             .folders
             .retain(|f| !f.path.starts_with(&prefix));

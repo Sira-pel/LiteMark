@@ -192,6 +192,11 @@ impl BulkTrashReport {
     }
 
     /// True once every row has reported back.
+    /// True when the next recorded row will be the last one.
+    pub fn is_last_pending(&self) -> bool {
+        self.finished + 1 >= self.total
+    }
+
     pub fn is_finished(&self) -> bool {
         self.finished >= self.total
     }
@@ -447,7 +452,6 @@ mod tests {
             folder_id: None,
             path: PathBuf::from(name),
             file_type: super::super::document::FileType::Markdown,
-            updated_at: 0,
         }
     }
 

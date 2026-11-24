@@ -376,11 +376,24 @@ fn main() {
             };
             // Files other launches hand over open as tabs here.
             if let Some(incoming) = incoming {
-                cx.spawn(async move |cx| loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(250))
-                        .await;
-                    while let Ok(path) = incoming.try_recv() {
+                // A thread blocks on the handover channel and wakes the UI
+                // only when a path arrives, instead of polling on a timer.
+                let (tx, mut woken) = futures::channel::mpsc::unbounded::<PathBuf>();
+                let forwarder = std::thread::Builder::new()
+                    .name("incoming-files".into())
+                    .spawn(move || {
+                        while let Ok(path) = incoming.recv() {
+                            if tx.unbounded_send(path).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                if forwarder.is_err() {
+                    eprintln!("litemark: could not watch for files from other launches");
+                }
+                cx.spawn(async move |cx| {
+                    use futures::StreamExt;
+                    while let Some(path) = woken.next().await {
                         let updated = window.update(cx, |app, window, cx| {
                             app.open_path(path, cx);
                             // Redraw now, or the new tab only shows once the
@@ -388,7 +401,7 @@ fn main() {
                             cx.notify();
                             window.activate_window();
                         });
-                        // The window is gone: stop polling.
+                        // The window is gone: stop waiting.
                         if updated.is_err() {
                             return;
                         }

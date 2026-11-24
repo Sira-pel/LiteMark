@@ -98,8 +98,12 @@ fn save_refuses_to_overwrite_a_file_changed_elsewhere() {
             "theirs, written by a sync client\n"
         );
 
-        // Ctrl+S asks instead of saving.
+        // Ctrl+S asks instead of saving (the check runs in the background).
         app.handle_save(cx);
+    });
+    cx.run_until_parked();
+    view.update(cx, |app, cx| {
+        let id = app.active_tab_id.clone();
         assert!(matches!(
             app.prompt,
             Some(Prompt::ExternalChange { deleted: false, .. })
@@ -136,6 +140,9 @@ fn reload_takes_the_file_from_disk() {
         std::fs::write(&path, "theirs\n").unwrap();
 
         app.handle_save(cx);
+    });
+    cx.run_until_parked();
+    view.update(cx, |app, cx| {
         app.answer_prompt("Reload", cx);
         let tab = app.active_tab().unwrap();
         assert_eq!(tab.content, "theirs\n");
@@ -148,6 +155,9 @@ fn reload_takes_the_file_from_disk() {
         tab.is_modified = true;
         std::fs::write(&path, "theirs, longer now\n").unwrap();
         app.handle_save(cx);
+    });
+    cx.run_until_parked();
+    view.update(cx, |app, cx| {
         app.answer_prompt("Cancel", cx);
         assert_eq!(app.active_tab().unwrap().content, "again theirs\n");
         assert_eq!(

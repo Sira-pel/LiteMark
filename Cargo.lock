@@ -3173,6 +3173,7 @@ name = "litemark"
 version = "0.13.0"
 dependencies = [
  "dirs 5.0.1",
+ "futures",
  "gpui",
  "image",
  "lopdf",

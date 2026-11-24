@@ -139,7 +139,7 @@ impl LiteMarkApp {
     /// The assets folder appears in the sidebar once it holds files.
     fn refresh_after_asset_write(&mut self, note_dir: &Path) {
         if note_dir.starts_with(&self.workspace.folder_path) {
-            self.rescan_workspace();
+            self.request_rescan();
         }
     }
 

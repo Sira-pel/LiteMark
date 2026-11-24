@@ -70,7 +70,7 @@ impl LiteMarkApp {
         let element = render_outline(
             OutlineProps {
                 current: current_heading(&items, caret),
-                items: items.to_vec(),
+                items: items.clone(),
                 expanded,
                 area_height,
                 area_width: self.editor_scroll.bounds().size.width,

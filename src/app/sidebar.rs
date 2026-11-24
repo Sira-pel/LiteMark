@@ -61,6 +61,51 @@ impl LiteMarkApp {
         items
     }
 
+    /// What the sidebar lists: the folder tree, or the search matches when a
+    /// query is typed. Search results are cached per workspace generation
+    /// and query, so a redraw doesn't filter every note again.
+    pub(super) fn sidebar_rows(&self) -> std::rc::Rc<Vec<SidebarTreeItem>> {
+        let query = self.search_query.trim();
+        if query.is_empty() {
+            return self.sidebar_tree();
+        }
+        let generation = self.workspace.generation();
+        let mut cache = self.sidebar_search.borrow_mut();
+        if let Some((cached_gen, cached_query, items)) = cache.as_ref() {
+            if *cached_gen == generation && cached_query == &self.search_query {
+                return items.clone();
+            }
+        }
+        // Same matching the sidebar used to do on every frame, as row indices.
+        let query = query.to_lowercase();
+        let folders = self
+            .workspace
+            .folders
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name.to_lowercase().contains(&query))
+            .map(|(index, _)| SidebarTreeItem::Folder {
+                index: index as u32,
+                depth: 0,
+            });
+        let files = self
+            .workspace
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                let stem = f.path.file_stem().and_then(|s| s.to_str());
+                stem.unwrap_or(&f.name).to_lowercase().contains(&query)
+            })
+            .map(|(index, _)| SidebarTreeItem::File {
+                index: index as u32,
+                depth: 0,
+            });
+        let items = std::rc::Rc::new(folders.chain(files).collect::<Vec<_>>());
+        *cache = Some((generation, self.search_query.clone(), items.clone()));
+        items
+    }
+
     /// Flatten the visible sidebar tree into selection targets, in row order.
     pub(super) fn sidebar_visible_targets(&self) -> Vec<SidebarTarget> {
         if !self.search_query.trim().is_empty() {
@@ -288,18 +333,18 @@ impl LiteMarkApp {
                 let Some(file) = self.workspace.files.iter().find(|f| f.id == id).cloned() else {
                     return;
                 };
-                match read_note(&file.path) {
-                    Ok(content) => {
-                        self.open_loaded_tab(
+                self.read_note_then(file.path.clone(), cx, move |this, result, cx| {
+                    match result {
+                        Ok(content) => this.open_loaded_tab(
                             file.name.clone(),
                             content,
                             Some(file.path.clone()),
                             Some(file.id.clone()),
-                        );
+                        ),
+                        Err(err) => this.show_error(err),
                     }
-                    Err(err) => self.show_error(err),
-                }
-                cx.notify();
+                    cx.notify();
+                });
             }
         }
     }
@@ -361,20 +406,68 @@ impl LiteMarkApp {
     }
 
     pub fn rescan_workspace(&mut self) {
+        // A scan still running in the background is now out of date.
+        self.scan_generation += 1;
+        self.rescan_requested = false;
+        let scanned =
+            scan_workspace_dir(&self.workspace.folder_path, self.settings.show_code_files);
+        self.apply_scan(scanned);
+    }
+
+    /// Ask for a rescan that doesn't block: for the callers that don't read
+    /// the new tree straight afterwards. It starts at the next frame.
+    pub(super) fn request_rescan(&mut self) {
+        self.rescan_requested = true;
+    }
+
+    /// Start the rescan [`Self::request_rescan`] asked for, on the background
+    /// executor. Only the newest scan is applied.
+    pub(super) fn start_requested_rescan(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.rescan_requested) {
+            return;
+        }
+        self.scan_generation += 1;
+        let generation = self.scan_generation;
+        let folder = self.workspace.folder_path.clone();
+        let show_code_files = self.settings.show_code_files;
+        cx.spawn(async move |this, cx| {
+            let scanned = {
+                let folder = folder.clone();
+                cx.background_executor()
+                    .spawn(async move { scan_workspace_dir(&folder, show_code_files) })
+                    .await
+            };
+            this.update(cx, |this, cx| {
+                // Skip a result that a newer scan, a workspace switch or a
+                // settings change has outdated.
+                if this.scan_generation == generation
+                    && this.workspace.folder_path == folder
+                    && this.settings.show_code_files == show_code_files
+                {
+                    this.apply_scan(scanned);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Replace the tree with `scanned`, keeping the folders the user has
+    /// open or closed *now* (not when the scan started).
+    pub(super) fn apply_scan(&mut self, mut scanned: WorkspaceDirectory) {
         let open_map: std::collections::HashMap<PathBuf, bool> = self
             .workspace
             .folders
             .iter()
             .map(|f| (f.path.clone(), f.is_open))
             .collect();
-        let mut new_workspace =
-            scan_workspace_dir(&self.workspace.folder_path, self.settings.show_code_files);
-        for folder in &mut new_workspace.folders {
+        for folder in &mut scanned.folders {
             if let Some(&open) = open_map.get(&folder.path) {
                 folder.is_open = open;
             }
         }
-        self.workspace = new_workspace.into();
+        self.workspace = scanned.into();
         self.refresh_workspace_ids();
     }
 

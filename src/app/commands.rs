@@ -371,6 +371,12 @@ impl LiteMarkApp {
     }
 
     pub fn handle_close_tab(&mut self, id: String) {
+        // Its Ctrl+S is still writing: close once the write has landed, so a
+        // failed write leaves the note (and its text) open.
+        if self.saves_in_flight.contains(&id) {
+            self.close_after_save.insert(id);
+            return;
+        }
         let snaps: Vec<TabSnap<'_>> = self
             .tabs
             .iter()
@@ -398,6 +404,9 @@ impl LiteMarkApp {
             self.begin_save_naming(&id, cx);
             return;
         }
+        if self.start_async_save(&id, cx) {
+            return;
+        }
         match self.disk_change_for(&id) {
             DiskChange::Unchanged => {}
             change => {
@@ -408,7 +417,8 @@ impl LiteMarkApp {
                 return;
             }
         }
-        match self.save_tab(&id) {
+        // Just verified `Unchanged`; don't hash the file a second time.
+        match self.overwrite_tab(&id) {
             Ok(title) => self.show_toast(format!("Saved {title}"), cx),
             Err(err) => self.show_file_error(err),
         }
@@ -447,10 +457,13 @@ impl LiteMarkApp {
             }
             self.open_pdf_in_background(name, path, cx);
         } else {
-            match read_note(&path) {
-                Ok(content) => self.open_loaded_tab(name, content, Some(path), None),
-                Err(err) => self.show_error(err),
-            }
+            self.read_note_then(path.clone(), cx, move |this, result, cx| {
+                match result {
+                    Ok(content) => this.open_loaded_tab(name, content, Some(path), None),
+                    Err(err) => this.show_error(err),
+                }
+                cx.notify();
+            });
         }
     }
 
@@ -747,7 +760,7 @@ impl LiteMarkApp {
     pub fn handle_toggle_show_code_files(&mut self) {
         self.settings.show_code_files = !self.settings.show_code_files;
         self.save_settings();
-        self.rescan_workspace();
+        self.request_rescan();
     }
 
     pub fn handle_toggle_sidebar(&mut self) {

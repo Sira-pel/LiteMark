@@ -952,7 +952,12 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
         return hits;
     }
 
-    let needle = term.to_lowercase();
+    find_matches_lowered(content, &term.to_lowercase())
+}
+
+/// Case-insensitive search for `needle`, which the caller has already
+/// lowercased, so a loop over many lines folds the term once.
+pub fn find_matches_lowered(content: &str, needle: &str) -> Vec<Range<usize>> {
     if needle.is_empty() {
         return Vec::new();
     }
@@ -984,7 +989,7 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
             };
             let pos = start + rel;
             let rest = &content[pos..];
-            if let Some(len) = caseless_match_len(rest, &needle) {
+            if let Some(len) = caseless_match_len(rest, needle) {
                 hits.push(pos..pos + len);
                 start = pos + len;
             } else {
@@ -996,7 +1001,7 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
 
     while start < content.len() {
         let rest = &content[start..];
-        if let Some(len) = caseless_match_len(rest, &needle) {
+        if let Some(len) = caseless_match_len(rest, needle) {
             hits.push(start..start + len);
             start += len;
         } else {
@@ -1004,6 +1009,139 @@ pub fn find_matches(content: &str, term: &str, match_case: bool) -> Vec<Range<us
         }
     }
     hits
+}
+
+/// First match of a term at or after a byte position, one at a time, so a
+/// caller can stop scanning as soon as it has what it needs.
+struct Matcher {
+    term: String,
+    needle: String,
+    match_case: bool,
+}
+
+impl Matcher {
+    fn new(term: &str, match_case: bool) -> Option<Self> {
+        let needle = if match_case {
+            String::new()
+        } else {
+            term.to_lowercase()
+        };
+        if term.is_empty() || (!match_case && needle.is_empty()) {
+            return None;
+        }
+        Some(Self {
+            term: term.to_string(),
+            needle,
+            match_case,
+        })
+    }
+
+    /// The longest source text one match can span, in bytes. A caseless
+    /// match can be longer than the needle: Kelvin `K` is 3 bytes and
+    /// lowercases to a 1-byte `k`.
+    fn max_len(&self) -> usize {
+        if self.match_case {
+            self.term.len()
+        } else {
+            self.needle.len() * 3 + 4
+        }
+    }
+
+    fn next(&self, content: &str, from: usize) -> Option<Range<usize>> {
+        if self.match_case {
+            let rel = content.get(from..)?.find(&self.term)?;
+            let start = from + rel;
+            return Some(start..start + self.term.len());
+        }
+        // Same scan as `find_matches_lowered`, stopping at the first hit.
+        let mut start = from;
+        while start < content.len() {
+            let rest = &content[start..];
+            // Skip to a byte that can begin a match when that is cheap.
+            let first = self.needle.chars().next()?;
+            if first.is_ascii() {
+                let lower = first as u8;
+                let upper = lower.to_ascii_uppercase();
+                let extra_lead = match lower {
+                    b'i' => Some(0xC4u8),
+                    b'k' => Some(0xE2u8),
+                    _ => None,
+                };
+                let bytes = rest.as_bytes();
+                let rel = match extra_lead {
+                    Some(lead) => memchr::memchr3(lower, upper, lead, bytes),
+                    None if lower == upper => memchr::memchr(lower, bytes),
+                    None => memchr::memchr2(lower, upper, bytes),
+                }?;
+                start += rel;
+            }
+            let rest = &content[start..];
+            if let Some(len) = caseless_match_len(rest, &self.needle) {
+                return Some(start..start + len);
+            }
+            start += rest.chars().next().map_or(1, char::len_utf8);
+        }
+        None
+    }
+}
+
+/// The matches of `term` in `content` after one edit, given the matches
+/// before it. `edited` is the replaced range in the old text and `new_len`
+/// the length of the text that replaced it. Equal to a fresh
+/// [`find_matches`], but only the neighbourhood of the edit is searched.
+///
+/// Matching is greedy and non-overlapping, so an edit can re-pair the hits
+/// after it (`aa` in `aaaa` shifts by one inserted `a`). The scan therefore
+/// runs forward until a new hit lands exactly on a shifted old one: from
+/// there the greedy state, and every later hit, is the same as before.
+pub fn update_matches(
+    old: &[Range<usize>],
+    content: &str,
+    term: &str,
+    match_case: bool,
+    edited: Range<usize>,
+    new_len: usize,
+) -> Vec<Range<usize>> {
+    let Some(matcher) = Matcher::new(term, match_case) else {
+        return Vec::new();
+    };
+    let (start, old_end) = (edited.start, edited.end);
+    let new_end = start + new_len;
+    // Hits wholly before the edit are untouched; those overlapping it are
+    // gone; those wholly after it are candidates for resync.
+    let kept = old.partition_point(|hit| hit.end <= start);
+    let suffix_from = old.partition_point(|hit| hit.start < old_end);
+    let suffix = &old[suffix_from.max(kept)..];
+    let shift = |at: usize| (at + new_len).wrapping_sub(edited.len());
+    let mut out: Vec<Range<usize>> = old[..kept].to_vec();
+    // No match can begin before the last kept hit's end, and none can begin
+    // so early that it would have ended before the edit (it would be kept).
+    let floor = out.last().map_or(0, |hit| hit.end);
+    let from = floor.max(floor_char_boundary(
+        content,
+        start.saturating_sub(matcher.max_len()),
+    ));
+    let mut pos = from;
+    while let Some(hit) = matcher.next(content, pos) {
+        if hit.start >= new_end {
+            // Old coordinates of this hit, if it is one of the old ones.
+            let old_start = hit.start.wrapping_add(edited.len()).wrapping_sub(new_len);
+            if let Ok(ix) = suffix.binary_search_by(|o| o.start.cmp(&old_start)) {
+                if shift(suffix[ix].end) == hit.end {
+                    out.push(hit);
+                    out.extend(
+                        suffix[ix + 1..]
+                            .iter()
+                            .map(|o| shift(o.start)..shift(o.end)),
+                    );
+                    return out;
+                }
+            }
+        }
+        pos = hit.end;
+        out.push(hit);
+    }
+    out
 }
 
 /// Byte length of the shortest start of `text` whose lowercase is `needle`,
@@ -1049,11 +1187,11 @@ pub fn find_next(hits: &[Range<usize>], cursor: usize, current: Option<usize>) -
         Some(index) if hits.get(index).is_some_and(|hit| hit.start == cursor) => index + 1,
         _ => 0,
     };
-    if let Some(rel) = hits[scan_from.min(hits.len())..]
-        .iter()
-        .position(|hit| hit.start >= cursor)
-    {
-        return Some(scan_from.min(hits.len()) + rel);
+    // Hits are sorted and disjoint, so binary-search the first at/after the cursor.
+    let from = scan_from.min(hits.len());
+    let rel = hits[from..].partition_point(|hit| hit.start < cursor);
+    if from + rel < hits.len() {
+        return Some(from + rel);
     }
     Some(0)
 }
@@ -1079,8 +1217,8 @@ pub fn find_prev(hits: &[Range<usize>], cursor: usize, current: Option<usize>) -
         _ => hits.len(),
     };
     hits[..scan_end]
-        .iter()
-        .rposition(|hit| hit.end < cursor)
+        .partition_point(|hit| hit.end < cursor)
+        .checked_sub(1)
         .or(Some(hits.len() - 1))
 }
 
@@ -1242,9 +1380,7 @@ pub fn visual_row_count_measured(
         count += if fits_one_row(content, start, end, wrap_cols, tab_width, widths) {
             1
         } else {
-            let mut rows = Vec::new();
-            push_wrapped(&mut rows, content, start, end, wrap_cols, tab_width, widths);
-            rows.len()
+            count_wrapped(content, start, end, wrap_cols, tab_width, widths)
         };
     };
     while let Some(rel) = memchr::memchr2(b'\n', b'\r', &bytes[line_start..]) {
@@ -1397,76 +1533,105 @@ fn push_wrapped(
     tab_width: usize,
     widths: &CharWidths,
 ) {
+    for_each_wrapped(content, start, end, wrap_cols, tab_width, widths, |row| {
+        rows.push(row)
+    });
+}
+
+/// Number of rows `push_wrapped` would produce, without building them.
+fn count_wrapped(
+    content: &str,
+    start: usize,
+    end: usize,
+    wrap_cols: usize,
+    tab_width: usize,
+    widths: &CharWidths,
+) -> usize {
+    let mut count = 0usize;
+    for_each_wrapped(content, start, end, wrap_cols, tab_width, widths, |_| {
+        count += 1
+    });
+    count
+}
+
+/// Streams the wrapped rows of `content[start..end]` to `emit` using byte
+/// positions only, so wrapping a long line allocates nothing.
+fn for_each_wrapped(
+    content: &str,
+    start: usize,
+    end: usize,
+    wrap_cols: usize,
+    tab_width: usize,
+    widths: &CharWidths,
+    mut emit: impl FnMut((usize, usize)),
+) {
     if wrap_cols == 0
         || wrap_cols == usize::MAX
         || start >= end
         || fits_one_row(content, start, end, wrap_cols, tab_width, widths)
     {
-        rows.push((start, end));
+        emit((start, end));
         return;
     }
-    let chars: Vec<(usize, char)> = content[start..end]
-        .char_indices()
-        .map(|(index, ch)| (start + index, ch))
-        .collect();
-    let mut index = 0usize;
-    while index < chars.len() {
-        let row_start = chars[index].0;
+    let mut pos = start;
+    while pos < end {
+        let row_start = pos;
         // The furthest char that still fits in `wrap_cols` columns; a row
         // always takes at least one char.
         let mut col = 0usize;
-        let mut max_next = index;
-        while max_next < chars.len() {
-            let prev = (max_next > index).then(|| chars[max_next - 1].1);
-            let width = if tab_width > 0 && chars[max_next].1 == '\t' {
+        let mut max_next = pos;
+        let mut prev: Option<char> = None;
+        for ch in content[pos..end].chars() {
+            let width = if tab_width > 0 && ch == '\t' {
                 let stop = tab_width * widths.unit;
                 stop - col % stop
             } else {
-                widths.width_after(prev, chars[max_next].1)
+                widths.width_after(prev, ch)
             };
-            if col + width > wrap_cols && max_next > index {
+            if col + width > wrap_cols && max_next > pos {
                 break;
             }
             col += width;
-            max_next += 1;
+            max_next += ch.len_utf8();
+            prev = Some(ch);
         }
-        if max_next == chars.len() {
-            rows.push((row_start, end));
+        if max_next == end {
+            emit((row_start, end));
             break;
         }
 
-        // Look for a break opportunity (whitespace or punctuation) between index and max_next
-        let mut break_idx = None;
-        for i in (index + 1..=max_next).rev() {
-            let (_, ch) = chars[i - 1];
-            if ch.is_whitespace() {
-                break_idx = Some(i);
-                break;
-            }
-        }
+        // Look for a break opportunity (whitespace) between pos and max_next.
+        let break_at = content[pos..max_next]
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(off, ch)| pos + off + ch.len_utf8());
 
-        let mut next = if let Some(b) = break_idx { b } else { max_next };
+        let mut next = break_at.unwrap_or(max_next);
         // Never split a letter from the vowel, sign or subscript that
         // belongs to it: back up to the start of its cluster, unless that
         // would leave the row empty.
-        if break_idx.is_none() {
+        if break_at.is_none() {
+            let first_len = content[pos..].chars().next().map_or(1, char::len_utf8);
             let mut at = next;
-            while at > index + 1 && at < chars.len() && joins_previous(chars[at - 1].1, chars[at].1)
-            {
-                at -= 1;
+            while at > pos + first_len && at < end {
+                let Some(before) = content[..at].chars().next_back() else {
+                    break;
+                };
+                let Some(here) = content[at..].chars().next() else {
+                    break;
+                };
+                if !joins_previous(before, here) {
+                    break;
+                }
+                at -= before.len_utf8();
             }
-            if at > index {
+            if at > pos {
                 next = at;
             }
         }
-
-        let row_end = if next < chars.len() {
-            chars[next].0
-        } else {
-            end
-        };
-        rows.push((row_start, row_end));
-        index = next;
+        emit((row_start, next));
+        pos = next;
     }
 }
 
@@ -2232,5 +2397,65 @@ mod emptied_group_tests {
         h.push_span_opening(DiffEdit::new(0, String::new(), "ab".into()));
         h.push(DiffEdit::new(0, "ab".into(), String::new()));
         assert_eq!(h.stored_bytes(), 0);
+    }
+}
+
+#[cfg(test)]
+mod update_matches_tests {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % n
+        }
+    }
+
+    fn random_text(rng: &mut Lcg, len: usize, alphabet: &[&str]) -> String {
+        (0..len)
+            .map(|_| alphabet[rng.next(alphabet.len())])
+            .collect()
+    }
+
+    #[test]
+    fn incremental_matches_equal_a_fresh_search() {
+        let alphabets: [&[&str]; 3] = [
+            &["a", "b", "İ", "\r", "\n"],
+            &["a", "A", "K", "k", "i", "I", "İ"],
+            &["a", "a", "a", "b"],
+        ];
+        let terms = ["aa", "aba", "i", "a", "k", "ab", "İ", "aaa"];
+        let mut rng = Lcg(7);
+        for round in 0..4000 {
+            let alphabet = alphabets[round % alphabets.len()];
+            let len = rng.next(40);
+            let before = random_text(&mut rng, len, alphabet);
+            let term = terms[rng.next(terms.len())];
+            let match_case = rng.next(2) == 0;
+            // A random edit on char boundaries.
+            let bounds: Vec<usize> = before
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain([before.len()])
+                .collect();
+            let a = bounds[rng.next(bounds.len())];
+            let b = bounds[rng.next(bounds.len())];
+            let (a, b) = (a.min(b), a.max(b));
+            let len = rng.next(6);
+            let inserted = random_text(&mut rng, len, alphabet);
+            let mut after = before.clone();
+            after.replace_range(a..b, &inserted);
+            let old = find_matches(&before, term, match_case);
+            let got = update_matches(&old, &after, term, match_case, a..b, inserted.len());
+            assert_eq!(
+                got,
+                find_matches(&after, term, match_case),
+                "{before:?} -> {after:?} edit {a}..{b} {inserted:?} term {term:?} case {match_case}"
+            );
+        }
     }
 }

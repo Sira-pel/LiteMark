@@ -293,11 +293,22 @@ fn line_total(content: &str, endings: usize) -> usize {
 /// Line endings in `before + mid + after`. CRLF is two bytes, so one byte
 /// of context on each side of an edit catches every ending it joins or splits.
 fn window_line_endings(before: Option<u8>, mid: &str, after: Option<u8>) -> usize {
-    let mut window = Vec::with_capacity(mid.len() + 2);
-    window.extend(before);
-    window.extend_from_slice(mid.as_bytes());
-    window.extend(after);
-    count_line_endings(&window)
+    let bytes = mid.as_bytes();
+    let mut count = count_line_endings(bytes);
+    // `mid` alone counts a trailing CR as an ending; a following LF joins it.
+    if bytes.last() == Some(&b'\r') && after == Some(b'\n') {
+        count -= 1;
+    }
+    match before {
+        Some(b'\n') => count += 1,
+        // A CR counts unless the byte after it is an LF.
+        Some(b'\r') if bytes.first().or(after.as_ref()) != Some(&b'\n') => count += 1,
+        _ => {}
+    }
+    if matches!(after, Some(b'\n' | b'\r')) {
+        count += 1;
+    }
+    count
 }
 
 /// Incrementally maintained stats staged during `DocumentTab::edit` so
@@ -863,6 +874,30 @@ impl DocumentTab {
         find_matches(&self.content, term, match_case)
     }
 
+    /// `previous` (the hits found at revision `rev`) brought up to date with
+    /// the current text, when exactly one edit separates the two revisions;
+    /// `None` when it can't be known and the caller must search afresh.
+    pub fn find_hits_after_edit(
+        &self,
+        previous: &[Range<usize>],
+        rev: u64,
+        term: &str,
+        match_case: bool,
+    ) -> Option<Vec<Range<usize>>> {
+        let (edit_rev, range, new_len) = self.last_edit.as_ref()?;
+        if *edit_rev != rev || rev.wrapping_add(1) != self.revision {
+            return None;
+        }
+        Some(super::text_ops::update_matches(
+            previous,
+            &self.content,
+            term,
+            match_case,
+            range.clone(),
+            *new_len,
+        ))
+    }
+
     pub fn select_match_in(
         &mut self,
         hits: &[Range<usize>],
@@ -1114,7 +1149,7 @@ impl DocumentTab {
         );
         self.caret.move_to(caret);
         self.caret.clamp(&self.content);
-        self.refresh_cursor();
+        // The caller snaps the caret and refreshes the cursor once.
     }
 
     fn clamp_range(&self, range: Range<usize>) -> Range<usize> {

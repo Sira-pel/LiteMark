@@ -252,6 +252,8 @@ pub struct LayoutCache {
     mono_widths: Rc<CharWidths>,
     /// The fonts and size the widths were measured for.
     widths_key: Option<(SharedString, SharedString, u32)>,
+    /// Width of a `0` in the prose font, by `(font family, size bits)`.
+    char_width: Option<(SharedString, u32, Pixels)>,
     /// WYSIWYG: each table's width-cache key, for a parse generation and a
     /// font key (the same hash of an empty table).
     table_keys: Option<(u64, u64, Rc<TableKeys>)>,
@@ -742,9 +744,23 @@ pub fn padded_table_cell_col(paint: &EditorPaint, position: Point<Pixels>) -> Op
         .then_some(col_idx)
 }
 
+/// The last row starting at or before `offset` (the first row when none
+/// does). Rows are in source order, so this is a binary search.
+pub fn row_at_or_before(rows: &[PaintRow], offset: usize) -> Option<&PaintRow> {
+    let after = rows.partition_point(|row| row.byte_start <= offset);
+    rows.get(after.saturating_sub(1))
+}
+
 pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<String> {
-    for row in &paint.rows {
-        if source_offset >= row.byte_start && source_offset <= row.byte_end {
+    // Rows are in source order, so skip straight to the first that can hold it.
+    let first = paint
+        .rows
+        .partition_point(|row| row.byte_end < source_offset);
+    for row in &paint.rows[first..] {
+        if row.byte_start > source_offset {
+            break;
+        }
+        {
             for (range, url) in row.link_hits.iter() {
                 if source_offset >= range.start && source_offset <= range.end {
                     return Some(url.to_string());
@@ -1083,14 +1099,10 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
         }
         return first.offset_map.display_to_source(0);
     }
-    let mut chosen = 0usize;
-    for (index, row) in paint.rows.iter().enumerate() {
-        if position.y >= row.origin.y {
-            chosen = index;
-        } else {
-            break;
-        }
-    }
+    let chosen = paint
+        .rows
+        .partition_point(|row| position.y >= row.origin.y)
+        .saturating_sub(1);
     let row = &paint.rows[chosen];
     if !row.cells.is_empty() {
         let cell = row
@@ -1246,6 +1258,10 @@ pub struct EditorElement<V: 'static> {
     pub view_mode: ViewMode,
     pub selection: Range<usize>,
     pub marked: Option<Range<usize>>,
+    /// Line count and caret line the tab already tracks; saves a full-file
+    /// scan per frame in Raw mode. `None` falls back to scanning.
+    pub line_count: Option<usize>,
+    pub cursor_line: Option<usize>,
     pub find_hits: Rc<[Range<usize>]>,
     pub active_find: Option<usize>,
     pub show_line_numbers: bool,
@@ -1470,20 +1486,43 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
     ) -> Self::PrepaintState {
         let base_font = font(self.font_family.clone());
         let mono_font = font(self.mono_font_family.clone());
-        let sample = window.text_system().shape_line(
-            "0".into(),
-            self.font_size,
-            &[TextRun {
-                len: 1,
-                font: base_font.clone(),
-                color: self.text_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        );
-        let char_width = sample.width.max(px(1.0));
+        let char_width = {
+            let cached = self
+                .paint
+                .borrow()
+                .layout_cache
+                .char_width
+                .as_ref()
+                .filter(|(family, size, _)| {
+                    *family == self.font_family && *size == f32::from(self.font_size).to_bits()
+                })
+                .map(|(_, _, width)| *width);
+            match cached {
+                Some(width) => width,
+                None => {
+                    let sample = window.text_system().shape_line(
+                        "0".into(),
+                        self.font_size,
+                        &[TextRun {
+                            len: 1,
+                            font: base_font.clone(),
+                            color: self.text_color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    );
+                    let width = sample.width.max(px(1.0));
+                    self.paint.borrow_mut().layout_cache.char_width = Some((
+                        self.font_family.clone(),
+                        f32::from(self.font_size).to_bits(),
+                        width,
+                    ));
+                    width
+                }
+            }
+        };
         let font_size = self.font_size;
         let measure = |window: &mut Window| {
             // Widths round up, so a long row never comes out wider than the
@@ -1535,11 +1574,13 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             )
         };
         // The parse is cached per revision, so this is O(1) per redraw.
-        let line_count = if self.parsed.lines.is_empty() {
+        let line_count = if !self.parsed.lines.is_empty() {
+            self.parsed.lines.len()
+        } else if let Some(count) = self.line_count {
+            count
+        } else {
             let content = self.entity.read(cx).editor_content();
             logical_line_number(content, content.len())
-        } else {
-            self.parsed.lines.len()
         };
         let inset = gutter_pad(bounds.size.width);
         let (gutter_box, gutter) = self.gutter(char_width, line_count, inset);
@@ -1620,8 +1661,10 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             let mut quads = Vec::new();
             let mut cursor = None;
             let mut line_number = 0usize;
-            let caret_line = (self.numbered() && self.selection.is_empty())
-                .then(|| logical_line_number(content, self.selection.start));
+            let caret_line = (self.numbered() && self.selection.is_empty()).then(|| {
+                self.cursor_line
+                    .unwrap_or_else(|| logical_line_number(content, self.selection.start))
+            });
             let current_line_color = Hsla {
                 a: self.selection_color.a * 0.35,
                 ..self.selection_color
@@ -3544,7 +3587,12 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             text_cursor,
             window.insert_hitbox(bounds, HitboxBehavior::Normal),
         )];
-        for (_, b) in &pictures {
+        // Pictures wholly above or below the viewport can't be hovered.
+        let viewport = window.content_mask().bounds;
+        for (_, b) in pictures
+            .iter()
+            .filter(|(_, b)| b.bottom() >= viewport.top() && b.top() <= viewport.bottom())
+        {
             cursor_hitboxes.push((
                 CursorStyle::Arrow,
                 window.insert_hitbox(*b, HitboxBehavior::Normal),
@@ -3730,7 +3778,15 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 table.viewport = Some(bounds);
             }
         }
-        let occupied = super::table_chrome::occupied_content(&self.paint.borrow().rows);
+        let occupied = {
+            let paint = self.paint.borrow();
+            // Only the hover pills consult occupied content.
+            if paint.tables.is_empty() || self.table_hover.is_none() {
+                Vec::new()
+            } else {
+                super::table_chrome::occupied_content(&paint.rows)
+            }
+        };
         super::table_chrome::paint(
             window,
             &self.paint.borrow().tables,
@@ -4375,6 +4431,29 @@ fn paint_ranges_mapped(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gutter_line_count_is_status_lines_plus_a_trailing_ending() {
+        for text in [
+            "",
+            "a",
+            "a\n",
+            "a\r\n",
+            "\n",
+            "\r",
+            "a\n\r",
+            "a\nb",
+            "a\r\nb\r\n",
+        ] {
+            let status = crate::model::document::compute_stats(text).lines;
+            let adjusted = status + usize::from(text.ends_with(['\n', '\r']));
+            assert_eq!(
+                adjusted,
+                super::logical_line_number(text, text.len()),
+                "{text:?}"
+            );
+        }
+    }
+
     use super::{
         compute_table_column_widths, editor_end_visual, editor_home_visual, index_in_rows,
         move_vertical_visual, wrap_cell_text, CellLine, EditorPaint, PaintCell, PaintRow,

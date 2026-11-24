@@ -412,35 +412,8 @@ where
     let is_searching = !props.search_query.trim().is_empty();
 
     let app_entity = props.app.clone();
-    let tree_items: std::rc::Rc<Vec<SidebarTreeItem>> = if is_searching {
-        let query = props.search_query.trim().to_lowercase();
-        let folders = props
-            .workspace
-            .folders
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| f.name.to_lowercase().contains(&query))
-            .map(|(index, _)| SidebarTreeItem::Folder {
-                index: index as u32,
-                depth: 0,
-            });
-        let files = props
-            .workspace
-            .files
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| {
-                let stem = f.path.file_stem().and_then(|s| s.to_str());
-                stem.unwrap_or(&f.name).to_lowercase().contains(&query)
-            })
-            .map(|(index, _)| SidebarTreeItem::File {
-                index: index as u32,
-                depth: 0,
-            });
-        std::rc::Rc::new(folders.chain(files).collect())
-    } else {
-        props.tree.clone()
-    };
+    // The app already filtered for a search query.
+    let tree_items = props.tree.clone();
 
     let show_empty_notes = creating.is_none()
         && !is_searching
