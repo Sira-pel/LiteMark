@@ -20,6 +20,8 @@ pub const OUTLINE_STRIP_W: f32 = 40.0;
 pub const OUTLINE_PINNED_MIN_EDITOR_W: f32 = 640.0;
 const STRIP_PITCH: f32 = 10.0;
 const STRIP_MAX_LINES: usize = 40;
+const OUTLINE_ROW_H: f32 = 30.0;
+const OUTLINE_HEADER_H: f32 = 36.0;
 
 type HoverFn = Box<dyn Fn(bool, &mut Window, &mut App)>;
 type OpenFn = Box<dyn Fn(&mut Window, &mut App)>;
@@ -86,53 +88,16 @@ pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
     if props.expanded {
         let card_w = card_width(area_w, &props.items);
         let max_h = (area - 2.0 * OUTLINE_EDGE).max(80.0);
-        let rows = props.items.iter().enumerate().map(|(i, item)| {
-            let offset = item.offset;
-            let on_jump = props.on_jump.clone();
-            let level = item.level.clamp(1, 6);
-            let current = props.current == Some(i);
-            let text = if item.text.is_empty() {
-                "Untitled".to_string()
-            } else {
-                item.text.clone()
-            };
-            div()
-                .id(("outline-row", i))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(30.0))
-                .flex_none()
-                .pr(px(8.0))
-                .pl(px(8.0 + 10.0 * (level.min(3) - 1) as f32))
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .when(current, |s| s.bg(theme.outline_current))
-                .when(!current, |s| s.hover(|s| s.bg(theme.row_hover)))
-                .on_click(move |_, window, cx| on_jump(offset, window, cx))
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(22.0))
-                        .text_size(px(10.5))
-                        .font_family(Theme::FONT_MONO)
-                        .text_color(theme.text_faint)
-                        .child(format!("H{level}")),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(14.0))
-                        .text_color(if current {
-                            theme.text_hi
-                        } else {
-                            theme.row_text
-                        })
-                        .child(text),
-                )
-        });
+        let list_h = (props.items.len() as f32 * OUTLINE_ROW_H)
+            .min((max_h - OUTLINE_HEADER_H).max(OUTLINE_ROW_H));
+        let items = props.items.clone();
+        let current_ix = props.current;
+        let on_jump = props.on_jump.clone();
+        let outline_current = theme.outline_current;
+        let row_hover = theme.row_hover;
+        let text_faint = theme.text_faint;
+        let text_hi = theme.text_hi;
+        let row_text = theme.row_text;
         root.right(px(OUTLINE_EDGE)).child(
             div()
                 .w(px(card_w))
@@ -178,15 +143,57 @@ pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
                         ),
                 )
                 .child(
-                    div()
-                        .id("outline-list")
-                        .flex()
-                        .flex_col()
-                        .min_h_0()
-                        .px(px(4.0))
-                        .pb(px(6.0))
-                        .overflow_y_scroll()
-                        .children(rows),
+                    uniform_list("outline-list", items.len(), move |range, _window, _cx| {
+                        range
+                            .map(|i| {
+                                let item = &items[i];
+                                let offset = item.offset;
+                                let on_jump = on_jump.clone();
+                                let level = item.level.clamp(1, 6);
+                                let current = current_ix == Some(i);
+                                let text = if item.text.is_empty() {
+                                    "Untitled".to_string()
+                                } else {
+                                    item.text.clone()
+                                };
+                                div()
+                                    .id(("outline-row", i))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .h(px(OUTLINE_ROW_H))
+                                    .flex_none()
+                                    .pr(px(8.0))
+                                    .pl(px(8.0 + 10.0 * (level.min(3) - 1) as f32))
+                                    .rounded(px(6.0))
+                                    .cursor_pointer()
+                                    .when(current, |s| s.bg(outline_current))
+                                    .when(!current, |s| s.hover(move |s| s.bg(row_hover)))
+                                    .on_click(move |_, window, cx| on_jump(offset, window, cx))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .w(px(22.0))
+                                            .text_size(px(10.5))
+                                            .font_family(Theme::FONT_MONO)
+                                            .text_color(text_faint)
+                                            .child(format!("H{level}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(14.0))
+                                            .text_color(if current { text_hi } else { row_text })
+                                            .child(text),
+                                    )
+                            })
+                            .collect()
+                    })
+                    .h(px(list_h))
+                    .px(px(4.0))
+                    .pb(px(6.0)),
                 ),
         )
     } else {

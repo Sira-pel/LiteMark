@@ -123,3 +123,49 @@ fn pinning_toggles_and_the_card_opens_on_hover() {
         assert!(!app.settings.outline_pinned);
     });
 }
+
+#[std_test]
+fn activate_tab_releases_outgoing_caches_before_switching() {
+    let (view, mut cx) = harness("# First\n| a | b |\n| - | - |\n| 1 | 2 |\n");
+    let first_id = view.read_with(&cx, |app, _| app.active_tab_id.clone());
+
+    view.update(&mut cx, |app, _cx| {
+        app.open_loaded_tab("second.md".into(), "# Second\n".into(), None, None);
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    view.update(&mut cx, |app, _| {
+        assert!(app.active_tab().unwrap().has_cached_parse());
+        assert!(!app.editor_paint.borrow().rows.is_empty());
+        assert!(app.outline_cache.is_some());
+
+        app.activate_tab(first_id.clone());
+        let outgoing = app.tabs.iter().find(|t| t.id != first_id).unwrap();
+        assert!(
+            !outgoing.has_cached_parse(),
+            "outgoing tab parse cache must be freed on switch"
+        );
+        assert!(app.editor_paint.borrow().rows.is_empty());
+        assert!(app.outline_cache.is_none());
+    });
+}
+
+#[std_test]
+fn expanded_outline_with_many_headings_renders_with_uniform_list() {
+    let doc: String = (0..5_000).map(|i| format!("# Heading {i}\n")).collect();
+    let (view, mut cx) = harness(&doc);
+    view.update(&mut cx, |app, cx| {
+        app.outline_open = true;
+        cx.notify();
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    view.read_with(&cx, |app, _| {
+        assert!(app.outline_expanded());
+        assert_eq!(
+            app.outline_cache.as_ref().map(|(_, items)| items.len()),
+            Some(5_000)
+        );
+    });
+}

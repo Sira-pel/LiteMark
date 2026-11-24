@@ -393,6 +393,7 @@ impl LayoutCache {
                 }
             }
             _ => {
+                self.lines = Vec::new();
                 self.lines = vec![CachedRows::Uncached; doc.lines.len()];
                 self.estimate.reset(doc.lines.len());
             }

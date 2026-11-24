@@ -37,6 +37,11 @@ impl LiteMarkApp {
             return;
         }
         self.reset_editor_transient_state();
+        if let Some(tab) = self.active_tab_mut() {
+            tab.release_parse_cache();
+        }
+        self.drop_painted_document_data();
+        self.outline_cache = None;
         self.active_tab_id = id;
         if self.effective_view_mode() == ViewMode::Wysiwyg {
             if let Some(tab) = self.active_tab_mut() {

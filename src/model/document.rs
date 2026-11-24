@@ -635,6 +635,11 @@ impl DocumentTab {
         }
     }
 
+    #[cfg(test)]
+    pub fn has_cached_parse(&self) -> bool {
+        self.cached_parse.is_some()
+    }
+
     #[cfg(all(test, feature = "heap-count"))]
     pub fn has_parse_cache_for_bench(&self) -> bool {
         self.cached_parse.is_some()
