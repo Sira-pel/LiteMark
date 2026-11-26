@@ -2,9 +2,17 @@
 
 use super::*;
 use crate::model::outline::{
-    can_skip_outline_patch, current_heading, outline_items, outline_items_raw, patch_outline_items,
-    OutlineItem,
+    can_skip_outline_patch, current_heading, outline_items, outline_items_and_fences_raw,
+    patch_outline_items, patch_outline_items_raw, OutlineItem,
 };
+
+fn outline_max_chars(items: &[OutlineItem]) -> usize {
+    items
+        .iter()
+        .map(|i| i.text.chars().count())
+        .max()
+        .unwrap_or(0)
+}
 
 impl LiteMarkApp {
     /// Headings of the active tab, kept until the text changes. Empty for
@@ -26,12 +34,51 @@ impl LiteMarkApp {
                     return cache.items.clone();
                 }
             }
-            let items = Arc::new(outline_items_raw(&tab.content));
+            let last_edit = tab.last_edit();
+            let line_delta = tab.last_edit_line_delta();
+            if let (Some(cache), Some((edit_rev, old_range, new_len))) =
+                (&mut self.outline_cache, last_edit)
+            {
+                if cache.tab_id == tab.id && cache.parse_gen.is_none() && cache.revision == edit_rev
+                {
+                    let items_mut = Arc::make_mut(&mut cache.items);
+                    let patched = patch_outline_items_raw(
+                        items_mut,
+                        &mut cache.raw_fences,
+                        &tab.content,
+                        old_range,
+                        new_len,
+                        line_delta,
+                        |prefix_items, win_start| {
+                            if let Some(prev) = prefix_items.last() {
+                                prev.line_index
+                                    + crate::model::text_ops::count_line_endings(
+                                        &tab.content.as_bytes()[prev.offset..win_start],
+                                    ) as u32
+                            } else {
+                                crate::model::text_ops::count_line_endings(
+                                    &tab.content.as_bytes()[..win_start],
+                                ) as u32
+                            }
+                        },
+                    );
+                    if patched {
+                        cache.revision = tab.revision;
+                        cache.max_chars = outline_max_chars(&cache.items);
+                        return cache.items.clone();
+                    }
+                }
+            }
+            let (raw_items, raw_fences) = outline_items_and_fences_raw(&tab.content);
+            let max_chars = outline_max_chars(&raw_items);
+            let items = Arc::new(raw_items);
             self.outline_cache = Some(OutlineCache {
                 tab_id: tab.id.clone(),
                 revision: tab.revision,
                 parse_gen: None,
                 items: items.clone(),
+                raw_fences,
+                max_chars,
             });
             return items;
         }
@@ -67,6 +114,7 @@ impl LiteMarkApp {
                                 inserted,
                                 parsed.meta.last_byte_delta,
                             );
+                            cache.max_chars = outline_max_chars(&cache.items);
                         }
                         cache.revision = tab.revision;
                         cache.parse_gen = Some(parse_gen);
@@ -75,12 +123,16 @@ impl LiteMarkApp {
                 }
             }
         }
-        let items = Arc::new(outline_items(&parsed, &tab.content));
+        let raw_items = outline_items(&parsed, &tab.content);
+        let max_chars = outline_max_chars(&raw_items);
+        let items = Arc::new(raw_items);
         self.outline_cache = Some(OutlineCache {
             tab_id: tab.id.clone(),
             revision: tab.revision,
             parse_gen: Some(parse_gen),
             items: items.clone(),
+            raw_fences: Vec::new(),
+            max_chars,
         });
         items
     }
@@ -118,6 +170,11 @@ impl LiteMarkApp {
             return None;
         }
         let items = self.outline_headings();
+        let max_chars = self
+            .outline_cache
+            .as_ref()
+            .map(|c| c.max_chars)
+            .unwrap_or(0);
         let caret = self.active_tab()?.cursor_offset();
         let measured = self.editor_scroll.bounds().size.height;
         let area_height = if measured > px(0.0) {
@@ -131,6 +188,7 @@ impl LiteMarkApp {
             OutlineProps {
                 current: current_heading(&items, caret),
                 items: items.clone(),
+                max_chars,
                 expanded,
                 area_height,
                 area_width: self.editor_scroll.bounds().size.width,
@@ -160,8 +218,15 @@ impl LiteMarkApp {
                         let _ = view.update(cx, |this, cx| {
                             // The card is already showing under the pointer
                             // (hover), so a click on its title pins it open,
-                            // and a click on an open card closes it.
-                            this.outline_open = !this.outline_open;
+                            // and a click on an open card closes it. A card
+                            // pinned by the shortcut closes (unpins) too.
+                            if this.outline_pinned_open() {
+                                this.settings.outline_pinned = false;
+                                this.save_settings();
+                                this.outline_open = false;
+                            } else {
+                                this.outline_open = !this.outline_open;
+                            }
                             if !this.outline_open {
                                 this.outline_hover = false;
                             }

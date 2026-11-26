@@ -112,19 +112,49 @@ const COMPRESSED_FONTS: &[&[u8]] = &[
     include_bytes!(concat!(env!("OUT_DIR"), "/UbuntuMono-BI.ttf.deflate")),
 ];
 
-fn load_bundled_fonts() -> Vec<std::borrow::Cow<'static, [u8]>> {
+include!(concat!(env!("OUT_DIR"), "/font_lengths.rs"));
+
+fn decompress_bundled_font(
+    compressed: &[u8],
+    uncompressed_len: usize,
+) -> Option<std::borrow::Cow<'static, [u8]>> {
     use std::io::Read;
-    COMPRESSED_FONTS
-        .iter()
-        .filter_map(|compressed| {
-            let mut decoder = flate2::read::DeflateDecoder::new(*compressed);
-            let mut out = Vec::new();
-            decoder
-                .read_to_end(&mut out)
-                .ok()
-                .map(|_| std::borrow::Cow::Owned(out))
-        })
-        .collect()
+    let mut decoder = flate2::read::DeflateDecoder::new(compressed);
+    let mut out = Vec::with_capacity(uncompressed_len);
+    decoder
+        .read_to_end(&mut out)
+        .ok()
+        .map(|_| std::borrow::Cow::Owned(out))
+}
+
+fn load_bundled_fonts() -> Vec<std::borrow::Cow<'static, [u8]>> {
+    let total = COMPRESSED_FONTS.len();
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 4)
+        .min(total.max(1));
+    if workers <= 1 {
+        return COMPRESSED_FONTS
+            .iter()
+            .zip(BUNDLED_FONT_LENS)
+            .filter_map(|(compressed, len)| decompress_bundled_font(compressed, len))
+            .collect();
+    }
+    let mut slots: Vec<Option<std::borrow::Cow<'static, [u8]>>> = vec![None; total];
+    let chunk_size = total.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (chunk_idx, slot_chunk) in slots.chunks_mut(chunk_size).enumerate() {
+            let start = chunk_idx * chunk_size;
+            scope.spawn(move || {
+                for (offset, slot) in slot_chunk.iter_mut().enumerate() {
+                    let idx = start + offset;
+                    *slot = decompress_bundled_font(COMPRESSED_FONTS[idx], BUNDLED_FONT_LENS[idx]);
+                }
+            });
+        }
+    });
+    slots.into_iter().flatten().collect()
 }
 
 struct EmbeddedAssets;

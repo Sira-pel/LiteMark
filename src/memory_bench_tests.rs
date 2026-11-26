@@ -134,10 +134,11 @@ fn bench_note_heap() {
             let mut hist = std::collections::BTreeMap::<String, usize>::new();
             let (mut len_sum, mut cap_sum) = (0usize, 0usize);
             for l in &doc.lines {
+                let h_count = usize::from(l.prefix_hidden) + l.hidden_ranges.len();
                 let key = format!(
                     "{:?} h{} p{} s{} l{} m{} d{}",
                     std::mem::discriminant(&l.kind),
-                    l.hidden_ranges.len(),
+                    h_count,
                     l.inline_pairs().len(),
                     l.styled_segments().len(),
                     l.link_hits().len(),
@@ -145,7 +146,7 @@ fn bench_note_heap() {
                     (l.display_owned_len_for_bench() > 0) as u8
                 );
                 *hist.entry(key).or_default() += 1;
-                len_sum += l.hidden_ranges.len() + l.inline_pairs().len() + l.styled_segments().len();
+                len_sum += h_count + l.inline_pairs().len() + l.styled_segments().len();
                 cap_sum += l.hidden_ranges.len() + l.inline_pairs().len() + l.styled_segments().len();
             }
             for (k, v) in hist {
@@ -277,4 +278,66 @@ fn bench_two_large_tabs() {
     redraw(&mut cx);
     report("big tab closed + frame", base);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[ignore]
+#[std_test]
+fn bench_parse_document_large() {
+    let text = sample_note(20_000); // 120,001 lines of mixed dense markdown
+    let line_count = text.lines().count();
+    let t0 = std::time::Instant::now();
+    let doc = crate::markdown::parse_document(&text);
+    let dt = t0.elapsed();
+    let lines_per_sec = (doc.lines.len() as f64) / dt.as_secs_f64();
+    eprintln!(
+        "parse_document ({line_count} lines, {} bytes): {:.2} ms ({:.0} lines/s)",
+        text.len(),
+        dt.as_secs_f64() * 1000.0,
+        lines_per_sec
+    );
+}
+
+#[ignore]
+#[std_test]
+fn bench_raw_edit_with_headings() {
+    use crate::model::outline::{outline_items_and_fences_raw, patch_outline_items_raw};
+    let mut text = String::new();
+    for i in 0..5_000 {
+        text.push_str(&format!("# Heading {i}\n"));
+        for j in 0..19 {
+            text.push_str(&format!("Paragraph line {j} inside section {i}.\n"));
+        }
+    }
+    let (mut items, mut fences) = outline_items_and_fences_raw(&text);
+    assert_eq!(items.len(), 5_000);
+    let edit_pos = text.find("Paragraph line 5").unwrap() + 10;
+    let t0 = std::time::Instant::now();
+    for step in 0..100usize {
+        let pos = edit_pos + step;
+        text.insert(pos, 'x');
+        let ok = patch_outline_items_raw(
+            &mut items,
+            &mut fences,
+            &text,
+            pos..pos,
+            1,
+            0,
+            |prefix_items, win_start| {
+                if let Some(prev) = prefix_items.last() {
+                    prev.line_index
+                        + crate::model::text_ops::count_line_endings(
+                            &text.as_bytes()[prev.offset..win_start],
+                        ) as u32
+                } else {
+                    crate::model::text_ops::count_line_endings(&text.as_bytes()[..win_start]) as u32
+                }
+            },
+        );
+        assert!(ok);
+    }
+    let dt = t0.elapsed();
+    eprintln!(
+        "raw_edit_with_headings (100k lines, 5k headings): avg {:.2} us/edit",
+        dt.as_secs_f64() * 1_000_000.0 / 100.0
+    );
 }

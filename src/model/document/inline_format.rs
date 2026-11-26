@@ -1108,6 +1108,9 @@ pub(super) fn expand_replace_to_matching_neighbors(
     }
 
     let line_start = pline.source.start;
+    // The accessor also covers a `# `/`- ` prefix stored as `prefix_hidden`.
+    let mut hidden_scratch = [LineRange::new(0, 0); 1];
+    let hidden = pline.hidden_ranges_slice(&mut hidden_scratch);
     let mut left_front = p_start;
     let mut right_front = p_end;
     loop {
@@ -1117,13 +1120,7 @@ pub(super) fn expand_replace_to_matching_neighbors(
                 continue;
             }
             if seg.source.end <= left_front
-                && gap_is_ws_and_markers(
-                    content,
-                    line_start,
-                    &pline.hidden_ranges,
-                    seg.source.end,
-                    left_front,
-                )
+                && gap_is_ws_and_markers(content, line_start, hidden, seg.source.end, left_front)
             {
                 let (open, close) = covering_span(parsed, pline, &seg);
                 if open < replace.start || close > replace.end || seg.source.start < left_front {
@@ -1134,13 +1131,7 @@ pub(super) fn expand_replace_to_matching_neighbors(
                 }
             }
             if seg.source.start >= right_front
-                && gap_is_ws_and_markers(
-                    content,
-                    line_start,
-                    &pline.hidden_ranges,
-                    right_front,
-                    seg.source.start,
-                )
+                && gap_is_ws_and_markers(content, line_start, hidden, right_front, seg.source.start)
             {
                 let (open, close) = covering_span(parsed, pline, &seg);
                 if close > replace.end || open < replace.start || seg.source.end > right_front {

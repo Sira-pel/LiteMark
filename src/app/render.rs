@@ -1454,6 +1454,10 @@ impl Render for LiteMarkApp {
             }))
             .on_modifiers_changed(cx.listener(
                 |this, event: &ModifiersChangedEvent, _window, cx| {
+                    // Ctrl/Cmd over a link swaps in the hand cursor.
+                    if this.hovered_link.is_some() {
+                        cx.notify();
+                    }
                     if this.table_drag.is_none() || !event.modifiers.modified() {
                         return;
                     }

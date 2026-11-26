@@ -18,10 +18,12 @@ const FONT_FILES: &[&str] = &[
 fn main() {
     let out_dir = std::env::var_os("OUT_DIR").expect("OUT_DIR");
     let out_dir = Path::new(&out_dir);
+    let mut font_lens = Vec::with_capacity(FONT_FILES.len());
     for name in FONT_FILES {
         let src = Path::new("assets/fonts").join(name);
         println!("cargo:rerun-if-changed=assets/fonts/{name}");
         let raw = std::fs::read(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+        font_lens.push(raw.len());
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
         encoder
             .write_all(&raw)
@@ -32,6 +34,13 @@ fn main() {
         let dst = out_dir.join(format!("{name}.deflate"));
         std::fs::write(&dst, compressed).unwrap_or_else(|e| panic!("write {}: {e}", dst.display()));
     }
+    let lengths_src = format!(
+        "const BUNDLED_FONT_LENS: [usize; {}] = {:?};\n",
+        font_lens.len(),
+        font_lens
+    );
+    std::fs::write(out_dir.join("font_lengths.rs"), lengths_src)
+        .unwrap_or_else(|e| panic!("write font_lengths.rs: {e}"));
 
     #[cfg(windows)]
     {

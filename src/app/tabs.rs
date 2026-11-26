@@ -563,28 +563,35 @@ impl LiteMarkApp {
         // Runs every frame: compare in place and only allocate on a change.
         let open_changed = !open_paths().eq(self.settings.open_tabs.iter());
         let new_open: Option<Vec<PathBuf>> = open_changed.then(|| open_paths().cloned().collect());
-        let active_path = self.active_tab().and_then(|tab| tab.file_path.clone());
-        let active = {
+        let (active_changed, new_active, recent_changed, new_recent) = {
+            let active_path = self.active_tab().and_then(|tab| tab.file_path.as_deref());
             let open: &[PathBuf] = new_open.as_deref().unwrap_or(&self.settings.open_tabs);
-            active_path.clone().filter(|path| open.contains(path))
+            let target_active =
+                active_path.filter(|p| open.iter().any(|entry| entry.as_path() == *p));
+            let active_changed = target_active != self.settings.active_tab.as_deref();
+            let new_active = active_changed.then(|| target_active.map(Path::to_path_buf));
+            let recent_changed = active_path != self.recent_seen.as_deref();
+            let new_recent = recent_changed.then(|| active_path.map(Path::to_path_buf));
+            (active_changed, new_active, recent_changed, new_recent)
         };
         let mut changed = false;
         if let Some(open) = new_open {
             self.settings.open_tabs = open;
             changed = true;
         }
-        if active != self.settings.active_tab {
-            self.settings.active_tab = active;
+        if active_changed {
+            self.settings.active_tab = new_active.flatten();
             changed = true;
         }
-        if active_path != self.recent_seen {
-            if let Some(path) = &active_path {
+        if recent_changed {
+            let owned = new_recent.flatten();
+            if let Some(path) = &owned {
                 if push_recent(&mut self.settings.recent_notes, path) {
                     self.recent_menu_cache = None;
                     changed = true;
                 }
             }
-            self.recent_seen = active_path;
+            self.recent_seen = owned;
         }
         if changed {
             self.tab_settings_dirty = true;
@@ -722,6 +729,7 @@ impl LiteMarkApp {
             return 0;
         };
 
+        let mut active_loaded = Some(active_loaded);
         let mut active_id = String::new();
         for (idx, path) in candidates.into_iter().enumerate() {
             let id = self.tab_ids.alloc();
@@ -731,7 +739,7 @@ impl LiteMarkApp {
                 restored.push(DocumentTab::from_loaded(
                     id,
                     name,
-                    active_loaded.clone(),
+                    active_loaded.take().unwrap(),
                     Some(path),
                     None,
                 ));

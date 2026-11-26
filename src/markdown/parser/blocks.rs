@@ -304,58 +304,40 @@ pub(crate) fn atx_display_content_range(line: &str) -> Option<(u8, std::ops::Ran
     })
 }
 
-#[allow(clippy::single_range_in_vec_init)]
 pub(super) fn fence_marker_line(
     index: usize,
     source: std::ops::Range<usize>,
     line: &str,
     kind: LineKind,
 ) -> ParsedLine {
-    let hidden = if line.is_empty() {
-        Vec::new()
-    } else {
-        vec![LineRange::new(0, line.len() as u32)]
-    };
     ParsedLine {
         line_index: index as u32,
         source,
         content_end: line.len() as u32,
         prefix_len: line.len() as u32,
         quote_depth: 0,
+        prefix_hidden: !line.is_empty(),
         kind,
-        hidden_ranges: hidden.into(),
+        hidden_ranges: Box::default(),
         inline: None,
     }
 }
 
-#[allow(clippy::single_range_in_vec_init)]
 pub(super) fn code_content_line(
     index: usize,
     source: std::ops::Range<usize>,
     line: &str,
     strip: usize,
 ) -> ParsedLine {
-    if strip == 0 {
-        return ParsedLine {
-            line_index: index as u32,
-            source,
-            content_end: line.len() as u32,
-            prefix_len: 0,
-            quote_depth: 0,
-            kind: LineKind::CodeLine,
-            hidden_ranges: Box::default(),
-            inline: None,
-        };
-    }
-    let hidden = vec![LineRange::new(0, strip as u32)];
     ParsedLine {
         line_index: index as u32,
         source,
         content_end: line.len() as u32,
         prefix_len: strip as u32,
         quote_depth: 0,
+        prefix_hidden: strip > 0,
         kind: LineKind::CodeLine,
-        hidden_ranges: hidden.into(),
+        hidden_ranges: Box::default(),
         inline: None,
     }
 }
@@ -366,31 +348,57 @@ pub(super) fn atx_line(
     line: &str,
     level: u8,
     content: std::ops::Range<usize>,
+    scratch: &mut InlineScratch,
 ) -> ParsedLine {
-    let mut hidden = Vec::new();
+    let prefix_len = content.start as u32;
+    if content.is_empty() {
+        scratch.raw_hidden.clear();
+        scratch.styled_segments.clear();
+        if content.start > 0 {
+            scratch.raw_hidden.push(0..content.start);
+        }
+        if content.end < line.len() {
+            scratch.raw_hidden.push(content.end..line.len());
+        }
+        merge_line_ranges_into(&mut scratch.raw_hidden, &mut scratch.merged_hidden);
+        let display_text_owned = build_display(line, content.start, &scratch.merged_hidden);
+        let (prefix_hidden, hidden_ranges) = pack_hidden_ranges(prefix_len, &scratch.merged_hidden);
+        return ParsedLine {
+            line_index: index as u32,
+            source,
+            content_end: content.end as u32,
+            prefix_len,
+            quote_depth: 0,
+            prefix_hidden,
+            kind: LineKind::Heading { level },
+            hidden_ranges,
+            inline: LineInline::boxed_slices(&[], &mut scratch.styled_segments, display_text_owned),
+        };
+    }
+    parse_inline_syntax(&line[content.start..content.end], content.start, scratch);
     if content.start > 0 {
-        hidden.push(0..content.start);
+        scratch.raw_hidden.push(0..content.start);
     }
     if content.end < line.len() {
-        hidden.push(content.end..line.len());
+        scratch.raw_hidden.push(content.end..line.len());
     }
-    let (inline_hidden, inline_pairs, styled_segments) = if content.is_empty() {
-        (Vec::new(), Vec::new(), Vec::new())
-    } else {
-        parse_inline_syntax(&line[content.start..content.end], content.start)
-    };
-    hidden.extend(inline_hidden);
-    let hidden = merge_line_ranges(hidden);
-    let display_text_owned = build_display(line, content.start, &hidden);
+    merge_line_ranges_into(&mut scratch.raw_hidden, &mut scratch.merged_hidden);
+    let display_text_owned = build_display(line, content.start, &scratch.merged_hidden);
+    let (prefix_hidden, hidden_ranges) = pack_hidden_ranges(prefix_len, &scratch.merged_hidden);
     ParsedLine {
         line_index: index as u32,
         source,
         content_end: content.end as u32,
-        prefix_len: content.start as u32,
+        prefix_len,
         quote_depth: 0,
+        prefix_hidden,
         kind: LineKind::Heading { level },
-        hidden_ranges: hidden.into(),
-        inline: LineInline::boxed(inline_pairs, styled_segments, display_text_owned),
+        hidden_ranges,
+        inline: LineInline::boxed_slices(
+            &scratch.inline_pairs,
+            &mut scratch.styled_segments,
+            display_text_owned,
+        ),
     }
 }
 

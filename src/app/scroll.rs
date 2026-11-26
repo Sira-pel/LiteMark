@@ -1,7 +1,6 @@
 //! Scrolling: momentum, caret follow, selection reveal.
 
 use super::*;
-use crate::ui::text_editor::row_at_or_before;
 
 impl LiteMarkApp {
     /// Feeds touchpad movement to the momentum tracker; wheel notches reset it.
@@ -88,20 +87,27 @@ impl LiteMarkApp {
         let Some(cursor) = self.active_tab().map(|tab| tab.caret.cursor()) else {
             return false;
         };
-        let paint = self.editor_paint.borrow();
+        let parsed = if self.effective_view_mode() == ViewMode::Wysiwyg {
+            self.active_tab_mut()
+                .filter(|t| t.file_type.supports_markdown_features())
+                .map(|t| t.parsed())
+        } else {
+            None
+        };
+        let mut paint = self.editor_paint.borrow_mut();
         if paint.painted_len != key.3
             || paint.painted_selection != key.2
             || paint.painted_view_mode != key.1
         {
             return false;
         }
-        let row = row_at_or_before(&paint.rows, cursor);
+        let row_y = paint.row_y_for_offset(cursor, parsed.as_deref());
         let view = self.editor_scroll.bounds();
         let mut scrolled = false;
-        if let Some(row) = row {
+        if let Some((row_top, row_height)) = row_y {
             if let Some(delta) = follow_caret_delta(
-                row.origin.y,
-                row.line_height,
+                row_top,
+                row_height,
                 paint.line_height,
                 view.top(),
                 view.size.height,
@@ -126,8 +132,15 @@ impl LiteMarkApp {
         let Some(cursor) = self.active_tab().map(|tab| tab.cursor_offset()) else {
             return;
         };
-        let paint = self.editor_paint.borrow();
-        let Some(row) = row_at_or_before(&paint.rows, cursor) else {
+        let parsed = if self.effective_view_mode() == ViewMode::Wysiwyg {
+            self.active_tab_mut()
+                .filter(|t| t.file_type.supports_markdown_features())
+                .map(|t| t.parsed())
+        } else {
+            None
+        };
+        let mut paint = self.editor_paint.borrow_mut();
+        let Some((row_top, row_height)) = paint.row_y_for_offset(cursor, parsed.as_deref()) else {
             return;
         };
         let view = self.editor_scroll.bounds();
@@ -137,9 +150,9 @@ impl LiteMarkApp {
         let line_h = if paint.line_height > px(0.0) {
             paint.line_height
         } else {
-            row.line_height
+            row_height
         };
-        let delta = row.origin.y - (view.top() + line_h * 1.5);
+        let delta = row_top - (view.top() + line_h * 1.5);
         let offset = self.editor_scroll.offset();
         let max = self.editor_scroll.max_offset().height;
         let y = (offset.y - delta).clamp(-max, px(0.0));
@@ -153,13 +166,19 @@ impl LiteMarkApp {
         let Some(start) = self.active_tab().map(|tab| tab.selection_range().start) else {
             return;
         };
-        let paint = self.editor_paint.borrow();
-        let Some(row) = row_at_or_before(&paint.rows, start) else {
+        let parsed = if self.effective_view_mode() == ViewMode::Wysiwyg {
+            self.active_tab_mut()
+                .filter(|t| t.file_type.supports_markdown_features())
+                .map(|t| t.parsed())
+        } else {
+            None
+        };
+        let mut paint = self.editor_paint.borrow_mut();
+        let Some((row_top, row_height)) = paint.row_y_for_offset(start, parsed.as_deref()) else {
             return;
         };
         let view = self.editor_scroll.bounds();
-        let Some(delta) =
-            scroll_delta_for_row(row.origin.y, row.line_height, view.top(), view.size.height)
+        let Some(delta) = scroll_delta_for_row(row_top, row_height, view.top(), view.size.height)
         else {
             return;
         };

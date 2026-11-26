@@ -21,18 +21,26 @@ fn plain_inline_shortcut_matches_pulldown() {
         "a",
         "x | y > z & ! ]",
     ];
+    let mut s1 = InlineScratch::default();
+    let mut s2 = InlineScratch::default();
     let mut checked = 0usize;
     for text in named {
         assert!(is_plain_inline(text), "{text:?} should take the shortcut");
         for base in [0, 7] {
+            parse_inline_syntax(text, base, &mut s1);
+            s2.clear_inline();
+            parse_inline_with_pulldown(text, base, false, false, &mut s2);
             assert_eq!(
-                parse_inline_syntax(text, base),
-                parse_inline_with_pulldown(text, base, false, false),
+                (&s1.raw_hidden, &s1.inline_pairs, &s1.styled_segments),
+                (&s2.raw_hidden, &s2.inline_pairs, &s2.styled_segments),
                 "{text:?}"
             );
+            parse_inline_syntax_cell(text, base, &mut s1);
+            s2.clear_inline();
+            parse_inline_with_pulldown(text, base, true, false, &mut s2);
             assert_eq!(
-                parse_inline_syntax_cell(text, base),
-                parse_inline_with_pulldown(text, base, true, false),
+                (&s1.raw_hidden, &s1.inline_pairs, &s1.styled_segments),
+                (&s2.raw_hidden, &s2.inline_pairs, &s2.styled_segments),
                 "cell {text:?}"
             );
         }
@@ -58,14 +66,20 @@ fn plain_inline_shortcut_matches_pulldown() {
             text.push(alphabet[(s >> 33) as usize % alphabet.len()]);
         }
         if is_plain_inline(&text) {
+            parse_inline_syntax(&text, 3, &mut s1);
+            s2.clear_inline();
+            parse_inline_with_pulldown(&text, 3, false, false, &mut s2);
             assert_eq!(
-                parse_inline_syntax(&text, 3),
-                parse_inline_with_pulldown(&text, 3, false, false),
+                (&s1.raw_hidden, &s1.inline_pairs, &s1.styled_segments),
+                (&s2.raw_hidden, &s2.inline_pairs, &s2.styled_segments),
                 "{text:?}"
             );
+            parse_inline_syntax_cell(&text, 3, &mut s1);
+            s2.clear_inline();
+            parse_inline_with_pulldown(&text, 3, true, false, &mut s2);
             assert_eq!(
-                parse_inline_syntax_cell(&text, 3),
-                parse_inline_with_pulldown(&text, 3, true, false),
+                (&s1.raw_hidden, &s1.inline_pairs, &s1.styled_segments),
+                (&s2.raw_hidden, &s2.inline_pairs, &s2.styled_segments),
                 "cell {text:?}"
             );
             checked += 1;
@@ -165,6 +179,7 @@ fn test_in_list_or_quote_tracker_exhaustive() {
                 content_end: 0,
                 prefix_len: 0,
                 quote_depth: 0,
+                prefix_hidden: false,
                 kind: kind.clone(),
                 hidden_ranges: Box::default(),
                 inline: None,
@@ -3894,12 +3909,13 @@ fn rebuilt_offset_map_matches_from_hidden() {
             continue;
         };
         let text = &md[line.source.clone()];
+        let mut hs = [LineRange::new(0, 0); 1];
         let (display, expected) = RowOffsetMap::from_hidden(
             text,
             line.source.start,
             line.prefix_end(),
             line.source.start,
-            &line.hidden_ranges,
+            line.hidden_ranges_slice(&mut hs),
         );
         assert_eq!(map, expected, "{text:?}");
         assert_eq!(line.display_text(md), display);
@@ -3913,12 +3929,13 @@ fn zero_alloc_line_lookups_match_row_offset_map() {
     let md = "plain text\n# Heading\n# \n---\n- item\n> quote **b**\n**bold** and *italic* and [link](https://example.com) and `code`\n**all**\n\u{1F600}*é*ក\n";
     let doc = parse_document(md);
     for line in &doc.lines {
+        let mut hs = [LineRange::new(0, 0); 1];
         let map = RowOffsetMap::from_hidden_ranges(
             line.source.start,
             line.source.end,
             line.prefix_end(),
             line.source.start,
-            &line.hidden_ranges,
+            line.hidden_ranges_slice(&mut hs),
         );
         for src in line.source.start.saturating_sub(2)..=line.source.end + 2 {
             assert_eq!(

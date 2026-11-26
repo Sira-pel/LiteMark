@@ -913,9 +913,12 @@ pub struct ParsedLine {
     /// Blockquote nesting depth (`0` = not inside a blockquote, `1` = `> `,
     /// `2` = `> > `, etc.). Fits in existing tail padding (`72 B` total).
     pub quote_depth: u8,
+    /// True when `hidden_ranges` would have held only `[0..prefix_len]`, avoiding
+    /// a separate heap allocation for every heading, list, quote, HR, and fence line.
+    pub prefix_hidden: bool,
     pub kind: LineKind,
     /// All byte ranges hidden in WYSIWYG on this line, relative to `source.start`
-    /// (sorted, non-overlapping).
+    /// (sorted, non-overlapping). Empty when `prefix_hidden` is true.
     pub hidden_ranges: Box<[LineRange]>,
     /// Inline markup data; `None` for lines that carry none (blank, heading,
     /// list, code and plain-text lines), so they cost no extra allocation.
@@ -942,9 +945,9 @@ pub struct LineInline {
 impl LineInline {
     /// Seal line-relative inline data into a [`LineInline`] box, or `None` when
     /// it is all empty (so equal parses always agree on whether a line has a box).
-    pub(super) fn boxed(
-        inline_pairs: Vec<InlinePair>,
-        raw_segments: Vec<RawStyledSegment>,
+    pub(super) fn boxed_slices(
+        inline_pairs: &[InlinePair],
+        raw_segments: &mut Vec<RawStyledSegment>,
         display_text_owned: Option<Box<str>>,
     ) -> Option<Box<Self>> {
         if inline_pairs.is_empty() && raw_segments.is_empty() && display_text_owned.is_none() {
@@ -954,7 +957,7 @@ impl LineInline {
             inline_pairs.iter().map(LineInlinePair::from_rel).collect();
         let mut links: Vec<(LineRange, Arc<str>)> = Vec::new();
         let mut styled_segments: Vec<StyledSegment> = Vec::with_capacity(raw_segments.len());
-        for seg in raw_segments {
+        for seg in raw_segments.drain(..) {
             let range = LineRange::from_rel(seg.source.clone());
             let mut flags = 0u8;
             if seg.bold {
@@ -1020,13 +1023,39 @@ impl ParsedLine {
         self.inline.is_some()
     }
 
+    /// Line-relative hidden ranges for this line, using `scratch` when `prefix_hidden` is set.
+    #[inline]
+    pub(crate) fn hidden_ranges_slice<'a>(
+        &'a self,
+        scratch: &'a mut [LineRange; 1],
+    ) -> &'a [LineRange] {
+        if self.prefix_hidden {
+            scratch[0] = LineRange::new(0, self.prefix_len);
+            scratch
+        } else {
+            &self.hidden_ranges
+        }
+    }
+
     /// Document-absolute hidden ranges for this line.
     #[inline]
     pub fn hidden_ranges_abs(
         &self,
     ) -> impl ExactSizeIterator<Item = std::ops::Range<usize>> + DoubleEndedIterator + '_ {
         let base = self.source.start;
-        self.hidden_ranges.iter().map(move |r| r.to_abs(base))
+        let len = if self.prefix_hidden {
+            1
+        } else {
+            self.hidden_ranges.len()
+        };
+        (0..len).map(move |i| {
+            if self.prefix_hidden {
+                LineRange::new(0, self.prefix_len)
+            } else {
+                self.hidden_ranges[i]
+            }
+            .to_abs(base)
+        })
     }
 
     /// Line-relative paired inline delimiter ranges.
@@ -1103,12 +1132,13 @@ impl ParsedLine {
     /// build, so callers should reuse the result across several lookups.
     pub(crate) fn offset_map_cached(&self) -> Option<RowOffsetMap> {
         self.display_text_owned()?;
+        let mut scratch = [LineRange::new(0, 0); 1];
         Some(RowOffsetMap::from_hidden_ranges(
             self.source.start,
             self.source.end,
             self.prefix_end(),
             self.source.start,
-            &self.hidden_ranges,
+            self.hidden_ranges_slice(&mut scratch),
         ))
     }
 
@@ -1142,10 +1172,7 @@ impl ParsedLine {
 
     #[inline]
     fn has_only_prefix_hidden(&self) -> bool {
-        (self.hidden_ranges.is_empty() && self.prefix_len == 0)
-            || (self.hidden_ranges.len() == 1
-                && self.hidden_ranges[0].start == 0
-                && self.hidden_ranges[0].end as usize == self.prefix_len as usize)
+        self.prefix_hidden || (self.hidden_ranges.is_empty() && self.prefix_len == 0)
     }
 
     #[inline]
@@ -1158,7 +1185,8 @@ impl ParsedLine {
         let mut disp = 0usize;
         let mut cursor = line_start;
         let mut emitted = false;
-        for &h in &self.hidden_ranges {
+        let mut scratch = [LineRange::new(0, 0); 1];
+        for &h in self.hidden_ranges_slice(&mut scratch) {
             let abs = h.to_abs(line_start);
             let h_start = abs.start.clamp(line_start, line_end);
             let h_end = abs.end.clamp(line_start, line_end);
@@ -1335,6 +1363,10 @@ pub struct ParseMeta {
     pub generation: u64,
     /// Number of [`LineKind::TableRow`] lines in the document.
     pub(crate) table_line_count: usize,
+    /// Contiguous line-index spans `[start..end)` of each table in `lines`.
+    pub(crate) table_ranges: Vec<std::ops::Range<usize>>,
+    /// Sorted line indices of paragraph lines starting with `![` (image candidates).
+    pub(crate) image_lines: Vec<u32>,
     /// The last incremental update: `(generation before it, first line,
     /// lines removed, lines inserted)`. Lets caches keyed by line index
     /// follow the edit instead of starting over.
@@ -1459,7 +1491,8 @@ impl ParsedDocument {
                         }
                     }
                     let mut cursor = clip.start;
-                    for &h in &line.hidden_ranges {
+                    let mut scratch = [LineRange::new(0, 0); 1];
+                    for &h in line.hidden_ranges_slice(&mut scratch) {
                         let hidden = h.to_abs(line.source.start);
                         if hidden.end <= cursor || hidden.start >= clip.end {
                             continue;
@@ -1480,11 +1513,38 @@ impl ParsedDocument {
     }
 }
 
-pub(super) fn merge_line_ranges(ranges: Vec<std::ops::Range<usize>>) -> Vec<LineRange> {
-    merge_ranges(ranges)
-        .into_iter()
-        .map(LineRange::from_rel)
-        .collect()
+pub(super) fn pack_hidden_ranges(
+    prefix_len: u32,
+    merged_hidden: &[LineRange],
+) -> (bool, Box<[LineRange]>) {
+    if prefix_len > 0
+        && merged_hidden.len() == 1
+        && merged_hidden[0].start == 0
+        && merged_hidden[0].end == prefix_len
+    {
+        (true, Box::default())
+    } else {
+        (false, merged_hidden.into())
+    }
+}
+
+pub(super) fn merge_line_ranges_into(
+    ranges: &mut Vec<std::ops::Range<usize>>,
+    out: &mut Vec<LineRange>,
+) {
+    ranges.retain(|r| r.end > r.start);
+    ranges.sort_by_key(|r| (r.start, r.end));
+    out.clear();
+    for r in ranges.drain(..) {
+        let lr = LineRange::from_rel(r);
+        if let Some(last) = out.last_mut() {
+            if lr.start <= last.end {
+                last.end = last.end.max(lr.end);
+                continue;
+            }
+        }
+        out.push(lr);
+    }
 }
 
 fn merge_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<usize>> {
@@ -1501,6 +1561,21 @@ fn merge_ranges(mut ranges: Vec<std::ops::Range<usize>>) -> Vec<std::ops::Range<
         merged.push(r);
     }
     merged
+}
+
+fn merge_ranges_into(src: &mut Vec<std::ops::Range<usize>>, out: &mut Vec<std::ops::Range<usize>>) {
+    src.retain(|r| r.end > r.start);
+    src.sort_by_key(|r| (r.start, r.end));
+    out.clear();
+    for r in src.drain(..) {
+        if let Some(last) = out.last_mut() {
+            if r.start <= last.end {
+                last.end = last.end.max(r.end);
+                continue;
+            }
+        }
+        out.push(r);
+    }
 }
 
 fn skip_link_destination(bytes: &[u8], open_paren: usize) -> Option<usize> {
@@ -1739,22 +1814,69 @@ pub(crate) fn prepare_for_pulldown(input: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-type InlineSyntax = (
-    Vec<std::ops::Range<usize>>,
-    Vec<InlinePair>,
-    Vec<RawStyledSegment>,
-);
-
-fn parse_inline_syntax(input: &str, base: usize) -> InlineSyntax {
-    parse_inline_syntax_inner(input, base, false, false)
+#[derive(Default)]
+pub(super) struct InlineScratch {
+    pub(super) raw_hidden: Vec<std::ops::Range<usize>>,
+    pub(super) inline_pairs: Vec<InlinePair>,
+    pub(super) styled_segments: Vec<RawStyledSegment>,
+    pub(super) merged_hidden: Vec<LineRange>,
+    table_hidden: Vec<std::ops::Range<usize>>,
+    table_pairs: Vec<InlinePair>,
+    table_segments: Vec<RawStyledSegment>,
+    blocked_ranges: Vec<std::ops::Range<usize>>,
+    bold_stack: Vec<usize>,
+    italic_stack: Vec<usize>,
+    strike_stack: Vec<usize>,
+    underline_stack: Vec<usize>,
+    link_stack: Vec<(usize, Arc<str>, usize)>,
+    image_stack: Vec<usize>,
+    escapes: Vec<usize>,
+    rebuilt: Vec<RawStyledSegment>,
+    code_inner_tmp: Vec<std::ops::Range<usize>>,
+    code_inner: Vec<std::ops::Range<usize>>,
+    prefixed_buf: String,
 }
 
-fn parse_inline_syntax_line(input: &str, base: usize, allow_hard_break: bool) -> InlineSyntax {
-    parse_inline_syntax_inner(input, base, false, allow_hard_break)
+impl InlineScratch {
+    fn clear_inline(&mut self) {
+        self.raw_hidden.clear();
+        self.inline_pairs.clear();
+        self.styled_segments.clear();
+        self.blocked_ranges.clear();
+        self.bold_stack.clear();
+        self.italic_stack.clear();
+        self.strike_stack.clear();
+        self.underline_stack.clear();
+        self.link_stack.clear();
+        self.image_stack.clear();
+        self.escapes.clear();
+        self.rebuilt.clear();
+        self.code_inner_tmp.clear();
+        self.code_inner.clear();
+    }
+
+    fn clear_table(&mut self) {
+        self.table_hidden.clear();
+        self.table_pairs.clear();
+        self.table_segments.clear();
+    }
 }
 
-fn parse_inline_syntax_cell(input: &str, base: usize) -> InlineSyntax {
-    parse_inline_syntax_inner(input, base, true, false)
+pub(super) fn parse_inline_syntax(input: &str, base: usize, scratch: &mut InlineScratch) {
+    parse_inline_syntax_inner(input, base, false, false, scratch)
+}
+
+fn parse_inline_syntax_line(
+    input: &str,
+    base: usize,
+    allow_hard_break: bool,
+    scratch: &mut InlineScratch,
+) {
+    parse_inline_syntax_inner(input, base, false, allow_hard_break, scratch)
+}
+
+fn parse_inline_syntax_cell(input: &str, base: usize, scratch: &mut InlineScratch) {
+    parse_inline_syntax_inner(input, base, true, false, scratch)
 }
 
 fn parse_inline_syntax_inner(
@@ -1762,9 +1884,11 @@ fn parse_inline_syntax_inner(
     base: usize,
     in_table_cell: bool,
     allow_hard_break: bool,
-) -> InlineSyntax {
+    scratch: &mut InlineScratch,
+) {
+    scratch.clear_inline();
     if input.is_empty() {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return;
     }
     // Block structure is decided before this point, so leading indentation
     // is only text. Pulldown would read four columns of it as indented code
@@ -1772,12 +1896,18 @@ fn parse_inline_syntax_inner(
     let body = input.trim_start_matches([' ', '\t']);
     if body.len() < input.len() {
         let lead = input.len() - body.len();
-        return parse_inline_syntax_inner(body, base + lead, in_table_cell, allow_hard_break);
+        return parse_inline_syntax_inner(
+            body,
+            base + lead,
+            in_table_cell,
+            allow_hard_break,
+            scratch,
+        );
     }
     if is_plain_inline(input) {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return;
     }
-    parse_inline_with_pulldown(input, base, in_table_cell, allow_hard_break)
+    parse_inline_with_pulldown(input, base, in_table_cell, allow_hard_break, scratch)
 }
 
 /// Text pulldown-cmark would return as one unstyled run: no byte that can
@@ -1794,12 +1924,14 @@ fn parse_inline_with_pulldown(
     base: usize,
     in_table_cell: bool,
     allow_hard_break: bool,
-) -> InlineSyntax {
+    scratch: &mut InlineScratch,
+) {
     let prepared = prepare_for_pulldown(input);
-    let owned_prefixed;
     let (parse_input, offset_shift) = if in_table_cell {
-        owned_prefixed = format!("x {prepared}");
-        (owned_prefixed.as_str(), 2usize)
+        scratch.prefixed_buf.clear();
+        scratch.prefixed_buf.push_str("x ");
+        scratch.prefixed_buf.push_str(&prepared);
+        (scratch.prefixed_buf.as_str(), 2usize)
     } else {
         (prepared.as_ref(), 0usize)
     };
@@ -1807,17 +1939,16 @@ fn parse_inline_with_pulldown(
     options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
     let parser = pulldown_cmark::Parser::new_ext(parse_input, options).into_offset_iter();
 
-    let mut raw_hidden = Vec::new();
-    let mut inline_pairs = Vec::new();
-    let mut styled_segments = Vec::new();
-    let mut blocked_ranges: Vec<std::ops::Range<usize>> = Vec::new();
-
-    let mut bold_stack: Vec<usize> = Vec::new();
-    let mut italic_stack: Vec<usize> = Vec::new();
-    let mut strike_stack: Vec<usize> = Vec::new();
-    let mut underline_stack: Vec<usize> = Vec::new();
-    let mut link_stack: Vec<(usize, Arc<str>, usize)> = Vec::new(); // (outer_start, url, last_inner_end)
-    let mut image_stack: Vec<usize> = Vec::new();
+    let raw_hidden = &mut scratch.raw_hidden;
+    let inline_pairs = &mut scratch.inline_pairs;
+    let styled_segments = &mut scratch.styled_segments;
+    let blocked_ranges = &mut scratch.blocked_ranges;
+    let bold_stack = &mut scratch.bold_stack;
+    let italic_stack = &mut scratch.italic_stack;
+    let strike_stack = &mut scratch.strike_stack;
+    let underline_stack = &mut scratch.underline_stack;
+    let link_stack = &mut scratch.link_stack;
+    let image_stack = &mut scratch.image_stack;
 
     for (event, raw_range) in parser {
         if raw_range.end <= offset_shift {
@@ -2022,21 +2153,21 @@ fn parse_inline_with_pulldown(
     }
 
     if let Some(&first_unclosed) = underline_stack.first() {
-        for seg in &mut styled_segments {
+        for seg in styled_segments.iter_mut() {
             if seg.source.start >= first_unclosed {
                 seg.underline = false;
             }
         }
     }
 
-    normalize_shared_run_pairs(&mut inline_pairs);
+    normalize_shared_run_pairs(inline_pairs);
     synthesize_flanking_pairs(
         input,
         base,
-        &blocked_ranges,
-        &mut raw_hidden,
-        &mut inline_pairs,
-        &mut styled_segments,
+        blocked_ranges,
+        raw_hidden,
+        inline_pairs,
+        styled_segments,
     );
 
     // Backslash escapes: the parser consumes `\X` (X an ASCII punctuation
@@ -2046,20 +2177,20 @@ fn parse_inline_with_pulldown(
     // cells which unescapes to `|`.
     let bytes = input.as_bytes();
     if bytes.contains(&b'\\') {
-        let code_inner = merge_ranges(
+        scratch.code_inner_tmp.extend(
             inline_pairs
                 .iter()
                 .filter(|p| p.kind == InlineTagKind::Code)
-                .map(|p| p.inner.clone())
-                .collect(),
+                .map(|p| p.inner.clone()),
         );
-        // Absolute offsets of hidden backslashes, ascending.
-        let mut escapes: Vec<usize> = Vec::new();
+        merge_ranges_into(&mut scratch.code_inner_tmp, &mut scratch.code_inner);
+        let code_inner = &scratch.code_inner;
+        let escapes = &mut scratch.escapes;
         let mut i = 0usize;
         while i < bytes.len() {
             if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() {
                 let abs = base + i;
-                let in_code = index_in_ranges(&code_inner, abs);
+                let in_code = index_in_ranges(code_inner, abs);
                 if !in_code || (in_table_cell && bytes[i + 1] == b'|') {
                     raw_hidden.push(abs..abs + 1);
                     escapes.push(abs);
@@ -2071,7 +2202,7 @@ fn parse_inline_with_pulldown(
                 && i + 1 == bytes.len()
             {
                 let abs = base + i;
-                if !index_in_ranges(&code_inner, abs) {
+                if !index_in_ranges(code_inner, abs) {
                     raw_hidden.push(abs..abs + 1);
                     escapes.push(abs);
                 }
@@ -2083,7 +2214,8 @@ fn parse_inline_with_pulldown(
         if !escapes.is_empty() {
             // The text segment covering an escape keeps the escaped character
             // only; the backslash is cut out of it.
-            let mut rebuilt: Vec<RawStyledSegment> = Vec::with_capacity(styled_segments.len());
+            let rebuilt = &mut scratch.rebuilt;
+            rebuilt.clear();
             for s in styled_segments.drain(..) {
                 let first = escapes.partition_point(|&e| e < s.source.start);
                 let inside = &escapes[first..];
@@ -2109,16 +2241,14 @@ fn parse_inline_with_pulldown(
                     });
                 }
             }
-            styled_segments = rebuilt;
+            std::mem::swap(styled_segments, rebuilt);
         }
     }
 
-    finalize_pair_groups(&mut inline_pairs);
+    finalize_pair_groups(inline_pairs);
     if styled_segments.iter().all(RawStyledSegment::is_plain) {
         styled_segments.clear();
-        styled_segments.shrink_to_fit();
     }
-    (raw_hidden, inline_pairs, styled_segments)
 }
 
 /// Up to this many pairs on a line, pair lookups scan the list directly:
@@ -2590,22 +2720,176 @@ fn normalize_shared_run_pairs(inline_pairs: &mut [InlinePair]) {
     }
 }
 
-pub fn parse_document(markdown: &str) -> ParsedDocument {
-    let mut raw_lines = LineSource::all(markdown);
-    let mut lines = Vec::with_capacity(raw_lines.len_hint());
-    let mut state = ParseState::default();
-    let mut checkpoints = Vec::with_capacity(raw_lines.len_hint() / CHECKPOINT_EVERY + 1);
-    parse_lines(&mut raw_lines, 0, &mut state, &mut lines, |i, _, state| {
-        if i % CHECKPOINT_EVERY == 0 {
-            checkpoints.push((i, state.clone()));
+pub(super) struct PendingInline {
+    line_idx: usize,
+    extra_hidden: Option<LineRange>,
+    allow_hard_break: bool,
+}
+
+fn resolve_pending_inline(
+    line: &mut ParsedLine,
+    raw_line: &str,
+    pending: &PendingInline,
+    scratch: &mut InlineScratch,
+) {
+    if let LineKind::TableRow { body, .. } = &line.kind {
+        scratch.clear_table();
+        let line_start = line.source.start;
+        for cell in &body.cells {
+            let c_start_rel = cell.start - line_start;
+            let c_end_rel = cell.end - line_start;
+            if c_end_rel > c_start_rel {
+                parse_inline_syntax_cell(&raw_line[c_start_rel..c_end_rel], c_start_rel, scratch);
+                scratch.table_hidden.append(&mut scratch.raw_hidden);
+                scratch.table_pairs.append(&mut scratch.inline_pairs);
+                scratch.table_segments.append(&mut scratch.styled_segments);
+            }
         }
-        Step::Parse
-    });
+        merge_line_ranges_into(&mut scratch.table_hidden, &mut scratch.merged_hidden);
+        line.prefix_hidden = false;
+        line.hidden_ranges = scratch.merged_hidden.as_slice().into();
+        line.inline =
+            LineInline::boxed_slices(&scratch.table_pairs, &mut scratch.table_segments, None);
+        return;
+    }
+
+    let prefix_len = line.prefix_len as usize;
+    let content_end = line.content_end as usize;
+    parse_inline_syntax_line(
+        &raw_line[prefix_len..content_end],
+        prefix_len,
+        pending.allow_hard_break,
+        scratch,
+    );
+    if pending.allow_hard_break
+        && scratch
+            .raw_hidden
+            .iter()
+            .any(|r| r.start + 1 == raw_line.len() && r.end == raw_line.len())
+    {
+        line.content_end = (raw_line.len() - 1) as u32;
+    }
+    if prefix_len > 0 {
+        scratch.raw_hidden.push(0..prefix_len);
+    }
+    if let Some(trail) = pending.extra_hidden {
+        scratch
+            .raw_hidden
+            .push((trail.start as usize)..(trail.end as usize));
+    }
+    merge_line_ranges_into(&mut scratch.raw_hidden, &mut scratch.merged_hidden);
+    let display_text_owned = build_display(raw_line, prefix_len, &scratch.merged_hidden);
+    let (prefix_hidden, hidden_ranges) =
+        pack_hidden_ranges(line.prefix_len, &scratch.merged_hidden);
+    line.prefix_hidden = prefix_hidden;
+    line.hidden_ranges = hidden_ranges;
+    line.inline = LineInline::boxed_slices(
+        &scratch.inline_pairs,
+        &mut scratch.styled_segments,
+        display_text_owned,
+    );
+}
+
+pub fn parse_document(markdown: &str) -> ParsedDocument {
+    parse_document_with_parallel(markdown, true)
+}
+
+fn parse_document_with_parallel(markdown: &str, allow_parallel: bool) -> ParsedDocument {
+    let mut raw_lines = LineSource::all(markdown);
+    let hint = raw_lines.len_hint();
+    let mut lines = Vec::with_capacity(hint);
+    let mut state = ParseState::default();
+    let mut checkpoints = Vec::with_capacity(hint / CHECKPOINT_EVERY + 1);
+    let mut scratch = InlineScratch::default();
+    let workers = if allow_parallel && hint >= 1024 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(8)
+    } else {
+        1
+    };
+
+    if workers >= 2 {
+        let mut pending = Vec::new();
+        parse_lines(
+            &mut raw_lines,
+            0,
+            &mut state,
+            &mut lines,
+            &mut scratch,
+            Some(&mut pending),
+            |i, _, state| {
+                if i % CHECKPOINT_EVERY == 0 {
+                    checkpoints.push((i, state.clone()));
+                }
+                Step::Parse
+            },
+        );
+        if pending.len() >= 64 {
+            let chunk_size = pending.len().div_ceil(workers);
+            std::thread::scope(|scope| {
+                let mut rest: &mut [ParsedLine] = lines.as_mut_slice();
+                let mut base_line = 0usize;
+                let mut offset = 0usize;
+                while offset < pending.len() {
+                    let end = (offset + chunk_size).min(pending.len());
+                    let chunk = &pending[offset..end];
+                    let split_at = if end == pending.len() {
+                        rest.len()
+                    } else {
+                        pending[end].line_idx - base_line
+                    };
+                    let (left, right) = rest.split_at_mut(split_at);
+                    let chunk_base = base_line;
+                    scope.spawn(move || {
+                        let mut worker_scratch = InlineScratch::default();
+                        for p in chunk {
+                            let line = &mut left[p.line_idx - chunk_base];
+                            let raw_line = &markdown[line.source.clone()];
+                            resolve_pending_inline(line, raw_line, p, &mut worker_scratch);
+                        }
+                    });
+                    rest = right;
+                    base_line += split_at;
+                    offset = end;
+                }
+            });
+        } else {
+            for p in &pending {
+                let line = &mut lines[p.line_idx];
+                let raw_line = &markdown[line.source.clone()];
+                resolve_pending_inline(line, raw_line, p, &mut scratch);
+            }
+        }
+    } else {
+        parse_lines(
+            &mut raw_lines,
+            0,
+            &mut state,
+            &mut lines,
+            &mut scratch,
+            None,
+            |i, _, state| {
+                if i % CHECKPOINT_EVERY == 0 {
+                    checkpoints.push((i, state.clone()));
+                }
+                Step::Parse
+            },
+        );
+    }
+
     let code_blocks = code_blocks_of(&lines, markdown.len());
     let table_line_count = lines
         .iter()
         .filter(|l| matches!(l.kind, LineKind::TableRow { .. }))
         .count();
+    let table_ranges = if table_line_count == 0 {
+        Vec::new()
+    } else {
+        table_ranges_of(&lines)
+    };
+    let image_lines = image_lines_in(&lines, markdown);
     ParsedDocument {
         lines,
         code_blocks,
@@ -2613,10 +2897,50 @@ pub fn parse_document(markdown: &str) -> ParsedDocument {
             checkpoints,
             generation: next_generation(),
             table_line_count,
+            table_ranges,
+            image_lines,
             last_splice: None,
             last_byte_delta: 0,
         },
     }
+}
+
+fn table_ranges_of(lines: &[ParsedLine]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        let is_table = matches!(
+            line.kind,
+            LineKind::TableRow { .. } | LineKind::TableDelimiter
+        );
+        match (start, is_table) {
+            (None, true) => start = Some(i),
+            (Some(s), false) => {
+                ranges.push(s..i);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        ranges.push(s..lines.len());
+    }
+    ranges
+}
+
+fn is_image_candidate_line(line: &ParsedLine, text: &str) -> bool {
+    matches!(line.kind, LineKind::Paragraph)
+        && text
+            .get(line.source.clone())
+            .is_some_and(|s| s.trim_start().starts_with("!["))
+}
+
+fn image_lines_in(lines: &[ParsedLine], text: &str) -> Vec<u32> {
+    lines
+        .iter()
+        .filter(|l| is_image_candidate_line(l, text))
+        .map(|l| l.line_index)
+        .collect()
 }
 
 /// Shared empty parse for tabs that do not use Markdown structure.
@@ -2761,11 +3085,14 @@ impl ParsedDocument {
         let mut new_checkpoints = Vec::new();
         let mut resync = None;
         let mut state = restart_state;
+        let mut scratch = InlineScratch::default();
         parse_lines(
             &mut raw,
             restart,
             &mut state,
             &mut new_lines,
+            &mut scratch,
+            None,
             |i, start, now| {
                 if start >= new_edit_end && i > restart {
                     let old_start = (start as isize - delta) as usize;
@@ -2851,10 +3178,44 @@ impl ParsedDocument {
             }
         }
         let table_line_count = self.meta.table_line_count - old_tables + new_tables;
+        let line_delta = inserted as isize - removed as isize;
+        let table_ranges = if table_line_count == 0 {
+            Vec::new()
+        } else if old_tables > 0 || new_tables > 0 {
+            table_ranges_of(&self.lines)
+        } else {
+            let mut tr = std::mem::take(&mut self.meta.table_ranges);
+            if line_delta != 0 {
+                let first = tr.partition_point(|r| r.end <= restart);
+                for r in &mut tr[first..] {
+                    r.start = (r.start as isize + line_delta) as usize;
+                    r.end = (r.end as isize + line_delta) as usize;
+                }
+            }
+            tr
+        };
+        let mut image_lines = std::mem::take(&mut self.meta.image_lines);
+        let img_first = image_lines.partition_point(|&idx| (idx as usize) < restart);
+        let img_end = image_lines.partition_point(|&idx| (idx as usize) < restart + removed);
+        let new_images: Vec<u32> = self.lines[restart..restart + inserted]
+            .iter()
+            .filter(|l| is_image_candidate_line(l, text))
+            .map(|l| l.line_index)
+            .collect();
+        if line_delta != 0 {
+            for idx in &mut image_lines[img_end..] {
+                *idx = (*idx as isize + line_delta) as u32;
+            }
+        }
+        if img_first != img_end || !new_images.is_empty() {
+            image_lines.splice(img_first..img_end, new_images);
+        }
         self.meta = ParseMeta {
             checkpoints,
             generation: next_generation(),
             table_line_count,
+            table_ranges,
+            image_lines,
             last_splice: Some((old_generation, restart, removed, inserted)),
             last_byte_delta: delta,
         };
@@ -2885,7 +3246,7 @@ fn all_source_lines(markdown: &str) -> Vec<SourceLine<'_>> {
 }
 
 /// Lines between checkpoints of the parser state.
-pub(crate) const CHECKPOINT_EVERY: usize = 16;
+pub(crate) const CHECKPOINT_EVERY: usize = 32;
 
 /// What `parse_lines` does with the next line.
 pub(crate) enum Step {
@@ -3031,6 +3392,8 @@ fn parse_lines(
     base: usize,
     state: &mut ParseState,
     lines: &mut Vec<ParsedLine>,
+    scratch: &mut InlineScratch,
+    mut defer_inline: Option<&mut Vec<PendingInline>>,
     mut on_line: impl FnMut(usize, usize, &ParseState) -> Step,
 ) -> Option<usize> {
     let mut next_local = 0usize;
@@ -3235,6 +3598,7 @@ fn parse_lines(
                 content_end: line.len() as u32,
                 prefix_len: 0,
                 quote_depth: 0,
+                prefix_hidden: false,
                 kind: LineKind::Empty,
                 hidden_ranges: Box::default(),
                 inline: None,
@@ -3254,19 +3618,15 @@ fn parse_lines(
         // open list item (document level rejects four spaces and a tab).
         if exact_thematic_break(line, list_walk.thematic_parent_col(line)) {
             list_walk.note_block(line);
-            let hidden = if line.is_empty() {
-                Vec::new()
-            } else {
-                vec![LineRange::new(0, line.len() as u32)]
-            };
             push_line!(ParsedLine {
                 line_index: i as u32,
                 source: line_source,
                 content_end: line.len() as u32,
                 prefix_len: line.len() as u32,
                 quote_depth: 0,
+                prefix_hidden: !line.is_empty(),
                 kind: LineKind::HorizontalRule,
-                hidden_ranges: hidden.into(),
+                hidden_ranges: Box::default(),
                 inline: None,
             });
             continue;
@@ -3292,19 +3652,15 @@ fn parse_lines(
             list_walk.note_block(line);
             if i == tbl.delimiter {
                 pending_header_cells = None;
-                let hidden = if line.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![LineRange::new(0, line.len() as u32)]
-                };
                 push_line!(ParsedLine {
                     line_index: i as u32,
                     source: line_source,
                     content_end: line.len() as u32,
                     prefix_len: line.len() as u32,
                     quote_depth: 0,
+                    prefix_hidden: !line.is_empty(),
                     kind: LineKind::TableDelimiter,
-                    hidden_ranges: hidden.into(),
+                    hidden_ranges: Box::default(),
                     inline: None,
                 });
                 continue;
@@ -3313,9 +3669,6 @@ fn parse_lines(
                 let cols = tbl.alignments.len();
                 let mut cells = Vec::new();
                 let mut raw_cells = Vec::new();
-                let mut row_hidden = Vec::new();
-                let mut row_pairs = Vec::new();
-                let mut row_segments = Vec::new();
                 let cell_ranges = if is_header {
                     pending_header_cells
                         .take()
@@ -3323,57 +3676,141 @@ fn parse_lines(
                 } else {
                     table_cell_ranges(line)
                 };
-                for raw in cell_ranges.into_iter().take(cols) {
-                    let raw_abs = (line_start + raw.start)..(line_start + raw.end);
-                    let cell_slice = &line[raw.clone()];
-                    let lead = usize::from(cell_slice.starts_with(' '));
-                    let rem = &cell_slice[lead..];
-                    let trail = usize::from(rem.ends_with(' '));
-                    let c_start_rel = raw.start + lead;
-                    let c_end_rel = raw.end - trail;
-                    let c_start = line_start + c_start_rel;
-                    let c_end = line_start + c_end_rel;
-                    raw_cells.push(raw_abs);
-                    cells.push(c_start..c_end);
-                    if c_end_rel > c_start_rel {
-                        let inner_slice = &line[c_start_rel..c_end_rel];
-                        let (c_hid, c_pairs, c_segs) =
-                            parse_inline_syntax_cell(inner_slice, c_start_rel);
-                        row_hidden.extend(c_hid);
-                        row_pairs.extend(c_pairs);
-                        row_segments.extend(c_segs);
+                let mut needs_inline = false;
+                if defer_inline.is_some() {
+                    for raw in cell_ranges.into_iter().take(cols) {
+                        let raw_abs = (line_start + raw.start)..(line_start + raw.end);
+                        let cell_slice = &line[raw.clone()];
+                        let lead = usize::from(cell_slice.starts_with(' '));
+                        let rem = &cell_slice[lead..];
+                        let trail = usize::from(rem.ends_with(' '));
+                        let c_start_rel = raw.start + lead;
+                        let c_end_rel = raw.end - trail;
+                        raw_cells.push(raw_abs);
+                        cells.push((line_start + c_start_rel)..(line_start + c_end_rel));
+                        if c_end_rel > c_start_rel {
+                            let inner_trimmed =
+                                line[c_start_rel..c_end_rel].trim_start_matches([' ', '\t']);
+                            if !inner_trimmed.is_empty() && !is_plain_inline(inner_trimmed) {
+                                needs_inline = true;
+                            }
+                        }
                     }
+                    while cells.len() < cols {
+                        cells.push(line_end..line_end);
+                        raw_cells.push(line_end..line_end);
+                    }
+                    if needs_inline {
+                        if let Some(pending) = defer_inline.as_deref_mut() {
+                            pending.push(PendingInline {
+                                line_idx: i,
+                                extra_hidden: None,
+                                allow_hard_break: false,
+                            });
+                        }
+                    }
+                    push_line!(ParsedLine {
+                        line_index: i as u32,
+                        source: line_source,
+                        content_end: line.len() as u32,
+                        prefix_len: 0,
+                        quote_depth: 0,
+                        prefix_hidden: false,
+                        kind: LineKind::TableRow {
+                            is_header,
+                            body: Box::new(TableRowBody {
+                                cells,
+                                raw_cells,
+                                alignments: Arc::clone(&tbl.alignments),
+                                table_source: tbl.source.clone(),
+                            }),
+                        },
+                        hidden_ranges: Box::default(),
+                        inline: None,
+                    });
+                } else {
+                    scratch.clear_table();
+                    for raw in cell_ranges.into_iter().take(cols) {
+                        let raw_abs = (line_start + raw.start)..(line_start + raw.end);
+                        let cell_slice = &line[raw.clone()];
+                        let lead = usize::from(cell_slice.starts_with(' '));
+                        let rem = &cell_slice[lead..];
+                        let trail = usize::from(rem.ends_with(' '));
+                        let c_start_rel = raw.start + lead;
+                        let c_end_rel = raw.end - trail;
+                        let c_start = line_start + c_start_rel;
+                        let c_end = line_start + c_end_rel;
+                        raw_cells.push(raw_abs);
+                        cells.push(c_start..c_end);
+                        if c_end_rel > c_start_rel {
+                            let inner_slice = &line[c_start_rel..c_end_rel];
+                            parse_inline_syntax_cell(inner_slice, c_start_rel, scratch);
+                            scratch.table_hidden.append(&mut scratch.raw_hidden);
+                            scratch.table_pairs.append(&mut scratch.inline_pairs);
+                            scratch.table_segments.append(&mut scratch.styled_segments);
+                        }
+                    }
+                    while cells.len() < cols {
+                        cells.push(line_end..line_end);
+                        raw_cells.push(line_end..line_end);
+                    }
+                    merge_line_ranges_into(&mut scratch.table_hidden, &mut scratch.merged_hidden);
+                    push_line!(ParsedLine {
+                        line_index: i as u32,
+                        source: line_source,
+                        content_end: line.len() as u32,
+                        prefix_len: 0,
+                        quote_depth: 0,
+                        prefix_hidden: false,
+                        kind: LineKind::TableRow {
+                            is_header,
+                            body: Box::new(TableRowBody {
+                                cells,
+                                raw_cells,
+                                alignments: Arc::clone(&tbl.alignments),
+                                table_source: tbl.source.clone(),
+                            }),
+                        },
+                        hidden_ranges: scratch.merged_hidden.as_slice().into(),
+                        inline: LineInline::boxed_slices(
+                            &scratch.table_pairs,
+                            &mut scratch.table_segments,
+                            None,
+                        ),
+                    });
                 }
-                while cells.len() < cols {
-                    cells.push(line_end..line_end);
-                    raw_cells.push(line_end..line_end);
-                }
-                let merged_hidden = merge_line_ranges(row_hidden);
-                push_line!(ParsedLine {
-                    line_index: i as u32,
-                    source: line_source,
-                    content_end: line.len() as u32,
-                    prefix_len: 0,
-                    quote_depth: 0,
-                    kind: LineKind::TableRow {
-                        is_header,
-                        body: Box::new(TableRowBody {
-                            cells,
-                            raw_cells,
-                            alignments: Arc::clone(&tbl.alignments),
-                            table_source: tbl.source.clone(),
-                        }),
-                    },
-                    hidden_ranges: merged_hidden.into(),
-                    inline: LineInline::boxed(row_pairs, row_segments, None),
-                });
                 continue;
             }
         }
 
         if let Some((level, content)) = atx_display_content_range(line) {
             list_walk.note_block(line);
-            let parsed = atx_line(i, line_source, line, level, content);
+            if let Some(pending) = defer_inline.as_deref_mut() {
+                let inner_trimmed =
+                    line[content.start..content.end].trim_start_matches([' ', '\t']);
+                if !inner_trimmed.is_empty() && !is_plain_inline(inner_trimmed) {
+                    let extra_hidden = (content.end < line.len())
+                        .then(|| LineRange::from_rel(content.end..line.len()));
+                    pending.push(PendingInline {
+                        line_idx: i,
+                        extra_hidden,
+                        allow_hard_break: false,
+                    });
+                    push_line!(ParsedLine {
+                        line_index: i as u32,
+                        source: line_source,
+                        content_end: content.end as u32,
+                        prefix_len: content.start as u32,
+                        quote_depth: 0,
+                        prefix_hidden: false,
+                        kind: LineKind::Heading { level },
+                        hidden_ranges: Box::default(),
+                        inline: None,
+                    });
+                    continue;
+                }
+            }
+            let parsed = atx_line(i, line_source, line, level, content, scratch);
             push_line!(parsed);
             continue;
         }
@@ -3414,19 +3851,15 @@ fn parse_lines(
                     extra_hidden = Some(content_end..line.len());
                 }
             } else if exact_thematic_break(inner, 0) {
-                let hidden = if line.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![LineRange::new(0, line.len() as u32)]
-                };
                 push_line!(ParsedLine {
                     line_index: i as u32,
                     source: line_source,
                     content_end: line.len() as u32,
                     prefix_len: line.len() as u32,
                     quote_depth,
+                    prefix_hidden: !line.is_empty(),
                     kind: LineKind::HorizontalRule,
-                    hidden_ranges: hidden.into(),
+                    hidden_ranges: Box::default(),
                     inline: None,
                 });
                 continue;
@@ -3472,27 +3905,50 @@ fn parse_lines(
                 !next.text.trim().is_empty()
             }
         });
-        let prefix_range = 0..prefix_len;
         let body = &line[prefix_len..content_end];
-        let (mut inline_hidden, inline_pairs, styled_segments) =
-            parse_inline_syntax_line(body, prefix_len, allow_hard_break);
+        if let Some(pending) = defer_inline.as_deref_mut() {
+            let body_trimmed = body.trim_start_matches([' ', '\t']);
+            if !body_trimmed.is_empty() && !is_plain_inline(body_trimmed) {
+                pending.push(PendingInline {
+                    line_idx: i,
+                    extra_hidden: extra_hidden.map(LineRange::from_rel),
+                    allow_hard_break,
+                });
+                push_line!(ParsedLine {
+                    line_index: i as u32,
+                    source: line_source,
+                    content_end: content_end as u32,
+                    prefix_len: prefix_len as u32,
+                    quote_depth,
+                    prefix_hidden: false,
+                    kind,
+                    hidden_ranges: Box::default(),
+                    inline: None,
+                });
+                continue;
+            }
+        }
+        parse_inline_syntax_line(body, prefix_len, allow_hard_break, scratch);
 
         if allow_hard_break
-            && inline_hidden
+            && scratch
+                .raw_hidden
                 .iter()
                 .any(|r| r.start + 1 == line.len() && r.end == line.len())
         {
             content_end = line.len() - 1;
         }
         if prefix_len > 0 {
-            inline_hidden.push(prefix_range);
+            scratch.raw_hidden.push(0..prefix_len);
         }
         if let Some(trail) = extra_hidden {
-            inline_hidden.push(trail);
+            scratch.raw_hidden.push(trail);
         }
-        let merged_hidden = merge_line_ranges(inline_hidden);
+        merge_line_ranges_into(&mut scratch.raw_hidden, &mut scratch.merged_hidden);
 
-        let display_text_owned = build_display(line, prefix_len, &merged_hidden);
+        let display_text_owned = build_display(line, prefix_len, &scratch.merged_hidden);
+        let (prefix_hidden, hidden_ranges) =
+            pack_hidden_ranges(prefix_len as u32, &scratch.merged_hidden);
 
         push_line!(ParsedLine {
             line_index: i as u32,
@@ -3500,9 +3956,14 @@ fn parse_lines(
             content_end: content_end as u32,
             prefix_len: prefix_len as u32,
             quote_depth,
+            prefix_hidden,
             kind,
-            hidden_ranges: merged_hidden.into(),
-            inline: LineInline::boxed(inline_pairs, styled_segments, display_text_owned),
+            hidden_ranges,
+            inline: LineInline::boxed_slices(
+                &scratch.inline_pairs,
+                &mut scratch.styled_segments,
+                display_text_owned,
+            ),
         });
     }
     None
@@ -3513,3 +3974,38 @@ mod tests;
 
 #[cfg(test)]
 mod incremental_tests;
+
+#[cfg(test)]
+mod parallel_and_layout_tests {
+    use super::*;
+
+    #[test]
+    fn parsed_line_size_stays_compact() {
+        assert_eq!(std::mem::size_of::<ParsedLine>(), 72);
+    }
+
+    #[test]
+    fn parallel_parse_matches_sequential_parse() {
+        let mut doc = String::new();
+        for i in 0..220 {
+            doc.push_str(&format!("# Heading **{i}** ###\r\n"));
+            doc.push_str(&format!(
+                "Paragraph with **bold**, *italic*, `code`, ~~strike~~, <u>under</u>, [link](https://example.com/{i}), and ![img](a.png) \\\n"
+            ));
+            doc.push_str("Continuation line\n\n");
+            doc.push_str(&format!("- [x] Task *item* {i}\n1. Ordered **two**\n"));
+            doc.push_str("> > Nested **quote** line\n> > # Quoted Heading\n\n");
+            doc.push_str("| H1 | H2 |\n| --- | :---: |\n| **a** | `b\\|c` |\n\n");
+            doc.push_str("```rust\nlet x = **not_bold**;\n```\n\n");
+        }
+        assert!(doc.lines().count() >= 1200);
+        let par = parse_document_with_parallel(&doc, true);
+        let seq = parse_document_with_parallel(&doc, false);
+        assert_eq!(par.lines, seq.lines);
+        assert_eq!(par.code_blocks, seq.code_blocks);
+        assert_eq!(par.meta.checkpoints, seq.meta.checkpoints);
+        assert_eq!(par.meta.table_line_count, seq.meta.table_line_count);
+        assert_eq!(par.meta.table_ranges, seq.meta.table_ranges);
+        assert_eq!(par.meta.image_lines, seq.meta.image_lines);
+    }
+}

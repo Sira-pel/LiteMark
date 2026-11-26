@@ -1525,6 +1525,27 @@ pub fn range_from_utf16(content: &str, range: &Range<usize>) -> Range<usize> {
     start_byte..content.len()
 }
 
+/// Compact visual row for Raw mode (`12 B`, `Copy`): stores byte range and
+/// 0-based logical line index so `prepaint` can materialize only visible rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawRow {
+    pub start: u32,
+    pub end: u32,
+    pub line_index: u32,
+}
+
+impl RawRow {
+    #[inline]
+    pub fn byte_start(self) -> usize {
+        self.start as usize
+    }
+
+    #[inline]
+    pub fn byte_end(self) -> usize {
+        self.end as usize
+    }
+}
+
 /// Visual rows as `(byte_start, byte_end)` exclusive of the line ending (`\r\n`, `\n`, or `\r`).
 /// `wrap_cols == usize::MAX` keeps one row per logical line.
 #[cfg(test)]
@@ -1581,7 +1602,7 @@ pub fn visual_rows_measured(
 }
 
 /// Start of the line holding the byte at `at` (CRLF counts as one ending).
-fn line_start_at(content: &str, at: usize) -> usize {
+pub(crate) fn line_start_at(content: &str, at: usize) -> usize {
     let bytes = content.as_bytes();
     let mut at = at.min(bytes.len());
     if at < bytes.len() && bytes[at] == b'\n' && at > 0 && bytes[at - 1] == b'\r' {
@@ -1599,6 +1620,7 @@ fn line_start_at(content: &str, at: usize) -> usize {
 /// are wrapped again; rows before it are kept and rows after it just shift.
 /// `None` when the old rows don't line up with the edit (the caller then
 /// rebuilds them all).
+#[cfg(test)]
 pub fn patch_visual_rows_measured(
     rows: &mut Vec<(usize, usize)>,
     content: &str,
@@ -1681,6 +1703,185 @@ pub fn patch_visual_rows_measured(
     }
     if rows.is_empty() {
         rows.push((0, 0));
+    }
+    Some(())
+}
+
+/// Compact [`RawRow`] equivalent of [`visual_rows_measured`].
+pub fn raw_rows_measured(
+    content: &str,
+    wrap_cols: usize,
+    tab_width: usize,
+    widths: &CharWidths,
+) -> Vec<RawRow> {
+    let mut rows = Vec::new();
+    let bytes = content.as_bytes();
+    let mut line_start = 0usize;
+    let mut line_index = 0u32;
+    while let Some(rel) = memchr::memchr2(b'\n', b'\r', &bytes[line_start..]) {
+        let line_end = line_start + rel;
+        for_each_wrapped(
+            content,
+            line_start,
+            line_end,
+            wrap_cols,
+            tab_width,
+            widths,
+            |(s, e)| {
+                rows.push(RawRow {
+                    start: saturating_u32(s),
+                    end: saturating_u32(e),
+                    line_index,
+                });
+            },
+        );
+        line_index += 1;
+        line_start = if bytes[line_end] == b'\r' && bytes.get(line_end + 1) == Some(&b'\n') {
+            line_end + 2
+        } else {
+            line_end + 1
+        };
+    }
+    for_each_wrapped(
+        content,
+        line_start,
+        content.len(),
+        wrap_cols,
+        tab_width,
+        widths,
+        |(s, e)| {
+            rows.push(RawRow {
+                start: saturating_u32(s),
+                end: saturating_u32(e),
+                line_index,
+            });
+        },
+    );
+    if rows.is_empty() {
+        rows.push(RawRow {
+            start: 0,
+            end: 0,
+            line_index: 0,
+        });
+    }
+    rows
+}
+
+/// Incremental [`RawRow`] equivalent of [`patch_visual_rows_measured`].
+pub fn patch_raw_rows_measured(
+    rows: &mut Vec<RawRow>,
+    content: &str,
+    old_range: Range<usize>,
+    new_len: usize,
+    wrap_cols: usize,
+    tab_width: usize,
+    widths: &CharWidths,
+) -> Option<()> {
+    let bytes = content.as_bytes();
+    let delta = new_len as isize - (old_range.end - old_range.start) as isize;
+    let edit_end = old_range.start + new_len;
+    if edit_end > bytes.len() || old_range.start > old_range.end {
+        return None;
+    }
+    let first = match old_range.start {
+        0 => 0,
+        at => match line_start_at(content, at - 1) {
+            0 => 0,
+            line => line_start_at(content, line - 1),
+        },
+    };
+    let keep = rows.partition_point(|row| row.byte_start() < first);
+    let base_line = if keep == 0 {
+        0u32
+    } else if rows[keep - 1].byte_end() < first {
+        rows[keep - 1].line_index + 1
+    } else {
+        rows[keep - 1].line_index
+    };
+
+    let mut fresh = Vec::new();
+    let mut line_start = first;
+    let mut line_index = base_line;
+    let resume = loop {
+        match memchr::memchr2(b'\n', b'\r', &bytes[line_start..]) {
+            Some(rel) => {
+                let line_end = line_start + rel;
+                for_each_wrapped(
+                    content,
+                    line_start,
+                    line_end,
+                    wrap_cols,
+                    tab_width,
+                    widths,
+                    |(s, e)| {
+                        fresh.push(RawRow {
+                            start: saturating_u32(s),
+                            end: saturating_u32(e),
+                            line_index,
+                        });
+                    },
+                );
+                line_index += 1;
+                line_start = if bytes[line_end] == b'\r' && bytes.get(line_end + 1) == Some(&b'\n')
+                {
+                    line_end + 2
+                } else {
+                    line_end + 1
+                };
+                if line_start >= edit_end {
+                    break Some(line_start);
+                }
+            }
+            None => {
+                for_each_wrapped(
+                    content,
+                    line_start,
+                    bytes.len(),
+                    wrap_cols,
+                    tab_width,
+                    widths,
+                    |(s, e)| {
+                        fresh.push(RawRow {
+                            start: saturating_u32(s),
+                            end: saturating_u32(e),
+                            line_index,
+                        });
+                    },
+                );
+                line_index += 1;
+                break None;
+            }
+        }
+    };
+
+    let (resume_old, line_delta) = match resume {
+        None => (rows.len(), 0isize),
+        Some(at) => {
+            let old_at = usize::try_from(at as isize - delta).ok()?;
+            let index = rows.partition_point(|row| row.byte_start() < old_at);
+            let starts_line = index > 0 && rows[index - 1].byte_end() < old_at;
+            if rows.get(index)?.byte_start() != old_at || index < keep || !starts_line {
+                return None;
+            }
+            let ld = line_index as isize - rows[index].line_index as isize;
+            (index, ld)
+        }
+    };
+    let tail = keep + fresh.len();
+    rows.splice(keep..resume_old, fresh);
+    if delta != 0 || line_delta != 0 {
+        for row in &mut rows[tail..] {
+            row.start = saturating_u32((row.start as isize + delta) as usize);
+            row.end = saturating_u32((row.end as isize + delta) as usize);
+            row.line_index = (row.line_index as isize + line_delta) as u32;
+        }
+    }
+    if rows.is_empty() {
+        rows.push(RawRow {
+            start: 0,
+            end: 0,
+            line_index: 0,
+        });
     }
     Some(())
 }
@@ -2033,6 +2234,71 @@ mod tests {
                     rows = candidate;
                 } else {
                     rows = visual_rows_measured(&text, wrap_cols, tab_width, &widths);
+                }
+            }
+        }
+        assert!(
+            patched_count * 2 > total,
+            "{patched_count}/{total} edits patched"
+        );
+    }
+
+    #[test]
+    fn patched_raw_rows_match_a_full_rebuild() {
+        let alphabet: Vec<&str> = vec![
+            "a", "b", "c", "d", " ", " ", "\n", "\r", "\r\n", "\t", "é", "ក", "long", "word",
+        ];
+        let mut state = 0x517C_C1B7_2722_0A95u64;
+        let mut next = move |n: usize| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as usize) % n.max(1)
+        };
+        let widths = CharWidths::uniform();
+        let (mut patched_count, mut total) = (0usize, 0usize);
+        for round in 0..100 {
+            let wrap_cols = [4usize, 9, 30, usize::MAX][round % 4];
+            let tab_width = [0usize, 4][round % 2];
+            let mut text = String::new();
+            for _ in 0..next(60) {
+                text.push_str(alphabet[next(alphabet.len())]);
+            }
+            let mut rows = raw_rows_measured(&text, wrap_cols, tab_width, &widths);
+            for _ in 0..25 {
+                let bounds: Vec<usize> = (0..=text.len())
+                    .filter(|&i| text.is_char_boundary(i))
+                    .collect();
+                let a = bounds[next(bounds.len())];
+                let b = bounds[next(bounds.len())];
+                let (start, end) = (a.min(b), a.max(b));
+                let mut insert = String::new();
+                for _ in 0..next(4) {
+                    insert.push_str(alphabet[next(alphabet.len())]);
+                }
+                text.replace_range(start..end, &insert);
+                total += 1;
+                let mut candidate = rows.clone();
+                if patch_raw_rows_measured(
+                    &mut candidate,
+                    &text,
+                    start..end,
+                    insert.len(),
+                    wrap_cols,
+                    tab_width,
+                    &widths,
+                )
+                .is_some()
+                {
+                    patched_count += 1;
+                    let full = raw_rows_measured(&text, wrap_cols, tab_width, &widths);
+                    assert_eq!(
+                        candidate, full,
+                        "text {text:?} edit {start}..{end} -> {insert:?}"
+                    );
+                    rows = candidate;
+                } else {
+                    rows = raw_rows_measured(&text, wrap_cols, tab_width, &widths);
                 }
             }
         }
