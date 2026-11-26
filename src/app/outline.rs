@@ -218,8 +218,15 @@ impl LiteMarkApp {
                         let _ = view.update(cx, |this, cx| {
                             // The card is already showing under the pointer
                             // (hover), so a click on its title pins it open,
-                            // and a click on an open card closes it.
-                            this.outline_open = !this.outline_open;
+                            // and a click on an open card closes it. A card
+                            // pinned by the shortcut closes (unpins) too.
+                            if this.outline_pinned_open() {
+                                this.settings.outline_pinned = false;
+                                this.save_settings();
+                                this.outline_open = false;
+                            } else {
+                                this.outline_open = !this.outline_open;
+                            }
                             if !this.outline_open {
                                 this.outline_hover = false;
                             }

@@ -91,7 +91,7 @@ pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
         let current_ix = props.current;
         let on_jump = props.on_jump.clone();
         let outline_current = theme.outline_current;
-        let row_hover = theme.row_hover;
+        let row_hover = theme.outline_hover;
         let text_faint = theme.text_faint;
         let text_hi = theme.text_hi;
         let row_text = theme.row_text;
@@ -158,6 +158,7 @@ pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.0))
+                                    .w_full()
                                     .h(px(OUTLINE_ROW_H))
                                     .flex_none()
                                     .pr(px(8.0))
@@ -183,6 +184,7 @@ pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
                                             .truncate()
                                             .text_size(px(14.0))
                                             .text_color(if current { text_hi } else { row_text })
+                                            .when(current, |s| s.font_weight(FontWeight::SEMIBOLD))
                                             .child(text),
                                     )
                             })
