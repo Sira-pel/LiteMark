@@ -105,7 +105,7 @@ pub struct Theme {
     pub outline_current: Rgba,
     pub row_hover: Rgba,
     /// Hovered row in the outline card: clearly visible on `menu_bg`,
-    /// lighter than `outline_current` so the two never look alike.
+    /// less prominent than `outline_current` so the two never look alike.
     pub outline_hover: Rgba,
     /// Rows in a Shift/Ctrl+A multi-selection: a cool tint that reads apart
     /// from the neutral open-note highlight in both themes.

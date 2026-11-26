@@ -312,8 +312,8 @@ pub fn patch_outline_items_raw(
         if touches_open || touches_close {
             return false;
         }
-        // Also bail if an unclosed fence reaches EOF and the edit is at or after its open_end
-        //? Actually an edit strictly inside an unclosed fence (open_end <= win_start) has no closing line to touch!
+        // An edit wholly inside a fence's body (closed or running to EOF)
+        // can't change any heading: only shift what follows.
         if win_start >= f.open_end && old_win_end <= f.close_start {
             inside_fence_idx = Some(idx);
             break;
