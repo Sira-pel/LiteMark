@@ -849,6 +849,7 @@ impl LiteMarkApp {
                 .clone()
                 .filter(|d| self.active_tab().is_some_and(|tab| tab.id == d.tab_id)),
             pointer_hidden: self.pointer_hidden,
+            link_hover_enabled: self.hovered_link.is_some(),
             table_hot: self.table_hot.clone(),
             table_pressed: self.table_pressed,
             table_hover_fill: theme.bg_hover.into(),

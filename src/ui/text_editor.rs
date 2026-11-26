@@ -772,6 +772,19 @@ impl LayoutCache {
         self.generation = meta.generation;
     }
 
+    /// Drop the WYSIWYG per-line rows and height estimate (Raw mode doesn't
+    /// use them). `reset` keeps their capacity for reuse; this frees it. The
+    /// next WYSIWYG layout rebuilds them from scratch.
+    fn release_wysiwyg(&mut self) {
+        if self.lines.capacity() == 0 && self.estimate.slots.capacity() == 0 {
+            return;
+        }
+        self.lines = Vec::new();
+        self.estimate = HeightEstimates::default();
+        // No parse has this generation, so `keep_for` starts over.
+        self.generation = u64::MAX;
+    }
+
     /// Use `widths` (measured for `key`), dropping every row split with other
     /// widths.
     fn set_widths(
@@ -1332,31 +1345,77 @@ fn link_bounds_on_row(row: &PaintRow, range: &Range<usize>) -> Option<Bounds<Pix
     })
 }
 
+/// Where one link's text lies on a wrapped line inside a table cell.
+fn link_bounds_on_cell_line(line: &CellLine, range: &Range<usize>) -> Option<Bounds<Pixels>> {
+    let map = &line.offset_map;
+    let s = range.start.max(map.line_start);
+    let e = range.end.min(map.line_end);
+    if s >= e {
+        return None;
+    }
+    let x0 = line.shaped.x_for_index(map.source_to_display(s));
+    let x1 = line.shaped.x_for_index(map.source_to_display(e));
+    (x1 > x0).then(|| {
+        Bounds::new(
+            point(line.text_origin.x + x0, line.text_origin.y),
+            size(x1 - x0, line.line_height),
+        )
+    })
+}
+
+/// Every painted piece of `range` on `row`: the row itself, or the lines of
+/// its table cells.
+fn link_bounds_in_row(row: &PaintRow, range: &Range<usize>, out: &mut Vec<Bounds<Pixels>>) {
+    if row.cells.is_empty() {
+        out.extend(link_bounds_on_row(row, range));
+        return;
+    }
+    for cell in row.cells.iter() {
+        if cell.raw_range.end < range.start || cell.raw_range.start > range.end {
+            continue;
+        }
+        for line in &cell.lines {
+            if let Some(b) = link_bounds_on_cell_line(line, range) {
+                // A cell clips its text, so the tint must not spill out.
+                if let Some(b) = Some(b.intersect(&cell.box_bounds))
+                    .filter(|b| b.size.width > px(0.0) && b.size.height > px(0.0))
+                {
+                    out.push(b);
+                }
+            }
+        }
+    }
+}
+
 /// The link whose visible text is under `position`: its URL and the bounds
-/// of every painted piece of it (a link can wrap onto more rows).
+/// of every painted piece of it (a link can wrap onto more rows or, in a
+/// table cell, onto more lines of the cell).
 pub fn link_hover_at(
     rows: &[PaintRow],
     position: Point<Pixels>,
 ) -> Option<(String, Vec<Bounds<Pixels>>)> {
     let row = rows.iter().find(|r| {
-        r.cells.is_empty()
-            && r.link_hits.is_some()
-            && position.y >= r.origin.y
-            && position.y < r.origin.y + r.line_height
+        r.link_hits.is_some() && position.y >= r.origin.y && position.y < r.origin.y + r.line_height
     })?;
     let (base, links) = row.link_hits.as_deref()?;
+    let mut pieces = Vec::new();
     let (range, url) = links.iter().find_map(|(r, url)| {
         let range = r.to_abs(*base as usize);
-        let b = link_bounds_on_row(row, &range)?;
-        (position.x >= b.left() && position.x < b.right()).then(|| (range, url.to_string()))
+        pieces.clear();
+        link_bounds_in_row(row, &range, &mut pieces);
+        pieces
+            .iter()
+            .any(|b| b.contains(&position))
+            .then(|| (range, url.to_string()))
     })?;
     let first = rows.partition_point(|r| r.byte_end() < range.start);
-    let bounds = rows[first..]
+    let mut bounds = Vec::new();
+    for r in rows[first..]
         .iter()
         .take_while(|r| r.byte_start() <= range.end)
-        .filter(|r| r.cells.is_empty())
-        .filter_map(|r| link_bounds_on_row(r, &range))
-        .collect();
+    {
+        link_bounds_in_row(r, &range, &mut bounds);
+    }
     Some((url, bounds))
 }
 
@@ -2057,6 +2116,9 @@ pub struct EditorElement<V: 'static> {
     pub image_drag: Option<super::note_images::ImageDrag>,
     /// Hide the mouse pointer over the text (after typing).
     pub pointer_hidden: bool,
+    /// The app found a link under the resting pointer (no button held), so
+    /// prepaint may draw its tint and tooltip.
+    pub link_hover_enabled: bool,
     pub table_hover_fill: Hsla,
     pub table_active_fill: Hsla,
     /// Folder of the note, for relative image paths; `None` for an unsaved note.
@@ -2265,6 +2327,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             cache.estimated_height = h;
             h.max(paint_borrow.total_height)
         } else {
+            paint_borrow.layout_cache.release_wysiwyg();
             // Build the rows here, not just count them: prepaint reuses them
             // when the wrap width is unchanged, so an edit splits the
             // document into rows once instead of twice.
@@ -4877,16 +4940,21 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 }
             }
         }
-        let link_hover = link_hover_paint(
-            &rows,
-            bounds,
-            window,
-            self.link_color,
-            self.surface_bg,
-            self.border_color,
-            self.muted_color,
-            &self.font_family,
-        );
+        let link_hover = self
+            .link_hover_enabled
+            .then(|| {
+                link_hover_paint(
+                    &rows,
+                    bounds,
+                    window,
+                    self.link_color,
+                    self.surface_bg,
+                    self.border_color,
+                    self.muted_color,
+                    &self.font_family,
+                )
+            })
+            .flatten();
         if let Some(hover) = &link_hover {
             if hover.open_ready {
                 for b in &hover.bounds {
