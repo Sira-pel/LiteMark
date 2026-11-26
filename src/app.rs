@@ -137,6 +137,8 @@ pub(crate) struct OutlineCache {
     pub revision: u64,
     pub parse_gen: Option<u64>,
     pub items: Arc<Vec<crate::model::outline::OutlineItem>>,
+    pub raw_fences: Vec<crate::model::outline::RawFence>,
+    pub max_chars: usize,
 }
 
 pub struct LiteMarkApp {
@@ -345,17 +347,18 @@ impl LiteMarkApp {
             Some(dir) => dir,
             None => {
                 let dir = get_or_create_notes_dir();
-                seed_welcome_note(&dir);
+                if initial_file.is_none() {
+                    seed_welcome_note(&dir);
+                }
                 dir
             }
         };
-        let workspace = scan_workspace_dir(&notes_dir, settings.show_code_files);
 
         let mut tab_ids = TabIds::new();
         let first_id = tab_ids.alloc();
         let mut error_message = settings_warning;
         let mut opened_initial = false;
-        let initial_tab = if let Some(path) = initial_file {
+        let (workspace, initial_tab, rescan_requested) = if let Some(path) = initial_file {
             let name = path
                 .file_name()
                 .and_then(|f| f.to_str())
@@ -366,15 +369,33 @@ impl LiteMarkApp {
                     let tab =
                         DocumentTab::from_loaded(first_id.clone(), name, loaded, Some(path), None);
                     opened_initial = true;
-                    tab
+                    let folder_name = notes_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Notes")
+                        .to_string();
+                    let empty_ws = WorkspaceDirectory {
+                        folder_name,
+                        folder_path: notes_dir,
+                        is_linked_to_local_disk: true,
+                        folders: Vec::new(),
+                        files: Vec::new(),
+                        scan_truncated: false,
+                    };
+                    (empty_ws, tab, true)
                 }
                 Err(err) => {
+                    seed_welcome_note(&notes_dir);
+                    let workspace = scan_workspace_dir(&notes_dir, settings.show_code_files);
                     error_message = Some(err);
-                    Self::welcome_tab(&workspace, first_id.clone())
+                    let tab = Self::welcome_tab(&workspace, first_id.clone());
+                    (workspace, tab, false)
                 }
             }
         } else {
-            Self::welcome_tab(&workspace, first_id.clone())
+            let workspace = scan_workspace_dir(&notes_dir, settings.show_code_files);
+            let tab = Self::welcome_tab(&workspace, first_id.clone());
+            (workspace, tab, false)
         };
         if workspace.scan_truncated && error_message.is_none() {
             error_message = Some(scan_truncated_message());
@@ -613,7 +634,7 @@ impl LiteMarkApp {
             workspace: workspace.into(),
             field_colors: None,
             scan_generation: 0,
-            rescan_requested: false,
+            rescan_requested,
             sidebar_tree: RefCell::new(None),
             sidebar_search: RefCell::new(None),
             settings,

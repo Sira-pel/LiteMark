@@ -29,6 +29,7 @@ type JumpFn = std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 pub struct OutlineProps {
     pub items: std::sync::Arc<Vec<OutlineItem>>,
+    pub max_chars: usize,
     pub current: Option<usize>,
     /// Open card (hovered or pinned) instead of the strip.
     pub expanded: bool,
@@ -48,7 +49,7 @@ pub struct OutlineProps {
 
 /// Card width: as wide as the longest heading needs, up to a cap that
 /// shrinks with the editor (260 wide, 240 medium, 70% when narrow).
-pub fn card_width(area_w: f32, items: &[OutlineItem]) -> f32 {
+pub fn card_width(area_w: f32, max_chars: usize) -> f32 {
     let cap = if area_w >= 900.0 {
         OUTLINE_CARD_MAX_W
     } else if area_w >= 500.0 {
@@ -56,11 +57,7 @@ pub fn card_width(area_w: f32, items: &[OutlineItem]) -> f32 {
     } else {
         (area_w * 0.7).min(240.0)
     };
-    let longest = items
-        .iter()
-        .map(|i| i.text.chars().count().max(8))
-        .max()
-        .unwrap_or(8) as f32;
+    let longest = max_chars.max(8) as f32;
     // Text at ~7.8px a character, plus badge, indent and padding.
     (longest * 7.8 + 84.0).clamp(180.0_f32.min(cap), cap)
 }
@@ -86,7 +83,7 @@ pub fn render_outline(props: OutlineProps, theme: &Theme) -> impl IntoElement {
         .top(px(OUTLINE_EDGE))
         .on_hover(move |hovered, window, cx| on_hover(*hovered, window, cx));
     if props.expanded {
-        let card_w = card_width(area_w, &props.items);
+        let card_w = card_width(area_w, props.max_chars);
         let max_h = (area - 2.0 * OUTLINE_EDGE).max(80.0);
         let list_h = (props.items.len() as f32 * OUTLINE_ROW_H)
             .min((max_h - OUTLINE_HEADER_H).max(OUTLINE_ROW_H));

@@ -137,10 +137,19 @@ fn all_states(text: &str) -> Vec<ParseState> {
     let mut lines = Vec::new();
     let mut state = ParseState::default();
     let mut states = Vec::new();
-    parse_lines(&mut raw, 0, &mut state, &mut lines, |_, _, now| {
-        states.push(now.clone());
-        Step::Parse
-    });
+    let mut scratch = InlineScratch::default();
+    parse_lines(
+        &mut raw,
+        0,
+        &mut state,
+        &mut lines,
+        &mut scratch,
+        None,
+        |_, _, now| {
+            states.push(now.clone());
+            Step::Parse
+        },
+    );
     states
 }
 

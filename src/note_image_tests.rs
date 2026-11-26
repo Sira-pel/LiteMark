@@ -234,10 +234,23 @@ fn a_far_image_keeps_its_height_without_being_loaded() {
     let (view, mut cx) = harness(&doc, &dir);
     // The first frame may not have seen the far image; the next knows it.
     redraw(&mut cx);
-    let (_, _, y, h) = row_at(&view, &cx, start);
-    assert_eq!(h, SMALL_PICTURE_ROW);
-    let (_, _, last_y, _) = row_at(&view, &cx, doc.find("last").unwrap());
-    assert_eq!(last_y, y + SMALL_PICTURE_ROW);
+    let (y, h, last_y) = view.update(&mut cx, |app, _| {
+        let parsed = app.active_tab_mut().map(|t| t.parsed());
+        let mut paint = app.editor_paint.borrow_mut();
+        assert!(
+            paint.rows.iter().all(|r| r.byte_start() != start),
+            "far image should not materialize a PaintRow while off-screen"
+        );
+        let (y, h) = paint
+            .row_y_for_offset(start, parsed.as_deref())
+            .expect("image y");
+        let (last_y, _) = paint
+            .row_y_for_offset(doc.find("last").unwrap(), parsed.as_deref())
+            .expect("last y");
+        (f32::from(y), f32::from(h), f32::from(last_y))
+    });
+    assert!((h - SMALL_PICTURE_ROW).abs() < 0.25);
+    assert!((last_y - y - SMALL_PICTURE_ROW).abs() < 0.25);
     // Far off screen it is neither drawn nor re-read: no picture elements.
     // Keep the document scrolled to the top and compare totals.
     let total = view.read_with(&cx, |app, _| {

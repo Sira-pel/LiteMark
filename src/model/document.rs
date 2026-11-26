@@ -520,6 +520,7 @@ pub struct DocumentTab {
     /// it applied to, the bytes it replaced, and the length written. Lets
     /// `parsed()` update the cached parse instead of parsing everything.
     last_edit: Option<(u64, Range<usize>, usize)>,
+    last_edit_line_delta: isize,
     stats_revision: Option<u64>,
     staged_stats: Option<StagedStats>,
     /// Where the last line and UTF-16 lookups landed, so the next lookup
@@ -692,6 +693,7 @@ impl DocumentTab {
             revision: 1,
             cached_parse: None,
             last_edit: None,
+            last_edit_line_delta: 0,
             stats_revision: Some(1),
             staged_stats: Some(StagedStats {
                 revision: 1,
@@ -737,6 +739,7 @@ impl DocumentTab {
         self.content = String::new();
         self.cached_parse = None;
         self.last_edit = None;
+        self.last_edit_line_delta = 0;
         self.history = UndoHistory::default();
         self.count_anchors = Default::default();
 
@@ -912,6 +915,19 @@ impl DocumentTab {
         self.last_edit.clone()
     }
 
+    pub fn last_edit_line_delta(&self) -> isize {
+        self.last_edit_line_delta
+    }
+
+    fn line_ending_delta(content: &str, range: &Range<usize>, new_text: &str) -> isize {
+        let Some(old_slice) = content.get(range.clone()) else {
+            return 0;
+        };
+        let b = content[..range.start].bytes().last();
+        let a = content[range.end..].bytes().next();
+        window_line_endings(b, new_text, a) as isize - window_line_endings(b, old_slice, a) as isize
+    }
+
     pub fn selection_range(&self) -> Range<usize> {
         let start = floor_boundary(&self.content, self.caret.range.start);
         let end = floor_boundary(&self.content, self.caret.range.end);
@@ -1063,6 +1079,7 @@ impl DocumentTab {
         }
         let cursor_at = plain_end;
         self.last_edit = Some((self.revision, range.clone(), new_text.len()));
+        self.last_edit_line_delta = Self::line_ending_delta(&self.content, &range, new_text);
         Self::advance_staged_stats(
             &mut self.staged_stats,
             self.revision,
@@ -1436,7 +1453,9 @@ impl DocumentTab {
     }
 
     pub fn undo(&mut self) -> bool {
+        let mut line_delta = 0isize;
         if let Some((range, new_text)) = self.history.peek_undo_replace() {
+            line_delta = Self::line_ending_delta(&self.content, &range, new_text);
             Self::advance_staged_stats(
                 &mut self.staged_stats,
                 self.revision,
@@ -1457,6 +1476,7 @@ impl DocumentTab {
             restore.replaced.0.clone(),
             restore.replaced.1,
         ));
+        self.last_edit_line_delta = line_delta;
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);
@@ -1466,7 +1486,9 @@ impl DocumentTab {
     }
 
     pub fn redo(&mut self) -> bool {
+        let mut line_delta = 0isize;
         if let Some((range, new_text)) = self.history.peek_redo_replace() {
+            line_delta = Self::line_ending_delta(&self.content, &range, new_text);
             Self::advance_staged_stats(
                 &mut self.staged_stats,
                 self.revision,
@@ -1487,6 +1509,7 @@ impl DocumentTab {
             restore.replaced.0.clone(),
             restore.replaced.1,
         ));
+        self.last_edit_line_delta = line_delta;
         self.revision = self.revision.wrapping_add(1);
         self.pending_formats = ActiveFormats::default();
         self.place_after_history(restore);

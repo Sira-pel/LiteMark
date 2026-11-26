@@ -130,26 +130,64 @@ fn leading_fence_info(line: &str) -> Option<(u8, usize, &str)> {
     }
 }
 
-/// Lightweight ATX heading scan for Raw mode that skips building a full AST.
-pub fn outline_items_raw(content: &str) -> Vec<OutlineItem> {
-    let mut items = Vec::new();
-    let bytes = content.as_bytes();
-    let mut pos = 0usize;
-    let mut line_index = 0u32;
-    let mut open_fence: Option<(u8, usize)> = None;
+/// Fenced code block byte span in Raw mode, tracking opening and closing
+/// line bounds so incremental edits can tell whether a fence boundary was touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawFence {
+    pub open_start: usize,
+    pub open_end: usize,
+    pub close_start: usize,
+    pub close_end: usize,
+}
 
-    while pos < bytes.len() {
+/// Lightweight ATX heading scan for Raw mode that skips building a full AST.
+#[cfg(test)]
+pub fn outline_items_raw(content: &str) -> Vec<OutlineItem> {
+    outline_items_and_fences_raw(content).0
+}
+
+fn scan_raw_range(
+    content: &str,
+    start: usize,
+    end: usize,
+    mut line_index: u32,
+) -> (Vec<OutlineItem>, Vec<RawFence>) {
+    let mut items = Vec::new();
+    let mut fences = Vec::new();
+    let bytes = content.as_bytes();
+    let mut pos = start;
+    let mut open_fence: Option<(u8, usize, usize, usize)> = None;
+
+    while pos < end {
         let line_start = pos;
-        let line_end = match memchr::memchr2(b'\n', b'\r', &bytes[pos..]) {
+        let line_end = match memchr::memchr2(b'\n', b'\r', &bytes[pos..end]) {
             Some(rel) => pos + rel,
-            None => bytes.len(),
+            None => end,
+        };
+        let line_next = if line_end < end {
+            if bytes[line_end] == b'\r'
+                && bytes.get(line_end + 1) == Some(&b'\n')
+                && line_end + 1 < end
+            {
+                line_end + 2
+            } else {
+                line_end + 1
+            }
+        } else {
+            end
         };
         let line = &content[line_start..line_end];
 
-        if let Some((marker, open_len)) = open_fence {
+        if let Some((marker, open_len, open_start, open_end)) = open_fence {
             if let Some((ch, len, rest)) = leading_fence_info(line) {
                 if ch == marker && len >= open_len && rest.bytes().all(|b| b == b' ' || b == b'\t')
                 {
+                    fences.push(RawFence {
+                        open_start,
+                        open_end,
+                        close_start: line_start,
+                        close_end: line_next,
+                    });
                     open_fence = None;
                 }
             }
@@ -159,7 +197,7 @@ pub fn outline_items_raw(content: &str) -> Vec<OutlineItem> {
             if matches!(first_non_ws, Some(b'#' | b'`' | b'~')) {
                 if let Some((ch, len, rest)) = leading_fence_info(line) {
                     if ch == b'~' || !rest.as_bytes().contains(&b'`') {
-                        open_fence = Some((ch, len));
+                        open_fence = Some((ch, len, line_start, line_next));
                     }
                 } else if let Some((level, content_range)) = atx_display_content_range(line) {
                     let raw = &line[content_range];
@@ -188,17 +226,137 @@ pub fn outline_items_raw(content: &str) -> Vec<OutlineItem> {
         }
 
         line_index += 1;
-        if line_end == bytes.len() {
+        if line_next >= end {
             break;
         }
-        pos = if bytes[line_end] == b'\r' && bytes.get(line_end + 1) == Some(&b'\n') {
-            line_end + 2
-        } else {
-            line_end + 1
-        };
+        pos = line_next;
     }
 
-    items
+    if let Some((_, _, open_start, open_end)) = open_fence {
+        fences.push(RawFence {
+            open_start,
+            open_end,
+            close_start: end,
+            close_end: end,
+        });
+    }
+
+    (items, fences)
+}
+
+/// Lightweight ATX heading + fence scan for Raw mode.
+pub fn outline_items_and_fences_raw(content: &str) -> (Vec<OutlineItem>, Vec<RawFence>) {
+    scan_raw_range(content, 0, content.len(), 0)
+}
+
+/// Incrementally patch Raw-mode `items` and `fences` after an edit `old_range`
+/// replaced by `new_len` bytes in `content`. Returns `false` if fence state may
+/// have changed and a full scan is required.
+pub fn patch_outline_items_raw(
+    items: &mut Vec<OutlineItem>,
+    fences: &mut [RawFence],
+    content: &str,
+    old_range: std::ops::Range<usize>,
+    new_len: usize,
+    line_delta: isize,
+    line_index_at: impl FnOnce(&[OutlineItem], usize) -> u32,
+) -> bool {
+    let bytes = content.as_bytes();
+    let new_end = old_range.start + new_len;
+    if new_end > bytes.len() || old_range.start > old_range.end {
+        return false;
+    }
+    let byte_delta = new_len as isize - (old_range.end - old_range.start) as isize;
+
+    // Expand to full line boundaries in `content`. Back up 1 byte if `start` sits
+    // right after `\r` so a split `\r\n` expands to the start of that line.
+    let mut probe = old_range.start;
+    if probe > 0 && bytes[probe - 1] == b'\r' {
+        probe -= 1;
+    }
+    let win_start = crate::model::text_ops::line_start_at(content, probe);
+
+    let mut new_win_end = new_end;
+    if new_win_end < bytes.len() {
+        if let Some(rel) = memchr::memchr2(b'\n', b'\r', &bytes[new_win_end..]) {
+            let e = new_win_end + rel;
+            new_win_end = if bytes[e] == b'\r' && bytes.get(e + 1) == Some(&b'\n') {
+                e + 2
+            } else {
+                e + 1
+            };
+        } else {
+            new_win_end = bytes.len();
+        }
+    }
+    let Some(old_win_end_signed) = (new_win_end as isize).checked_sub(byte_delta) else {
+        return false;
+    };
+    if old_win_end_signed < win_start as isize {
+        return false;
+    }
+    let old_win_end = old_win_end_signed as usize;
+
+    // Bail out if the new edited window has any fence marker candidate.
+    let new_slice = &content[win_start..new_win_end];
+    if new_slice.contains("```") || new_slice.contains("~~~") {
+        return false;
+    }
+
+    // Check if the old window touched any fence opening or closing line, or sits strictly inside one.
+    let mut inside_fence_idx = None;
+    for (idx, f) in fences.iter().enumerate() {
+        let touches_open = win_start < f.open_end && old_win_end > f.open_start;
+        let touches_close =
+            f.close_start < f.close_end && win_start < f.close_end && old_win_end > f.close_start;
+        if touches_open || touches_close {
+            return false;
+        }
+        // Also bail if an unclosed fence reaches EOF and the edit is at or after its open_end
+        //? Actually an edit strictly inside an unclosed fence (open_end <= win_start) has no closing line to touch!
+        if win_start >= f.open_end && old_win_end <= f.close_start {
+            inside_fence_idx = Some(idx);
+            break;
+        }
+    }
+
+    if let Some(f_idx) = inside_fence_idx {
+        fences[f_idx].close_start = (fences[f_idx].close_start as isize + byte_delta) as usize;
+        fences[f_idx].close_end = (fences[f_idx].close_end as isize + byte_delta) as usize;
+        for f in &mut fences[f_idx + 1..] {
+            f.open_start = (f.open_start as isize + byte_delta) as usize;
+            f.open_end = (f.open_end as isize + byte_delta) as usize;
+            f.close_start = (f.close_start as isize + byte_delta) as usize;
+            f.close_end = (f.close_end as isize + byte_delta) as usize;
+        }
+        let first_after = items.partition_point(|it| it.offset < old_win_end);
+        for it in &mut items[first_after..] {
+            it.offset = (it.offset as isize + byte_delta) as usize;
+            it.line_index = (it.line_index as isize + line_delta) as u32;
+        }
+        return true;
+    }
+
+    let first_ix = items.partition_point(|it| it.offset < win_start);
+    let end_ix = items.partition_point(|it| it.offset < old_win_end);
+    let base_line = line_index_at(&items[..first_ix], win_start);
+    let (new_items, _) = scan_raw_range(content, win_start, new_win_end, base_line);
+
+    for it in &mut items[end_ix..] {
+        it.offset = (it.offset as isize + byte_delta) as usize;
+        it.line_index = (it.line_index as isize + line_delta) as u32;
+    }
+    if first_ix != end_ix || !new_items.is_empty() {
+        items.splice(first_ix..end_ix, new_items);
+    }
+    let fence_after = fences.partition_point(|f| f.open_start < old_win_end);
+    for f in &mut fences[fence_after..] {
+        f.open_start = (f.open_start as isize + byte_delta) as usize;
+        f.open_end = (f.open_end as isize + byte_delta) as usize;
+        f.close_start = (f.close_start as isize + byte_delta) as usize;
+        f.close_end = (f.close_end as isize + byte_delta) as usize;
+    }
+    true
 }
 
 /// Index of the heading whose section holds `caret`: the last heading that
@@ -376,5 +534,67 @@ mod tests {
             }
             assert_eq!(cached, outline_items(&doc, &text), "step {step}");
         }
+    }
+
+    #[test]
+    fn incremental_raw_outline_patch_matches_full_scan_across_random_edits() {
+        let mut text = "# Top\n\npara one\n\n## Mid\r\n\r\n```\n# fenced\n```\n\n~~~\n# tilde\n~~~\n\n### End\n".to_string();
+        let (mut cached, mut fences) = outline_items_and_fences_raw(&text);
+        let snippets = [
+            "abc",
+            "\n# Added\n",
+            "\r\n## CRLF Heading\r\n",
+            "\n```\n",
+            "\n~~~\n",
+            "## ",
+            "### Sub\nline\n",
+            " ",
+            "\n",
+            "\r",
+            "\r\n",
+            "é😀",
+        ];
+        let mut seed = 0xD1B5_4A32_D192_ED03u64;
+        let mut patched_count = 0usize;
+        for step in 0..200 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let a = (seed as usize) % (text.len() + 1);
+            let b = ((seed >> 16) as usize) % (text.len() + 1);
+            let mut start = a.min(b);
+            let mut end = a.max(b).min((start + 24).min(text.len()));
+            while !text.is_char_boundary(start) {
+                start -= 1;
+            }
+            while !text.is_char_boundary(end) {
+                end += 1;
+            }
+            let ins = if (seed >> 32).is_multiple_of(3) {
+                ""
+            } else {
+                snippets[((seed >> 40) as usize) % snippets.len()]
+            };
+            let old_lines = crate::model::text_ops::count_line_endings(text.as_bytes());
+            text.replace_range(start..end, ins);
+            let new_lines = crate::model::text_ops::count_line_endings(text.as_bytes());
+            let line_delta = new_lines as isize - old_lines as isize;
+            let ok = patch_outline_items_raw(
+                &mut cached,
+                &mut fences,
+                &text,
+                start..end,
+                ins.len(),
+                line_delta,
+                |_, off| crate::model::text_ops::count_line_endings(&text.as_bytes()[..off]) as u32,
+            );
+            if ok {
+                patched_count += 1;
+            } else {
+                (cached, fences) = outline_items_and_fences_raw(&text);
+            }
+            assert_eq!(cached, outline_items_raw(&text), "step {step}");
+        }
+        assert!(patched_count > 50, "only {patched_count}/200 patched");
     }
 }

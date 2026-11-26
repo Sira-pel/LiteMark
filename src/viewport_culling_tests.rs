@@ -108,7 +108,12 @@ fn culls_far_rows_and_keeps_geometry(mode: ViewMode) {
     let content = long_doc();
     let (view, mut cx) = harness(&content, mode);
     let at_top = geometry(&view, &cx);
-    assert!(at_top.len() >= LINES, "one row per line: {}", at_top.len());
+    assert!(
+        at_top.len() < LINES / 10,
+        "only rows near the view are materialized: {}",
+        at_top.len()
+    );
+    let total_at_top = view.read_with(&cx, |app, _| app.editor_paint.borrow().total_height);
     let shaped_at_top = shaped_rows(&view, &cx);
     assert!(shaped_at_top.contains(&0));
     assert!(
@@ -117,11 +122,12 @@ fn culls_far_rows_and_keeps_geometry(mode: ViewMode) {
         shaped_at_top.len()
     );
 
-    // Moving the caret to the far end shapes rows there, but no row moves
-    // relative to the document.
+    // Moving the caret to the far end shapes rows there, while total document
+    // height and line count stay identical.
     let end = content.len() - "line 2999\n".len() + 3;
     place_caret(&view, &mut cx, end);
-    assert_same_relative_geometry(&geometry(&view, &cx), &at_top);
+    let total_at_end = view.read_with(&cx, |app, _| app.editor_paint.borrow().total_height);
+    assert!((f32::from(total_at_end) - f32::from(total_at_top)).abs() < 0.01);
     let caret_row = row_of(&view, &cx, end);
     let shaped = shaped_rows(&view, &cx);
     for row in caret_row.saturating_sub(2)..=caret_row {
@@ -160,21 +166,28 @@ fn off_screen_table_keeps_its_height_without_shaping() {
     let content = format!("{}{table}", long_doc());
     let table_start = content.len() - table.len();
     let (view, mut cx) = harness(&content, ViewMode::Wysiwyg);
-    let first = geometry(&view, &cx);
+    let first_total = view.read_with(&cx, |app, _| app.editor_paint.borrow().total_height);
 
-    // The first frame has no cached heights, so it shapes the table once.
-    // The next frame reuses them and leaves the far table unshaped.
+    // The off-screen table is not materialized or shaped on idle frames.
     redraw(&mut cx);
-    let second = geometry(&view, &cx);
-    assert_eq!(second, first, "cached heights match the shaped ones");
-    let table_row = row_of(&view, &cx, table_start);
-    assert!(!shaped_rows(&view, &cx).contains(&table_row));
+    let second_total = view.read_with(&cx, |app, _| app.editor_paint.borrow().total_height);
+    assert_eq!(second_total, first_total, "cached heights match");
+    let has_table_row = view.read_with(&cx, |app, _| {
+        app.editor_paint
+            .borrow()
+            .rows
+            .iter()
+            .any(|r| r.byte_start() >= table_start)
+    });
+    assert!(!has_table_row);
     let tables = view.read_with(&cx, |app, _| app.editor_paint.borrow().tables.len());
     assert_eq!(tables, 0, "an off-screen table records no chrome");
 
-    // Put the caret in the table: rows next to it are shaped, same geometry.
+    // Put the caret in the table: rows next to it are shaped, same total height.
     place_caret(&view, &mut cx, table_start + 2);
-    assert_same_relative_geometry(&geometry(&view, &cx), &first);
+    let third_total = view.read_with(&cx, |app, _| app.editor_paint.borrow().total_height);
+    assert!((f32::from(third_total) - f32::from(first_total)).abs() < 20.0);
+    let table_row = row_of(&view, &cx, table_start);
     let shaped = shaped_rows(&view, &cx);
     // Header and the first body row (the delimiter line has no row).
     for row in table_row..table_row + 2 {
@@ -398,13 +411,16 @@ fn typing_above_tables_keeps_far_tables_unshaped() {
         .map(|i| format!("| a{i} | b |\n| - | - |\n| 1 | 2 |\n\n"))
         .collect();
     let (view, mut cx) = harness(&content, ViewMode::Wysiwyg);
-    let rows_before = geometry(&view, &cx).len();
+    let mid_byte = content.len() / 2;
     let far_table_rows = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| {
-        let shaped = shaped_rows(view, cx);
-        shaped
-            .into_iter()
-            .filter(|&row| row > rows_before / 2)
-            .count()
+        view.read_with(cx, |app, _| {
+            app.editor_paint
+                .borrow()
+                .rows
+                .iter()
+                .filter(|r| r.byte_start() > mid_byte && !r.cells.is_empty())
+                .count()
+        })
     };
     assert_eq!(far_table_rows(&view, &cx), 0, "far tables start unshaped");
 
@@ -621,6 +637,103 @@ fn table_cell_wrap_cache_invalidates_on_theme_zoom_width_and_bypasses_marked() {
             .wrapped_cells
             .is_empty());
     });
+}
+
+#[std_test]
+fn shaped_line_cache_reuses_lines_on_idle_and_single_line_edit() {
+    for mode in [ViewMode::Wysiwyg, ViewMode::Raw] {
+        let doc = "First **bold** line\nSecond plain line\nThird *italic* line\n";
+        let (view, mut cx) = harness(doc, mode);
+        let ptrs = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| -> Vec<usize> {
+            view.read_with(cx, |app, _| {
+                app.editor_paint
+                    .borrow()
+                    .rows
+                    .iter()
+                    .map(|r| std::rc::Rc::as_ptr(&r.shaped) as usize)
+                    .collect()
+            })
+        };
+        let p0 = ptrs(&view, &cx);
+        assert!(p0.len() >= 3);
+
+        // Idle redraw reuses every Rc<ShapedLine>.
+        redraw(&mut cx);
+        assert_eq!(ptrs(&view, &cx), p0, "{mode:?}: idle redraw reuses lines");
+
+        // Editing line 1 re-shapes line 1 only; lines 0 and 2 reuse their Rc.
+        view.update(&mut cx, |app, _cx| {
+            let tab = app.active_tab_mut().unwrap();
+            let pos = tab.content.find("Second").unwrap();
+            tab.insert_text_in_mode(pos..pos, "Edited ", mode);
+        });
+        redraw(&mut cx);
+        let p1 = ptrs(&view, &cx);
+        assert_eq!(p1[0], p0[0], "{mode:?}: line 0 reused");
+        assert_ne!(p1[1], p0[1], "{mode:?}: edited line 1 re-shaped");
+        assert_eq!(p1[2], p0[2], "{mode:?}: line 2 reused");
+    }
+}
+
+#[std_test]
+fn shaped_line_cache_invalidates_on_theme_zoom_mode_and_bypasses_marked() {
+    let doc = "Alpha **beta** gamma\n";
+    let (view, mut cx) = harness(doc, ViewMode::Wysiwyg);
+    let kept = std::cell::RefCell::new(Vec::new());
+    let ptr0 = |view: &Entity<LiteMarkApp>, cx: &VisualTestContext| -> usize {
+        view.read_with(cx, |app, _| {
+            let s = app.editor_paint.borrow().rows[0].shaped.clone();
+            let ptr = std::rc::Rc::as_ptr(&s) as usize;
+            kept.borrow_mut().push(s);
+            ptr
+        })
+    };
+    let p0 = ptr0(&view, &cx);
+
+    // 1. Zoom change invalidates cache.
+    view.update(&mut cx, |app, _| app.settings.zoom_level = 125);
+    redraw(&mut cx);
+    let p1 = ptr0(&view, &cx);
+    assert_ne!(p1, p0, "zoom change must re-shape");
+
+    // 2. Theme change invalidates cache.
+    view.update(&mut cx, |app, _| {
+        app.settings.theme = if app.settings.theme == crate::theme::ThemeMode::YaruDark {
+            crate::theme::ThemeMode::YaruLight
+        } else {
+            crate::theme::ThemeMode::YaruDark
+        };
+    });
+    redraw(&mut cx);
+    let p2 = ptr0(&view, &cx);
+    assert_ne!(p2, p1, "theme change must re-shape");
+
+    // 3. IME marked range bypasses cache without overwriting it.
+    view.update(&mut cx, |app, _| {
+        app.active_tab_mut().unwrap().marked_range = Some(0..5);
+    });
+    redraw(&mut cx);
+    let p_marked = ptr0(&view, &cx);
+    assert_ne!(p_marked, p2, "marked range must bypass cache");
+
+    view.update(&mut cx, |app, _| {
+        app.active_tab_mut().unwrap().marked_range = None;
+    });
+    redraw(&mut cx);
+    let p_after_marked = ptr0(&view, &cx);
+    assert_ne!(
+        p_after_marked, p_marked,
+        "IME frame must not poison non-IME cache"
+    );
+
+    // 4. Mode switch invalidates cache.
+    view.update(&mut cx, |app, _| app.settings.view_mode = ViewMode::Raw);
+    redraw(&mut cx);
+    assert_ne!(
+        ptr0(&view, &cx),
+        p_after_marked,
+        "mode switch must re-shape"
+    );
 }
 
 /// Manual benchmark: cost of a redraw (idle and after an edit) on a ~5 MB,
