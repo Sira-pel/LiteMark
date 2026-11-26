@@ -320,6 +320,9 @@ pub struct LiteMarkApp {
     pub image_drag: Option<crate::ui::note_images::ImageDrag>,
     /// The mouse pointer is hidden after typing until the mouse moves.
     pub pointer_hidden: bool,
+    /// URL of the link under the pointer (WYSIWYG), so a move onto or off
+    /// a link repaints its hover tint and tooltip.
+    pub hovered_link: Option<String>,
     /// True while the mouse button that started a table drag is still held.
     /// Survives a modifier cancel of the visual drag so later chords cannot
     /// edit the note until that press ends (mouse-up anywhere, next mouse-down,
@@ -741,6 +744,7 @@ impl LiteMarkApp {
             table_drag: None,
             image_drag: None,
             pointer_hidden: false,
+            hovered_link: None,
             table_drag_press_held: false,
             table_action_anchor: None,
             title_drag_armed: Rc::new(Cell::new(false)),
@@ -954,6 +958,7 @@ impl LiteMarkApp {
             table_drag: None,
             image_drag: None,
             pointer_hidden: false,
+            hovered_link: None,
             table_drag_press_held: false,
             table_action_anchor: None,
             title_drag_armed: Rc::new(Cell::new(false)),

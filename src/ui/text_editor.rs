@@ -564,8 +564,8 @@ impl HeightEstimates {
         let mut acc = self.block_prefix[b];
         let start = b * Self::BLOCK_SIZE;
         let end = (start + Self::BLOCK_SIZE).min(self.slots.len());
-        for i in start..end {
-            let v = self.slots[i];
+        for (i, &v) in self.slots[start..end].iter().enumerate() {
+            let i = start + i;
             let h = if v == Self::UNSET { 0 } else { i64::from(v) };
             if acc + h > target_q {
                 return (i, acc as f32 / Self::SCALE);
@@ -1315,6 +1315,152 @@ pub fn link_for_offset(paint: &EditorPaint, source_offset: usize) -> Option<Stri
     None
 }
 
+/// Where one link's text lies on a painted row (`None` when it isn't on it).
+fn link_bounds_on_row(row: &PaintRow, range: &Range<usize>) -> Option<Bounds<Pixels>> {
+    let s = range.start.max(row.byte_start());
+    let e = range.end.min(row.byte_end());
+    if s >= e {
+        return None;
+    }
+    let x0 = row.shaped.x_for_index(row.source_to_display(s));
+    let x1 = row.shaped.x_for_index(row.source_to_display(e));
+    (x1 > x0).then(|| {
+        Bounds::new(
+            point(row.origin.x + x0, row.origin.y),
+            size(x1 - x0, row.line_height),
+        )
+    })
+}
+
+/// The link whose visible text is under `position`: its URL and the bounds
+/// of every painted piece of it (a link can wrap onto more rows).
+pub fn link_hover_at(
+    rows: &[PaintRow],
+    position: Point<Pixels>,
+) -> Option<(String, Vec<Bounds<Pixels>>)> {
+    let row = rows.iter().find(|r| {
+        r.cells.is_empty()
+            && r.link_hits.is_some()
+            && position.y >= r.origin.y
+            && position.y < r.origin.y + r.line_height
+    })?;
+    let (base, links) = row.link_hits.as_deref()?;
+    let (range, url) = links.iter().find_map(|(r, url)| {
+        let range = r.to_abs(*base as usize);
+        let b = link_bounds_on_row(row, &range)?;
+        (position.x >= b.left() && position.x < b.right()).then(|| (range, url.to_string()))
+    })?;
+    let first = rows.partition_point(|r| r.byte_end() < range.start);
+    let bounds = rows[first..]
+        .iter()
+        .take_while(|r| r.byte_start() <= range.end)
+        .filter(|r| r.cells.is_empty())
+        .filter_map(|r| link_bounds_on_row(r, &range))
+        .collect();
+    Some((url, bounds))
+}
+
+pub struct LinkHoverPaint {
+    bounds: Vec<Bounds<Pixels>>,
+    /// Ctrl (Cmd on macOS) is held, so a click opens the link.
+    open_ready: bool,
+    tint: Hsla,
+    tip_bounds: Bounds<Pixels>,
+    tip_bg: Hsla,
+    tip_border: Hsla,
+    tip_line_h: Pixels,
+    tip_url: ShapedLine,
+    tip_hint: ShapedLine,
+}
+
+/// Longest URL shown in the tooltip before it is cut with an ellipsis.
+const LINK_TIP_MAX_CHARS: usize = 80;
+
+/// Text shown in the link tooltip: the URL, cut to `LINK_TIP_MAX_CHARS`.
+pub fn link_tip_text(url: &str) -> String {
+    if url.chars().count() > LINK_TIP_MAX_CHARS {
+        let mut cut: String = url.chars().take(LINK_TIP_MAX_CHARS - 1).collect();
+        cut.push('\u{2026}');
+        cut
+    } else {
+        url.to_string()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn link_hover_paint(
+    rows: &[PaintRow],
+    editor_bounds: Bounds<Pixels>,
+    window: &mut Window,
+    link_color: Hsla,
+    tip_bg: Hsla,
+    tip_border: Hsla,
+    hint_color: Hsla,
+    font_family: &SharedString,
+) -> Option<LinkHoverPaint> {
+    let mouse = window.mouse_position();
+    let visible = window.content_mask().bounds.intersect(&editor_bounds);
+    if !visible.contains(&mouse) {
+        return None;
+    }
+    let (url, bounds) = link_hover_at(rows, mouse)?;
+    let anchor = *bounds
+        .iter()
+        .find(|b| b.contains(&mouse))
+        .or(bounds.first())?;
+    let mods = window.modifiers();
+    let open_ready = mods.control || mods.platform;
+
+    let shown = link_tip_text(&url);
+    let hint = if cfg!(target_os = "macos") {
+        "Cmd+Click to open"
+    } else {
+        "Ctrl+Click to open"
+    };
+    let font_size = px(12.0);
+    let font = font(font_family.clone());
+    let shape = |window: &mut Window, text: &str, color: Hsla| {
+        let text: SharedString = text.to_string().into();
+        let run = TextRun {
+            len: text.len(),
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(text, font_size, &[run], None)
+    };
+    let tip_url = shape(window, &shown, link_color);
+    let tip_hint = shape(window, hint, hint_color);
+    let tip_line_h = px(18.0);
+    let w = tip_url.width.max(tip_hint.width) + px(16.0);
+    let h = tip_line_h * 2.0 + px(10.0);
+    // Below the link, or above it when that would leave the visible area;
+    // kept inside the editor horizontally.
+    let mut y = anchor.bottom() + px(4.0);
+    if y + h > visible.bottom() {
+        y = anchor.top() - h - px(4.0);
+    }
+    let max_x = (visible.right() - w - px(4.0)).max(visible.left());
+    let x = mouse.x.min(max_x).max(visible.left());
+    let mut tint = link_color;
+    tint.a = 0.12;
+    Some(LinkHoverPaint {
+        bounds,
+        open_ready,
+        tint,
+        tip_bounds: Bounds::new(point(x, y), size(w, h)),
+        tip_bg,
+        tip_border,
+        tip_line_h,
+        tip_url,
+        tip_hint,
+    })
+}
+
 /// True when the caret sits in a wrapped table cell that has another visual
 /// line in the `delta` direction, so Up/Down should move inside the cell.
 pub fn cell_has_line_in_direction(paint: &EditorPaint, cursor: usize, delta: i32) -> bool {
@@ -1967,6 +2113,8 @@ impl<V: 'static> EditorElement<V> {
 
 pub struct Prepaint {
     rows: Vec<PaintRow>,
+    /// The link under the pointer (WYSIWYG): tint, tooltip, hand cursor.
+    link_hover: Option<LinkHoverPaint>,
     checkbox_hits: Vec<(Bounds<Pixels>, Range<usize>)>,
     numbers: Vec<(Point<Pixels>, Pixels, Rc<ShapedLine>)>,
     decor_lines: Vec<(Point<Pixels>, Pixels, Rc<ShapedLine>)>,
@@ -2587,6 +2735,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 content_top: top_y,
                 doc_line_count: total_raw_rows,
                 last_row_byte_end,
+                link_hover: None,
             };
         }
 
@@ -4728,6 +4877,26 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 }
             }
         }
+        let link_hover = link_hover_paint(
+            &rows,
+            bounds,
+            window,
+            self.link_color,
+            self.surface_bg,
+            self.border_color,
+            self.muted_color,
+            &self.font_family,
+        );
+        if let Some(hover) = &link_hover {
+            if hover.open_ready {
+                for b in &hover.bounds {
+                    cursor_hitboxes.push((
+                        CursorStyle::PointingHand,
+                        window.insert_hitbox(*b, HitboxBehavior::Normal),
+                    ));
+                }
+            }
+        }
         trim_row_slack(&mut rows);
         Prepaint {
             rows,
@@ -4755,6 +4924,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             content_top: doc_top,
             doc_line_count: n_lines,
             last_row_byte_end,
+            link_hover,
         }
     }
 
@@ -4798,6 +4968,11 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
         }
         for quad in prepaint.bg_quads.drain(..) {
             window.paint_quad(quad);
+        }
+        if let Some(hover) = &prepaint.link_hover {
+            for b in &hover.bounds {
+                window.paint_quad(fill(*b, hover.tint).corner_radii(px(3.0)));
+            }
         }
         for image in prepaint.images.iter_mut() {
             image.paint(window, cx);
@@ -4853,6 +5028,24 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
         }
         if let Some(cursor) = prepaint.cursor.take() {
             window.paint_quad(cursor);
+        }
+        if let Some(hover) = prepaint.link_hover.take() {
+            window.paint_quad(
+                fill(hover.tip_bounds, hover.tip_bg)
+                    .corner_radii(px(6.0))
+                    .border_widths(px(1.0))
+                    .border_color(hover.tip_border),
+            );
+            let mut y = hover.tip_bounds.origin.y + px(5.0);
+            for line in [&hover.tip_url, &hover.tip_hint] {
+                let _ = line.paint(
+                    point(hover.tip_bounds.origin.x + px(8.0), y),
+                    hover.tip_line_h,
+                    window,
+                    cx,
+                );
+                y += hover.tip_line_h;
+            }
         }
         // A resize cursor over the picture handle, and all through a drag.
         for (style, hitbox) in &prepaint.cursor_hitboxes {
@@ -5577,6 +5770,17 @@ fn paint_ranges_mapped(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn link_tooltip_shows_short_urls_whole_and_cuts_long_ones() {
+        use super::{link_tip_text, LINK_TIP_MAX_CHARS};
+        assert_eq!(link_tip_text("https://example.com"), "https://example.com");
+        let long = format!("https://example.com/{}", "é".repeat(200));
+        let shown = link_tip_text(&long);
+        assert_eq!(shown.chars().count(), LINK_TIP_MAX_CHARS);
+        assert!(shown.ends_with('\u{2026}'));
+        assert!(long.starts_with(shown.trim_end_matches('\u{2026}')));
+    }
 
     #[test]
     fn height_estimate_total_matches_a_naive_sum_after_random_splices() {

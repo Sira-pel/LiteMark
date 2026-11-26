@@ -601,6 +601,30 @@ impl LiteMarkApp {
         cx.notify();
     }
 
+    /// Repaints when the pointer moves onto, off or between links, so the
+    /// editor redraws the hover tint and URL tooltip. None while a button is
+    /// held (a drag-select shouldn't pop tooltips) or outside WYSIWYG.
+    pub(super) fn track_link_hover(
+        &mut self,
+        at: Point<Pixels>,
+        button_held: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let link = if button_held || self.effective_view_mode() != ViewMode::Wysiwyg {
+            None
+        } else {
+            let paint = self.editor_paint.borrow();
+            let inside = paint.bounds.is_some_and(|b| b.contains(&at));
+            inside
+                .then(|| link_hover_at(&paint.rows, at).map(|(url, _)| url))
+                .flatten()
+        };
+        if self.hovered_link != link {
+            self.hovered_link = link;
+            cx.notify();
+        }
+    }
+
     pub(super) fn editor_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if self.pointer_hidden {
             self.pointer_hidden = false;
@@ -653,6 +677,7 @@ impl LiteMarkApp {
             return;
         }
         self.track_table_hover(event.position, cx);
+        self.track_link_hover(event.position, event.pressed_button.is_some(), cx);
         if !self.selecting {
             return;
         }
