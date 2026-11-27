@@ -736,6 +736,186 @@ fn shaped_line_cache_invalidates_on_theme_zoom_mode_and_bypasses_marked() {
     );
 }
 
+#[std_test]
+fn scrolling_past_multiple_offscreen_tables_keeps_column_widths_and_reaches_bottom() {
+    // Regression test for v0.15 scroll glitch: tables outside the initial
+    // viewport were missing from `layout_cache.table_keys`, colliding on
+    // `table_key = 0` and stealing each other's column counts/widths as tables
+    // entered and left the shaping band.
+    let mut content = String::from(
+        "# Top\n\n\
+         | ID | Task | Owner | Status |\n\
+         | --- | --- | --- | --- |\n\
+         | P0-1 | Initial setup | Alice | Done |\n\n",
+    );
+    // Enough prose to push the remaining tables well past the initial shaping band.
+    for i in 0..80 {
+        content.push_str(&format!("Spacer paragraph line {i} with ordinary text.\n"));
+    }
+    content.push_str(
+        "\n## 4. Key numbers\n\n\
+         | Metric | Now | Target (Demo Day) |\n\
+         | --- | --- | --- |\n\
+         | Facilities in app | 7 (sample) | All ODC rows fill in after DATA-01 |\n\
+         | Automated tests | 14 | 100% pass |\n\n\
+         ## 5. Risks\n\n\
+         | Risk | Impact | Likelihood | Mitigation |\n\
+         | --- | --- | --- | --- |\n\
+         | Event rules ban pre-event code | High | Unknown | Confirm rules early |\n\
+         | Prakas details (injury deadlines, exclusions) unclear | High | Medium | Verify with lawyer |\n\
+         | Internet fails on Demo Day | High | Low | Cache offline bundle |\n\n\
+         ## 6. Open questions\n\n\
+         | # | Question | Asked to |\n\
+         | --- | --- | --- |\n\
+         | Q1 | What are the judging criteria? | TSA |\n\
+         | Q2 | Can we bring an existing prototype, and must code be written in build week? | TSA |\n\
+         | Q3 | Is 1286 still the NSSF hotline? | NSSF |\n\
+         | Q4 | Which facilities accept HEF? | MoH / PCA |\n\
+         | Q5 | Can we combine ODC (CC BY-SA) with OSM data? | ODC |\n\n\
+         ## 7. Weekly log\n\n\
+         - Done: demo audit and bug fixes.\n\
+         - Next: commit the fixes and verify.\n\
+         - Blocked: nothing.\n",
+    );
+
+    let risks_start = content.find("| Risk | Impact |").unwrap();
+    let questions_start = content.find("| # | Question |").unwrap();
+    let weekly_start = content.find("## 7. Weekly log").unwrap();
+    let end_marker = content.find("- Blocked: nothing.").unwrap();
+
+    let (view, mut cx) = harness(&content, ViewMode::Wysiwyg);
+    redraw(&mut cx);
+
+    let pos = view.read_with(&cx, |app, _| app.editor_scroll.bounds().center());
+    let mut prev_y = view.read_with(&cx, |app, _| f32::from(app.editor_scroll.offset().y));
+    let mut saw_risks = false;
+    let mut saw_questions = false;
+    let mut questions_col1_widths: Vec<f32> = Vec::new();
+
+    // Scroll down in Windows-like line wheel notches until reaching the bottom.
+    for step in 0..80 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: pos,
+            delta: ScrollDelta::Lines(point(0.0, -3.0)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        redraw(&mut cx);
+
+        let cur_y = view.read_with(&cx, |app, _| f32::from(app.editor_scroll.offset().y));
+        assert!(
+            cur_y <= prev_y + 0.5,
+            "step {step}: scrolling down bounced upward ({prev_y} -> {cur_y})"
+        );
+        prev_y = cur_y;
+
+        view.read_with(&cx, |app, _| {
+            let paint = app.editor_paint.borrow();
+            for tbl in &paint.tables {
+                if tbl.source.start == risks_start {
+                    saw_risks = true;
+                    assert_eq!(
+                        tbl.columns.len(),
+                        4,
+                        "step {step}: Risks table must keep all 4 columns"
+                    );
+                } else if tbl.source.start == questions_start {
+                    saw_questions = true;
+                    assert_eq!(
+                        tbl.columns.len(),
+                        3,
+                        "step {step}: Open questions table must keep 3 columns"
+                    );
+                    let q_col_w = f32::from(tbl.columns[1].header_bounds.size.width);
+                    let id_col_w = f32::from(tbl.columns[0].header_bounds.size.width);
+                    assert!(
+                        q_col_w > id_col_w,
+                        "step {step}: Question column ({q_col_w}) must be wider than # column ({id_col_w})"
+                    );
+                    questions_col1_widths.push(q_col_w);
+                }
+            }
+        });
+    }
+
+    assert!(saw_risks, "should have scrolled past Risks table");
+    assert!(
+        saw_questions,
+        "should have scrolled past Open questions table"
+    );
+    let first_w = questions_col1_widths[0];
+    for (i, w) in questions_col1_widths.iter().enumerate() {
+        assert!(
+            (*w - first_w).abs() < 0.5,
+            "Question column width must stay stable across scroll steps (step {i}: {w} vs {first_w})"
+        );
+    }
+
+    // Confirm the bottom of the document (section 7) is visible in the viewport.
+    view.read_with(&cx, |app, _| {
+        let paint = app.editor_paint.borrow();
+        let view_bounds = app.editor_scroll.bounds();
+        let weekly_row = paint
+            .rows
+            .iter()
+            .find(|r| r.byte_start() <= weekly_start && r.byte_end() >= weekly_start)
+            .expect("Weekly log heading row should be materialized");
+        let last_row = paint
+            .rows
+            .iter()
+            .find(|r| r.byte_start() <= end_marker && r.byte_end() >= end_marker)
+            .expect("final line should be materialized");
+        assert!(
+            weekly_row.origin.y >= view_bounds.top()
+                && last_row.origin.y + last_row.line_height <= view_bounds.bottom() + px(1.0),
+            "bottom content must scroll cleanly into view (last bottom={:?}, view bottom={:?})",
+            last_row.origin.y + last_row.line_height,
+            view_bounds.bottom()
+        );
+    });
+
+    // Scroll back up to the top and back down again: cached table widths must
+    // survive passing through the prose-only middle section and stay identical.
+    for _ in 0..80 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: pos,
+            delta: ScrollDelta::Lines(point(0.0, 3.0)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        redraw(&mut cx);
+    }
+    let mut prev_y = view.read_with(&cx, |app, _| f32::from(app.editor_scroll.offset().y));
+    for step in 0..80 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: pos,
+            delta: ScrollDelta::Lines(point(0.0, -3.0)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        redraw(&mut cx);
+        let cur_y = view.read_with(&cx, |app, _| f32::from(app.editor_scroll.offset().y));
+        assert!(
+            cur_y <= prev_y + 0.5,
+            "second pass step {step}: scrolling down bounced upward ({prev_y} -> {cur_y})"
+        );
+        prev_y = cur_y;
+        view.read_with(&cx, |app, _| {
+            let paint = app.editor_paint.borrow();
+            for tbl in &paint.tables {
+                if tbl.source.start == questions_start {
+                    assert_eq!(tbl.columns.len(), 3);
+                    let w = f32::from(tbl.columns[1].header_bounds.size.width);
+                    assert!(
+                        (w - first_w).abs() < 0.5,
+                        "second pass step {step}: Question column width drifted ({w} vs {first_w})"
+                    );
+                }
+            }
+        });
+    }
+}
+
 /// Manual benchmark: cost of a redraw (idle and after an edit) on a ~5 MB,
 /// 100k-line note. Run with
 /// `cargo test --release bench_large_note_redraw -- --ignored --nocapture`.

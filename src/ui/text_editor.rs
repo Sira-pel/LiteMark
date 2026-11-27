@@ -706,9 +706,6 @@ pub struct LayoutCache {
     estimate_key: (u32, u32, bool),
     /// Content width used in the last `prepaint`, shared with `request_layout`.
     content_width: Pixels,
-    /// The last WYSIWYG height estimate, before it is raised to the painted
-    /// total: what the layout height should be once the total is known.
-    estimated_height: Pixels,
     /// The height an extra redraw was last asked for, so each new height
     /// gets one redraw and never a loop.
     redrawn_for: Option<Pixels>,
@@ -2323,9 +2320,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 };
                 f32::from(top_gap + line_h * wrapped as f32)
             });
-            let h = px(32.0 + estimate.total());
-            cache.estimated_height = h;
-            h.max(paint_borrow.total_height)
+            (px(16.0 + estimate.total()) + px(32.0)).max(px(64.0))
         } else {
             paint_borrow.layout_cache.release_wysiwyg();
             // Build the rows here, not just count them: prepaint reuses them
@@ -2988,51 +2983,57 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             }
         }
 
-        // Each table's cache key: a hash of its text and the fonts. Hashed
-        // once per parse and font, not on every frame (scroll, hover).
+        // Each table's cache key: a hash of its text and the fonts. Lazily
+        // populated as tables enter the materialized intervals so off-screen
+        // tables are not hashed until visited, and every visited table gets
+        // its own key instead of colliding on 0.
         let font_key = table_width_key(
             "",
             &self.font_family,
             &self.mono_font_family,
             self.font_size,
         );
-        let table_keys = match &layout_cache.table_keys {
-            Some((generation, fonts, keys))
-                if *generation == self.parsed.meta.generation && *fonts == font_key =>
-            {
-                keys.clone()
-            }
-            _ => {
-                let content = self.entity.read(cx).editor_content();
-                let keys: Rc<TableKeys> = Rc::new(
-                    table_rows
-                        .keys()
-                        .map(|source| {
-                            let key = table_width_key(
-                                content.get(source.clone()).unwrap_or(""),
-                                &self.font_family,
-                                &self.mono_font_family,
-                                self.font_size,
-                            );
-                            (source.clone(), key)
-                        })
-                        .collect(),
-                );
-                layout_cache.table_keys =
-                    Some((self.parsed.meta.generation, font_key, keys.clone()));
-                keys
-            }
-        };
         let mut table_width_cache = std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
-        if table_rows.is_empty() {
+        let table_keys: Rc<TableKeys> = if self.parsed.meta.table_ranges.is_empty() {
             table_width_cache.clear_and_shrink();
             layout_cache.table_keys = None;
+            Rc::new(TableKeys::new())
         } else {
-            let live_keys: std::collections::HashSet<u64> = table_keys.values().copied().collect();
-            table_width_cache
-                .entries
-                .retain(|k, _| live_keys.contains(k));
-        }
+            let reuse = matches!(
+                &layout_cache.table_keys,
+                Some((generation, fonts, _))
+                    if *generation == self.parsed.meta.generation && *fonts == font_key
+            );
+            let mut keys = if reuse {
+                let (_, _, existing) = layout_cache.table_keys.take().expect("table keys");
+                Rc::try_unwrap(existing).unwrap_or_else(|rc| (*rc).clone())
+            } else {
+                TableKeys::new()
+            };
+            if table_rows.keys().any(|source| !keys.contains_key(source)) {
+                let content = self.entity.read(cx).editor_content();
+                for source in table_rows.keys() {
+                    keys.entry(source.clone()).or_insert_with(|| {
+                        table_width_key(
+                            content.get(source.clone()).unwrap_or(""),
+                            &self.font_family,
+                            &self.mono_font_family,
+                            self.font_size,
+                        )
+                    });
+                }
+            }
+            let keys = Rc::new(keys);
+            layout_cache.table_keys = Some((self.parsed.meta.generation, font_key, keys.clone()));
+            let entries_cap = self.parsed.meta.table_ranges.len().saturating_mul(4) + 64;
+            if table_width_cache.entries.len() > entries_cap {
+                let live_keys: std::collections::HashSet<u64> = keys.values().copied().collect();
+                table_width_cache
+                    .entries
+                    .retain(|k, _| live_keys.contains(k));
+            }
+            keys
+        };
         // Cell and row entries are kept across frames (an idle frame measures
         // nothing, and the next keystroke still needs them) and cleared only
         // when they outgrow the document's tables several times over.
@@ -5185,26 +5186,23 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             },
             &occupied,
         );
-        // Pictures change a line's height after the estimate the layout used;
+        // Pictures and wrapped table rows refine `estimate` during prepaint;
         // draw once more with the real total so the scroll range is right,
-        // whether pictures made the note taller or (one removed) shorter.
-        // The layout height is max(estimate, last total), so compare with
-        // that, not the total alone, or a note shorter than its estimate
-        // would redraw forever.
-        // One extra draw per height at most, so a parent that sizes the
-        // editor differently can never cause a redraw loop.
+        // whether the note grew or shrank. Clear `redrawn_for` once the layout
+        // catches up, and ask at most once per height so a parent that sizes
+        // the editor differently can never cause a redraw loop.
         let height_changed = self.view_mode == ViewMode::Wysiwyg && {
             let mut paint = self.paint.borrow_mut();
-            let expected = paint
-                .layout_cache
-                .estimated_height
-                .max(prepaint.total_height);
-            let redraw = (expected - bounds.size.height).abs() > px(1.0)
-                && paint.layout_cache.redrawn_for != Some(expected);
-            if redraw {
+            let expected = prepaint.total_height;
+            if (expected - bounds.size.height).abs() <= px(1.0) {
+                paint.layout_cache.redrawn_for = None;
+                false
+            } else if paint.layout_cache.redrawn_for != Some(expected) {
                 paint.layout_cache.redrawn_for = Some(expected);
+                true
+            } else {
+                false
             }
-            redraw
         };
         let needs_layout_redraw = (wrap_changed && self.word_wrap) || height_changed;
         if needs_layout_redraw {
