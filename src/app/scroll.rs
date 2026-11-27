@@ -1,8 +1,25 @@
-//! Scrolling: momentum, caret follow, selection reveal.
+//! Scrolling: momentum, caret follow, selection reveal, scroll anchoring.
 
 use super::*;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingScroll {
+    /// Align the caret row near the top of the viewport (Outline jump).
+    CaretToTop { tab_id: String, offset: usize },
+    /// Reveal the selection start inside the viewport (Find / Quick Open jump).
+    SelectionIntoView { tab_id: String, offset: usize },
+}
+
 impl LiteMarkApp {
+    pub(super) fn wysiwyg_parsed(&mut self) -> Option<Arc<crate::markdown::ParsedDocument>> {
+        if self.effective_view_mode() != ViewMode::Wysiwyg {
+            return None;
+        }
+        self.active_tab_mut()
+            .filter(|t| t.file_type.supports_markdown_features())
+            .map(|t| t.parsed())
+    }
+
     /// Feeds touchpad movement to the momentum tracker; wheel notches reset it.
     pub(super) fn note_scroll(
         &mut self,
@@ -10,6 +27,8 @@ impl LiteMarkApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Manual scrolling cancels any pending jump re-alignment.
+        self.pending_scroll = None;
         // Scrolling brings back a pointer hidden by typing or a click.
         if self.pointer_hidden {
             self.pointer_hidden = false;
@@ -67,10 +86,45 @@ impl LiteMarkApp {
     }
 
     pub(crate) fn needs_follow_caret_check(&self) -> bool {
+        if self.pending_scroll.is_some() {
+            return true;
+        }
         let Some(key) = self.follow_caret_key() else {
             return false;
         };
         self.caret_followed.as_ref() != Some(&key)
+    }
+
+    /// Keeps the currently-visible lines stationary when unmeasured blocks
+    /// strictly above the viewport change height as they enter `ShapingBand`.
+    pub(super) fn anchor_scroll_after_paint_impl(
+        &mut self,
+        delta: Pixels,
+        total_height: Pixels,
+    ) -> bool {
+        if self.pending_scroll.is_some() || delta.abs() <= px(0.5) {
+            return false;
+        }
+        let view = self.editor_scroll.bounds();
+        if view.size.height <= px(0.0) {
+            return false;
+        }
+        let offset = self.editor_scroll.offset();
+        if offset.y >= px(-0.5) {
+            return false;
+        }
+        let max = self
+            .editor_scroll
+            .max_offset()
+            .height
+            .max((total_height - view.size.height).max(px(0.0)));
+        let y = (offset.y - delta).clamp(-max, px(0.0));
+        if (y - offset.y).abs() > px(0.5) {
+            self.editor_scroll.set_offset(point(offset.x, y));
+            true
+        } else {
+            false
+        }
     }
 
     /// Keeps the caret on screen after typing, Enter, mode switches, or caret moves.
@@ -79,21 +133,46 @@ impl LiteMarkApp {
     /// the scroll offset actually changed and a redraw is needed.
     pub(super) fn follow_caret_after_paint_impl(&mut self, _window: &mut Window) -> bool {
         let Some(key) = self.follow_caret_key() else {
+            self.pending_scroll = None;
             return false;
         };
+        let Some(cursor) = self.active_tab().map(|tab| tab.caret.cursor()) else {
+            self.pending_scroll = None;
+            return false;
+        };
+        if let Some(pending) = self.pending_scroll.take() {
+            let paint_matches = {
+                let paint = self.editor_paint.borrow();
+                paint.painted_len == key.3
+                    && paint.painted_selection == key.2
+                    && paint.painted_view_mode == key.1
+            };
+            if !paint_matches {
+                self.pending_scroll = Some(pending);
+                return false;
+            }
+            match pending {
+                PendingScroll::CaretToTop { tab_id, offset }
+                    if tab_id == key.0 && offset == cursor =>
+                {
+                    let scrolled = self.scroll_caret_to_top_now();
+                    self.caret_followed = Some(key);
+                    return scrolled;
+                }
+                PendingScroll::SelectionIntoView { tab_id, offset }
+                    if tab_id == key.0 && offset == key.2.start =>
+                {
+                    let scrolled = self.scroll_selection_into_view_now();
+                    self.caret_followed = Some(key);
+                    return scrolled;
+                }
+                _ => {}
+            }
+        }
         if self.caret_followed.as_ref() == Some(&key) {
             return false;
         }
-        let Some(cursor) = self.active_tab().map(|tab| tab.caret.cursor()) else {
-            return false;
-        };
-        let parsed = if self.effective_view_mode() == ViewMode::Wysiwyg {
-            self.active_tab_mut()
-                .filter(|t| t.file_type.supports_markdown_features())
-                .map(|t| t.parsed())
-        } else {
-            None
-        };
+        let parsed = self.wysiwyg_parsed();
         let mut paint = self.editor_paint.borrow_mut();
         if paint.painted_len != key.3
             || paint.painted_selection != key.2
@@ -126,26 +205,18 @@ impl LiteMarkApp {
         scrolled
     }
 
-    /// Scrolls so the row holding the caret sits near the top of the view
-    /// (as far as the end of the document allows).
-    pub(super) fn scroll_caret_to_top(&mut self) {
+    fn scroll_caret_to_top_now(&mut self) -> bool {
         let Some(cursor) = self.active_tab().map(|tab| tab.cursor_offset()) else {
-            return;
+            return false;
         };
-        let parsed = if self.effective_view_mode() == ViewMode::Wysiwyg {
-            self.active_tab_mut()
-                .filter(|t| t.file_type.supports_markdown_features())
-                .map(|t| t.parsed())
-        } else {
-            None
-        };
+        let parsed = self.wysiwyg_parsed();
         let mut paint = self.editor_paint.borrow_mut();
         let Some((row_top, row_height)) = paint.row_y_for_offset(cursor, parsed.as_deref()) else {
-            return;
+            return false;
         };
         let view = self.editor_scroll.bounds();
         if view.size.height <= px(0.0) {
-            return;
+            return false;
         }
         let line_h = if paint.line_height > px(0.0) {
             paint.line_height
@@ -156,36 +227,60 @@ impl LiteMarkApp {
         let offset = self.editor_scroll.offset();
         let max = self.editor_scroll.max_offset().height;
         let y = (offset.y - delta).clamp(-max, px(0.0));
-        self.editor_scroll.set_offset(point(offset.x, y));
+        if (y - offset.y).abs() > px(0.5) {
+            self.editor_scroll.set_offset(point(offset.x, y));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Scrolls so the row holding the caret sits near the top of the view
+    /// (as far as the end of the document allows).
+    pub(super) fn scroll_caret_to_top(&mut self) {
+        self.scroll_caret_to_top_now();
+        self.pending_scroll = self.active_tab().map(|tab| PendingScroll::CaretToTop {
+            tab_id: tab.id.clone(),
+            offset: tab.cursor_offset(),
+        });
+    }
+
+    fn scroll_selection_into_view_now(&mut self) -> bool {
+        let Some(start) = self.active_tab().map(|tab| tab.selection_range().start) else {
+            return false;
+        };
+        let parsed = self.wysiwyg_parsed();
+        let mut paint = self.editor_paint.borrow_mut();
+        let Some((row_top, row_height)) = paint.row_y_for_offset(start, parsed.as_deref()) else {
+            return false;
+        };
+        let view = self.editor_scroll.bounds();
+        let Some(delta) = scroll_delta_for_row(row_top, row_height, view.top(), view.size.height)
+        else {
+            return false;
+        };
+        let offset = self.editor_scroll.offset();
+        let max = self.editor_scroll.max_offset().height;
+        let y = (offset.y - delta).clamp(-max, px(0.0));
+        if (y - offset.y).abs() > px(0.5) {
+            self.editor_scroll.set_offset(point(offset.x, y));
+            true
+        } else {
+            false
+        }
     }
 
     /// Scrolls the editor so the row holding the selection start is visible.
     /// Uses the geometry from the last paint, which is still valid after a
     /// find step because the content did not change.
     pub(super) fn scroll_selection_into_view(&mut self) {
-        let Some(start) = self.active_tab().map(|tab| tab.selection_range().start) else {
-            return;
-        };
-        let parsed = if self.effective_view_mode() == ViewMode::Wysiwyg {
-            self.active_tab_mut()
-                .filter(|t| t.file_type.supports_markdown_features())
-                .map(|t| t.parsed())
-        } else {
-            None
-        };
-        let mut paint = self.editor_paint.borrow_mut();
-        let Some((row_top, row_height)) = paint.row_y_for_offset(start, parsed.as_deref()) else {
-            return;
-        };
-        let view = self.editor_scroll.bounds();
-        let Some(delta) = scroll_delta_for_row(row_top, row_height, view.top(), view.size.height)
-        else {
-            return;
-        };
-        let offset = self.editor_scroll.offset();
-        let max = self.editor_scroll.max_offset().height;
-        let y = (offset.y - delta).clamp(-max, px(0.0));
-        self.editor_scroll.set_offset(point(offset.x, y));
+        self.scroll_selection_into_view_now();
+        self.pending_scroll = self
+            .active_tab()
+            .map(|tab| PendingScroll::SelectionIntoView {
+                tab_id: tab.id.clone(),
+                offset: tab.selection_range().start,
+            });
     }
 }
 

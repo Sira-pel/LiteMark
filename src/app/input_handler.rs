@@ -569,9 +569,10 @@ impl EntityInputHandler for LiteMarkApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
+        let parsed = self.wysiwyg_parsed();
         let utf8 = {
             let paint = self.editor_paint.borrow();
-            index_for_position(&paint, point)?
+            index_for_position_in(&paint, parsed.as_deref(), point)?
         };
         Some(self.active_tab().map_or(0, |tab| tab.offset_to_utf16(utf8)))
     }

@@ -916,6 +916,285 @@ fn scrolling_past_multiple_offscreen_tables_keeps_column_widths_and_reaches_bott
     }
 }
 
+#[std_test]
+fn scrolling_up_past_unmeasured_tables_anchors_visible_content() {
+    let mut doc = String::from("# Top\n\n");
+    for i in 0..45 {
+        doc.push_str(&format!("Top paragraph line {i} with filler prose.\n"));
+    }
+    // Two multi-line wrapped tables in the middle, initially far below the viewport.
+    for t in 0..2 {
+        doc.push_str(&format!(
+            "\n## Middle Table {t}\n\n| Col A | Col B | Detailed Description Column |\n| --- | --- | --- |\n"
+        ));
+        for r in 0..8 {
+            doc.push_str(&format!(
+                "| Item {t}-{r} | Owner {r} | A deliberately long table cell description that wraps onto several visual lines inside a narrow column to expand row height when measured. |\n"
+            ));
+        }
+    }
+    doc.push_str("\n## Bottom Section\n\n");
+    for i in 0..60 {
+        doc.push_str(&format!("Bottom paragraph line {i} with steady prose.\n"));
+    }
+
+    let (view, mut cx) = harness(&doc, ViewMode::Wysiwyg);
+    let bottom_marker = doc.find("Bottom paragraph line 30").expect("bottom marker");
+
+    // Jump directly to the bottom without ever scrolling down through the middle tables.
+    view.update(&mut cx, |app, _cx| {
+        let max = app.editor_scroll.max_offset().height;
+        app.editor_scroll.set_offset(point(px(0.0), -max));
+    });
+    redraw(&mut cx);
+    redraw(&mut cx);
+
+    let pos = view.read_with(&cx, |app, _| app.editor_scroll.bounds().center());
+
+    // Scroll UP step by step so the unmeasured middle tables enter ShapingBand above us.
+    let mut max_single_step_shift = 0.0f32;
+    let mut saw_anchor = false;
+    for step in 0..35 {
+        let before_y = view.read_with(&cx, |app, _| {
+            let paint = app.editor_paint.borrow();
+            let view_bounds = app.editor_scroll.bounds();
+            paint
+                .rows
+                .iter()
+                .find(|r| r.origin.y >= view_bounds.top() && r.origin.y < view_bounds.bottom())
+                .map(|r| (r.byte_start(), f32::from(r.origin.y)))
+        });
+
+        cx.simulate_event(ScrollWheelEvent {
+            position: pos,
+            delta: ScrollDelta::Lines(point(0.0, 3.0)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        redraw(&mut cx);
+
+        if let Some((anchor_byte, y_before)) = before_y {
+            let after_y = view.read_with(&cx, |app, _| {
+                app.editor_paint
+                    .borrow()
+                    .rows
+                    .iter()
+                    .find(|r| r.byte_start() == anchor_byte)
+                    .map(|r| f32::from(r.origin.y))
+            });
+            if let Some(y_after) = after_y {
+                saw_anchor = true;
+                let shift = y_after - y_before;
+                max_single_step_shift = max_single_step_shift.max(shift);
+                assert!(
+                    (-1.0..220.0).contains(&shift),
+                    "step {step}: scrolling up caused abrupt jump ({y_before} -> {y_after}, delta={shift})"
+                );
+            }
+        }
+    }
+    assert!(saw_anchor, "should have tracked visible anchor rows");
+    // Ensure the bottom marker existed in our test doc.
+    assert!(bottom_marker > 0);
+}
+
+#[std_test]
+fn offscreen_thumbnail_image_rows_prepopulate_height_estimate() {
+    let mut doc = String::from("# Intro\n\n");
+    for i in 0..80 {
+        doc.push_str(&format!(
+            "Prose line {i} pushing thumbnail rows off-screen.\n"
+        ));
+    }
+    let thumb_offset = doc.len();
+    doc.push_str("![a](a.png) ![b](b.png) ![c](c.png) ![d](d.png)\n\n");
+    doc.push_str("![e](e.png) ![f](f.png) ![g](g.png) ![h](h.png)\n\n");
+    for i in 0..30 {
+        doc.push_str(&format!("Trailing prose line {i}.\n"));
+    }
+
+    let (view, mut cx) = harness(&doc, ViewMode::Wysiwyg);
+    // Let the initial height-sync redraw complete while still at scroll y = 0.
+    redraw(&mut cx);
+
+    let (initial_total, thumb_slot_h) = view.update(&mut cx, |app, _cx| {
+        let parsed = app.active_tab_mut().expect("tab").parsed();
+        let mut paint = app.editor_paint.borrow_mut();
+        let (_, h) = paint
+            .row_y_for_offset(thumb_offset, Some(&parsed))
+            .expect("thumbnail row estimate");
+        (f32::from(paint.total_height), f32::from(h))
+    });
+    assert!(
+        thumb_slot_h > 100.0,
+        "off-screen thumbnail row should be pre-measured to thumbnail height, got {thumb_slot_h}"
+    );
+
+    // Scroll down to the thumbnail rows and verify total_height stayed stable.
+    view.update(&mut cx, |app, _cx| {
+        let max = app.editor_scroll.max_offset().height;
+        app.editor_scroll.set_offset(point(px(0.0), -max));
+    });
+    redraw(&mut cx);
+    redraw(&mut cx);
+
+    let after_total = view.read_with(&cx, |app, _| {
+        f32::from(app.editor_paint.borrow().total_height)
+    });
+    assert!(
+        (after_total - initial_total).abs() < 4.0,
+        "total height should not jump when off-screen thumbnail rows enter viewport ({initial_total} -> {after_total})"
+    );
+}
+
+#[std_test]
+fn outline_jump_below_unmeasured_wrapped_tables_lands_at_top() {
+    let mut doc = String::from("# Start\n\n");
+    for i in 0..45 {
+        doc.push_str(&format!("Opening line {i} pushing tables off-screen.\n"));
+    }
+    for t in 0..3 {
+        doc.push_str(&format!(
+            "\n## Table {t}\n\n| Key | Value | Long Notes |\n| --- | --- | --- |\n"
+        ));
+        for r in 0..6 {
+            doc.push_str(&format!(
+                "| K{t}-{r} | V{r} | Long wrapped text inside table cell {t}-{r} so its real height is several times larger than a single-line estimate. |\n"
+            ));
+        }
+    }
+    doc.push('\n');
+    let target_offset = doc.len();
+    doc.push_str("## Target Heading\n\n");
+    for i in 0..50 {
+        doc.push_str(&format!(
+            "Post-target line {i} so heading can sit at top.\n"
+        ));
+    }
+
+    let (view, mut cx) = harness(&doc, ViewMode::Wysiwyg);
+    // Jump directly to Target Heading while all 3 tables above it are still unmeasured.
+    view.update(&mut cx, |app, cx| {
+        app.jump_to_heading(target_offset);
+        cx.notify();
+    });
+    redraw(&mut cx);
+    redraw(&mut cx);
+
+    view.read_with(&cx, |app, _| {
+        let paint = app.editor_paint.borrow();
+        let view_bounds = app.editor_scroll.bounds();
+        let target_row = paint
+            .rows
+            .iter()
+            .find(|r| r.byte_start() <= target_offset && r.byte_end() >= target_offset)
+            .expect("Target Heading should be materialized after outline jump");
+        let dist_from_top = f32::from(target_row.origin.y - view_bounds.top());
+        let expected_margin = f32::from(paint.line_height) * 1.5;
+        assert!(
+            (dist_from_top - expected_margin).abs() <= f32::from(paint.line_height) * 2.0,
+            "Target Heading should land near top of viewport (dist={dist_from_top}, expected~{expected_margin})"
+        );
+    });
+}
+
+#[std_test]
+fn wysiwyg_hit_test_outside_materialized_band_does_not_snap_to_bof_or_eof() {
+    let doc: String = (0..400).map(|i| format!("Paragraph line {i}\n")).collect();
+    let (view, mut cx) = harness(&doc, ViewMode::Wysiwyg);
+
+    // Move caret to the middle and scroll to the middle so both top and bottom
+    // of the doc are outside paint.rows.
+    let mid_offset = doc.find("Paragraph line 200\n").expect("mid line");
+    place_caret(&view, &mut cx, mid_offset);
+    view.update(&mut cx, |app, _cx| {
+        let max = app.editor_scroll.max_offset().height;
+        app.editor_scroll.set_offset(point(px(0.0), -max * 0.5));
+    });
+    redraw(&mut cx);
+
+    view.update(&mut cx, |app, _cx| {
+        let parsed = app.active_tab_mut().expect("tab").parsed();
+        let paint = app.editor_paint.borrow();
+        let bounds = paint.bounds.expect("editor bounds");
+        let first = paint.rows.first().expect("first materialized row");
+        let last = paint.rows.last().expect("last materialized row");
+        assert!(first.byte_start() > 0, "top of doc should be culled");
+        assert!(
+            last.byte_end() < paint.last_row_byte_end,
+            "bottom of doc should be culled"
+        );
+
+        let mid_x = bounds.center().x;
+        // Pick a Y strictly between content_top (line 0) and first materialized row.
+        let above_y = paint.content_top + (first.origin.y - paint.content_top) * 0.5;
+        let off_above = index_for_position_in(&paint, Some(&parsed), point(mid_x, above_y))
+            .expect("offset above band");
+        assert!(
+            off_above > 0 && off_above < first.byte_start(),
+            "above-band hit test should map proportionally instead of snapping to 0 (got {off_above}, first={})",
+            first.byte_start()
+        );
+        // Without parsed doc, it should clamp to first row rather than jumping to 0.
+        let clamp_above =
+            index_for_position(&paint, point(mid_x, above_y)).expect("clamped offset above");
+        assert_eq!(clamp_above, first.byte_start());
+
+        // Pick a Y strictly between last materialized row and bounds.bottom().
+        let last_bottom = last.origin.y + last.line_height;
+        let below_y = last_bottom + (bounds.bottom() - last_bottom) * 0.5;
+        let off_below = index_for_position_in(&paint, Some(&parsed), point(mid_x, below_y))
+            .expect("offset below band");
+        assert!(
+            off_below > last.byte_end() && off_below < paint.last_row_byte_end,
+            "below-band hit test should map proportionally instead of snapping to EOF (got {off_below}, last={}, eof={})",
+            last.byte_end(),
+            paint.last_row_byte_end
+        );
+        // Without parsed doc, it should clamp to last row rather than jumping to EOF.
+        let clamp_below =
+            index_for_position(&paint, point(mid_x, below_y)).expect("clamped offset below");
+        assert_eq!(clamp_below, last.byte_end());
+    });
+
+    // Now put the caret back at byte 0 while scrolled to the middle, creating
+    // an unmaterialized gap between the caret anchor interval and the viewport.
+    view.update(&mut cx, |app, _cx| {
+        app.active_tab_mut().expect("tab").place(0, false);
+        let max = app.editor_scroll.max_offset().height;
+        app.editor_scroll.set_offset(point(px(0.0), -max * 0.5));
+    });
+    redraw(&mut cx);
+    // Keep scroll in the middle after caret_followed runs.
+    view.update(&mut cx, |app, _cx| {
+        let max = app.editor_scroll.max_offset().height;
+        app.editor_scroll.set_offset(point(px(0.0), -max * 0.5));
+    });
+    redraw(&mut cx);
+
+    view.update(&mut cx, |app, _cx| {
+        let parsed = app.active_tab_mut().expect("tab").parsed();
+        let paint = app.editor_paint.borrow();
+        let bounds = paint.bounds.expect("editor bounds");
+        let gap = paint
+            .rows
+            .windows(2)
+            .find(|w| w[1].line_index > w[0].line_index + 1)
+            .expect("should have a gap between caret anchor and viewport band");
+        let gap_top = gap[0].origin.y + gap[0].line_height;
+        let gap_mid_y = gap_top + (gap[1].origin.y - gap_top) * 0.5;
+        let off_gap =
+            index_for_position_in(&paint, Some(&parsed), point(bounds.center().x, gap_mid_y))
+                .expect("offset in gap");
+        assert!(
+            off_gap > gap[0].byte_end() && off_gap < gap[1].byte_start(),
+            "gap hit test should map proportionally inside the gap (got {off_gap}, gap={}..{})",
+            gap[0].byte_end(),
+            gap[1].byte_start()
+        );
+    });
+}
+
 /// Manual benchmark: cost of a redraw (idle and after an edit) on a ~5 MB,
 /// 100k-line note. Run with
 /// `cargo test --release bench_large_note_redraw -- --ignored --nocapture`.
