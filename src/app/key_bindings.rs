@@ -376,6 +376,9 @@ impl LiteMarkApp {
                 this.show_about_modal = false;
                 this.show_shortcuts_modal = false;
                 cx.notify();
+            } else if this.show_pdf_export_modal {
+                this.handle_confirm_pdf_export(cx);
+                cx.notify();
             } else if this.show_pdf_modal {
                 // 0 = "Open in Document Viewer", 1 = Close.
                 if this.prompt_selected_ix == 0 {
