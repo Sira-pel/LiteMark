@@ -259,6 +259,7 @@ fn table_wrapped_env_hash(
     hash_hsla(colors.h2_color, &mut hasher);
     hash_hsla(colors.code_color, &mut hasher);
     hash_hsla(colors.code_bg, &mut hasher);
+    hash_hsla(colors.highlight_bg, &mut hasher);
     hash_hsla(colors.link_color, &mut hasher);
     hash_hsla(colors.border_color, &mut hasher);
     hasher.finish()
@@ -2097,6 +2098,7 @@ pub struct EditorElement<V: 'static> {
     pub h2_color: Hsla,
     pub code_color: Hsla,
     pub code_bg: Hsla,
+    pub highlight_bg: Hsla,
     pub surface_bg: Hsla,
     pub border_color: Hsla,
     pub link_color: Hsla,
@@ -2136,6 +2138,7 @@ pub(crate) struct EditorColors {
     pub h2_color: Hsla,
     pub code_color: Hsla,
     pub code_bg: Hsla,
+    pub highlight_bg: Hsla,
     pub link_color: Hsla,
     pub border_color: Hsla,
 }
@@ -2150,6 +2153,7 @@ impl<V: 'static> EditorElement<V> {
             h2_color: self.h2_color,
             code_color: self.code_color,
             code_bg: self.code_bg,
+            highlight_bg: self.highlight_bg,
             link_color: self.link_color,
             border_color: self.border_color,
         }
@@ -5616,7 +5620,9 @@ fn segment_to_run(
         default_color
     };
 
-    let background_color = if seg.code() {
+    let background_color = if seg.highlight() {
+        Some(colors.highlight_bg)
+    } else if seg.code() {
         Some(colors.code_bg)
     } else {
         None
@@ -6789,6 +6795,7 @@ mod tests {
             h2_color: hsla(0.2, 0.8, 0.5, 1.0),
             code_color: hsla(0.3, 0.8, 0.5, 1.0),
             code_bg: hsla(0.4, 0.8, 0.5, 1.0),
+            highlight_bg: hsla(0.15, 0.9, 0.6, 0.5),
             link_color: hsla(0.5, 0.8, 0.5, 1.0),
             border_color: hsla(0.6, 0.8, 0.5, 1.0),
         };
@@ -6867,6 +6874,27 @@ mod tests {
         assert_eq!(runs_bi[1].font.weight, FontWeight::BOLD);
         assert_eq!(runs_bi[1].color, colors.strong_color);
 
+        // 3b. Highlight background color
+        let src_hi = "Normal ==marked== text";
+        let doc_hi = parse_document(src_hi);
+        let line_hi = &doc_hi.lines[0];
+        let map_hi = line_hi.to_offset_map();
+        let runs_hi = super::wysiwyg_slice_runs(
+            line_hi,
+            src_hi,
+            0..line_hi.display_len(),
+            line_hi.display_len(),
+            &map_hi,
+            None,
+            &base_font,
+            &mono_font,
+            &colors,
+        );
+        assert_eq!(runs_hi.len(), 3);
+        assert_eq!(runs_hi[0].background_color, None);
+        assert_eq!(runs_hi[1].background_color, Some(colors.highlight_bg));
+        assert_eq!(runs_hi[2].background_color, None);
+
         // 4. Blockquote italic maintains blockquote's muted color
         let src4 = "> A *quote with italic* text";
         let doc_bq = parse_document(src4);
@@ -6898,6 +6926,7 @@ mod tests {
             h2_color: hsla(0.2, 0.8, 0.5, 1.0),
             code_color: hsla(0.3, 0.8, 0.5, 1.0),
             code_bg: hsla(0.4, 0.8, 0.5, 1.0),
+            highlight_bg: hsla(0.15, 0.9, 0.6, 0.5),
             link_color: hsla(0.5, 0.8, 0.5, 1.0),
             border_color: hsla(0.6, 0.8, 0.5, 1.0),
         };
@@ -6946,6 +6975,7 @@ mod tests {
             h2_color: hsla(0.2, 0.8, 0.5, 1.0),
             code_color: hsla(0.3, 0.8, 0.5, 1.0),
             code_bg: hsla(0.4, 0.8, 0.5, 1.0),
+            highlight_bg: hsla(0.15, 0.9, 0.6, 0.5),
             link_color: hsla(0.5, 0.8, 0.5, 1.0),
             border_color: hsla(0.6, 0.8, 0.5, 1.0),
         };

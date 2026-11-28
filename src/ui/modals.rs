@@ -21,6 +21,7 @@ where
         (sec("Ctrl + I"), "Toggle Italic"),
         (sec("Ctrl + U"), "Toggle Underline"),
         (sec("Ctrl + Shift + X"), "Toggle Strikethrough"),
+        (sec("Ctrl + Shift + H"), "Toggle Highlight"),
         (sec("Ctrl + 1 – 6"), "Heading 1 – 6"),
         (sec("Ctrl + E"), "Toggle Inline Code"),
         (sec("Ctrl + K"), "Insert Link"),

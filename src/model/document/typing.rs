@@ -5,7 +5,7 @@ use super::*;
 impl DocumentTab {
     pub fn has_pending_inline_formats(&self) -> bool {
         let pf = self.pending_formats;
-        pf.bold || pf.italic || pf.underline || pf.strike || pf.code
+        pf.bold || pf.italic || pf.underline || pf.strike || pf.highlight || pf.code
     }
 
     pub fn insert_text_in_mode(&mut self, range: Range<usize>, text: &str, mode: ViewMode) {
@@ -35,6 +35,7 @@ impl DocumentTab {
                                     italic: pf.italic,
                                     underline: pf.underline,
                                     strike: pf.strike,
+                                    highlight: pf.highlight,
                                     code: pf.code,
                                 };
                                 let (open, close) = wrap_delimiters(&flags);
@@ -102,6 +103,7 @@ impl DocumentTab {
                                 InlineTagKind::Bold
                                     | InlineTagKind::Italic
                                     | InlineTagKind::Strike
+                                    | InlineTagKind::Highlight
                                     | InlineTagKind::Underline
                                     | InlineTagKind::Code
                             ) && range.start == p.close_delim.start
@@ -159,12 +161,13 @@ impl DocumentTab {
                     return;
                 }
             }
-            if pf.bold || pf.italic || pf.underline || pf.strike || pf.code {
+            if pf.bold || pf.italic || pf.underline || pf.strike || pf.highlight || pf.code {
                 let flags = FormatFlags {
                     bold: pf.bold,
                     italic: pf.italic,
                     underline: pf.underline,
                     strike: pf.strike,
+                    highlight: pf.highlight,
                     code: pf.code,
                 };
                 let lead_len = text.len() - text.trim_start().len();
@@ -177,6 +180,9 @@ impl DocumentTab {
                 let core_owned;
                 let core = if pf.strike && core.contains('~') {
                     core_owned = core.replace('~', "\\~");
+                    &core_owned
+                } else if pf.highlight && core.contains('=') {
+                    core_owned = core.replace('=', "\\=");
                     &core_owned
                 } else if (pf.bold || pf.italic) && core.contains('*') {
                     core_owned = core.replace('*', "\\*");
@@ -230,6 +236,11 @@ impl DocumentTab {
                     InlineTagKind::Strike => {
                         if text.contains('~') {
                             escaped = Some(text.replace('~', "\\~"));
+                        }
+                    }
+                    InlineTagKind::Highlight => {
+                        if text.contains('=') {
+                            escaped = Some(text.replace('=', "\\="));
                         }
                     }
                     InlineTagKind::Code if text.contains('`') => {
@@ -872,7 +883,7 @@ impl DocumentTab {
 pub(super) fn cmd_selects_placeholder(cmd: &str) -> bool {
     matches!(
         cmd,
-        "bold" | "italic" | "underline" | "strike" | "code" | "link"
+        "bold" | "italic" | "underline" | "strike" | "highlight" | "code" | "link"
     )
 }
 
@@ -881,7 +892,7 @@ pub(super) fn placeholder_prefix_len(cmd: &str) -> usize {
         "bold" => 2,
         "italic" | "code" => 1,
         "underline" => 3,
-        "strike" => 2,
+        "strike" | "highlight" => 2,
         "link" => 1,
         _ => 0,
     }
@@ -893,6 +904,7 @@ pub(super) fn placeholder_len(cmd: &str) -> usize {
         "italic" => "italic text".len(),
         "underline" => "underlined".len(),
         "strike" => "strikethrough".len(),
+        "highlight" => "highlighted".len(),
         "code" => "code".len(),
         "link" => "link".len(),
         _ => 0,

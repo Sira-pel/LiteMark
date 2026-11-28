@@ -8,6 +8,7 @@ pub struct FormatFlags {
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
+    pub highlight: bool,
     pub code: bool,
 }
 
@@ -18,23 +19,24 @@ impl FormatFlags {
             InlineTagKind::Italic => self.italic,
             InlineTagKind::Underline => self.underline,
             InlineTagKind::Strike => self.strike,
+            InlineTagKind::Highlight => self.highlight,
             InlineTagKind::Code => self.code,
             InlineTagKind::Link => false,
         }
     }
 
     pub(super) fn any_set(self) -> bool {
-        self.bold || self.italic || self.underline || self.strike || self.code
+        self.bold || self.italic || self.underline || self.strike || self.highlight || self.code
     }
 
-    /// Bold, italic, and strike markers cannot open or close next to a space.
+    /// Bold, italic, strike, and highlight markers cannot open or close next to a space.
     pub(super) fn flanking_sensitive(self) -> bool {
-        self.bold || self.italic || self.strike
+        self.bold || self.italic || self.strike || self.highlight
     }
 
     /// Flags that may stay on a space peeled out of a flanking-sensitive span.
     /// Underline tags do not depend on spaces, so the space can remain inside
-    /// `<u>` while sitting outside `*` / `**` / `~~`.
+    /// `<u>` while sitting outside `*` / `**` / `~~` / `==`.
     pub(super) fn glue(self) -> Self {
         Self {
             underline: self.underline,
@@ -46,6 +48,7 @@ impl FormatFlags {
 #[derive(Clone, Copy)]
 pub(super) enum SharedKind {
     Underline,
+    Highlight,
     Strike,
     BoldItalic,
     Bold,
@@ -56,6 +59,7 @@ pub(super) enum SharedKind {
 pub(super) fn flag_of(s: &WorkSlice, kind: SharedKind) -> bool {
     match kind {
         SharedKind::Underline => s.flags.underline,
+        SharedKind::Highlight => s.flags.highlight,
         SharedKind::Strike => s.flags.strike,
         SharedKind::BoldItalic => s.flags.bold && s.flags.italic,
         SharedKind::Bold => s.flags.bold,
@@ -67,6 +71,7 @@ pub(super) fn flag_of(s: &WorkSlice, kind: SharedKind) -> bool {
 pub(super) fn wrap_for_shared(kind: SharedKind) -> (String, String) {
     match kind {
         SharedKind::Underline => ("<u>".into(), "</u>".into()),
+        SharedKind::Highlight => ("==".into(), "==".into()),
         SharedKind::Strike => ("~~".into(), "~~".into()),
         SharedKind::BoldItalic => ("***".into(), "***".into()),
         SharedKind::Bold => ("**".into(), "**".into()),
@@ -78,6 +83,7 @@ pub(super) fn wrap_for_shared(kind: SharedKind) -> (String, String) {
 pub(super) fn clear_shared(mut flags: FormatFlags, kind: SharedKind) -> FormatFlags {
     match kind {
         SharedKind::Underline => flags.underline = false,
+        SharedKind::Highlight => flags.highlight = false,
         SharedKind::Strike => flags.strike = false,
         SharedKind::BoldItalic => {
             flags.bold = false;
@@ -95,6 +101,7 @@ pub(super) fn clear_shared(mut flags: FormatFlags, kind: SharedKind) -> FormatFl
 pub(super) fn longest_shared_flag_run(slices: &[WorkSlice]) -> Option<(SharedKind, usize, usize)> {
     let kinds = [
         SharedKind::Underline,
+        SharedKind::Highlight,
         SharedKind::Strike,
         SharedKind::BoldItalic,
         SharedKind::Bold,
@@ -132,6 +139,7 @@ pub(super) fn segment_flags(seg: &AbsStyledSegment) -> FormatFlags {
         italic: seg.italic,
         underline: seg.underline,
         strike: seg.strike,
+        highlight: seg.highlight,
         code: seg.code,
     }
 }
@@ -159,6 +167,10 @@ pub(super) fn wrap_delimiters(flags: &FormatFlags) -> (String, String) {
     if flags.underline {
         open.push_str("<u>");
         close.push_str("</u>");
+    }
+    if flags.highlight {
+        open.push_str("==");
+        close.insert_str(0, "==");
     }
     if flags.strike {
         open.push_str("~~");
@@ -425,6 +437,7 @@ pub(super) fn render_work_slices(
     }
 
     let all_underline = merged.iter().all(|s| s.flags.underline);
+    let all_highlight = merged.iter().all(|s| s.flags.highlight);
     let all_strike = merged.iter().all(|s| s.flags.strike);
     let all_code = merged.iter().all(|s| s.flags.code);
     let all_bold = merged.iter().all(|s| s.flags.bold);
@@ -438,6 +451,16 @@ pub(super) fn render_work_slices(
         let inner_str =
             render_work_slices(&inner, sel_range, offset + 3, false, include_wraps_in_sel);
         return format!("<u>{}</u>", inner_str);
+    }
+
+    if all_highlight {
+        let inner = map_work_flags(&merged, |mut f| {
+            f.highlight = false;
+            f
+        });
+        let inner_str =
+            render_work_slices(&inner, sel_range, offset + 2, false, include_wraps_in_sel);
+        return format!("=={}==", inner_str);
     }
 
     if all_strike {
@@ -464,7 +487,11 @@ pub(super) fn render_work_slices(
     if all_italic {
         let is_middle = merged.len() == 3
             && !merged.iter().any(|s| {
-                s.flags.strike || s.flags.underline || s.flags.code || slice_has_edge_ws(s)
+                s.flags.strike
+                    || s.flags.highlight
+                    || s.flags.underline
+                    || s.flags.code
+                    || slice_has_edge_ws(s)
             })
             && merged[0].flags.bold
             && !merged[1].flags.bold
@@ -510,7 +537,11 @@ pub(super) fn render_work_slices(
     if all_bold {
         let is_middle = merged.len() == 3
             && !merged.iter().any(|s| {
-                s.flags.strike || s.flags.underline || s.flags.code || slice_has_edge_ws(s)
+                s.flags.strike
+                    || s.flags.highlight
+                    || s.flags.underline
+                    || s.flags.code
+                    || slice_has_edge_ws(s)
             })
             && merged[0].flags.italic
             && !merged[1].flags.italic
@@ -551,6 +582,7 @@ pub(super) fn render_work_slices(
                 && s.flags.italic == merged[0].flags.italic
                 && s.flags.underline == merged[0].flags.underline
                 && s.flags.strike == merged[0].flags.strike
+                && s.flags.highlight == merged[0].flags.highlight
         });
         if non_code_equal {
             let inner = map_work_flags(&merged, |mut f| {
@@ -738,6 +770,11 @@ pub(super) fn alternate_wrap(flags: &FormatFlags, avoid: char) -> Option<(String
             close.insert_str(0, "</u>");
             outer = true;
         }
+        if flags.highlight {
+            open.push_str("==");
+            close.insert_str(0, "==");
+            outer = true;
+        }
         if flags.bold && flags.italic {
             open.push_str("***");
             close.insert_str(0, "***");
@@ -754,6 +791,46 @@ pub(super) fn alternate_wrap(flags: &FormatFlags, avoid: char) -> Option<(String
         if outer {
             open.push_str("~~");
             close.insert_str(0, "~~");
+            if flags.code {
+                open.push('`');
+                close.insert(0, '`');
+            }
+            return Some((open, close));
+        }
+    }
+    if avoid == '=' && flags.highlight {
+        // Highlight has no second syntax; nest it inside the other formats.
+        let mut outer = false;
+        if flags.underline {
+            open.push_str("<u>");
+            close.insert_str(0, "</u>");
+            outer = true;
+        }
+        if flags.strike {
+            open.push_str("~~");
+            close.insert_str(0, "~~");
+            outer = true;
+        }
+        if flags.bold && flags.italic {
+            open.push_str("***");
+            close.insert_str(0, "***");
+            outer = true;
+        } else if flags.bold {
+            open.push_str("**");
+            close.insert_str(0, "**");
+            outer = true;
+        } else if flags.italic {
+            open.push('*');
+            close.insert(0, '*');
+            outer = true;
+        }
+        if outer {
+            open.push_str("==");
+            close.insert_str(0, "==");
+            if flags.code {
+                open.push('`');
+                close.insert(0, '`');
+            }
             return Some((open, close));
         }
     }
@@ -873,6 +950,7 @@ pub(super) fn apply_toggle(flags: &mut FormatFlags, kind: InlineTagKind, on: boo
         InlineTagKind::Italic => flags.italic = on,
         InlineTagKind::Underline => flags.underline = on,
         InlineTagKind::Strike => flags.strike = on,
+        InlineTagKind::Highlight => flags.highlight = on,
         InlineTagKind::Code => flags.code = on,
         InlineTagKind::Link => {}
     }
@@ -897,6 +975,7 @@ pub(super) struct FlagCounts {
     italic: u16,
     underline: u16,
     strike: u16,
+    highlight: u16,
     code: u16,
 }
 
@@ -907,6 +986,7 @@ impl FlagCounts {
             InlineTagKind::Italic => &mut self.italic,
             InlineTagKind::Underline => &mut self.underline,
             InlineTagKind::Strike => &mut self.strike,
+            InlineTagKind::Highlight => &mut self.highlight,
             InlineTagKind::Code => &mut self.code,
             InlineTagKind::Link => return,
         };
@@ -923,6 +1003,7 @@ impl FlagCounts {
             italic: self.italic > 0,
             underline: self.underline > 0,
             strike: self.strike > 0,
+            highlight: self.highlight > 0,
             code: self.code > 0,
         }
     }
@@ -1189,8 +1270,12 @@ pub(super) fn extend_or_splice_span(
     if caret == 0 {
         return None;
     }
-    let has_any_armed =
-        pending.bold || pending.italic || pending.underline || pending.strike || pending.code;
+    let has_any_armed = pending.bold
+        || pending.italic
+        || pending.underline
+        || pending.strike
+        || pending.highlight
+        || pending.code;
     if !has_any_armed {
         return None;
     }
@@ -1217,6 +1302,7 @@ pub(super) fn extend_or_splice_span(
         InlineTagKind::Italic => pending.italic,
         InlineTagKind::Underline => pending.underline,
         InlineTagKind::Strike => pending.strike,
+        InlineTagKind::Highlight => pending.highlight,
         InlineTagKind::Code => pending.code,
         InlineTagKind::Link => false,
     };
@@ -1229,6 +1315,7 @@ pub(super) fn extend_or_splice_span(
             InlineTagKind::Italic,
             InlineTagKind::Underline,
             InlineTagKind::Strike,
+            InlineTagKind::Highlight,
             InlineTagKind::Code,
         ]
         .iter()
@@ -1302,6 +1389,7 @@ pub(super) fn splice_for_anchor(
         InlineTagKind::Italic => pending.italic,
         InlineTagKind::Underline => pending.underline,
         InlineTagKind::Strike => pending.strike,
+        InlineTagKind::Highlight => pending.highlight,
         InlineTagKind::Code => pending.code,
         InlineTagKind::Link => false,
     };
@@ -1310,6 +1398,7 @@ pub(super) fn splice_for_anchor(
         InlineTagKind::Italic,
         InlineTagKind::Underline,
         InlineTagKind::Strike,
+        InlineTagKind::Highlight,
         InlineTagKind::Code,
     ]
     .iter()
@@ -1378,6 +1467,7 @@ pub(super) fn splice_for_anchor(
             italic: pending.italic || in_group(InlineTagKind::Italic),
             underline: pending.underline || in_group(InlineTagKind::Underline),
             strike: pending.strike || in_group(InlineTagKind::Strike),
+            highlight: pending.highlight || in_group(InlineTagKind::Highlight),
             code: pending.code || in_group(InlineTagKind::Code),
         }
     } else {
@@ -1386,6 +1476,7 @@ pub(super) fn splice_for_anchor(
             italic: pending.italic,
             underline: pending.underline,
             strike: pending.strike,
+            highlight: pending.highlight,
             code: pending.code,
         }
     };
@@ -1412,6 +1503,7 @@ pub(super) fn splice_for_anchor(
                         italic: s.italic,
                         underline: s.underline,
                         strike: s.strike,
+                        highlight: s.highlight,
                         code: s.code,
                     },
                     is_selected: false,
@@ -1424,6 +1516,7 @@ pub(super) fn splice_for_anchor(
             italic: in_group(InlineTagKind::Italic),
             underline: in_group(InlineTagKind::Underline),
             strike: in_group(InlineTagKind::Strike),
+            highlight: in_group(InlineTagKind::Highlight),
             code: in_group(InlineTagKind::Code),
         };
         vec![StyledSlice {
@@ -1467,6 +1560,7 @@ pub(super) fn pending_formats_at(parsed: &ParsedDocument, cursor: usize) -> Acti
                 InlineTagKind::Italic => fmt.italic = true,
                 InlineTagKind::Underline => fmt.underline = true,
                 InlineTagKind::Strike => fmt.strike = true,
+                InlineTagKind::Highlight => fmt.highlight = true,
                 InlineTagKind::Code => fmt.code = true,
                 InlineTagKind::Link => {}
             }
@@ -1518,6 +1612,7 @@ pub(super) fn compute_active_formats(
                     InlineTagKind::Italic => fmt.italic = true,
                     InlineTagKind::Underline => fmt.underline = true,
                     InlineTagKind::Strike => fmt.strike = true,
+                    InlineTagKind::Highlight => fmt.highlight = true,
                     InlineTagKind::Code => fmt.code = true,
                     InlineTagKind::Link => fmt.link = true,
                 }

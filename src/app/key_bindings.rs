@@ -29,6 +29,11 @@ impl LiteMarkApp {
             window.refresh();
             cx.notify();
         }))
+        .on_action(cx.listener(|this, _: &ToggleHighlight, window, cx| {
+            this.handle_format_cmd("highlight", cx);
+            window.refresh();
+            cx.notify();
+        }))
         .on_action(cx.listener(|this, _: &Heading1, window, cx| {
             this.handle_format_cmd("h1", cx);
             window.refresh();

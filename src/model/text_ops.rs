@@ -983,6 +983,7 @@ pub fn format_replacement(cmd: &str, selected: &str, at_line_starts: &[bool]) ->
         "italic" => wrap_inline(selected, "*", "*", "italic text"),
         "underline" => wrap_inline(selected, "<u>", "</u>", "underlined"),
         "strike" => wrap_inline(selected, "~~", "~~", "strikethrough"),
+        "highlight" => wrap_inline(selected, "==", "==", "highlighted"),
         "code" => wrap_inline(selected, "`", "`", "code"),
         "h1" => heading(selected, "#"),
         "h2" => heading(selected, "##"),
@@ -1096,6 +1097,7 @@ fn strip_inline_marks(text: &str) -> String {
         .replace("<u>", "")
         .replace("</u>", "")
         .replace("~~", "")
+        .replace("==", "")
         .replace(['`', '*'], "")
 }
 

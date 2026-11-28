@@ -90,7 +90,7 @@ fn plain_inline_shortcut_matches_pulldown() {
         "only {checked} inputs exercised the shortcut"
     );
 
-    for text in ["*a*", "a_b", "x\\y", "<b>", "[l](u)", "~s~", "`c`"] {
+    for text in ["*a*", "a_b", "x\\y", "<b>", "[l](u)", "~s~", "`c`", "==h=="] {
         assert!(!is_plain_inline(text), "{text:?} must use pulldown");
     }
 }
@@ -4161,4 +4161,44 @@ fn w3_hidden_trailing_hard_break_backslash() {
     inc.apply_edit(&text, 7..8, 0);
     assert_eq!(inc, parse_document(&text));
     assert_eq!(inc.lines[0].display_text(&text), "hello");
+}
+
+#[test]
+fn highlight_inline_parsing_and_nesting() {
+    let md = "Normal ==marked== and **==both==** and ==**nested**== and [==link==](https://x.com)";
+    let doc = parse_document(md);
+    let line = &doc.lines[0];
+    assert_eq!(
+        line.display_text(md),
+        "Normal marked and both and nested and link"
+    );
+    let segs: Vec<(&str, bool, bool, bool)> = line
+        .abs_styled_segments()
+        .map(|s| (&md[s.source], s.highlight, s.bold, s.is_link))
+        .collect();
+    assert!(segs.contains(&("marked", true, false, false)), "{segs:?}");
+    assert!(segs.contains(&("both", true, true, false)), "{segs:?}");
+    assert!(segs.contains(&("nested", true, true, false)), "{segs:?}");
+    assert!(segs.contains(&("link", true, false, true)), "{segs:?}");
+
+    // Spaces inside, triple equals, escaped equals, and code spans must not highlight.
+    for plain in [
+        "a == b == c",
+        "== spaced ==",
+        "===triple===",
+        "\\==escaped==",
+        "`==in code==`",
+        "[url](https://x.com/?a==1&b==2)",
+    ] {
+        let d = parse_document(plain);
+        assert!(
+            d.lines[0].styled_segments().iter().all(|s| !s.highlight()),
+            "unexpected highlight in {plain:?}"
+        );
+    }
+
+    // Table cells support highlight.
+    let tbl = "| H1 |\n| --- |\n| ==cell== |";
+    let d = parse_document(tbl);
+    assert!(d.lines[2].styled_segments().iter().any(|s| s.highlight()));
 }

@@ -243,6 +243,7 @@ pub struct ActiveFormats {
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
+    pub highlight: bool,
     pub h1: bool,
     pub h2: bool,
     pub h3: bool,

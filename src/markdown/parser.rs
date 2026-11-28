@@ -437,6 +437,7 @@ pub const STYLE_UNDERLINE: u8 = 1 << 2;
 pub const STYLE_STRIKE: u8 = 1 << 3;
 pub const STYLE_CODE: u8 = 1 << 4;
 pub const STYLE_LINK: u8 = 1 << 5;
+pub const STYLE_HIGHLIGHT: u8 = 1 << 6;
 
 /// Compact line-relative styled segment (`12 B`, `Copy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,6 +484,11 @@ impl StyledSegment {
     }
 
     #[inline]
+    pub const fn highlight(&self) -> bool {
+        (self.flags & STYLE_HIGHLIGHT) != 0
+    }
+
+    #[inline]
     pub const fn to_abs(self, line_start: usize) -> AbsStyledSegment {
         AbsStyledSegment {
             source: self.range.to_abs(line_start),
@@ -490,6 +496,7 @@ impl StyledSegment {
             italic: self.italic(),
             underline: self.underline(),
             strike: self.strike(),
+            highlight: self.highlight(),
             code: self.code(),
             is_link: self.is_link(),
         }
@@ -504,6 +511,7 @@ pub struct AbsStyledSegment {
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
+    pub highlight: bool,
     pub code: bool,
     pub is_link: bool,
 }
@@ -515,6 +523,7 @@ pub(super) struct RawStyledSegment {
     pub(super) italic: bool,
     pub(super) underline: bool,
     pub(super) strike: bool,
+    pub(super) highlight: bool,
     pub(super) code: bool,
     pub(super) link_url: Option<Arc<str>>,
 }
@@ -526,6 +535,7 @@ impl RawStyledSegment {
             && !self.italic
             && !self.underline
             && !self.strike
+            && !self.highlight
             && !self.code
             && self.link_url.is_none()
     }
@@ -537,6 +547,7 @@ pub enum InlineTagKind {
     Italic,
     Underline,
     Strike,
+    Highlight,
     Code,
     Link,
 }
@@ -971,6 +982,9 @@ impl LineInline {
             }
             if seg.strike {
                 flags |= STYLE_STRIKE;
+            }
+            if seg.highlight {
+                flags |= STYLE_HIGHLIGHT;
             }
             if seg.code {
                 flags |= STYLE_CODE;
@@ -1910,13 +1924,25 @@ fn parse_inline_syntax_inner(
     parse_inline_with_pulldown(input, base, in_table_cell, allow_hard_break, scratch)
 }
 
-/// Text pulldown-cmark would return as one unstyled run: no byte that can
-/// open inline syntax (`*`, `_`, `~`, `` ` ``, `[`, `<`, `\`).
+/// Text pulldown-cmark and the highlight pass would return as one unstyled run:
+/// no byte that can open inline syntax (`*`, `_`, `~`, `` ` ``, `[`, `<`, `\`)
+/// and no `==` highlight delimiter.
 fn is_plain_inline(input: &str) -> bool {
-    !input
-        .as_bytes()
-        .iter()
-        .any(|&b| matches!(b, b'*' | b'_' | b'~' | b'`' | b'[' | b'<' | b'\\'))
+    let mut prev_eq = false;
+    for &b in input.as_bytes() {
+        if matches!(b, b'*' | b'_' | b'~' | b'`' | b'[' | b'<' | b'\\') {
+            return false;
+        }
+        if b == b'=' {
+            if prev_eq {
+                return false;
+            }
+            prev_eq = true;
+        } else {
+            prev_eq = false;
+        }
+    }
+    true
 }
 
 fn parse_inline_with_pulldown(
@@ -1976,6 +2002,7 @@ fn parse_inline_with_pulldown(
                                 italic: !italic_stack.is_empty(),
                                 underline: !underline_stack.is_empty(),
                                 strike: !strike_stack.is_empty(),
+                                highlight: false,
                                 code: false,
                                 link_url: link_stack.last().map(|(_, u, _)| u.clone()),
                             });
@@ -2122,6 +2149,7 @@ fn parse_inline_with_pulldown(
                         italic: !italic_stack.is_empty(),
                         underline: !underline_stack.is_empty(),
                         strike: !strike_stack.is_empty(),
+                        highlight: false,
                         code: true,
                         link_url: link_stack.last().map(|(_, u, _)| u.clone()),
                     });
@@ -2138,6 +2166,7 @@ fn parse_inline_with_pulldown(
                         italic: !italic_stack.is_empty(),
                         underline: !underline_stack.is_empty(),
                         strike: !strike_stack.is_empty(),
+                        highlight: false,
                         code: false,
                         link_url: link_stack.last().map(|(_, u, _)| u.clone()),
                     });
@@ -2169,6 +2198,7 @@ fn parse_inline_with_pulldown(
         inline_pairs,
         styled_segments,
     );
+    normalize_shared_run_pairs(inline_pairs);
 
     // Backslash escapes: the parser consumes `\X` (X an ASCII punctuation
     // character) and shows only `X`, so the backslash is hidden in the
@@ -2331,15 +2361,25 @@ fn delim_covered_fast(
     false
 }
 
-/// Delimiter runs that pulldown's emphasis matching rejected can still be
-/// what the user typed. Two rules reject valid-looking pairs: the flanking
-/// punctuation conditions (a closer after punctuation/symbol before a
-/// letter, or the mirrored opener) and the "multiple of 3" odd-match rule
-/// for runs that can both open and close. When runs were left unconsumed
-/// and a relaxed pairing (whitespace flanking only, no odd-match rule)
-/// matches them, synthesize the pair for the display: the document text
-/// stays exactly as typed, the markers are hidden, and the styled segments
-/// carry the intended formatting.
+fn find_synth_delim(bytes: &[u8]) -> Option<usize> {
+    match (
+        memchr::memchr3(b'*', b'~', b'`', bytes),
+        memchr::memchr(b'=', bytes),
+    ) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Delimiter runs that pulldown's emphasis matching rejected (or that pulldown
+/// does not parse natively, like `==highlight==`) can still be what the user
+/// typed. Two rules reject valid-looking pairs: the flanking punctuation
+/// conditions (a closer after punctuation/symbol before a letter, or the
+/// mirrored opener) and the "multiple of 3" odd-match rule for runs that can
+/// both open and close. When runs were left unconsumed and a relaxed pairing
+/// (whitespace flanking only, no odd-match rule) matches them, synthesize the
+/// pair for the display: the document text stays exactly as typed, the markers
+/// are hidden, and the styled segments carry the intended formatting.
 fn synthesize_flanking_pairs(
     input: &str,
     base: usize,
@@ -2349,8 +2389,8 @@ fn synthesize_flanking_pairs(
     styled_segments: &mut Vec<RawStyledSegment>,
 ) {
     let bytes = input.as_bytes();
-    // Most lines carry no delimiter at all: one SIMD scan skips the rest.
-    let Some(first_delim) = memchr::memchr3(b'*', b'~', b'`', bytes) else {
+    // Most lines carry no delimiter at all: SIMD scan skips the rest.
+    let Some(first_delim) = find_synth_delim(bytes) else {
         return;
     };
     // Zero-alloc pre-pass: if fewer than 2 delimiter runs are uncovered by
@@ -2359,10 +2399,13 @@ fn synthesize_flanking_pairs(
     let mut scan = first_delim;
     while scan < bytes.len() {
         let b = bytes[scan];
-        if (b == b'*' || b == b'~' || b == b'`') && !is_escaped_delim(input, scan) {
+        if (b == b'*' || b == b'~' || b == b'`' || b == b'=') && !is_escaped_delim(input, scan) {
             let start = scan;
             while scan < bytes.len() && bytes[scan] == b && !is_escaped_delim(input, scan) {
                 scan += 1;
+            }
+            if b == b'=' && scan - start != 2 {
+                continue;
             }
             let abs_run = (base + start)..(base + scan);
             if !delim_covered_fast(&abs_run, inline_pairs, extra_blocked) {
@@ -2372,8 +2415,7 @@ fn synthesize_flanking_pairs(
                 }
             }
         } else {
-            let next = memchr::memchr3(b'*', b'~', b'`', &bytes[scan + 1..]);
-            match next {
+            match find_synth_delim(&bytes[scan + 1..]) {
                 Some(rel) => scan = scan + 1 + rel,
                 None => break,
             }
@@ -2388,13 +2430,16 @@ fn synthesize_flanking_pairs(
     let mut i = first_delim;
     while i < bytes.len() {
         let b = bytes[i];
-        if (b == b'*' || b == b'~' || b == b'`') && !is_escaped_delim(input, i) {
+        if (b == b'*' || b == b'~' || b == b'`' || b == b'=') && !is_escaped_delim(input, i) {
             let start = i;
             while i < bytes.len() && bytes[i] == b && !is_escaped_delim(input, i) {
                 i += 1;
             }
+            if b == b'=' && i - start != 2 {
+                continue;
+            }
             runs.push((start, i, b));
-        } else if let Some(rel) = memchr::memchr3(b'*', b'~', b'`', &bytes[i + 1..]) {
+        } else if let Some(rel) = find_synth_delim(&bytes[i + 1..]) {
             i = i + 1 + rel;
         } else {
             break;
@@ -2454,9 +2499,10 @@ fn synthesize_flanking_pairs(
         (b'*', 2) => Some(1),
         (b'~', 2) => Some(2),
         (b'`', _) => Some(3),
+        (b'=', 2) => Some(4),
         _ => None,
     };
-    let mut closers: [Vec<usize>; 4] = Default::default();
+    let mut closers: [Vec<usize>; 5] = Default::default();
     for (k, &(s, e, ch)) in runs.iter().enumerate() {
         if input[..s]
             .chars()
@@ -2538,6 +2584,8 @@ fn synthesize_flanking_pairs(
             InlineTagKind::Code
         } else if ch == b'~' {
             InlineTagKind::Strike
+        } else if ch == b'=' {
+            InlineTagKind::Highlight
         } else if len == 2 {
             InlineTagKind::Bold
         } else {
@@ -2563,6 +2611,7 @@ fn synthesize_flanking_pairs(
             InlineTagKind::Italic => s.italic = true,
             InlineTagKind::Underline => s.underline = true,
             InlineTagKind::Strike => s.strike = true,
+            InlineTagKind::Highlight => s.highlight = true,
             InlineTagKind::Code => s.code = true,
             InlineTagKind::Link => {}
         };
@@ -2635,6 +2684,7 @@ fn synthesize_flanking_pairs(
                     && last.italic == s.italic
                     && last.underline == s.underline
                     && last.strike == s.strike
+                    && last.highlight == s.highlight
                     && last.code == s.code
                     && last.link_url == s.link_url
                 {
@@ -2651,6 +2701,7 @@ fn synthesize_flanking_pairs(
                 italic: false,
                 underline: false,
                 strike: false,
+                highlight: false,
                 code: false,
                 link_url: None,
             };

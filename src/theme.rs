@@ -131,6 +131,8 @@ pub struct Theme {
     pub bg_inset: Rgba,
     /// Fenced code blocks and unchecked task boxes in the editor.
     pub bg_code: Rgba,
+    /// Inline `==highlight==` background tint in WYSIWYG mode.
+    pub highlight_bg: Rgba,
     /// Hover fill for header-bar buttons (window controls, new tab, settings).
     pub header_hover: Rgba,
     /// Hint chip text in menus (e.g. the current font size).
@@ -187,6 +189,7 @@ impl Theme {
                 menu_shortcut_active: rgb(0xb4b4b4),
                 bg_inset: rgb(0x191919),
                 bg_code: rgb(0x292929),
+                highlight_bg: rgba(0xeab30847),
                 header_hover: rgb(0x2a2a2a),
                 menu_hint: rgb(0x6e6e6e),
                 border_block: rgb(0x4a4a4a),
@@ -237,6 +240,7 @@ impl Theme {
                 menu_shortcut_active: rgb(0x555555),
                 bg_inset: rgb(0xebebe9),
                 bg_code: rgb(0xe6e6e3),
+                highlight_bg: rgba(0xfef08a99),
                 header_hover: rgb(0xcbcbc9),
                 menu_hint: rgb(0x707070),
                 border_block: rgb(0xb0b0b0),

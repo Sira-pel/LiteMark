@@ -11,6 +11,7 @@ actions!(
         ToggleItalic,
         ToggleUnderline,
         ToggleStrikethrough,
+        ToggleHighlight,
         SaveFile,
         OpenFile,
         NewTab,
