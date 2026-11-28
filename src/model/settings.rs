@@ -46,6 +46,125 @@ pub enum ContentAlignment {
     Left,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PdfPageSize {
+    #[default]
+    A4,
+    Letter,
+    Legal,
+}
+
+impl PdfPageSize {
+    /// Portrait dimensions in PDF points (1 pt = 1/72 inch).
+    pub fn portrait_pt(self) -> (f32, f32) {
+        match self {
+            PdfPageSize::A4 => (595.28, 841.89),
+            PdfPageSize::Letter => (612.0, 792.0),
+            PdfPageSize::Legal => (612.0, 1008.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PdfOrientation {
+    #[default]
+    Portrait,
+    Landscape,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PdfMargins {
+    Narrow,
+    #[default]
+    Normal,
+    Wide,
+}
+
+impl PdfMargins {
+    /// Margin width on each edge in PDF points.
+    pub fn pt(self) -> f32 {
+        match self {
+            PdfMargins::Narrow => 36.0, // 0.5 in
+            PdfMargins::Normal => 54.0, // 0.75 in
+            PdfMargins::Wide => 72.0,   // 1.0 in
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PdfTheme {
+    #[default]
+    Light,
+    Sepia,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PdfFontSize {
+    Small,
+    #[default]
+    Normal,
+    Large,
+}
+
+impl PdfFontSize {
+    /// Body text size in PDF points.
+    pub fn body_pt(self) -> f32 {
+        match self {
+            PdfFontSize::Small => 9.5,
+            PdfFontSize::Normal => 11.0,
+            PdfFontSize::Large => 12.5,
+        }
+    }
+}
+
+fn default_pdf_page_numbers() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PdfExportSettings {
+    #[serde(default)]
+    pub page_size: PdfPageSize,
+    #[serde(default)]
+    pub orientation: PdfOrientation,
+    #[serde(default)]
+    pub margins: PdfMargins,
+    #[serde(default)]
+    pub theme: PdfTheme,
+    #[serde(default)]
+    pub font_size: PdfFontSize,
+    #[serde(default = "default_pdf_page_numbers")]
+    pub page_numbers: bool,
+    #[serde(default)]
+    pub open_after_export: bool,
+}
+
+impl Default for PdfExportSettings {
+    fn default() -> Self {
+        Self {
+            page_size: PdfPageSize::A4,
+            orientation: PdfOrientation::Portrait,
+            margins: PdfMargins::Normal,
+            theme: PdfTheme::Light,
+            font_size: PdfFontSize::Normal,
+            page_numbers: true,
+            open_after_export: false,
+        }
+    }
+}
+
+impl PdfExportSettings {
+    /// Page `(width, height)` in PDF points after applying orientation.
+    pub fn page_dimensions_pt(self) -> (f32, f32) {
+        let (w, h) = self.page_size.portrait_pt();
+        match self.orientation {
+            PdfOrientation::Portrait => (w, h),
+            PdfOrientation::Landscape => (h, w),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorSettings {
     #[serde(default)]
@@ -100,6 +219,9 @@ pub struct EditorSettings {
     /// Notes opened or switched to, newest first, without duplicates.
     #[serde(default)]
     pub recent_notes: Vec<PathBuf>,
+    /// Last-used PDF export preferences (remembered across exports).
+    #[serde(default)]
+    pub pdf_export: PdfExportSettings,
     /// Set when settings.json couldn't be read and couldn't be backed up
     /// either. Saving is refused for the session so the original file is
     /// never overwritten; the text says why.
@@ -130,6 +252,7 @@ impl Default for EditorSettings {
             open_tabs: Vec::new(),
             active_tab: None,
             recent_notes: Vec::new(),
+            pdf_export: PdfExportSettings::default(),
             save_blocked: None,
         }
     }
@@ -668,6 +791,29 @@ mod tests {
         let parsed: EditorSettings = serde_json::from_str("{}").expect("deserialize");
         assert_eq!(parsed.zoom_level, 100);
         assert!(!parsed.show_sidebar);
+        assert_eq!(parsed.pdf_export, PdfExportSettings::default());
+        assert!(parsed.pdf_export.page_numbers);
+        assert!(!parsed.pdf_export.open_after_export);
+    }
+
+    #[test]
+    fn pdf_export_settings_round_trip() {
+        let custom = PdfExportSettings {
+            page_size: PdfPageSize::Letter,
+            orientation: PdfOrientation::Landscape,
+            margins: PdfMargins::Narrow,
+            theme: PdfTheme::Sepia,
+            font_size: PdfFontSize::Large,
+            page_numbers: false,
+            open_after_export: true,
+        };
+        let s = EditorSettings {
+            pdf_export: custom,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let parsed: EditorSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.pdf_export, custom);
     }
 
     #[test]

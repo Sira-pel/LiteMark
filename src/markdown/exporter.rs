@@ -3,10 +3,10 @@ use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 use std::path::Path;
 
-/// Largest local image embedded in an HTML export.
-const MAX_EMBED_BYTES: u64 = 8 * 1024 * 1024;
+/// Largest local image embedded in an export.
+pub(crate) const MAX_EMBED_BYTES: u64 = 8 * 1024 * 1024;
 /// Most image data embedded in one export.
-const MAX_EMBED_TOTAL: u64 = 25 * 1024 * 1024;
+pub(crate) const MAX_EMBED_TOTAL: u64 = 25 * 1024 * 1024;
 
 #[cfg(test)]
 pub fn markdown_to_html_body(markdown: &str) -> String {
@@ -150,7 +150,7 @@ fn is_escaped_at(bytes: &[u8], pos: usize) -> bool {
 /// Converts paired `==text==` spans in inline text into `<mark>text</mark>`
 /// (when `emit_html` is true) or strips the `==` markers (for plain text).
 /// Skips code blocks, inline code spans, raw HTML, and image alt text.
-fn apply_highlights<'a>(
+pub(crate) fn apply_highlights<'a>(
     markdown: &str,
     events: impl Iterator<Item = (Event<'a>, Range<usize>)>,
     emit_html: bool,
@@ -346,7 +346,7 @@ fn apply_highlights<'a>(
 
 /// The width and height of the image written at `range` of `markdown`: the
 /// same rule the editor uses, so `a\|200` (an escaped bar) has none.
-fn written_size(markdown: &str, range: &Range<usize>) -> Option<(u32, Option<u32>)> {
+pub(crate) fn written_size(markdown: &str, range: &Range<usize>) -> Option<(u32, Option<u32>)> {
     let image = parse_image_line(markdown.get(range.clone())?)?;
     Some((image.width?, image.height))
 }

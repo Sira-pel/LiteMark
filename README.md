@@ -40,7 +40,7 @@ Windows and macOS builds are produced by CI and have had little hands-on testing
 - **Rich formatting:** headings, bold, italic, underline, strikethrough, highlight, links, lists, task lists, quotes, inline code, code blocks and tables.
 - **Notes sidebar:** create, rename, move and trash notes and folders. Notes live in `~/Documents/Notes` by default.
 - **Find and replace** with match case.
-- **Files:** open `.md`, `.txt` and `.pdf` (as extracted text). Export to HTML, Markdown or plain text.
+- **Files:** open `.md`, `.txt` and `.pdf` (as extracted text). Export to PDF, HTML, Markdown or plain text.
 - **Safe saving:** writes go to a temporary file and are renamed into place.
 - **Comfortable to use:** tabs, undo and redo, zoom, word wrap, dark / light / system theme and zen mode.
 
@@ -101,7 +101,7 @@ On macOS, Cmd replaces Ctrl.
 
 ## Known limitations
 
-- PDF export is not implemented, and opening a PDF shows extracted text only.
+- Opening a PDF shows extracted text only.
 - Windows and macOS builds are not code-signed or notarized.
 - Updates are not installed automatically; the app only tells you when a new release is out.
 

@@ -197,6 +197,7 @@ pub fn build_file_menu_items(
     on_export_html: impl Fn(&mut App) + 'static + Clone,
     on_export_md: impl Fn(&mut App) + 'static + Clone,
     on_export_txt: impl Fn(&mut App) + 'static + Clone,
+    on_export_pdf: impl Fn(&mut App) + 'static + Clone,
     on_view_pdf: impl Fn(&mut App) + 'static + Clone,
     on_close_tab: impl Fn(&mut App) + 'static + Clone,
 ) -> Vec<MenuItem> {
@@ -248,7 +249,10 @@ pub fn build_file_menu_items(
             let f = on_export_txt.clone();
             move |_, cx| f(cx)
         }),
-        MenuItem::disabled_action("Export as PDF", None, Some("Soon")),
+        MenuItem::action("Export as PDF…", None, None, {
+            let f = on_export_pdf.clone();
+            move |_, cx| f(cx)
+        }),
     ]);
 
     if has_pdf {
@@ -456,7 +460,7 @@ mod tests {
 
     fn file_menu(recent: Vec<MenuItem>, inline: bool) -> Vec<MenuItem> {
         let n = |_: &mut App| {};
-        build_file_menu_items(false, recent, inline, n, n, n, n, n, n, n, n, n, n, n)
+        build_file_menu_items(false, recent, inline, n, n, n, n, n, n, n, n, n, n, n, n)
     }
 
     fn labels(items: &[MenuItem]) -> Vec<&str> {
@@ -503,5 +507,16 @@ mod tests {
         let l = labels(&inline);
         let open = l.iter().position(|l| *l == "Open…").unwrap();
         assert_eq!(l[open + 2..open + 4], ["OPEN RECENT", "No recent notes"]);
+    }
+
+    #[std_test]
+    fn export_as_pdf_is_enabled_in_file_menu() {
+        let items = file_menu(Vec::new(), false);
+        let pdf_item = items
+            .iter()
+            .find(|it| it.label.as_ref() == "Export as PDF…")
+            .expect("Export as PDF… item should be present");
+        assert!(!pdf_item.disabled);
+        assert!(pdf_item.hint.is_none());
     }
 }

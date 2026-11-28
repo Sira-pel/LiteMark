@@ -1,4 +1,7 @@
 use super::primitives::{kbd_badge, render_icon};
+use crate::model::{
+    PdfExportSettings, PdfFontSize, PdfMargins, PdfOrientation, PdfPageSize, PdfTheme,
+};
 use crate::theme::Theme;
 use gpui::prelude::*;
 use gpui::*;
@@ -678,6 +681,548 @@ where
                                         .on_click(move |_, _, cx| choose(label, cx))
                                         .child(label)
                                 }),
+                        ),
+                ),
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_pdf_export_modal<FUpdate, FConfirm, FClose>(
+    note_title: String,
+    options: PdfExportSettings,
+    focus_handle: FocusHandle,
+    on_update: FUpdate,
+    on_confirm: FConfirm,
+    on_close: FClose,
+    theme: &Theme,
+) -> impl IntoElement
+where
+    FUpdate: Fn(PdfExportSettings, &mut App) + 'static + Clone,
+    FConfirm: Fn(&mut App) + 'static + Clone,
+    FClose: Fn(&mut App) + 'static + Clone,
+{
+    let close_bg = on_close.clone();
+    let close_x = on_close.clone();
+    let close_btn = on_close;
+    let confirm = on_confirm;
+
+    let segmented_row = |label: &'static str, buttons: Vec<AnyElement>| {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .w(px(96.0))
+                    .flex_shrink_0()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .p(px(2.0))
+                    .rounded(px(6.0))
+                    // Recessed track: a step darker than the modal in both themes.
+                    .bg(theme.bg_modal_header)
+                    .border_1()
+                    .border_color(theme.border_subtle)
+                    .children(buttons),
+            )
+    };
+
+    let make_seg_btn = |id: &'static str,
+                        text: &'static str,
+                        swatch: Option<u32>,
+                        active: bool,
+                        next: PdfExportSettings,
+                        on_update: FUpdate,
+                        theme: &Theme|
+     -> AnyElement {
+        // The selected option is a raised chip: a step lighter than the modal
+        // (white in light mode) with a hairline edge and full-strength text,
+        // sitting on a recessed track. Unselected options use muted text, so
+        // the choice reads clearly without competing with the Export button.
+        let dark = theme.bg_modal.r < 0.5;
+        let (active_bg, active_border) = if dark {
+            (rgb(0x3a3a3a), rgb(0x4a4a4a))
+        } else {
+            (rgb(0xffffff), theme.border_primary)
+        };
+        let hover_bg = theme.bg_hover;
+        let text_color = if active {
+            theme.text_strong
+        } else {
+            theme.text_muted
+        };
+        let swatch_border = theme.text_muted;
+        div()
+            .id(id)
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(5.0))
+            .py(px(5.0))
+            .px(px(6.0))
+            .rounded(px(4.0))
+            .text_size(px(12.0))
+            .font_weight(if active {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::NORMAL
+            })
+            .text_color(text_color)
+            .bg(if active { active_bg } else { rgba(0x00000000) })
+            .border_1()
+            .border_color(if active {
+                active_border
+            } else {
+                rgba(0x00000000)
+            })
+            .cursor_pointer()
+            .when(!active, |s| s.hover(move |h| h.bg(hover_bg)))
+            .on_click(move |_, _, cx| on_update(next, cx))
+            .when_some(swatch, |s, hex| {
+                s.child(
+                    div()
+                        .w(px(9.0))
+                        .h(px(9.0))
+                        .rounded_full()
+                        .bg(rgb(hex))
+                        .border_1()
+                        .border_color(swatch_border),
+                )
+            })
+            .child(text)
+            .into_any_element()
+    };
+
+    let page_size_row = segmented_row(
+        "Page size",
+        vec![
+            make_seg_btn(
+                "pdf-opt-a4",
+                "A4",
+                None,
+                options.page_size == PdfPageSize::A4,
+                PdfExportSettings {
+                    page_size: PdfPageSize::A4,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+            make_seg_btn(
+                "pdf-opt-letter",
+                "Letter",
+                None,
+                options.page_size == PdfPageSize::Letter,
+                PdfExportSettings {
+                    page_size: PdfPageSize::Letter,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+            make_seg_btn(
+                "pdf-opt-legal",
+                "Legal",
+                None,
+                options.page_size == PdfPageSize::Legal,
+                PdfExportSettings {
+                    page_size: PdfPageSize::Legal,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+        ],
+    );
+
+    let orientation_row = segmented_row(
+        "Orientation",
+        vec![
+            make_seg_btn(
+                "pdf-opt-portrait",
+                "Portrait",
+                None,
+                options.orientation == PdfOrientation::Portrait,
+                PdfExportSettings {
+                    orientation: PdfOrientation::Portrait,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+            make_seg_btn(
+                "pdf-opt-landscape",
+                "Landscape",
+                None,
+                options.orientation == PdfOrientation::Landscape,
+                PdfExportSettings {
+                    orientation: PdfOrientation::Landscape,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+        ],
+    );
+
+    let margins_row = segmented_row(
+        "Margins",
+        vec![
+            make_seg_btn(
+                "pdf-opt-narrow",
+                "Narrow",
+                None,
+                options.margins == PdfMargins::Narrow,
+                PdfExportSettings {
+                    margins: PdfMargins::Narrow,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+            make_seg_btn(
+                "pdf-opt-normal-m",
+                "Normal",
+                None,
+                options.margins == PdfMargins::Normal,
+                PdfExportSettings {
+                    margins: PdfMargins::Normal,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+            make_seg_btn(
+                "pdf-opt-wide",
+                "Wide",
+                None,
+                options.margins == PdfMargins::Wide,
+                PdfExportSettings {
+                    margins: PdfMargins::Wide,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+        ],
+    );
+
+    let theme_row = segmented_row(
+        "Theme",
+        vec![
+            make_seg_btn(
+                "pdf-opt-light",
+                "Light",
+                Some(0xFFFFFF),
+                options.theme == PdfTheme::Light,
+                PdfExportSettings {
+                    theme: PdfTheme::Light,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+            make_seg_btn(
+                "pdf-opt-sepia",
+                "Sepia",
+                Some(0xF8F1E3),
+                options.theme == PdfTheme::Sepia,
+                PdfExportSettings {
+                    theme: PdfTheme::Sepia,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+            make_seg_btn(
+                "pdf-opt-dark",
+                "Dark",
+                Some(0x1E1E1E),
+                options.theme == PdfTheme::Dark,
+                PdfExportSettings {
+                    theme: PdfTheme::Dark,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+        ],
+    );
+
+    let font_size_row = segmented_row(
+        "Font size",
+        vec![
+            make_seg_btn(
+                "pdf-opt-small",
+                "Small",
+                None,
+                options.font_size == PdfFontSize::Small,
+                PdfExportSettings {
+                    font_size: PdfFontSize::Small,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+            make_seg_btn(
+                "pdf-opt-normal-f",
+                "Normal",
+                None,
+                options.font_size == PdfFontSize::Normal,
+                PdfExportSettings {
+                    font_size: PdfFontSize::Normal,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+            make_seg_btn(
+                "pdf-opt-large",
+                "Large",
+                None,
+                options.font_size == PdfFontSize::Large,
+                PdfExportSettings {
+                    font_size: PdfFontSize::Large,
+                    ..options
+                },
+                on_update.clone(),
+                theme,
+            ),
+        ],
+    );
+
+    let make_check_row = |id: &'static str,
+                          label: &'static str,
+                          checked: bool,
+                          next: PdfExportSettings,
+                          on_update: FUpdate,
+                          theme: &Theme| {
+        let hover_bg = theme.bg_hover;
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(move |h| h.bg(hover_bg))
+            .on_click(move |_, _, cx| on_update(next, cx))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_primary)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .rounded(px(4.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(if checked {
+                        theme.text_hi
+                    } else {
+                        theme.bg_input
+                    })
+                    .border_1()
+                    .border_color(if checked {
+                        theme.text_hi
+                    } else {
+                        theme.text_muted
+                    })
+                    .when(checked, |s| {
+                        s.child(render_icon("check", 11.0, theme.on_primary))
+                    }),
+            )
+    };
+
+    let page_numbers_row = make_check_row(
+        "pdf-opt-page-numbers",
+        "Show page numbers",
+        options.page_numbers,
+        PdfExportSettings {
+            page_numbers: !options.page_numbers,
+            ..options
+        },
+        on_update.clone(),
+        theme,
+    );
+
+    let open_after_row = make_check_row(
+        "pdf-opt-open-after",
+        "Open PDF after export",
+        options.open_after_export,
+        PdfExportSettings {
+            open_after_export: !options.open_after_export,
+            ..options
+        },
+        on_update,
+        theme,
+    );
+
+    div()
+        .id("pdf-export-modal-backdrop")
+        .key_context("PromptModal")
+        .track_focus(&focus_handle)
+        .absolute()
+        .inset_0()
+        .bg(rgba(0x00000099))
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(16.0))
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| close_bg(cx))
+        .child(
+            div()
+                .id("pdf-export-modal-card")
+                .flex()
+                .flex_col()
+                .w(px(450.0))
+                .max_w_full()
+                .rounded(px(12.0))
+                .bg(theme.bg_modal)
+                .border_1()
+                .border_color(theme.border_surface)
+                .shadow_2xl()
+                .overflow_hidden()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(20.0))
+                        .py(px(14.0))
+                        .bg(theme.bg_modal_header)
+                        .border_b_1()
+                        .border_color(theme.border_subtle)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .min_w_0()
+                                .gap(px(8.0))
+                                .child(render_icon("printer", 16.0, theme.text_muted))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_size(px(14.0))
+                                                .text_color(theme.text_primary)
+                                                .child("Export as PDF"),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(px(11.0))
+                                                .text_color(theme.text_muted)
+                                                .child(note_title),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("pdf-export-modal-close-x")
+                                .p(px(4.0))
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .hover(|h| h.bg(theme.bg_hover))
+                                .on_click(move |_, _, cx| close_x(cx))
+                                .child(render_icon("x", 16.0, theme.text_muted)),
+                        ),
+                )
+                .child(
+                    div()
+                        .px(px(20.0))
+                        .py(px(16.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .child(page_size_row)
+                        .child(orientation_row)
+                        .child(margins_row)
+                        .child(theme_row)
+                        .child(font_size_row)
+                        .child(div().h(px(1.0)).my(px(4.0)).bg(theme.border_subtle))
+                        .child(page_numbers_row)
+                        .child(open_after_row),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .px(px(20.0))
+                        .py(px(12.0))
+                        .bg(theme.bg_modal_header)
+                        .border_t_1()
+                        .border_color(theme.border_subtle)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child("Press Enter to export"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .id("pdf-export-cancel-btn")
+                                        .px(px(14.0))
+                                        .py(px(6.0))
+                                        .rounded(px(6.0))
+                                        .cursor_pointer()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_size(px(12.0))
+                                        .bg(theme.bg_hover)
+                                        .text_color(theme.text_primary)
+                                        .hover(|h| h.bg(theme.bg_active))
+                                        .on_click(move |_, _, cx| close_btn(cx))
+                                        .child("Cancel"),
+                                )
+                                .child(
+                                    div()
+                                        .id("pdf-export-confirm-btn")
+                                        .px(px(14.0))
+                                        .py(px(6.0))
+                                        .rounded(px(6.0))
+                                        .cursor_pointer()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(px(12.0))
+                                        .bg(theme.text_hi)
+                                        .text_color(theme.on_primary)
+                                        .hover(|h| h.opacity(0.9))
+                                        .on_click(move |_, _, cx| confirm(cx))
+                                        .child("Export PDF…"),
+                                ),
                         ),
                 ),
         )

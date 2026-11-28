@@ -515,6 +515,40 @@ impl Render for LiteMarkApp {
             let on_export = on_export.clone();
             move |cx: &mut App| on_export("text", cx)
         };
+        let on_export_pdf = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_open_pdf_export_modal(cx);
+                });
+            }
+        };
+        let on_update_pdf_export = {
+            let view = view.clone();
+            move |next: crate::model::PdfExportSettings, cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_update_pdf_export_settings(next, cx);
+                });
+            }
+        };
+        let on_confirm_pdf_export = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.handle_confirm_pdf_export(cx);
+                    cx.notify();
+                });
+            }
+        };
+        let on_close_pdf_export = {
+            let view = view.clone();
+            move |cx: &mut App| {
+                let _ = view.update(cx, |this, cx| {
+                    this.show_pdf_export_modal = false;
+                    cx.notify();
+                });
+            }
+        };
 
         let on_close_active_tab = {
             let on_close_tab = on_close_tab.clone();
@@ -1134,6 +1168,7 @@ impl Render for LiteMarkApp {
                             on_export_html.clone(),
                             on_export_md.clone(),
                             on_export_txt.clone(),
+                            on_export_pdf.clone(),
                             on_view_pdf.clone(),
                             on_close_active_tab.clone(),
                         ),
@@ -1216,6 +1251,7 @@ impl Render for LiteMarkApp {
                             on_export_html.clone(),
                             on_export_md.clone(),
                             on_export_txt.clone(),
+                            on_export_pdf.clone(),
                             on_view_pdf.clone(),
                             on_close_active_tab.clone(),
                         );
@@ -1922,6 +1958,17 @@ impl Render for LiteMarkApp {
                     self.prompt_focus_handle.clone(),
                     on_close_pdf.clone(),
                     on_open_external_pdf.clone(),
+                    &theme,
+                ))
+            })
+            .when(self.show_pdf_export_modal, |s| {
+                s.child(render_pdf_export_modal(
+                    active_tab_title.clone(),
+                    self.settings.pdf_export,
+                    self.prompt_focus_handle.clone(),
+                    on_update_pdf_export.clone(),
+                    on_confirm_pdf_export.clone(),
+                    on_close_pdf_export.clone(),
                     &theme,
                 ))
             })

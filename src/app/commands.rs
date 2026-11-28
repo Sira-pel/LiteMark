@@ -120,6 +120,7 @@ impl LiteMarkApp {
             && !self.show_about_modal
             && !self.show_shortcuts_modal
             && !self.show_pdf_modal
+            && !self.show_pdf_export_modal
             && !self.show_find_replace
             && !self.zen_mode
         {
@@ -132,6 +133,8 @@ impl LiteMarkApp {
             self.show_about_modal = false;
         } else if self.show_shortcuts_modal {
             self.show_shortcuts_modal = false;
+        } else if self.show_pdf_export_modal {
+            self.show_pdf_export_modal = false;
         } else if self.show_pdf_modal {
             self.show_pdf_modal = false;
         } else if self.show_find_replace {
@@ -631,6 +634,132 @@ impl LiteMarkApp {
                         ),
                         cx,
                     ),
+                    Err(err) => this.show_file_error(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn handle_open_pdf_export_modal(&mut self, cx: &mut Context<Self>) {
+        if let Some(message) = file_dialog_error() {
+            self.show_error(message);
+            return;
+        }
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        if tab.deferred_load {
+            return;
+        }
+        if self.pdf_exporting {
+            self.show_toast("Still exporting a PDF…", cx);
+            return;
+        }
+        self.open_menu = None;
+        self.menu_selected_ix = None;
+        self.menu_open_submenu_ix = None;
+        self.show_pdf_export_modal = true;
+        self.prompt_selected_ix = 0;
+        cx.notify();
+    }
+
+    pub fn handle_update_pdf_export_settings(
+        &mut self,
+        next: crate::model::PdfExportSettings,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.pdf_export != next {
+            self.settings.pdf_export = next;
+            self.save_settings();
+            cx.notify();
+        }
+    }
+
+    pub fn handle_confirm_pdf_export(&mut self, cx: &mut Context<Self>) {
+        self.show_pdf_export_modal = false;
+        if let Some(message) = file_dialog_error() {
+            self.show_error(message);
+            return;
+        }
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        if tab.deferred_load {
+            return;
+        }
+        if self.pdf_exporting {
+            self.show_toast("Still exporting a PDF…", cx);
+            return;
+        }
+        let title = tab.title.clone();
+        let content = tab.content.clone();
+        let file_type = tab.file_type;
+        let base_dir = tab
+            .file_path
+            .as_deref()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf);
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from);
+        let scope = export_scope(
+            base_dir.as_deref(),
+            &self.workspace.folder_path,
+            home.as_deref(),
+        );
+        let stem = export_stem(&title);
+        let default_name = format!("{stem}.pdf");
+        let Some(dest) = pick_save_file(&default_name, "pdf") else {
+            return;
+        };
+
+        let pdf_settings = self.settings.pdf_export;
+        self.pdf_exporting = true;
+        let export_toast_epoch = {
+            self.show_toast("Exporting PDF…", cx);
+            self.toast_epoch
+        };
+
+        let task = cx.background_executor().spawn({
+            let dest = dest.clone();
+            async move {
+                let output = crate::markdown::export_to_pdf(
+                    &title,
+                    &content,
+                    file_type,
+                    pdf_settings,
+                    base_dir.as_deref(),
+                    scope.as_deref(),
+                )?;
+                crate::services::fs_service::atomic_save_bytes(&dest, &output.bytes)
+                    .map_err(|err| format!("Couldn't export PDF: {err}"))?;
+                Ok::<bool, String>(output.truncated)
+            }
+        });
+
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.pdf_exporting = false;
+                if this.toast_epoch == export_toast_epoch {
+                    this.saved_toast = None;
+                }
+                match result {
+                    Ok(truncated) => {
+                        let name = dest.file_name().unwrap_or_default().to_string_lossy();
+                        let msg = if truncated {
+                            format!("Exported to {name} (capped at 2,000 pages)")
+                        } else {
+                            format!("Exported to {name}")
+                        };
+                        this.show_toast(msg, cx);
+                        if pdf_settings.open_after_export {
+                            cx.open_with_system(&dest);
+                        }
+                    }
                     Err(err) => this.show_file_error(err),
                 }
                 cx.notify();

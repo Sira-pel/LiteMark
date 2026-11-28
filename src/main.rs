@@ -114,6 +114,26 @@ const COMPRESSED_FONTS: &[&[u8]] = &[
 
 include!(concat!(env!("OUT_DIR"), "/font_lengths.rs"));
 
+/// Index into [`COMPRESSED_FONTS`] for the bundled Ubuntu / Ubuntu Mono faces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum BundledFont {
+    Regular = 0,
+    Italic = 1,
+    Medium = 2,
+    Bold = 3,
+    BoldItalic = 4,
+    MonoRegular = 5,
+    MonoItalic = 6,
+    MonoBold = 7,
+    MonoBoldItalic = 8,
+}
+
+/// Decompress one bundled TrueType font on demand (used by PDF export).
+pub(crate) fn load_bundled_font_bytes(face: BundledFont) -> Option<Vec<u8>> {
+    let idx = face as usize;
+    decompress_bundled_font(COMPRESSED_FONTS[idx], BUNDLED_FONT_LENS[idx]).map(|c| c.into_owned())
+}
+
 fn decompress_bundled_font(
     compressed: &[u8],
     uncompressed_len: usize,

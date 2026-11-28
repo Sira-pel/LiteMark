@@ -409,10 +409,10 @@ fn rename_would_split(meta: &fs::Metadata) -> bool {
 /// split a hard link, lose its owner, or isn't possible in its folder. The
 /// text is written before the length is cut, so the file is never empty
 /// while the write runs.
-fn write_in_place(mut file: fs::File, content: &str) -> io::Result<()> {
+fn write_in_place_bytes(mut file: fs::File, content: &[u8]) -> io::Result<()> {
     use std::io::{Seek, SeekFrom};
     file.seek(SeekFrom::Start(0))?;
-    file.write_all(content.as_bytes())?;
+    file.write_all(content)?;
     file.set_len(content.len() as u64)?;
     file.sync_all()
 }
@@ -424,6 +424,11 @@ fn write_in_place(mut file: fs::File, content: &str) -> io::Result<()> {
 /// instead. A file the user may not write is refused, as a direct write
 /// would be, rather than replaced.
 pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
+    atomic_save_bytes(path, content.as_bytes())
+}
+
+/// Binary counterpart of [`atomic_save`], used for exports such as PDF.
+pub fn atomic_save_bytes(path: &Path, content: &[u8]) -> io::Result<()> {
     let target = resolve_symlink_chain(path)?;
     let existing = match fs::metadata(&target) {
         Ok(meta) => Some(meta),
@@ -439,14 +444,14 @@ pub fn atomic_save(path: &Path, content: &str) -> io::Result<()> {
     if let (Some(meta), Some(file)) = (&existing, in_place.as_ref()) {
         if rename_would_split(meta) {
             let file = file.try_clone()?;
-            return write_in_place(file, content);
+            return write_in_place_bytes(file, content);
         }
     }
-    let temp_path = match write_temp(&target, content) {
+    let temp_path = match write_temp_bytes(&target, content) {
         Ok(temp_path) => temp_path,
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
             return match in_place {
-                Some(file) => write_in_place(file, content),
+                Some(file) => write_in_place_bytes(file, content),
                 None => Err(err),
             };
         }

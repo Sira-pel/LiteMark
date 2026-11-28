@@ -562,7 +562,7 @@ impl LiteMarkApp {
             self.prompt_modal_data(prompt).2.len()
         } else if self.show_pdf_modal || self.sidebar_menu.is_some() {
             2
-        } else if self.show_about_modal || self.show_shortcuts_modal {
+        } else if self.show_about_modal || self.show_shortcuts_modal || self.show_pdf_export_modal {
             1
         } else {
             0
