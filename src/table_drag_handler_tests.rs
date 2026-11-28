@@ -649,7 +649,10 @@ fn simulated_mouse_drag_reorders_a_row() {
     cx.run_until_parked();
     let t = view.read_with(&cx, |a, _| a.editor_paint.borrow().tables[0].clone());
     let pill = crate::ui::table_chrome::row_pill_bounds(t.rows[1].bounds);
-    let grip = point(pill.left() + pill.size.width * 0.25, pill.top() + pill.size.height * 0.5);
+    let grip = point(
+        pill.left() + pill.size.width * 0.25,
+        pill.top() + pill.size.height * 0.5,
+    );
     let r3 = t.rows[3].bounds;
     let target = point(r3.left() + px(100.0), r3.top() + r3.size.height * 0.75);
     cx.simulate_mouse_move(grip, None, Modifiers::default());
@@ -661,12 +664,15 @@ fn simulated_mouse_drag_reorders_a_row() {
     });
     cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
     let (c, _) = content_and_caret(&view, &cx);
-    assert_eq!(c, "| A | B |
+    assert_eq!(
+        c,
+        "| A | B |
 | --- | --- |
 | g | h |
 | i | j |
 | d | e |
-");
+"
+    );
 }
 
 #[std_test]
@@ -681,7 +687,10 @@ fn vertical_drag_in_the_margin_reorders_a_row() {
     cx.run_until_parked();
     let t = view.read_with(&cx, |a, _| a.editor_paint.borrow().tables[0].clone());
     let pill = crate::ui::table_chrome::row_pill_bounds(t.rows[1].bounds);
-    let grip = point(pill.left() + pill.size.width * 0.25, pill.top() + pill.size.height * 0.5);
+    let grip = point(
+        pill.left() + pill.size.width * 0.25,
+        pill.top() + pill.size.height * 0.5,
+    );
     // Straight down, never entering the table's x range.
     let r3 = t.rows[3].bounds;
     let target = point(grip.x, r3.top() + r3.size.height * 0.75);
@@ -694,12 +703,15 @@ fn vertical_drag_in_the_margin_reorders_a_row() {
     });
     cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
     let (c, _) = content_and_caret(&view, &cx);
-    assert_eq!(c, "| A | B |
+    assert_eq!(
+        c,
+        "| A | B |
 | --- | --- |
 | g | h |
 | i | j |
 | d | e |
-");
+"
+    );
 }
 
 #[std_test]
@@ -712,7 +724,10 @@ fn horizontal_drag_above_the_table_reorders_a_column() {
     cx.run_until_parked();
     let t = view.read_with(&cx, |a, _| a.editor_paint.borrow().tables[0].clone());
     let pill = column_pill_bounds(t.columns[0].header_bounds);
-    let grip = point(pill.left() + pill.size.width * 0.15, pill.top() + pill.size.height * 0.5);
+    let grip = point(
+        pill.left() + pill.size.width * 0.15,
+        pill.top() + pill.size.height * 0.5,
+    );
     // Straight sideways above the table, never entering its y range.
     let c2 = t.columns[2].header_bounds;
     let target = point(c2.left() + c2.size.width * 0.75, grip.y);
@@ -725,8 +740,11 @@ fn horizontal_drag_above_the_table_reorders_a_column() {
     });
     cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
     let (c, _) = content_and_caret(&view, &cx);
-    assert_eq!(c, "| B | C | A |
+    assert_eq!(
+        c,
+        "| B | C | A |
 | --- | --- | --- |
 | 2 | 3 | 1 |
-");
+"
+    );
 }
