@@ -550,7 +550,12 @@ impl LayoutEngine {
         fonts: &mut FontBook,
     ) {
         let lines = self.wrap_inline_spans(spans, width, font_size, line_mult, color, fonts);
-        for line in &lines {
+        self.emit_lines(&lines, left, width);
+    }
+
+    /// Emit already-wrapped lines top to bottom, breaking pages as needed.
+    fn emit_lines(&mut self, lines: &[WrappedLine], left: f32, width: f32) {
+        for line in lines {
             if !self.ensure_space(line.height) {
                 return;
             }
@@ -747,12 +752,37 @@ impl LayoutEngine {
         };
         let ascent = fonts.ascent(FontRole::Regular, self.body_pt);
         let line_h = self.body_pt * 1.52;
+        let inner_w = (width - indent).max(50.0);
+        let para_color = if in_quote {
+            self.palette.quote_text
+        } else {
+            self.palette.text
+        };
 
         for (idx, item) in items.iter().enumerate() {
             if self.truncated {
                 return;
             }
-            if !self.ensure_space(line_h) {
+            // Wrap a leading paragraph up front so the marker is only drawn
+            // where its first line also fits, never orphaned on the page before.
+            let first_para_lines = match item.blocks.first() {
+                Some(PdfBlock::Paragraph(spans)) => Some(self.wrap_inline_spans(
+                    spans,
+                    inner_w,
+                    self.body_pt,
+                    1.52,
+                    para_color,
+                    fonts,
+                )),
+                _ => None,
+            };
+            let first_h = match (&first_para_lines, item.blocks.first()) {
+                (Some(lines), _) => lines.first().map_or(line_h, |l| l.height.max(line_h)),
+                (None, None) => line_h,
+                // Room for the start of a code block, table, quote, etc.
+                (None, Some(_)) => (self.body_pt * 3.2).max(line_h),
+            };
+            if !self.ensure_space(first_h) {
                 return;
             }
             let item_y = self.y;
@@ -809,7 +839,6 @@ impl LayoutEngine {
                 }
             }
 
-            let inner_w = (width - indent).max(50.0);
             if item.blocks.is_empty() {
                 self.y += line_h;
             } else {
@@ -819,19 +848,22 @@ impl LayoutEngine {
                         return;
                     }
                     match child {
+                        PdfBlock::Paragraph(_) if bi == 0 && first_para_lines.is_some() => {
+                            if let Some(lines) = &first_para_lines {
+                                self.emit_lines(lines, left + indent, inner_w);
+                            }
+                            if bi + 1 < item.blocks.len() {
+                                self.add_gap(self.body_pt * 0.35);
+                            }
+                        }
                         PdfBlock::Paragraph(spans) => {
-                            let color = if in_quote {
-                                self.palette.quote_text
-                            } else {
-                                self.palette.text
-                            };
                             self.layout_paragraph(
                                 spans,
                                 left + indent,
                                 inner_w,
                                 self.body_pt,
                                 1.52,
-                                color,
+                                para_color,
                                 fonts,
                             );
                             if bi + 1 < item.blocks.len() {
@@ -1002,34 +1034,99 @@ impl LayoutEngine {
             self.y += header_h;
         }
 
+        // Starts a new page and repeats the header row on it.
+        let table_page_break = |this: &mut Self| -> bool {
+            if !this.new_page() {
+                return false;
+            }
+            if !header.is_empty() {
+                this.emit_table_row(
+                    &wrapped_header,
+                    &col_widths,
+                    alignments,
+                    left,
+                    header_h,
+                    pad_x,
+                    pad_y,
+                    Some(this.palette.table_header_bg),
+                );
+                this.y += header_h;
+            }
+            true
+        };
+        let header_reserve = if header.is_empty() { 0.0 } else { header_h };
+
         // Emit body rows, repeating the header row whenever a page break occurs.
         for (row_idx, (cells, row_h)) in wrapped_rows.iter().enumerate() {
             if self.truncated {
                 return;
-            }
-            if !self.at_page_top() && self.y + *row_h > self.content_bottom {
-                if !self.new_page() {
-                    return;
-                }
-                if !header.is_empty() {
-                    self.emit_table_row(
-                        &wrapped_header,
-                        &col_widths,
-                        alignments,
-                        left,
-                        header_h,
-                        pad_x,
-                        pad_y,
-                        Some(self.palette.table_header_bg),
-                    );
-                    self.y += header_h;
-                }
             }
             let bg = if row_idx % 2 == 1 {
                 Some(self.palette.table_stripe_bg)
             } else {
                 None
             };
+
+            // A row taller than a whole page (below the repeated header) is
+            // split line by line across pages instead of running off the bottom.
+            if *row_h > self.content_height() - header_reserve {
+                let mut rest: Vec<&[WrappedLine]> = cells.iter().map(Vec::as_slice).collect();
+                let mut fresh_page = false;
+                while rest.iter().any(|lines| !lines.is_empty()) {
+                    if self.truncated {
+                        return;
+                    }
+                    let avail = self.content_bottom - self.y - 2.0 * pad_y;
+                    let mut chunk: Vec<Vec<WrappedLine>> = Vec::with_capacity(rest.len());
+                    for lines in rest.iter_mut() {
+                        let mut used = 0.0f32;
+                        let mut take = 0usize;
+                        for line in lines.iter() {
+                            if used + line.height > avail && !(fresh_page && take == 0) {
+                                break;
+                            }
+                            used += line.height;
+                            take += 1;
+                        }
+                        chunk.push(lines[..take].to_vec());
+                        *lines = &lines[take..];
+                    }
+                    if chunk.iter().all(Vec::is_empty) {
+                        // Nothing fits in what's left of this page.
+                        if !table_page_break(self) {
+                            return;
+                        }
+                        fresh_page = true;
+                        continue;
+                    }
+                    let chunk_h = table_row_height(&chunk, cell_pt, pad_y);
+                    self.emit_table_row(
+                        &chunk,
+                        &col_widths,
+                        alignments,
+                        left,
+                        chunk_h,
+                        pad_x,
+                        pad_y,
+                        bg,
+                    );
+                    self.y += chunk_h;
+                    if rest.iter().any(|lines| !lines.is_empty()) {
+                        if !table_page_break(self) {
+                            return;
+                        }
+                        fresh_page = true;
+                    }
+                }
+                continue;
+            }
+
+            if !self.at_page_top()
+                && self.y + *row_h > self.content_bottom
+                && !table_page_break(self)
+            {
+                return;
+            }
             self.emit_table_row(
                 cells,
                 &col_widths,
@@ -1407,9 +1504,22 @@ impl LayoutEngine {
             } else {
                 base_font_size
             };
-            let pad = if style.code { 4.4 } else { 0.0 };
-            fonts.measure_width(text, role, sz) + pad
+            fonts.measure_width(text, role, sz)
         };
+
+        // Inline code is drawn with 2.2pt of padding on each side once per
+        // coalesced segment, so only a piece that starts a new code segment
+        // on the line pays for it.
+        const CODE_PAD: f32 = 4.4;
+        let segment_pad = |line: &[LineItem], style: &InlineStyle| -> f32 {
+            let continues = matches!(line.last(), Some(LineItem::Text(_, last)) if last == style);
+            if style.code && !continues {
+                CODE_PAD
+            } else {
+                0.0
+            }
+        };
+        let fresh_pad = |style: &InlineStyle| if style.code { CODE_PAD } else { 0.0 };
 
         let push_to_line = |line: &mut Vec<LineItem>, text: &str, style: &InlineStyle| {
             if text.is_empty() {
@@ -1451,7 +1561,7 @@ impl LayoutEngine {
                     if cur_line.is_empty() && !keep_leading_space {
                         continue;
                     }
-                    let w = measure_piece(&text, &style, fonts);
+                    let w = measure_piece(&text, &style, fonts) + segment_pad(&cur_line, &style);
                     if cur_w + w <= max_w {
                         push_to_line(&mut cur_line, &text, &style);
                         cur_w += w;
@@ -1497,11 +1607,14 @@ impl LayoutEngine {
                     }
                 }
                 Token::Piece { text, style } => {
-                    let w = measure_piece(&text, &style, fonts);
+                    let text_w = measure_piece(&text, &style, fonts);
+                    let w = text_w + segment_pad(&cur_line, &style);
+                    // Width when the piece starts a fresh line instead.
+                    let w_alone = text_w + fresh_pad(&style);
                     if cur_w + w <= max_w {
                         push_to_line(&mut cur_line, &text, &style);
                         cur_w += w;
-                    } else if w <= max_w && !cur_line.is_empty() {
+                    } else if w_alone <= max_w && !cur_line.is_empty() {
                         // Trim trailing space on wrapped line.
                         trim_line_trailing_space(&mut cur_line);
                         if !cur_line.is_empty() {
@@ -1509,7 +1622,7 @@ impl LayoutEngine {
                         }
                         keep_leading_space = false;
                         push_to_line(&mut cur_line, &text, &style);
-                        cur_w = w;
+                        cur_w = w_alone;
                     } else {
                         // Word itself exceeds `max_w`: split cleanly on grapheme boundaries.
                         if !cur_line.is_empty() {
@@ -1521,14 +1634,14 @@ impl LayoutEngine {
                         }
                         keep_leading_space = false;
                         let mut chunk = String::new();
-                        let mut chunk_w = 0.0f32;
+                        let mut chunk_w = fresh_pad(&style);
                         for g in text.graphemes(true) {
                             let gw = measure_piece(g, &style, fonts);
                             if !chunk.is_empty() && chunk_w + gw > max_w {
                                 push_to_line(&mut cur_line, &chunk, &style);
                                 raw_lines.push(std::mem::take(&mut cur_line));
                                 chunk.clear();
-                                chunk_w = 0.0;
+                                chunk_w = fresh_pad(&style);
                             }
                             chunk.push_str(g);
                             chunk_w += gw;
@@ -1948,4 +2061,111 @@ fn distribute_column_widths(desired: &[f32], total_width: f32) -> Vec<f32> {
         }
     }
     clamped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::model::build_document_model;
+    use super::*;
+    use crate::model::FileType;
+
+    fn lay_out(md: &str) -> LaidOutDocument {
+        let mut fonts = FontBook::new().unwrap();
+        let doc = build_document_model(md, FileType::Markdown, None, None);
+        layout_document(&doc, PdfExportSettings::default(), &mut fonts)
+    }
+
+    fn page_texts(page: &LayoutPage) -> Vec<(&str, f32)> {
+        page.cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text(t) => Some((t.run.text.as_str(), t.baseline_y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn table_row_taller_than_a_page_is_split_across_pages() {
+        let long_cell = (0..4000)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let md = format!("| Head | Other |\n| --- | --- |\n| {long_cell} | x |\n| after | y |\n");
+        let out = lay_out(&md);
+        assert!(out.pages.len() >= 2, "row should span pages");
+        for (p, page) in out.pages.iter().enumerate() {
+            for (text, baseline) in page_texts(page) {
+                assert!(
+                    baseline <= out.page_h - out.margin + 1.0,
+                    "page {p}: {text:?} drawn below the content area at {baseline}"
+                );
+            }
+        }
+        let all: String = out
+            .pages
+            .iter()
+            .flat_map(|p| page_texts(p).into_iter().map(|(t, _)| t.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            all.contains("w3999") && all.contains("after"),
+            "content lost"
+        );
+        // The header repeats on the continuation page.
+        assert!(page_texts(&out.pages[1])
+            .iter()
+            .any(|(t, _)| t.contains("Head")));
+    }
+
+    #[test]
+    fn list_marker_stays_on_the_page_of_its_first_line() {
+        for filler in 25..70 {
+            let mut md = String::new();
+            for i in 0..filler {
+                md.push_str(&format!("Filler paragraph number {i}.\n\n"));
+            }
+            // A code block as the first block needs more room than one text line.
+            md.push_str("- ```\n  bulletitem\n  ```\n");
+            let out = lay_out(&md);
+            for page in &out.pages {
+                let texts = page_texts(page);
+                if texts.iter().any(|(t, _)| t.contains('\u{2022}')) {
+                    assert!(
+                        texts.iter().any(|(t, _)| t.contains("bulletitem")),
+                        "bullet orphaned with {filler} filler paragraphs"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inline_code_wraps_by_drawn_width() {
+        let words = (0..400).map(|_| "abc").collect::<Vec<_>>().join(" ");
+        let mut fonts = FontBook::new().unwrap();
+        let doc = build_document_model(&format!("`{words}`"), FileType::Markdown, None, None);
+        let settings = PdfExportSettings::default();
+        let out = layout_document(&doc, settings, &mut fonts);
+        let max_w = out.page_w - 2.0 * out.margin;
+        // Each drawn code background is one line's segment: it must fit, and
+        // all but the last line should be close to full (no early wrapping).
+        let widths: Vec<f32> = out.pages[0]
+            .cmds
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Rect(r) if r.fill == Some(out.palette.inline_code_bg) => Some(r.w),
+                _ => None,
+            })
+            .collect();
+        assert!(widths.len() > 2);
+        let word_w = fonts.measure_width("abc ", FontRole::MonoRegular, out.body_pt * 0.88);
+        for w in &widths[..widths.len() - 1] {
+            assert!(*w <= max_w + 0.5, "code line overflows: {w} > {max_w}");
+            assert!(
+                *w > max_w - word_w - 1.0,
+                "code line wrapped early: {w} of {max_w}"
+            );
+        }
+    }
 }

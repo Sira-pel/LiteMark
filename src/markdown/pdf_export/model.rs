@@ -669,18 +669,15 @@ fn build_markdown_model(
 
             Event::Text(text) => {
                 if !text.is_empty() {
-                    if !text.trim().is_empty() {
-                        if !standalone_images_in_para.is_empty() {
-                            demote_standalone_images(
-                                &mut standalone_images_in_para,
-                                &mut inline_buf,
-                            );
-                        }
-                        para_has_non_image_content = true;
-                        push_inline(&mut inline_buf, &text, &style);
-                    } else if standalone_images_in_para.is_empty() {
-                        push_inline(&mut inline_buf, &text, &style);
+                    // Pending standalone images go first so spaces stay in
+                    // source order (`![a](x) ![b](y)` keeps the gap between).
+                    if !standalone_images_in_para.is_empty() {
+                        demote_standalone_images(&mut standalone_images_in_para, &mut inline_buf);
                     }
+                    if !text.trim().is_empty() {
+                        para_has_non_image_content = true;
+                    }
+                    push_inline(&mut inline_buf, &text, &style);
                 }
             }
             Event::Code(code) => {
@@ -693,9 +690,15 @@ fn build_markdown_model(
                 para_has_non_image_content = true;
             }
             Event::SoftBreak => {
+                if !standalone_images_in_para.is_empty() {
+                    demote_standalone_images(&mut standalone_images_in_para, &mut inline_buf);
+                }
                 push_inline(&mut inline_buf, " ", &style);
             }
             Event::HardBreak => {
+                if !standalone_images_in_para.is_empty() {
+                    demote_standalone_images(&mut standalone_images_in_para, &mut inline_buf);
+                }
                 push_inline(&mut inline_buf, "\n", &style);
                 para_has_non_image_content = true;
             }
@@ -881,4 +884,36 @@ fn decode_to_krilla_image(ext: &str, bytes: Vec<u8>) -> Option<(KrillaImage, u32
         .ok()?;
     let img = KrillaImage::from_png(png_bytes.into(), true).ok()?;
     Some((img, w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paragraph_text(md: &str) -> String {
+        let doc = build_markdown_model(md, None, None);
+        match doc.blocks.as_slice() {
+            [PdfBlock::Paragraph(spans)] => spans.iter().map(|s| s.text.as_str()).collect(),
+            other => panic!("expected one paragraph, got {} blocks", other.len()),
+        }
+    }
+
+    #[test]
+    fn spaces_between_images_stay_in_order() {
+        assert_eq!(
+            paragraph_text("![a](x.png) ![b](y.png)"),
+            "[Image: a] [Image: b]"
+        );
+        assert_eq!(
+            paragraph_text("![a](x.png)\n![b](y.png)"),
+            "[Image: a] [Image: b]"
+        );
+        assert_eq!(paragraph_text("![a](x.png) `code`"), "[Image: a] code");
+    }
+
+    #[test]
+    fn a_lone_image_is_still_a_block() {
+        let doc = build_markdown_model("![a](x.png)", None, None);
+        assert!(matches!(doc.blocks.as_slice(), [PdfBlock::Image(_)]));
+    }
 }

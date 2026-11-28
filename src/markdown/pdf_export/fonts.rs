@@ -4,7 +4,7 @@
 use crate::{load_bundled_font_bytes, BundledFont};
 use krilla::text::{Font as KrillaFont, GlyphId, KrillaGlyph};
 use rustybuzz::{Direction, UnicodeBuffer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Logical font style requested by the PDF layout engine.
@@ -140,6 +140,9 @@ pub(crate) struct FontBook {
     system_loaded: HashMap<fontdb::ID, Option<usize>>,
     /// Cached face index for `(is_mono, is_bold, is_italic, ch)` fallback queries.
     char_fallback: HashMap<(bool, bool, bool, char), Option<usize>>,
+    /// Characters no installed font covers. Every style probes the same set
+    /// of system faces, so one miss means a miss for all styles.
+    uncovered: HashSet<char>,
     /// Ordered candidate system face IDs grouped by `(is_mono, is_bold, is_italic)` priority.
     system_candidates: HashMap<(bool, bool, bool), Vec<fontdb::ID>>,
     /// Shape plans reused across runs, keyed by `(face_idx, is_rtl, script)`.
@@ -188,6 +191,7 @@ impl FontBook {
             system_db: None,
             system_loaded: HashMap::new(),
             char_fallback: HashMap::new(),
+            uncovered: HashSet::new(),
             system_candidates: HashMap::new(),
             plans: HashMap::new(),
             width_cache: HashMap::new(),
@@ -328,7 +332,13 @@ impl FontBook {
             return cached.unwrap_or(primary);
         }
 
+        if self.uncovered.contains(&ch) {
+            return primary;
+        }
         let found = self.find_system_fallback(ch, role);
+        if found.is_none() {
+            self.uncovered.insert(ch);
+        }
         self.char_fallback.insert(key, found);
         found.unwrap_or(primary)
     }
@@ -400,7 +410,13 @@ impl FontBook {
                 ttf_parser::Face::parse(data, index)
                     .ok()
                     .is_some_and(|f| f.glyph_index(ch).is_some_and(|g| g.0 != 0))
-            })?;
+            });
+            let Some(covers) = covers else {
+                // Unreadable font file: skip it for good rather than ending
+                // the search (and wrongly treating `ch` as uncovered).
+                self.system_loaded.insert(id, None);
+                continue;
+            };
             if !covers {
                 continue;
             }
