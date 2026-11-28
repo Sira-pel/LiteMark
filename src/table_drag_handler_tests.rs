@@ -636,3 +636,68 @@ fn handle_table_edit_action_edits_when_press_is_not_held() {
     let (after, _) = content_and_caret(&view, &cx);
     assert_ne!(after, TABLE);
 }
+
+#[std_test]
+fn simulated_mouse_drag_reorders_a_row() {
+    let content = "| A | B |
+| --- | --- |
+| d | e |
+| g | h |
+| i | j |
+";
+    let (view, mut cx) = harness(content);
+    cx.run_until_parked();
+    let t = view.read_with(&cx, |a, _| a.editor_paint.borrow().tables[0].clone());
+    let pill = crate::ui::table_chrome::row_pill_bounds(t.rows[1].bounds);
+    let grip = point(pill.left() + pill.size.width * 0.25, pill.top() + pill.size.height * 0.5);
+    let r3 = t.rows[3].bounds;
+    let target = point(r3.left() + px(100.0), r3.top() + r3.size.height * 0.75);
+    cx.simulate_mouse_move(grip, None, Modifiers::default());
+    cx.simulate_mouse_down(grip, MouseButton::Left, Modifiers::default());
+    cx.simulate_event(MouseMoveEvent {
+        position: target,
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    });
+    cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+    let (c, _) = content_and_caret(&view, &cx);
+    assert_eq!(c, "| A | B |
+| --- | --- |
+| g | h |
+| i | j |
+| d | e |
+");
+}
+
+#[std_test]
+fn vertical_drag_in_the_margin_reorders_a_row() {
+    let content = "| A | B |
+| --- | --- |
+| d | e |
+| g | h |
+| i | j |
+";
+    let (view, mut cx) = harness(content);
+    cx.run_until_parked();
+    let t = view.read_with(&cx, |a, _| a.editor_paint.borrow().tables[0].clone());
+    let pill = crate::ui::table_chrome::row_pill_bounds(t.rows[1].bounds);
+    let grip = point(pill.left() + pill.size.width * 0.25, pill.top() + pill.size.height * 0.5);
+    // Straight down, never entering the table's x range.
+    let r3 = t.rows[3].bounds;
+    let target = point(grip.x, r3.top() + r3.size.height * 0.75);
+    cx.simulate_mouse_move(grip, None, Modifiers::default());
+    cx.simulate_mouse_down(grip, MouseButton::Left, Modifiers::default());
+    cx.simulate_event(MouseMoveEvent {
+        position: target,
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    });
+    cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+    let (c, _) = content_and_caret(&view, &cx);
+    assert_eq!(c, "| A | B |
+| --- | --- |
+| g | h |
+| i | j |
+| d | e |
+");
+}

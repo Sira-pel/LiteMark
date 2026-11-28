@@ -522,10 +522,19 @@ pub fn drag_gap_if_inside(
     at: Point<Pixels>,
 ) -> Option<usize> {
     let table = tables.iter().find(|table| table.source == drag.source)?;
-    if !contains(table.bounds, at) {
+    if !drag_point_in_table(table, drag, at) {
         return None;
     }
     Some(gap_at(tables, drag, at))
+}
+
+/// A row drag starts on the grip in the margin beside the table, so only the
+/// vertical position decides. A column drag likewise only looks at x.
+fn drag_point_in_table(table: &TableGeom, drag: &TableDrag, at: Point<Pixels>) -> bool {
+    match drag.kind {
+        TableDragKind::Row => at.y >= table.bounds.top() && at.y < table.bounds.bottom(),
+        TableDragKind::Column => at.x >= table.bounds.left() && at.x < table.bounds.right(),
+    }
 }
 
 /// Update the live drop gap. `None` hides the indicator until the pointer
@@ -551,7 +560,7 @@ pub fn drag_release(tables: &[TableGeom], drag: &TableDrag, at: Point<Pixels>) -
     let Some(table) = tables.iter().find(|table| table.source == drag.source) else {
         return DragRelease::Cancel;
     };
-    if !contains(table.bounds, at) {
+    if !drag_point_in_table(table, drag, at) {
         return DragRelease::Cancel;
     }
     let gap = match drag.kind {
@@ -936,12 +945,26 @@ fn paint_indicator(
     drag: &TableDrag,
     color: gpui::Hsla,
 ) {
-    if !drag.drop_visible {
-        return;
-    }
     let Some(table) = tables.iter().find(|table| table.source == drag.source) else {
         return;
     };
+    // Tint what is being moved so it is clear which row or column follows
+    // the pointer, even while the drop line is hidden.
+    let source = match drag.kind {
+        TableDragKind::Column => table.columns.get(drag.from).map(|column| {
+            Bounds::new(
+                point(column.header_bounds.left(), table.bounds.top()),
+                size(column.header_bounds.size.width, table.bounds.size.height),
+            )
+        }),
+        TableDragKind::Row => table.rows.get(drag.from).map(|row| row.bounds),
+    };
+    if let Some(source) = source {
+        window.paint_quad(gpui::fill(source, color.opacity(0.14)));
+    }
+    if !drag.drop_visible {
+        return;
+    }
     let thickness = sz::TABLE_DOT;
     let bounds = match drag.kind {
         TableDragKind::Column => {
@@ -1335,15 +1358,17 @@ mod tests {
         let mut doc = table_doc();
         let tables = [two_body_rows()];
         let drag = row_drag();
+        // Above or below the table cancels. Beside it does not: a row drag
+        // starts in the margin and only the vertical position counts.
         assert_eq!(
-            drag_release(&tables, &drag, point(px(20.0), px(55.0))),
+            drag_release(&tables, &drag, point(px(20.0), px(900.0))),
             DragRelease::Cancel
         );
         assert!(!commit_drag_release(
             &mut doc,
             &tables,
             &drag,
-            point(px(20.0), px(55.0))
+            point(px(20.0), px(900.0))
         ));
         assert_eq!(doc.content, TABLE);
     }
