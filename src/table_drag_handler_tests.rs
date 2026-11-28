@@ -701,3 +701,32 @@ fn vertical_drag_in_the_margin_reorders_a_row() {
 | d | e |
 ");
 }
+
+#[std_test]
+fn horizontal_drag_above_the_table_reorders_a_column() {
+    let content = "| A | B | C |
+| --- | --- | --- |
+| 1 | 2 | 3 |
+";
+    let (view, mut cx) = harness(content);
+    cx.run_until_parked();
+    let t = view.read_with(&cx, |a, _| a.editor_paint.borrow().tables[0].clone());
+    let pill = column_pill_bounds(t.columns[0].header_bounds);
+    let grip = point(pill.left() + pill.size.width * 0.15, pill.top() + pill.size.height * 0.5);
+    // Straight sideways above the table, never entering its y range.
+    let c2 = t.columns[2].header_bounds;
+    let target = point(c2.left() + c2.size.width * 0.75, grip.y);
+    cx.simulate_mouse_move(grip, None, Modifiers::default());
+    cx.simulate_mouse_down(grip, MouseButton::Left, Modifiers::default());
+    cx.simulate_event(MouseMoveEvent {
+        position: target,
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    });
+    cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+    let (c, _) = content_and_caret(&view, &cx);
+    assert_eq!(c, "| B | C | A |
+| --- | --- | --- |
+| 2 | 3 | 1 |
+");
+}
