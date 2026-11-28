@@ -5215,6 +5215,37 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
         for quad in prepaint.bg_quads.drain(..) {
             window.paint_quad(quad);
         }
+        // gpui's `ShapedLine::paint` draws glyphs only; each run's
+        // `background_color` (==highlight== and inline code) has to be painted
+        // separately. Do it here, above block backgrounds and below selection,
+        // Find hits and text.
+        for row in &prepaint.rows {
+            if row.cells.is_empty() {
+                if !row.shaped.text.is_empty() {
+                    let _ = row
+                        .shaped
+                        .paint_background(row.origin, row.line_height, window, cx);
+                }
+            } else {
+                for cell in &row.cells {
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: cell.box_bounds,
+                        }),
+                        |window| {
+                            for line in &cell.lines {
+                                let _ = line.shaped.paint_background(
+                                    line.text_origin,
+                                    line.line_height,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        },
+                    );
+                }
+            }
+        }
         if let Some(hover) = &prepaint.link_hover {
             for b in &hover.bounds {
                 window.paint_quad(fill(*b, hover.tint).corner_radii(px(3.0)));
