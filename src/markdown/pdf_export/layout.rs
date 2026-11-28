@@ -1436,14 +1436,19 @@ impl LayoutEngine {
             }
         };
 
+        // Leading spaces are kept at the start of the text and after a hard
+        // newline (indentation in plain text), but dropped on soft-wrapped lines.
+        let mut keep_leading_space = true;
+
         for token in tokens {
             match token {
                 Token::Newline => {
                     raw_lines.push(std::mem::take(&mut cur_line));
                     cur_w = 0.0;
+                    keep_leading_space = true;
                 }
                 Token::Space { text, style } => {
-                    if cur_line.is_empty() {
+                    if cur_line.is_empty() && !keep_leading_space {
                         continue;
                     }
                     let w = measure_piece(&text, &style, fonts);
@@ -1451,8 +1456,12 @@ impl LayoutEngine {
                         push_to_line(&mut cur_line, &text, &style);
                         cur_w += w;
                     } else {
-                        raw_lines.push(std::mem::take(&mut cur_line));
+                        trim_line_trailing_space(&mut cur_line);
+                        if !cur_line.is_empty() {
+                            raw_lines.push(std::mem::take(&mut cur_line));
+                        }
                         cur_w = 0.0;
+                        keep_leading_space = false;
                     }
                 }
                 Token::InlineImage { image, style } => {
@@ -1471,8 +1480,11 @@ impl LayoutEngine {
                         );
                         if !cur_line.is_empty() && cur_w + draw_w > max_w {
                             trim_line_trailing_space(&mut cur_line);
-                            raw_lines.push(std::mem::take(&mut cur_line));
+                            if !cur_line.is_empty() {
+                                raw_lines.push(std::mem::take(&mut cur_line));
+                            }
                             cur_w = 0.0;
+                            keep_leading_space = false;
                         }
                         cur_line.push(LineItem::Image {
                             image: krilla_img.clone(),
@@ -1492,16 +1504,22 @@ impl LayoutEngine {
                     } else if w <= max_w && !cur_line.is_empty() {
                         // Trim trailing space on wrapped line.
                         trim_line_trailing_space(&mut cur_line);
-                        raw_lines.push(std::mem::take(&mut cur_line));
+                        if !cur_line.is_empty() {
+                            raw_lines.push(std::mem::take(&mut cur_line));
+                        }
+                        keep_leading_space = false;
                         push_to_line(&mut cur_line, &text, &style);
                         cur_w = w;
                     } else {
                         // Word itself exceeds `max_w`: split cleanly on grapheme boundaries.
                         if !cur_line.is_empty() {
                             trim_line_trailing_space(&mut cur_line);
-                            raw_lines.push(std::mem::take(&mut cur_line));
+                            if !cur_line.is_empty() {
+                                raw_lines.push(std::mem::take(&mut cur_line));
+                            }
                             cur_w = 0.0;
                         }
+                        keep_leading_space = false;
                         let mut chunk = String::new();
                         let mut chunk_w = 0.0f32;
                         for g in text.graphemes(true) {

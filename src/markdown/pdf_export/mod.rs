@@ -323,6 +323,24 @@ Footnote ref[^1].
     }
 
     #[test]
+    fn plain_text_keeps_leading_indentation() {
+        let plain = "top\n    indented four\n\tindented tab";
+        let out = export_to_pdf(
+            "notes.txt",
+            plain,
+            FileType::PlainText,
+            PdfExportSettings::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        let doc = load_lopdf(&out.bytes);
+        let text = doc.extract_text(&[1]).unwrap();
+        assert!(text.contains("    indented four"), "{text:?}");
+        assert!(text.contains("    indented tab"), "{text:?}");
+    }
+
+    #[test]
     fn handles_unicode_and_non_latin_scripts_without_crashing() {
         let md = "# สวัสดี ไทย — 日本語 — Tiếng Việt — العربية — Привет\n\nParagraph with emoji 😀 and math ≈ ∞.";
         let out = export_to_pdf(

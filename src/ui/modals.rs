@@ -744,11 +744,19 @@ where
                         on_update: FUpdate,
                         theme: &Theme|
      -> AnyElement {
-        let active_bg = theme.bg_modal;
-        let active_border = theme.border_primary;
+        // The selected option is filled with the primary color (like the
+        // Export button and checked boxes) so it stands out in both themes.
+        let active_bg = theme.text_hi;
+        let active_border = theme.text_hi;
         let hover_bg = theme.bg_hover;
         let text_color = if active {
-            theme.text_strong
+            theme.on_primary
+        } else {
+            theme.text_primary
+        };
+        // Swatch outline that stays visible on the filled or empty button.
+        let swatch_border = if active {
+            theme.on_primary
         } else {
             theme.text_muted
         };
@@ -787,7 +795,7 @@ where
                         .rounded_full()
                         .bg(rgb(hex))
                         .border_1()
-                        .border_color(theme.border_primary),
+                        .border_color(swatch_border),
                 )
             })
             .child(text)
@@ -1033,7 +1041,7 @@ where
                     .border_color(if checked {
                         theme.text_hi
                     } else {
-                        theme.border_primary
+                        theme.text_muted
                     })
                     .when(checked, |s| {
                         s.child(render_icon("check", 11.0, theme.on_primary))

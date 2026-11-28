@@ -3255,6 +3255,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustybuzz 0.20.1",
+ "self_cell",
  "serde",
  "serde_json",
  "trash",

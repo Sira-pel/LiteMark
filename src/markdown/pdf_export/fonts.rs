@@ -71,11 +71,22 @@ impl FontRole {
     }
 }
 
+type RbFace<'a> = rustybuzz::Face<'a>;
+
+self_cell::self_cell!(
+    /// A `rustybuzz` face parsed once and kept next to the font bytes it
+    /// borrows, so shaping and glyph lookups don't re-parse the font each call.
+    struct ShapingFace {
+        owner: Arc<Vec<u8>>,
+        #[covariant]
+        dependent: RbFace,
+    }
+);
+
 /// One loaded font face shared between `rustybuzz` shaping and `krilla` output.
 pub(crate) struct LoadedFace {
     pub(crate) krilla_font: KrillaFont,
-    pub(crate) data: Arc<Vec<u8>>,
-    pub(crate) index: u32,
+    shaping: ShapingFace,
     pub(crate) units_per_em: f32,
     pub(crate) ascent_ratio: f32,
     pub(crate) descent_ratio: f32,
@@ -83,15 +94,20 @@ pub(crate) struct LoadedFace {
 
 impl LoadedFace {
     fn from_bytes(data: Arc<Vec<u8>>, index: u32) -> Option<Self> {
-        let parsed = ttf_parser::Face::parse(&data, index).ok()?;
+        let krilla_font = KrillaFont::new(data.clone().into(), index)?;
+        let shaping = ShapingFace::try_new(data, |bytes| {
+            rustybuzz::Face::from_slice(bytes, index).ok_or(())
+        })
+        .ok()?;
+        // rustybuzz's own `units_per_em()` returns i32; read metrics from
+        // the underlying ttf-parser face.
+        let parsed: &ttf_parser::Face = shaping.borrow_dependent();
         let units_per_em = f32::from(parsed.units_per_em()).max(1.0);
         let ascent_ratio = (f32::from(parsed.ascender()) / units_per_em).clamp(0.5, 1.3);
         let descent_ratio = (f32::from(-parsed.descender()) / units_per_em).clamp(0.1, 0.6);
-        let krilla_font = KrillaFont::new(data.clone().into(), index)?;
         Some(Self {
             krilla_font,
-            data,
-            index,
+            shaping,
             units_per_em,
             ascent_ratio,
             descent_ratio,
@@ -99,10 +115,10 @@ impl LoadedFace {
     }
 
     fn has_glyph(&self, ch: char) -> bool {
-        let Ok(parsed) = ttf_parser::Face::parse(&self.data, self.index) else {
-            return false;
-        };
-        parsed.glyph_index(ch).is_some_and(|gid| gid.0 != 0)
+        self.shaping
+            .borrow_dependent()
+            .glyph_index(ch)
+            .is_some_and(|gid| gid.0 != 0)
     }
 }
 
@@ -126,7 +142,18 @@ pub(crate) struct FontBook {
     char_fallback: HashMap<(bool, bool, bool, char), Option<usize>>,
     /// Ordered candidate system face IDs grouped by `(is_mono, is_bold, is_italic)` priority.
     system_candidates: HashMap<(bool, bool, bool), Vec<fontdb::ID>>,
+    /// Shape plans reused across runs, keyed by `(face_idx, is_rtl, script)`.
+    /// Building a plan is the costliest part of a short shaping call.
+    plans: HashMap<(usize, bool, rustybuzz::Script), rustybuzz::ShapePlan>,
+    /// Measured widths of words and spaces, keyed by `(role, font size bits)`
+    /// then text. Line wrapping measures every word, and prose repeats most
+    /// of them; cleared once it grows past [`WIDTH_CACHE_LIMIT`] entries.
+    width_cache: HashMap<(FontRole, u32), HashMap<String, f32>>,
+    width_cache_len: usize,
 }
+
+/// Most cached word widths kept before the cache is cleared.
+const WIDTH_CACHE_LIMIT: usize = 100_000;
 
 impl FontBook {
     pub(crate) fn new() -> Result<Self, String> {
@@ -162,6 +189,9 @@ impl FontBook {
             system_loaded: HashMap::new(),
             char_fallback: HashMap::new(),
             system_candidates: HashMap::new(),
+            plans: HashMap::new(),
+            width_cache: HashMap::new(),
+            width_cache_len: 0,
         })
     }
 
@@ -261,10 +291,25 @@ impl FontBook {
     }
 
     pub(crate) fn measure_width(&mut self, text: &str, role: FontRole, font_size: f32) -> f32 {
-        self.shape_text(text, role, font_size)
+        let key = (role, font_size.to_bits());
+        if let Some(&w) = self.width_cache.get(&key).and_then(|m| m.get(text)) {
+            return w;
+        }
+        let w = self
+            .shape_text(text, role, font_size)
             .iter()
             .map(|r| r.width)
-            .sum()
+            .sum();
+        if self.width_cache_len >= WIDTH_CACHE_LIMIT {
+            self.width_cache.clear();
+            self.width_cache_len = 0;
+        }
+        self.width_cache
+            .entry(key)
+            .or_default()
+            .insert(text.to_string(), w);
+        self.width_cache_len += 1;
+        w
     }
 
     fn resolve_face_for_char(&mut self, ch: char, role: FontRole, primary: usize) -> usize {
@@ -384,21 +429,14 @@ impl FontBook {
     }
 
     fn shape_single_run(
-        &self,
+        &mut self,
         face_idx: usize,
         text: &str,
         font_size: f32,
         is_rtl: bool,
     ) -> ShapedFontRun {
         let face = &self.faces[face_idx];
-        let Some(rb_face) = rustybuzz::Face::from_slice(&face.data, face.index) else {
-            return ShapedFontRun {
-                face_idx,
-                text: text.to_string(),
-                glyphs: Vec::new(),
-                width: 0.0,
-            };
-        };
+        let rb_face = face.shaping.borrow_dependent();
 
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
@@ -409,7 +447,12 @@ impl FontBook {
             buffer.set_direction(Direction::LeftToRight);
         }
         let dir = buffer.direction();
-        let output = rustybuzz::shape(&rb_face, &[], buffer);
+        let script = buffer.script();
+        let plan = self
+            .plans
+            .entry((face_idx, is_rtl, script))
+            .or_insert_with(|| rustybuzz::ShapePlan::new(rb_face, dir, Some(script), None, &[]));
+        let output = rustybuzz::shape_with_plan(rb_face, plan, buffer);
 
         let positions = output.glyph_positions();
         let infos = output.glyph_infos();
