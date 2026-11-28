@@ -522,10 +522,36 @@ pub fn drag_gap_if_inside(
     at: Point<Pixels>,
 ) -> Option<usize> {
     let table = tables.iter().find(|table| table.source == drag.source)?;
-    if !contains(table.bounds, at) {
+    if !drag_point_in_table(table, drag, at) {
         return None;
     }
     Some(gap_at(tables, drag, at))
+}
+
+/// How far the pointer may stray from the table on the axis a drag ignores
+/// before the drag stops counting. It covers the grip pill beside the table
+/// and stops a release over the sidebar or the window edge from moving things.
+const DRAG_NEAR: Pixels = px(96.0);
+
+/// A row drag starts on the grip in the margin beside the table, so only the
+/// vertical position picks the gap; the pointer just has to stay near the
+/// table sideways. A column drag is the same with the axes swapped.
+fn drag_point_in_table(table: &TableGeom, drag: &TableDrag, at: Point<Pixels>) -> bool {
+    let b = table.bounds;
+    match drag.kind {
+        TableDragKind::Row => {
+            at.y >= b.top()
+                && at.y < b.bottom()
+                && at.x >= b.left() - DRAG_NEAR
+                && at.x < b.right() + DRAG_NEAR
+        }
+        TableDragKind::Column => {
+            at.x >= b.left()
+                && at.x < b.right()
+                && at.y >= b.top() - DRAG_NEAR
+                && at.y < b.bottom() + DRAG_NEAR
+        }
+    }
 }
 
 /// Update the live drop gap. `None` hides the indicator until the pointer
@@ -551,7 +577,7 @@ pub fn drag_release(tables: &[TableGeom], drag: &TableDrag, at: Point<Pixels>) -
     let Some(table) = tables.iter().find(|table| table.source == drag.source) else {
         return DragRelease::Cancel;
     };
-    if !contains(table.bounds, at) {
+    if !drag_point_in_table(table, drag, at) {
         return DragRelease::Cancel;
     }
     let gap = match drag.kind {
@@ -936,12 +962,26 @@ fn paint_indicator(
     drag: &TableDrag,
     color: gpui::Hsla,
 ) {
-    if !drag.drop_visible {
-        return;
-    }
     let Some(table) = tables.iter().find(|table| table.source == drag.source) else {
         return;
     };
+    // Tint what is being moved so it is clear which row or column follows
+    // the pointer, even while the drop line is hidden.
+    let source = match drag.kind {
+        TableDragKind::Column => table.columns.get(drag.from).map(|column| {
+            Bounds::new(
+                point(column.header_bounds.left(), table.bounds.top()),
+                size(column.header_bounds.size.width, table.bounds.size.height),
+            )
+        }),
+        TableDragKind::Row => table.rows.get(drag.from).map(|row| row.bounds),
+    };
+    if let Some(source) = source {
+        window.paint_quad(gpui::fill(source, color.opacity(0.14)));
+    }
+    if !drag.drop_visible {
+        return;
+    }
     let thickness = sz::TABLE_DOT;
     let bounds = match drag.kind {
         TableDragKind::Column => {
@@ -1335,17 +1375,69 @@ mod tests {
         let mut doc = table_doc();
         let tables = [two_body_rows()];
         let drag = row_drag();
+        // Above or below the table cancels. Beside it does not: a row drag
+        // starts in the margin and only the vertical position counts.
         assert_eq!(
-            drag_release(&tables, &drag, point(px(20.0), px(55.0))),
+            drag_release(&tables, &drag, point(px(20.0), px(900.0))),
             DragRelease::Cancel
         );
         assert!(!commit_drag_release(
             &mut doc,
             &tables,
             &drag,
-            point(px(20.0), px(55.0))
+            point(px(20.0), px(900.0))
         ));
         assert_eq!(doc.content, TABLE);
+    }
+
+    #[test]
+    fn drag_release_beside_the_table_moves_but_far_away_cancels() {
+        let tables = [two_body_rows()];
+        let drag = row_drag();
+        // In the margin beside the table, at a lower row: still a move.
+        assert_eq!(
+            drag_release(&tables, &drag, point(px(60.0), px(55.0))),
+            DragRelease::Move(2)
+        );
+        // Far to the side, as over a sidebar: nothing.
+        assert_eq!(
+            drag_release(&tables, &drag, point(px(-400.0), px(55.0))),
+            DragRelease::Cancel
+        );
+        assert_eq!(
+            drag_release(&tables, &drag, point(px(900.0), px(55.0))),
+            DragRelease::Cancel
+        );
+    }
+
+    #[test]
+    fn column_drag_follows_x_near_the_table_only() {
+        let table = sample_table();
+        let drag = TableDrag {
+            source: table.source.clone(),
+            kind: TableDragKind::Column,
+            from: 0,
+            anchor: 2,
+            gap: 0,
+            drop_visible: true,
+        };
+        let tables = [table];
+        let top = tables[0].bounds.top();
+        // Above the header, over the right-hand column: a move.
+        assert_eq!(
+            drag_release(&tables, &drag, point(px(270.0), top - px(30.0))),
+            DragRelease::Move(1)
+        );
+        // Far above the table: nothing.
+        assert_eq!(
+            drag_release(&tables, &drag, point(px(270.0), top - px(400.0))),
+            DragRelease::Cancel
+        );
+        // Beside the table sideways: nothing.
+        assert_eq!(
+            drag_release(&tables, &drag, point(px(-50.0), top + px(10.0))),
+            DragRelease::Cancel
+        );
     }
 
     #[test]
