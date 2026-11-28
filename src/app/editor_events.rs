@@ -834,6 +834,7 @@ impl LiteMarkApp {
             h2_color: theme.h2.into(),
             code_color: theme.code_text.into(),
             code_bg: theme.tile_hover.into(),
+            highlight_bg: theme.highlight_bg.into(),
             surface_bg: theme.bg_code.into(),
             border_color: theme.border_block.into(),
             link_color: theme.text_hi.into(),

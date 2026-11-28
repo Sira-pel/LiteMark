@@ -614,6 +614,18 @@ pub fn build_overflow_menu_items(
         },
     ));
 
+    let f_highlight = on_format.clone();
+    let c_highlight = on_close.clone();
+    items.push(MenuItem::action(
+        "Highlight",
+        Some("highlighter"),
+        Some("Ctrl+Shift+H"),
+        move |_, cx| {
+            f_highlight("highlight", cx);
+            c_highlight(cx);
+        },
+    ));
+
     items.push(MenuItem::divider());
 
     let f_quote = on_format.clone();
@@ -714,6 +726,7 @@ mod tests {
             "Find must not be duplicated on wide windows"
         );
         assert!(labels_wide.contains(&"Strikethrough"));
+        assert!(labels_wide.contains(&"Highlight"));
         assert!(labels_wide.contains(&"Insert Table"));
 
         // In super small mode (is_narrow): headings, lists, and Find are prepended

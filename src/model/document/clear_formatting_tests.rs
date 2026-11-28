@@ -615,3 +615,52 @@ fn enter_before_heading_text_pushes_the_heading_down() {
     doc.smart_newline(false);
     assert_eq!(doc.content, "# Head\n");
 }
+
+#[test]
+fn highlight_toggle_pending_and_clear_formatting() {
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), "hello world".into(), None, None);
+    doc.set_view_mode(M);
+    doc.caret.range = 6..11;
+    doc.apply_format_in_mode("highlight", M);
+    assert_eq!(doc.content, "hello ==world==");
+    assert!(doc.active_formats.highlight);
+
+    // Combine with bold, then toggle highlight back off.
+    doc.apply_format_in_mode("bold", M);
+    assert_eq!(doc.content, "hello ==**world**==");
+    doc.apply_format_in_mode("highlight", M);
+    assert_eq!(doc.content, "hello **world**");
+
+    // Clear formatting strips ==...== too.
+    let src = "a ==mark== and **==both==** b";
+    assert_eq!(clear(src, 0..src.len()).0, "a mark and both b");
+
+    // Armed highlight in WYSIWYG wraps typed text.
+    let mut empty = DocumentTab::new("t".into(), "t.md".into(), String::new(), None, None);
+    empty.set_view_mode(M);
+    empty.apply_format_in_mode("highlight", M);
+    assert!(empty.pending_formats.highlight);
+    empty.insert_text_in_mode(0..0, "hi", M);
+    assert_eq!(empty.content, "==hi==");
+}
+
+#[test]
+fn armed_highlight_with_bold_escapes_both_markers() {
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), String::new(), None, None);
+    doc.set_view_mode(M);
+    doc.apply_format_in_mode("highlight", M);
+    doc.apply_format_in_mode("bold", M);
+    doc.insert_text_in_mode(0..0, "a=b*c", M);
+    assert_eq!(doc.content, r"==**a\=b\*c**==");
+}
+
+#[test]
+fn typing_inside_nested_highlight_and_bold_escapes_both_markers() {
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), "==**ab**==".into(), None, None);
+    doc.set_view_mode(M);
+    // Between "a" and "b".
+    doc.insert_text_in_mode(5..5, "=", M);
+    // The first insert became `\=`, so "b" now starts at offset 7.
+    doc.insert_text_in_mode(7..7, "*", M);
+    assert_eq!(doc.content, r"==**a\=\*b**==");
+}

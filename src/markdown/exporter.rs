@@ -115,11 +115,233 @@ pub fn markdown_to_html_body_in(
         (event, _) => (event, range),
     });
     let mut html_output = String::new();
+    let events = apply_highlights(markdown, parser, true);
     html::push_html(
         &mut html_output,
-        with_image_widths(markdown, parser).into_iter(),
+        with_image_widths(markdown, events.into_iter()).into_iter(),
     );
     html_output
+}
+
+fn is_inline_start(tag: &Tag<'_>) -> bool {
+    matches!(
+        tag,
+        Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. }
+    )
+}
+
+fn is_inline_end(tag: &TagEnd) -> bool {
+    matches!(
+        tag,
+        TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link
+    )
+}
+
+fn is_escaped_at(bytes: &[u8], pos: usize) -> bool {
+    let mut slashes = 0usize;
+    let mut p = pos;
+    while p > 0 && bytes[p - 1] == b'\\' {
+        slashes += 1;
+        p -= 1;
+    }
+    slashes % 2 == 1
+}
+
+/// Converts paired `==text==` spans in inline text into `<mark>text</mark>`
+/// (when `emit_html` is true) or strips the `==` markers (for plain text).
+/// Skips code blocks, inline code spans, raw HTML, and image alt text.
+fn apply_highlights<'a>(
+    markdown: &str,
+    events: impl Iterator<Item = (Event<'a>, Range<usize>)>,
+    emit_html: bool,
+) -> Vec<(Event<'a>, Range<usize>)> {
+    let items: Vec<(Event<'a>, Range<usize>)> = events.collect();
+    if !markdown.contains("==") {
+        return items;
+    }
+
+    let md_bytes = markdown.as_bytes();
+    let mut replacements: Vec<(usize, usize, bool)> = Vec::new(); // (ev_idx, rel_offset, is_open)
+    let mut in_code_block = 0usize;
+    let mut in_image = 0usize;
+    let mut inline_depth = 0usize;
+    // Open highlight markers at each inline nesting depth: (ev_idx, rel_offset, depth)
+    let mut open_stack: Vec<(usize, usize, usize)> = Vec::new();
+
+    for idx in 0..items.len() {
+        match &items[idx].0 {
+            Event::Start(Tag::CodeBlock(_)) => {
+                in_code_block += 1;
+                open_stack.clear();
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                in_code_block = in_code_block.saturating_sub(1);
+                open_stack.clear();
+            }
+            Event::Start(Tag::Image { .. }) => {
+                in_image += 1;
+            }
+            Event::End(TagEnd::Image) => {
+                in_image = in_image.saturating_sub(1);
+            }
+            Event::Start(tag) if is_inline_start(tag) => {
+                inline_depth += 1;
+            }
+            Event::End(tag) if is_inline_end(tag) => {
+                open_stack.retain(|&(_, _, d)| d < inline_depth);
+                inline_depth = inline_depth.saturating_sub(1);
+            }
+            Event::Start(_) | Event::End(_) | Event::Rule => {
+                open_stack.clear();
+                inline_depth = 0;
+            }
+            Event::Text(text) if in_code_block == 0 && in_image == 0 => {
+                let bytes = text.as_bytes();
+                if !text.contains("==") {
+                    continue;
+                }
+                let range = &items[idx].1;
+                let exact_slice = markdown.get(range.clone()) == Some(text.as_ref());
+                let mut i = 0usize;
+                while i < bytes.len() {
+                    if bytes[i] != b'=' {
+                        i += 1;
+                        continue;
+                    }
+                    let start = i;
+                    while i < bytes.len() && bytes[i] == b'=' {
+                        i += 1;
+                    }
+                    let len = i - start;
+                    if len != 2 {
+                        continue;
+                    }
+                    if exact_slice {
+                        let abs_start = range.start + start;
+                        let abs_end = range.start + i;
+                        if is_escaped_at(md_bytes, abs_start)
+                            || (abs_start > 0 && md_bytes[abs_start - 1] == b'=')
+                            || md_bytes.get(abs_end) == Some(&b'=')
+                        {
+                            continue;
+                        }
+                    } else if start == 0
+                        && range.start > 0
+                        && matches!(md_bytes[range.start - 1], b'\\' | b'=')
+                    {
+                        continue;
+                    }
+
+                    let can_close = if start > 0 {
+                        text[..start]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| !c.is_whitespace())
+                    } else if idx > 0 {
+                        match &items[idx - 1].0 {
+                            Event::End(t) => is_inline_end(t),
+                            Event::Code(_) | Event::InlineHtml(_) => true,
+                            Event::Text(prev) => {
+                                prev.chars().next_back().is_some_and(|c| !c.is_whitespace())
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+
+                    let can_open = if i < bytes.len() {
+                        text[i..].chars().next().is_some_and(|c| !c.is_whitespace())
+                    } else if idx + 1 < items.len() {
+                        match &items[idx + 1].0 {
+                            Event::Start(t) => is_inline_start(t),
+                            Event::Code(_) | Event::InlineHtml(_) => true,
+                            Event::Text(next) => {
+                                next.chars().next().is_some_and(|c| !c.is_whitespace())
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+
+                    // `==` is not a word-internal marker: `x==1 and y==2` stays plain.
+                    let prev_alnum = if start > 0 {
+                        text[..start]
+                            .chars()
+                            .next_back()
+                            .is_some_and(char::is_alphanumeric)
+                    } else if idx > 0 {
+                        matches!(&items[idx - 1].0, Event::Text(p)
+                            if p.chars().next_back().is_some_and(char::is_alphanumeric))
+                    } else {
+                        false
+                    };
+                    let next_alnum = if i < bytes.len() {
+                        text[i..].chars().next().is_some_and(char::is_alphanumeric)
+                    } else if idx + 1 < items.len() {
+                        matches!(&items[idx + 1].0, Event::Text(n)
+                            if n.chars().next().is_some_and(char::is_alphanumeric))
+                    } else {
+                        false
+                    };
+                    let can_open = can_open && !prev_alnum;
+                    let can_close = can_close && !next_alnum;
+
+                    if can_close
+                        && open_stack.last().is_some_and(|&(o_ev, o_off, d)| {
+                            d == inline_depth && (o_ev < idx || o_off + 2 < start)
+                        })
+                    {
+                        let (o_ev, o_off, _) = open_stack.pop().unwrap();
+                        replacements.push((o_ev, o_off, true));
+                        replacements.push((idx, start, false));
+                    } else if can_open && !open_stack.iter().any(|&(_, _, d)| d == inline_depth) {
+                        open_stack.push((idx, start, inline_depth));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if replacements.is_empty() {
+        return items;
+    }
+
+    replacements.sort_by_key(|&(ev_idx, rel, _)| (ev_idx, rel));
+    let mut out = Vec::with_capacity(items.len() + replacements.len() * 2);
+    let mut r_ix = 0usize;
+    for (ev_idx, (event, range)) in items.into_iter().enumerate() {
+        if r_ix >= replacements.len() || replacements[r_ix].0 != ev_idx {
+            out.push((event, range));
+            continue;
+        }
+        let Event::Text(text) = event else {
+            out.push((event, range));
+            continue;
+        };
+        let mut cursor = 0usize;
+        while r_ix < replacements.len() && replacements[r_ix].0 == ev_idx {
+            let (_, rel, is_open) = replacements[r_ix];
+            r_ix += 1;
+            if rel > cursor {
+                out.push((
+                    Event::Text(CowStr::from(text[cursor..rel].to_string())),
+                    range.clone(),
+                ));
+            }
+            if emit_html {
+                let tag = if is_open { "<mark>" } else { "</mark>" };
+                out.push((Event::Html(CowStr::Borrowed(tag)), range.clone()));
+            }
+            cursor = rel + 2;
+        }
+        if cursor < text.len() {
+            out.push((Event::Text(CowStr::from(text[cursor..].to_string())), range));
+        }
+    }
+    out
 }
 
 /// The width and height of the image written at `range` of `markdown`: the
@@ -289,6 +511,7 @@ pub fn export_to_html_in(
     }}
     h1, h2, h3 {{ color: #111; }}
     code {{ background: #f4f4f4; padding: 2px 5px; border-radius: 4px; font-family: 'Ubuntu Mono', monospace; }}
+    mark {{ background: #fef08a; color: inherit; padding: 0 2px; border-radius: 2px; }}
     pre {{ background: #282c34; color: #abb2bf; padding: 16px; border-radius: 6px; overflow-x: auto; }}
     pre code {{ background: none; padding: 0; color: inherit; }}
     blockquote {{ border-left: 4px solid #888; padding-left: 14px; color: #555; margin: 16px 0; }}
@@ -329,7 +552,11 @@ pub fn export_to_plaintext(markdown: &str) -> String {
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
 
-    let parser = Parser::new_ext(markdown, options).into_offset_iter();
+    let parser = apply_highlights(
+        markdown,
+        Parser::new_ext(markdown, options).into_offset_iter(),
+        false,
+    );
     let mut text_output = String::new();
     let mut list_stack: Vec<Option<u64>> = Vec::new();
     let mut first_cell_in_row = false;
@@ -685,5 +912,42 @@ mod tests {
     fn plaintext_export_strips_the_width_once_from_split_alt_text() {
         assert_eq!(export_to_plaintext("![a *b*|200](c.png)").trim(), "a b");
         assert_eq!(export_to_plaintext("![x|y|200](c.png)").trim(), "x|y");
+    }
+
+    #[test]
+    fn export_highlight_to_html_and_plaintext() {
+        let md =
+            "Normal ==marked==, ==**bold**==, **==inner==**, `==code==`, a == b == c, \\==esc==";
+        let html = export_to_html("Highlight", md);
+        assert!(html.contains("mark { background: #fef08a;"), "{html}");
+        assert!(html.contains("<mark>marked</mark>"), "{html}");
+        assert!(
+            html.contains("<mark><strong>bold</strong></mark>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<strong><mark>inner</mark></strong>"),
+            "{html}"
+        );
+        assert!(html.contains("<code>==code==</code>"), "{html}");
+        assert!(html.contains("a == b == c"), "{html}");
+        assert!(html.contains("==esc=="), "{html}");
+
+        // `==` inside a word is code-like text, not a highlight.
+        let code_like = "if x==1 and y==2 then, a==b";
+        let html = markdown_to_html_body(code_like);
+        assert!(!html.contains("<mark>"), "{html}");
+        assert_eq!(export_to_plaintext(code_like), code_like);
+        // ...while a highlight next to punctuation still works.
+        assert!(markdown_to_html_body("see (==ok==).").contains("<mark>ok</mark>"));
+
+        let fenced = "```\n==not marked==\n```";
+        assert!(!markdown_to_html_body(fenced).contains("<mark>"));
+
+        let plain = export_to_plaintext(md);
+        assert_eq!(
+            plain,
+            "Normal marked, bold, inner, ==code==, a == b == c, ==esc=="
+        );
     }
 }

@@ -83,6 +83,7 @@ impl DocumentTab {
             "italic" => Some((InlineTagKind::Italic, "*", "*", "italic text")),
             "underline" => Some((InlineTagKind::Underline, "<u>", "</u>", "underlined")),
             "strike" => Some((InlineTagKind::Strike, "~~", "~~", "strikethrough")),
+            "highlight" => Some((InlineTagKind::Highlight, "==", "==", "highlighted")),
             "code" => Some((InlineTagKind::Code, "`", "`", "code")),
             "link" => Some((InlineTagKind::Link, "[", link_suffix.as_str(), "link")),
             _ => None,
@@ -162,6 +163,7 @@ impl DocumentTab {
                                 InlineTagKind::Italic => pending.italic = false,
                                 InlineTagKind::Underline => pending.underline = false,
                                 InlineTagKind::Strike => pending.strike = false,
+                                InlineTagKind::Highlight => pending.highlight = false,
                                 InlineTagKind::Code => pending.code = false,
                                 InlineTagKind::Link => {}
                             }
@@ -249,6 +251,9 @@ impl DocumentTab {
                         }
                         InlineTagKind::Strike => {
                             self.pending_formats.strike = !self.pending_formats.strike
+                        }
+                        InlineTagKind::Highlight => {
+                            self.pending_formats.highlight = !self.pending_formats.highlight
                         }
                         InlineTagKind::Code => {
                             self.pending_formats.code = !self.pending_formats.code
@@ -895,6 +900,7 @@ impl DocumentTab {
                         InlineTagKind::Italic => seg.italic(),
                         InlineTagKind::Underline => seg.underline(),
                         InlineTagKind::Strike => seg.strike(),
+                        InlineTagKind::Highlight => seg.highlight(),
                         InlineTagKind::Code => seg.code(),
                         InlineTagKind::Link => false,
                     }
@@ -935,6 +941,7 @@ impl DocumentTab {
             (InlineTagKind::Italic, "italic"),
             (InlineTagKind::Underline, "underline"),
             (InlineTagKind::Strike, "strike"),
+            (InlineTagKind::Highlight, "highlight"),
             (InlineTagKind::Code, "code"),
         ];
         for (kind, cmd) in kinds {
@@ -1034,7 +1041,7 @@ pub(super) fn gap_is_ws_and_markers(
 pub(super) fn is_delimiter_markup(s: &str) -> bool {
     let t = s.trim();
     !t.is_empty()
-        && (t.chars().all(|c| matches!(c, '*' | '_' | '~' | '`'))
+        && (t.chars().all(|c| matches!(c, '*' | '_' | '~' | '`' | '='))
             || t.eq_ignore_ascii_case("<u>")
             || t.eq_ignore_ascii_case("</u>"))
 }
@@ -1100,6 +1107,7 @@ pub(super) fn expand_replace_to_matching_neighbors(
         InlineTagKind::Italic => target.italic = true,
         InlineTagKind::Underline => target.underline = true,
         InlineTagKind::Strike => target.strike = true,
+        InlineTagKind::Highlight => target.highlight = true,
         InlineTagKind::Code => target.code = true,
         InlineTagKind::Link => return (replace.start, replace.end),
     }
