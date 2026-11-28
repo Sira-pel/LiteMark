@@ -729,7 +729,8 @@ where
                     .gap(px(2.0))
                     .p(px(2.0))
                     .rounded(px(6.0))
-                    .bg(theme.bg_input)
+                    // Recessed track: a step darker than the modal in both themes.
+                    .bg(theme.bg_modal_header)
                     .border_1()
                     .border_color(theme.border_subtle)
                     .children(buttons),
@@ -744,22 +745,23 @@ where
                         on_update: FUpdate,
                         theme: &Theme|
      -> AnyElement {
-        // The selected option is filled with the primary color (like the
-        // Export button and checked boxes) so it stands out in both themes.
-        let active_bg = theme.text_hi;
-        let active_border = theme.text_hi;
+        // The selected option is a raised chip: a step lighter than the modal
+        // (white in light mode) with a hairline edge and full-strength text,
+        // sitting on a recessed track. Unselected options use muted text, so
+        // the choice reads clearly without competing with the Export button.
+        let dark = theme.bg_modal.r < 0.5;
+        let (active_bg, active_border) = if dark {
+            (rgb(0x3a3a3a), rgb(0x4a4a4a))
+        } else {
+            (rgb(0xffffff), theme.border_primary)
+        };
         let hover_bg = theme.bg_hover;
         let text_color = if active {
-            theme.on_primary
-        } else {
-            theme.text_primary
-        };
-        // Swatch outline that stays visible on the filled or empty button.
-        let swatch_border = if active {
-            theme.on_primary
+            theme.text_strong
         } else {
             theme.text_muted
         };
+        let swatch_border = theme.text_muted;
         div()
             .id(id)
             .flex_1()
