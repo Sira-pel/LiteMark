@@ -86,7 +86,7 @@ impl PaintRow {
     pub fn display_to_source(&self, disp: usize) -> usize {
         self.offset_map
             .as_deref()
-            .map_or(0, |map| map.display_to_source(disp))
+            .map_or(self.byte_start(), |map| map.display_to_source(disp))
     }
 }
 
@@ -395,6 +395,12 @@ impl HeightEstimates {
     /// Forget everything and size for `n` lines.
     fn reset(&mut self, n: usize) {
         self.slots.clear();
+        // A far smaller document should not keep the old, larger buffers.
+        if self.slots.capacity() > n.saturating_mul(2).max(1024) {
+            self.slots.shrink_to(n);
+            self.block_sums.shrink_to(n / Self::BLOCK_SIZE + 1);
+            self.block_prefix.shrink_to(n / Self::BLOCK_SIZE + 2);
+        }
         self.slots.resize(n, Self::UNSET);
         self.block_sums.clear();
         self.block_prefix.clear();
@@ -546,16 +552,17 @@ impl HeightEstimates {
         acc as f32 / Self::SCALE
     }
 
-    /// First line whose bottom is strictly greater than `y_px` (or `slots.len()`),
-    /// and the `y_before` of that line in px.
-    fn line_at_y(&mut self, y_px: f32) -> (usize, f32) {
+    /// Read-only version of `line_at_y` when prefix sums are already built.
+    fn line_at_y_ready(&self, y_px: f32) -> Option<(usize, f32)> {
         if self.slots.is_empty() || y_px <= 0.0 {
-            return (0, 0.0);
+            return Some((0, 0.0));
         }
-        self.ensure_prefix();
+        if self.blocks_dirty || self.prefix_dirty {
+            return None;
+        }
         let target_q = (y_px * Self::SCALE).floor() as i64;
         if target_q >= self.sum_q {
-            return (self.slots.len(), self.total());
+            return Some((self.slots.len(), self.total()));
         }
         let b = self
             .block_prefix
@@ -568,11 +575,21 @@ impl HeightEstimates {
             let i = start + i;
             let h = if v == Self::UNSET { 0 } else { i64::from(v) };
             if acc + h > target_q {
-                return (i, acc as f32 / Self::SCALE);
+                return Some((i, acc as f32 / Self::SCALE));
             }
             acc += h;
         }
-        (end, acc as f32 / Self::SCALE)
+        Some((end, acc as f32 / Self::SCALE))
+    }
+
+    /// First line whose bottom is strictly greater than `y_px` (or `slots.len()`),
+    /// and the `y_before` of that line in px.
+    fn line_at_y(&mut self, y_px: f32) -> (usize, f32) {
+        if self.slots.is_empty() || y_px <= 0.0 {
+            return (0, 0.0);
+        }
+        self.ensure_prefix();
+        self.line_at_y_ready(y_px).unwrap_or((0, 0.0))
     }
 
     /// The total estimate in px (once nothing is stale).
@@ -706,9 +723,6 @@ pub struct LayoutCache {
     estimate_key: (u32, u32, bool),
     /// Content width used in the last `prepaint`, shared with `request_layout`.
     content_width: Pixels,
-    /// The last WYSIWYG height estimate, before it is raised to the painted
-    /// total: what the layout height should be once the total is known.
-    estimated_height: Pixels,
     /// The height an extra redraw was last asked for, so each new height
     /// gets one redraw and never a loop.
     redrawn_for: Option<Pixels>,
@@ -893,6 +907,9 @@ pub struct EditorPaint {
     pub painted_len: usize,
     pub painted_selection: Range<usize>,
     pub painted_view_mode: ViewMode,
+    /// `ParseMeta::generation` last painted, so scroll anchoring only runs on
+    /// redraws of the same document.
+    pub painted_generation: u64,
     /// Top Y coordinate of row 0 in window space, and total logical/raw line count.
     pub content_top: Pixels,
     pub doc_line_count: usize,
@@ -904,6 +921,7 @@ impl EditorPaint {
     /// so stale height or hit targets from the previous view do not leak across.
     pub fn reset_for_switch(&mut self) {
         self.total_height = px(0.0);
+        self.painted_generation = u64::MAX;
         self.layout_cache.redrawn_for = None;
         self.checkbox_hits.clear();
         self.pictures.clear();
@@ -927,6 +945,7 @@ impl Default for EditorPaint {
             painted_len: 0,
             painted_selection: 0..0,
             painted_view_mode: ViewMode::Wysiwyg,
+            painted_generation: u64::MAX,
             pictures: Vec::new(),
             picture_handle: None,
             content_top: px(0.0),
@@ -1253,12 +1272,21 @@ pub fn compute_table_column_widths(
     widths
 }
 
+#[cfg(test)]
 pub fn index_for_position(paint: &EditorPaint, position: Point<Pixels>) -> Option<usize> {
+    index_for_position_in(paint, None, position)
+}
+
+pub fn index_for_position_in(
+    paint: &EditorPaint,
+    parsed: Option<&ParsedDocument>,
+    position: Point<Pixels>,
+) -> Option<usize> {
     let bounds = paint.bounds?;
     if !bounds.contains(&position) || paint.rows.is_empty() {
         return None;
     }
-    Some(index_in_rows(paint, position))
+    Some(index_in_rows(paint, parsed, position))
 }
 
 pub fn checkbox_for_position(paint: &EditorPaint, position: Point<Pixels>) -> Option<Range<usize>> {
@@ -1865,7 +1893,42 @@ fn move_vertical_rows(
     true
 }
 
-fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
+fn wysiwyg_offset_at_y(
+    paint: &EditorPaint,
+    parsed: Option<&ParsedDocument>,
+    y: Pixels,
+    want_end: bool,
+) -> Option<usize> {
+    if paint.painted_view_mode != ViewMode::Wysiwyg {
+        return None;
+    }
+    let parsed = parsed?;
+    if parsed.lines.is_empty() || paint.layout_cache.estimate.len() != parsed.lines.len() {
+        return None;
+    }
+    if y <= paint.content_top {
+        return Some(0);
+    }
+    let (line_idx, _) = paint
+        .layout_cache
+        .estimate
+        .line_at_y_ready(f32::from(y - paint.content_top))?;
+    if line_idx >= parsed.lines.len() {
+        return Some(paint.last_row_byte_end);
+    }
+    let line = &parsed.lines[line_idx];
+    Some(if want_end {
+        line.source.end
+    } else {
+        line.source.start
+    })
+}
+
+fn index_in_rows(
+    paint: &EditorPaint,
+    parsed: Option<&ParsedDocument>,
+    position: Point<Pixels>,
+) -> usize {
     if paint.rows.is_empty() {
         return 0;
     }
@@ -1884,7 +1947,9 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
                         return r.byte_start();
                     }
                 }
-            } else {
+            } else if let Some(off) = wysiwyg_offset_at_y(paint, parsed, position.y, false) {
+                return off;
+            } else if position.y <= paint.content_top {
                 return 0;
             }
         }
@@ -1906,8 +1971,12 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
                         return r.byte_end();
                     }
                 }
+                return paint.last_row_byte_end;
             }
-            return paint.last_row_byte_end;
+            if let Some(off) = wysiwyg_offset_at_y(paint, parsed, position.y, true) {
+                return off;
+            }
+            return last.byte_end();
         }
     }
     let chosen = paint
@@ -1915,6 +1984,27 @@ fn index_in_rows(paint: &EditorPaint, position: Point<Pixels>) -> usize {
         .partition_point(|row| position.y >= row.origin.y)
         .saturating_sub(1);
     let row = &paint.rows[chosen];
+    // Handle a pointer that lands in an unmaterialized gap between two
+    // non-adjacent intervals (e.g. between a caret anchor and the viewport).
+    if position.y >= row.origin.y + row.line_height {
+        if let Some(next) = paint.rows.get(chosen + 1) {
+            if next.line_index > row.line_index + 1 {
+                if paint.painted_view_mode == ViewMode::Raw {
+                    if let Some((_, _, _, ref raw_rows)) = paint.layout_cache.raw_rows {
+                        let row_ix = ((position.y - paint.content_top)
+                            / paint.line_height.max(px(1.0)))
+                        .floor() as usize;
+                        if let Some(r) = raw_rows.get(row_ix.min(raw_rows.len().saturating_sub(1)))
+                        {
+                            return r.byte_start();
+                        }
+                    }
+                } else if let Some(off) = wysiwyg_offset_at_y(paint, parsed, position.y, false) {
+                    return off;
+                }
+            }
+        }
+    }
     if !row.cells.is_empty() {
         let cell = row
             .cells
@@ -2063,6 +2153,13 @@ pub trait EditorContentSource {
     fn follow_caret_after_paint(&mut self, _window: &mut Window) -> bool {
         false
     }
+
+    /// Compensates the vertical scroll offset when unmeasured blocks strictly
+    /// above the viewport change height during prepaint. Returns `true` when
+    /// the scroll offset actually changed.
+    fn anchor_scroll_after_paint(&mut self, _delta: Pixels, _total_height: Pixels) -> bool {
+        false
+    }
 }
 
 pub struct EditorElement<V: 'static> {
@@ -2205,6 +2302,9 @@ pub struct Prepaint {
     content_top: Pixels,
     doc_line_count: usize,
     last_row_byte_end: usize,
+    /// Net height change (in px) of lines strictly above the visible viewport
+    /// whose slots were refined during this prepaint.
+    above_viewport_delta: Pixels,
 }
 
 /// Merge overlapping or adjacent half-open `[start..end)` intervals, sorted.
@@ -2323,9 +2423,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 };
                 f32::from(top_gap + line_h * wrapped as f32)
             });
-            let h = px(32.0 + estimate.total());
-            cache.estimated_height = h;
-            h.max(paint_borrow.total_height)
+            (px(16.0 + estimate.total()) + px(32.0)).max(px(64.0))
         } else {
             paint_borrow.layout_cache.release_wysiwyg();
             // Build the rows here, not just count them: prepaint reuses them
@@ -2799,6 +2897,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                 doc_line_count: total_raw_rows,
                 last_row_byte_end,
                 link_hover: None,
+                above_viewport_delta: px(0.0),
             };
         }
 
@@ -2811,10 +2910,18 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             f32::from(self.font_size).to_bits(),
             self.word_wrap,
         );
-        if layout_cache.estimate_key != est_key || layout_cache.estimate.len() != n_lines {
+        let est_reset =
+            layout_cache.estimate_key != est_key || layout_cache.estimate.len() != n_lines;
+        if est_reset {
             layout_cache.estimate.reset(n_lines);
             layout_cache.estimate_key = est_key;
         }
+        let can_anchor_scroll = !est_reset && {
+            let p = self.paint.borrow();
+            p.painted_view_mode == ViewMode::Wysiwyg
+                && p.painted_generation == self.parsed.meta.generation
+                && p.total_height > px(0.0)
+        };
         {
             let content = self.entity.read(cx).editor_content();
             let font_size = self.font_size;
@@ -2849,6 +2956,94 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             });
         }
         let doc_top = bounds.top() + px(16.0);
+        let can_anchor_scroll = can_anchor_scroll && clip.top() > doc_top;
+        let (first_visible_line, _) = if can_anchor_scroll {
+            layout_cache
+                .estimate
+                .line_at_y(f32::from(clip.top() - doc_top).max(0.0))
+        } else {
+            (0, 0.0)
+        };
+        let mut above_delta = 0.0f32;
+        let mut image_cache = std::mem::take(&mut self.paint.borrow_mut().images);
+        let mut image_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        if !self.parsed.meta.image_lines.is_empty() {
+            let content = self.entity.read(cx).editor_content();
+            let placeholder_h = placeholder_height(self.font_size);
+            for &img_line_idx in &self.parsed.meta.image_lines {
+                let idx = img_line_idx as usize;
+                let showing_raw = self.raw_picture_line == Some(idx);
+                if let Some(pline) = self.parsed.lines.get(idx) {
+                    if let Some(line_text) = content.get(pline.source.clone()) {
+                        if let Some(image) = parse_image_line(line_text) {
+                            let target =
+                                resolve_image_target(&image.target, self.base_dir.as_deref());
+                            let mut picture_h = None;
+                            if let ImageTarget::Local(p) = target {
+                                let natural = image_cache.size(&p, false);
+                                image_paths.insert(p);
+                                if let Some(n) = natural {
+                                    let wanted = image.width.map(|w| (w, image.height));
+                                    let (_, h) = match wanted {
+                                        Some((w, h)) => fit_image_size(n, w, h, content_width),
+                                        None => fit_image(n, content_width, MAX_IMAGE_HEIGHT),
+                                    };
+                                    picture_h = Some(h);
+                                }
+                            }
+                            if !showing_raw {
+                                let block_h = picture_h.unwrap_or_else(|| {
+                                    match (image.width, image.height) {
+                                        (Some(w), Some(h)) => {
+                                            fit_image_size((1, 1), w, Some(h), content_width).1
+                                        }
+                                        _ => placeholder_h,
+                                    }
+                                });
+                                let row_h = f32::from(block_h + IMAGE_MARGIN_Y * 2.0);
+                                let old_h = layout_cache.estimate.slot_height(idx);
+                                if (row_h - old_h).abs() > 0.02 {
+                                    layout_cache.estimate.set_slot(idx, row_h);
+                                    if can_anchor_scroll && idx < first_visible_line {
+                                        above_delta += row_h - old_h;
+                                    }
+                                }
+                            }
+                        } else if let Some(row) = parse_image_row(line_text) {
+                            let mut sizes: Vec<(Pixels, Pixels)> = Vec::with_capacity(row.len());
+                            for (_, image) in row {
+                                let mut natural = None;
+                                if let ImageTarget::Local(p) =
+                                    resolve_image_target(&image.target, self.base_dir.as_deref())
+                                {
+                                    natural = image_cache.size(&p, false);
+                                    image_paths.insert(p);
+                                }
+                                if !showing_raw {
+                                    sizes.push(thumbnail_size(
+                                        natural,
+                                        image.width,
+                                        image.height,
+                                        content_width,
+                                    ));
+                                }
+                            }
+                            if !showing_raw {
+                                let (_, flow_h) = flow_thumbnails(&sizes, content_width, THUMB_GAP);
+                                let row_h = f32::from(flow_h + IMAGE_MARGIN_Y * 2.0);
+                                let old_h = layout_cache.estimate.slot_height(idx);
+                                if (row_h - old_h).abs() > 0.02 {
+                                    layout_cache.estimate.set_slot(idx, row_h);
+                                    if can_anchor_scroll && idx < first_visible_line {
+                                        above_delta += row_h - old_h;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let (vis_start, _) = layout_cache
             .estimate
             .line_at_y(f32::from(band.top - doc_top).max(0.0));
@@ -2918,54 +3113,6 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             q.border_color = self.surface_bg;
             q
         };
-        let mut image_cache = std::mem::take(&mut self.paint.borrow_mut().images);
-        let mut image_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        if !self.parsed.meta.image_lines.is_empty() {
-            let content = self.entity.read(cx).editor_content();
-            let placeholder_h = placeholder_height(self.font_size);
-            for &img_line_idx in &self.parsed.meta.image_lines {
-                if let Some(pline) = self.parsed.lines.get(img_line_idx as usize) {
-                    if let Some(line_text) = content.get(pline.source.clone()) {
-                        if let Some(image) = parse_image_line(line_text) {
-                            let target =
-                                resolve_image_target(&image.target, self.base_dir.as_deref());
-                            let mut picture_h = None;
-                            if let ImageTarget::Local(p) = target {
-                                let natural = image_cache.size(&p, false);
-                                image_paths.insert(p);
-                                if let Some(n) = natural {
-                                    let wanted = image.width.map(|w| (w, image.height));
-                                    let (_, h) = match wanted {
-                                        Some((w, h)) => fit_image_size(n, w, h, content_width),
-                                        None => fit_image(n, content_width, MAX_IMAGE_HEIGHT),
-                                    };
-                                    picture_h = Some(h);
-                                }
-                            }
-                            let block_h =
-                                picture_h.unwrap_or_else(|| match (image.width, image.height) {
-                                    (Some(w), Some(h)) => {
-                                        fit_image_size((1, 1), w, Some(h), content_width).1
-                                    }
-                                    _ => placeholder_h,
-                                });
-                            let row_h = block_h + IMAGE_MARGIN_Y * 2.0;
-                            layout_cache
-                                .estimate
-                                .set_slot(img_line_idx as usize, f32::from(row_h));
-                        } else if let Some(row) = parse_image_row(line_text) {
-                            for (_, image) in row {
-                                if let ImageTarget::Local(p) =
-                                    resolve_image_target(&image.target, self.base_dir.as_deref())
-                                {
-                                    image_paths.insert(p);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
         let mut cursor = None;
         let base_x = bounds.left() + gutter + x_offset;
         let mut cur_y;
@@ -2988,51 +3135,57 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             }
         }
 
-        // Each table's cache key: a hash of its text and the fonts. Hashed
-        // once per parse and font, not on every frame (scroll, hover).
+        // Each table's cache key: a hash of its text and the fonts. Lazily
+        // populated as tables enter the materialized intervals so off-screen
+        // tables are not hashed until visited, and every visited table gets
+        // its own key instead of colliding on 0.
         let font_key = table_width_key(
             "",
             &self.font_family,
             &self.mono_font_family,
             self.font_size,
         );
-        let table_keys = match &layout_cache.table_keys {
-            Some((generation, fonts, keys))
-                if *generation == self.parsed.meta.generation && *fonts == font_key =>
-            {
-                keys.clone()
-            }
-            _ => {
-                let content = self.entity.read(cx).editor_content();
-                let keys: Rc<TableKeys> = Rc::new(
-                    table_rows
-                        .keys()
-                        .map(|source| {
-                            let key = table_width_key(
-                                content.get(source.clone()).unwrap_or(""),
-                                &self.font_family,
-                                &self.mono_font_family,
-                                self.font_size,
-                            );
-                            (source.clone(), key)
-                        })
-                        .collect(),
-                );
-                layout_cache.table_keys =
-                    Some((self.parsed.meta.generation, font_key, keys.clone()));
-                keys
-            }
-        };
         let mut table_width_cache = std::mem::take(&mut self.paint.borrow_mut().table_width_cache);
-        if table_rows.is_empty() {
+        let table_keys: Rc<TableKeys> = if self.parsed.meta.table_ranges.is_empty() {
             table_width_cache.clear_and_shrink();
             layout_cache.table_keys = None;
+            Rc::new(TableKeys::new())
         } else {
-            let live_keys: std::collections::HashSet<u64> = table_keys.values().copied().collect();
-            table_width_cache
-                .entries
-                .retain(|k, _| live_keys.contains(k));
-        }
+            let reuse = matches!(
+                &layout_cache.table_keys,
+                Some((generation, fonts, _))
+                    if *generation == self.parsed.meta.generation && *fonts == font_key
+            );
+            let mut keys = if reuse {
+                let (_, _, existing) = layout_cache.table_keys.take().expect("table keys");
+                Rc::try_unwrap(existing).unwrap_or_else(|rc| (*rc).clone())
+            } else {
+                TableKeys::new()
+            };
+            if table_rows.keys().any(|source| !keys.contains_key(source)) {
+                let content = self.entity.read(cx).editor_content();
+                for source in table_rows.keys() {
+                    keys.entry(source.clone()).or_insert_with(|| {
+                        table_width_key(
+                            content.get(source.clone()).unwrap_or(""),
+                            &self.font_family,
+                            &self.mono_font_family,
+                            self.font_size,
+                        )
+                    });
+                }
+            }
+            let keys = Rc::new(keys);
+            layout_cache.table_keys = Some((self.parsed.meta.generation, font_key, keys.clone()));
+            let entries_cap = self.parsed.meta.table_ranges.len().saturating_mul(4) + 64;
+            if table_width_cache.entries.len() > entries_cap {
+                let live_keys: std::collections::HashSet<u64> = keys.values().copied().collect();
+                table_width_cache
+                    .entries
+                    .retain(|k, _| live_keys.contains(k));
+            }
+            keys
+        };
         // Cell and row entries are kept across frames (an idle frame measures
         // nothing, and the next keystroke still needs them) and cleared only
         // when they outgrow the document's tables several times over.
@@ -3112,7 +3265,21 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                             table_source,
                             ..
                         } = &**body;
-                        let table_key = table_keys.get(table_source).copied().unwrap_or_default();
+                        // Every table has a key by now. If one is somehow missing,
+                        // derive its own instead of sharing key 0 with other tables.
+                        let table_key =
+                            table_keys.get(table_source).copied().unwrap_or_else(|| {
+                                table_width_key(
+                                    self.entity
+                                        .read(cx)
+                                        .editor_content()
+                                        .get(table_source.clone())
+                                        .unwrap_or(""),
+                                    &self.font_family,
+                                    &self.mono_font_family,
+                                    self.font_size,
+                                )
+                            });
                         let shape_table =
                             *table_shaped.entry(table_source.clone()).or_insert_with(|| {
                                 let lines = table_rows
@@ -4880,11 +5047,17 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                     } // end sub-row loop
                 } // end 'line
                 let actual_h = f32::from(cur_y - line_y_start);
-                if (actual_h - layout_cache.estimate.slot_height(line_idx)).abs() > 0.02 {
+                let old_h = layout_cache.estimate.slot_height(line_idx);
+                if (actual_h - old_h).abs() > 0.02 {
                     layout_cache.estimate.set_slot(line_idx, actual_h);
+                    if can_anchor_scroll && line_idx < first_visible_line {
+                        above_delta += actual_h - old_h;
+                    }
                 }
             }
         }
+
+        layout_cache.estimate.ensure_prefix();
 
         for (source, heights) in table_heights {
             let entry = table_keys
@@ -4993,6 +5166,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             doc_line_count: n_lines,
             last_row_byte_end,
             link_hover,
+            above_viewport_delta: px(above_delta),
         }
     }
 
@@ -5136,6 +5310,7 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             paint.painted_len = self.entity.read(cx).editor_content().len();
             paint.painted_selection = self.selection.clone();
             paint.painted_view_mode = self.view_mode;
+            paint.painted_generation = self.parsed.meta.generation;
             paint.content_top = prepaint.content_top;
             paint.doc_line_count = prepaint.doc_line_count;
             paint.last_row_byte_end = prepaint.last_row_byte_end;
@@ -5185,38 +5360,61 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
             },
             &occupied,
         );
-        // Pictures change a line's height after the estimate the layout used;
+        // Pictures and wrapped table rows refine `estimate` during prepaint;
         // draw once more with the real total so the scroll range is right,
-        // whether pictures made the note taller or (one removed) shorter.
-        // The layout height is max(estimate, last total), so compare with
-        // that, not the total alone, or a note shorter than its estimate
-        // would redraw forever.
-        // One extra draw per height at most, so a parent that sizes the
-        // editor differently can never cause a redraw loop.
+        // whether the note grew or shrank. Clear `redrawn_for` once the layout
+        // catches up, and ask at most once per height so a parent that sizes
+        // the editor differently can never cause a redraw loop.
         let height_changed = self.view_mode == ViewMode::Wysiwyg && {
             let mut paint = self.paint.borrow_mut();
-            let expected = paint
-                .layout_cache
-                .estimated_height
-                .max(prepaint.total_height);
-            let redraw = (expected - bounds.size.height).abs() > px(1.0)
-                && paint.layout_cache.redrawn_for != Some(expected);
-            if redraw {
+            let expected = prepaint.total_height;
+            if (expected - bounds.size.height).abs() <= px(1.0) {
+                paint.layout_cache.redrawn_for = None;
+                false
+            } else if paint.layout_cache.redrawn_for != Some(expected) {
                 paint.layout_cache.redrawn_for = Some(expected);
+                true
+            } else {
+                false
             }
-            redraw
         };
+        let has_anchor_delta =
+            self.view_mode == ViewMode::Wysiwyg && prepaint.above_viewport_delta.abs() > px(0.5);
         let needs_layout_redraw = (wrap_changed && self.word_wrap) || height_changed;
         if needs_layout_redraw {
             let entity = self.entity.clone();
+            let anchor_delta = if has_anchor_delta {
+                prepaint.above_viewport_delta
+            } else {
+                px(0.0)
+            };
+            let total_height = prepaint.total_height;
             window.defer(cx, move |_, cx| {
-                entity.update(cx, |_, cx| cx.notify());
+                entity.update(cx, |view, cx| {
+                    if anchor_delta != px(0.0) {
+                        view.anchor_scroll_after_paint(anchor_delta, total_height);
+                    }
+                    cx.notify();
+                });
             });
-        } else if self.entity.read(cx).needs_follow_caret() {
+        } else if has_anchor_delta || self.entity.read(cx).needs_follow_caret() {
             let entity = self.entity.clone();
+            let anchor_delta = if has_anchor_delta {
+                prepaint.above_viewport_delta
+            } else {
+                px(0.0)
+            };
+            let total_height = prepaint.total_height;
             window.defer(cx, move |window, cx| {
                 entity.update(cx, |view, cx| {
-                    if view.follow_caret_after_paint(window) {
+                    let mut redraw = false;
+                    if anchor_delta != px(0.0) {
+                        redraw |= view.anchor_scroll_after_paint(anchor_delta, total_height);
+                    }
+                    if view.needs_follow_caret() {
+                        redraw |= view.follow_caret_after_paint(window);
+                    }
+                    if redraw {
                         cx.notify();
                     }
                 });
@@ -5840,6 +6038,22 @@ fn paint_ranges_mapped(
 mod tests {
 
     #[test]
+    fn height_estimates_reset_gives_back_memory_for_a_much_smaller_document() {
+        let mut estimates = super::HeightEstimates::default();
+        estimates.reset(200_000);
+        let big = estimates.slots.capacity();
+        estimates.reset(10);
+        assert_eq!(estimates.len(), 10);
+        assert!(estimates.slots.capacity() < big / 10);
+        // A moderately smaller document keeps its buffer instead of
+        // reallocating on every reset.
+        estimates.reset(200_000);
+        let cap = estimates.slots.capacity();
+        estimates.reset(150_000);
+        assert_eq!(estimates.slots.capacity(), cap);
+    }
+
+    #[test]
     fn link_tooltip_shows_short_urls_whole_and_cuts_long_ones() {
         use super::{link_tip_text, LINK_TIP_MAX_CHARS};
         assert_eq!(link_tip_text("https://example.com"), "https://example.com");
@@ -6210,6 +6424,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             painted_view_mode: ViewMode::Wysiwyg,
+            painted_generation: 0,
             pictures: Vec::new(),
             picture_handle: None,
             content_top: px(0.0),
@@ -6312,6 +6527,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             painted_view_mode: ViewMode::Wysiwyg,
+            painted_generation: 0,
             pictures: Vec::new(),
             picture_handle: None,
             content_top: px(0.0),
@@ -6320,14 +6536,14 @@ mod tests {
         };
 
         // Click on Line 0 (y = 10px)
-        let offset_line0 = index_in_rows(&paint, point(px(30.0), px(10.0)));
+        let offset_line0 = index_in_rows(&paint, None, point(px(30.0), px(10.0)));
         assert!(
             offset_line0 <= 10,
             "Click on line 0 should yield line 0 offset, got {offset_line0}"
         );
 
         // Click on Line 1 (y = 35px)
-        let offset_line1 = index_in_rows(&paint, point(px(30.0), px(35.0)));
+        let offset_line1 = index_in_rows(&paint, None, point(px(30.0), px(35.0)));
         assert!(
             (10..=17).contains(&offset_line1),
             "Click on line 1 should yield line 1 offset, got {offset_line1}"
@@ -6389,6 +6605,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             painted_view_mode: ViewMode::Wysiwyg,
+            painted_generation: 0,
             pictures: Vec::new(),
             picture_handle: None,
             content_top: px(0.0),
@@ -6489,6 +6706,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             painted_view_mode: ViewMode::Wysiwyg,
+            painted_generation: 0,
             pictures: Vec::new(),
             picture_handle: None,
             content_top: px(0.0),
@@ -6497,14 +6715,14 @@ mod tests {
         };
 
         // Click in Cell 1 on Line 1 at y = 35px (Line 0 is 0..28px, Line 1 is 28..56px)
-        let offset = index_in_rows(&paint, point(px(150.0), px(35.0)));
+        let offset = index_in_rows(&paint, None, point(px(150.0), px(35.0)));
         assert!(
             (28..=35).contains(&offset),
             "Click on line 1 (y=35px) in a 112px tall row should map to Line 1 (28..35), got {offset}"
         );
 
         // Click in Cell 1 at y = 80px (empty area below Line 1 in the 112px row)
-        let offset_bottom = index_in_rows(&paint, point(px(150.0), px(80.0)));
+        let offset_bottom = index_in_rows(&paint, None, point(px(150.0), px(80.0)));
         assert!(
             (28..=35).contains(&offset_bottom),
             "Click below line 1 (y=80px) in a 112px row should clamp to Line 1 (28..35), got {offset_bottom}"
@@ -6696,6 +6914,7 @@ mod tests {
             painted_len: 0,
             painted_selection: 0..0,
             painted_view_mode: ViewMode::Wysiwyg,
+            painted_generation: 0,
             pictures: Vec::new(),
             picture_handle: None,
             content_top: px(0.0),
@@ -6707,7 +6926,7 @@ mod tests {
         caret.move_to(5);
 
         // None of these should panic on empty cell.lines
-        let _ = index_in_rows(&paint, point(px(10.0), px(10.0)));
+        let _ = index_in_rows(&paint, None, point(px(10.0), px(10.0)));
         let _ = editor_home_visual(&paint, &mut caret, false);
         let _ = editor_end_visual(&paint, &mut caret, false);
         let _ = move_vertical_visual(
@@ -6738,8 +6957,14 @@ mod tests {
             rows: vec![row],
             ..EditorPaint::default()
         };
-        assert_eq!(index_in_rows(&paint, point(px(-400.0), px(1010.0))), 500);
-        assert_eq!(index_in_rows(&paint, point(px(100.0), px(1010.0))), 500);
+        assert_eq!(
+            index_in_rows(&paint, None, point(px(-400.0), px(1010.0))),
+            500
+        );
+        assert_eq!(
+            index_in_rows(&paint, None, point(px(100.0), px(1010.0))),
+            500
+        );
     }
 
     #[test]

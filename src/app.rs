@@ -236,6 +236,9 @@ pub struct LiteMarkApp {
     /// Tab, view mode, caret and length the editor last scrolled to follow, so
     /// only a real edit, mode switch, or caret move scrolls (not the wheel or a repaint).
     caret_followed: Option<(String, ViewMode, Range<usize>, usize)>,
+    /// Deferred re-alignment for an Outline or Find jump, run once after the
+    /// destination's shaping band (tables/images) has been measured.
+    pending_scroll: Option<scroll::PendingScroll>,
     #[cfg(test)]
     pub(crate) render_count: usize,
     scroll_momentum: crate::ui::editor::ScrollMomentum,
@@ -688,6 +691,7 @@ impl LiteMarkApp {
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
+            pending_scroll: None,
             #[cfg(test)]
             render_count: 0,
             scroll_momentum: Default::default(),
@@ -902,6 +906,7 @@ impl LiteMarkApp {
             selection_words: None,
             editor_scroll: ScrollHandle::new(),
             caret_followed: None,
+            pending_scroll: None,
             #[cfg(test)]
             render_count: 0,
             scroll_momentum: Default::default(),
@@ -1181,6 +1186,10 @@ impl crate::ui::text_editor::EditorContentSource for LiteMarkApp {
 
     fn follow_caret_after_paint(&mut self, window: &mut Window) -> bool {
         self.follow_caret_after_paint_impl(window)
+    }
+
+    fn anchor_scroll_after_paint(&mut self, delta: Pixels, total_height: Pixels) -> bool {
+        self.anchor_scroll_after_paint_impl(delta, total_height)
     }
 }
 

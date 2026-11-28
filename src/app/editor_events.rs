@@ -503,9 +503,10 @@ impl LiteMarkApp {
 
         let follow_links = (event.modifiers.control || event.modifiers.platform)
             && self.effective_view_mode() == ViewMode::Wysiwyg;
+        let parsed = self.wysiwyg_parsed();
         let (offset, clicked_link, padded_col) = {
             let paint = self.editor_paint.borrow();
-            let off = index_for_position(&paint, event.position);
+            let off = index_for_position_in(&paint, parsed.as_deref(), event.position);
             let link = off
                 .filter(|_| follow_links)
                 .and_then(|o| link_for_offset(&paint, o));
@@ -681,9 +682,10 @@ impl LiteMarkApp {
         if !self.selecting {
             return;
         }
+        let parsed = self.wysiwyg_parsed();
         let offset = {
             let paint = self.editor_paint.borrow();
-            index_for_position(&paint, event.position)
+            index_for_position_in(&paint, parsed.as_deref(), event.position)
         };
         let Some(offset) = offset else {
             return;
@@ -715,9 +717,10 @@ impl LiteMarkApp {
             return;
         }
 
+        let parsed = self.wysiwyg_parsed();
         let offset = {
             let paint = self.editor_paint.borrow();
-            index_for_position(&paint, event.position)
+            index_for_position_in(&paint, parsed.as_deref(), event.position)
         };
         let Some(offset) = offset else {
             self.dismiss_editor_context_menu();
