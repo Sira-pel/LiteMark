@@ -265,6 +265,29 @@ fn apply_highlights<'a>(
                         false
                     };
 
+                    // `==` is not a word-internal marker: `x==1 and y==2` stays plain.
+                    let prev_alnum = if start > 0 {
+                        text[..start]
+                            .chars()
+                            .next_back()
+                            .is_some_and(char::is_alphanumeric)
+                    } else if idx > 0 {
+                        matches!(&items[idx - 1].0, Event::Text(p)
+                            if p.chars().next_back().is_some_and(char::is_alphanumeric))
+                    } else {
+                        false
+                    };
+                    let next_alnum = if i < bytes.len() {
+                        text[i..].chars().next().is_some_and(char::is_alphanumeric)
+                    } else if idx + 1 < items.len() {
+                        matches!(&items[idx + 1].0, Event::Text(n)
+                            if n.chars().next().is_some_and(char::is_alphanumeric))
+                    } else {
+                        false
+                    };
+                    let can_open = can_open && !prev_alnum;
+                    let can_close = can_close && !next_alnum;
+
                     if can_close
                         && open_stack.last().is_some_and(|&(o_ev, o_off, d)| {
                             d == inline_depth && (o_ev < idx || o_off + 2 < start)
@@ -909,6 +932,14 @@ mod tests {
         assert!(html.contains("<code>==code==</code>"), "{html}");
         assert!(html.contains("a == b == c"), "{html}");
         assert!(html.contains("==esc=="), "{html}");
+
+        // `==` inside a word is code-like text, not a highlight.
+        let code_like = "if x==1 and y==2 then, a==b";
+        let html = markdown_to_html_body(code_like);
+        assert!(!html.contains("<mark>"), "{html}");
+        assert_eq!(export_to_plaintext(code_like), code_like);
+        // ...while a highlight next to punctuation still works.
+        assert!(markdown_to_html_body("see (==ok==).").contains("<mark>ok</mark>"));
 
         let fenced = "```\n==not marked==\n```";
         assert!(!markdown_to_html_body(fenced).contains("<mark>"));

@@ -2511,6 +2511,10 @@ fn synthesize_flanking_pairs(
         {
             continue;
         }
+        // `==` is not a word-internal marker: `x==1 and y==2` stays plain.
+        if ch == b'=' && input[e..].chars().next().is_some_and(char::is_alphanumeric) {
+            continue;
+        }
         if let Some(slot) = closer_slot(ch, e - s) {
             closers[slot].push(k);
         }
@@ -2527,6 +2531,14 @@ fn synthesize_flanking_pairs(
             .chars()
             .next()
             .is_none_or(char::is_whitespace)
+        {
+            continue;
+        }
+        if ch == b'='
+            && input[..o_start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
         {
             continue;
         }

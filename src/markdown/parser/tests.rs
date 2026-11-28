@@ -4191,6 +4191,9 @@ fn highlight_inline_parsing_and_nesting() {
         "[url](https://x.com/?a==1&b==2)",
         "==hello",
         "hello==",
+        // `==` inside a word is code-like text, not a highlight.
+        "if x==1 and y==2 then",
+        "a==b==c",
     ] {
         let d = parse_document(plain);
         assert!(
