@@ -177,19 +177,18 @@ impl DocumentTab {
                 let core = &text[lead_len..text.len() - trail_len];
                 // The span's own delimiter characters inside the typed text
                 // would end the span early; escape them so it stays intact.
-                let core_owned;
-                let core = if pf.strike && core.contains('~') {
-                    core_owned = core.replace('~', "\\~");
-                    &core_owned
-                } else if pf.highlight && core.contains('=') {
-                    core_owned = core.replace('=', "\\=");
-                    &core_owned
-                } else if (pf.bold || pf.italic) && core.contains('*') {
-                    core_owned = core.replace('*', "\\*");
-                    &core_owned
-                } else {
-                    core
-                };
+                // Every armed marker needs escaping, not just the first one.
+                let mut core_owned = core.to_string();
+                if pf.strike {
+                    core_owned = core_owned.replace('~', "\\~");
+                }
+                if pf.highlight {
+                    core_owned = core_owned.replace('=', "\\=");
+                }
+                if pf.bold || pf.italic {
+                    core_owned = core_owned.replace('*', "\\*");
+                }
+                let core = core_owned.as_str();
 
                 let (open, close) = wrap_delimiters(&flags);
                 let wrapped = format!("{}{}{}{}{}", lead_ws, open, core, close, trail_ws);
@@ -222,32 +221,37 @@ impl DocumentTab {
             && !text.is_empty()
         {
             let parsed = self.parsed();
-            if let Some(pair) = line_pair_refs(&parsed, range.start)
+            let pairs = line_pair_refs(&parsed, range.start);
+            let enclosing: Vec<_> = pairs
                 .iter()
-                .rev()
-                .find(|p| range.start >= p.inner.start && range.start <= p.inner.end)
-            {
-                match pair.kind {
-                    InlineTagKind::Bold | InlineTagKind::Italic => {
-                        if text.contains('*') {
-                            escaped = Some(text.replace('*', "\\*"));
-                        }
+                .filter(|p| range.start >= p.inner.start && range.start <= p.inner.end)
+                .collect();
+            // The innermost span decides for code (its content is literal);
+            // otherwise every enclosing span's own marker needs escaping.
+            match enclosing.last().map(|p| p.kind) {
+                Some(InlineTagKind::Code) => {
+                    if text.contains('`') {
+                        refence_pair = enclosing.last().map(|p| (*p).clone());
                     }
-                    InlineTagKind::Strike => {
-                        if text.contains('~') {
-                            escaped = Some(text.replace('~', "\\~"));
-                        }
-                    }
-                    InlineTagKind::Highlight => {
-                        if text.contains('=') {
-                            escaped = Some(text.replace('=', "\\="));
-                        }
-                    }
-                    InlineTagKind::Code if text.contains('`') => {
-                        refence_pair = Some(pair.clone());
-                    }
-                    _ => {}
                 }
+                Some(_) => {
+                    let has =
+                        |kinds: &[InlineTagKind]| enclosing.iter().any(|p| kinds.contains(&p.kind));
+                    let mut out = text.to_string();
+                    if has(&[InlineTagKind::Bold, InlineTagKind::Italic]) {
+                        out = out.replace('*', "\\*");
+                    }
+                    if has(&[InlineTagKind::Strike]) {
+                        out = out.replace('~', "\\~");
+                    }
+                    if has(&[InlineTagKind::Highlight]) {
+                        out = out.replace('=', "\\=");
+                    }
+                    if out != text {
+                        escaped = Some(out);
+                    }
+                }
+                None => {}
             }
         }
         if let Some(pair) = refence_pair {

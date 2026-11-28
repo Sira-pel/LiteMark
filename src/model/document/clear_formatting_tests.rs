@@ -643,3 +643,24 @@ fn highlight_toggle_pending_and_clear_formatting() {
     empty.insert_text_in_mode(0..0, "hi", M);
     assert_eq!(empty.content, "==hi==");
 }
+
+#[test]
+fn armed_highlight_with_bold_escapes_both_markers() {
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), String::new(), None, None);
+    doc.set_view_mode(M);
+    doc.apply_format_in_mode("highlight", M);
+    doc.apply_format_in_mode("bold", M);
+    doc.insert_text_in_mode(0..0, "a=b*c", M);
+    assert_eq!(doc.content, r"==**a\=b\*c**==");
+}
+
+#[test]
+fn typing_inside_nested_highlight_and_bold_escapes_both_markers() {
+    let mut doc = DocumentTab::new("t".into(), "t.md".into(), "==**ab**==".into(), None, None);
+    doc.set_view_mode(M);
+    // Between "a" and "b".
+    doc.insert_text_in_mode(5..5, "=", M);
+    // The first insert became `\=`, so "b" now starts at offset 7.
+    doc.insert_text_in_mode(7..7, "*", M);
+    assert_eq!(doc.content, r"==**a\=\*b**==");
+}

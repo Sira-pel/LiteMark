@@ -37,7 +37,7 @@ Windows and macOS builds are produced by CI and have had little hands-on testing
 ## Features
 
 - **Two views of one document:** raw Markdown or WYSIWYG, with optional line numbers in raw view.
-- **Rich formatting:** headings, bold, italic, underline, strikethrough, links, lists, task lists, quotes, inline code, code blocks and tables.
+- **Rich formatting:** headings, bold, italic, underline, strikethrough, highlight, links, lists, task lists, quotes, inline code, code blocks and tables.
 - **Notes sidebar:** create, rename, move and trash notes and folders. Notes live in `~/Documents/Notes` by default.
 - **Find and replace** with match case.
 - **Files:** open `.md`, `.txt` and `.pdf` (as extracted text). Export to HTML, Markdown or plain text.
@@ -78,6 +78,7 @@ Press **F1** in the app for the full list. Common ones:
 | Ctrl+H | Find and replace |
 | Ctrl+B / I / U | Bold / italic / underline |
 | Ctrl+Shift+X | Strikethrough |
+| Ctrl+Shift+H | Highlight |
 | Ctrl+1 / 2 / 3 | Heading 1 / 2 / 3 |
 | Ctrl+E | Inline code |
 | Ctrl+K | Insert a link |

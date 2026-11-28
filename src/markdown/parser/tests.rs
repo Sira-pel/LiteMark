@@ -4189,6 +4189,8 @@ fn highlight_inline_parsing_and_nesting() {
         "\\==escaped==",
         "`==in code==`",
         "[url](https://x.com/?a==1&b==2)",
+        "==hello",
+        "hello==",
     ] {
         let d = parse_document(plain);
         assert!(
