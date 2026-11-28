@@ -952,6 +952,7 @@ fn scrolling_up_past_unmeasured_tables_anchors_visible_content() {
     let pos = view.read_with(&cx, |app, _| app.editor_scroll.bounds().center());
 
     // Scroll UP step by step so the unmeasured middle tables enter ShapingBand above us.
+    const WHEEL_STEP_PX: f32 = 78.0;
     let mut max_single_step_shift = 0.0f32;
     let mut saw_anchor = false;
     for step in 0..35 {
@@ -986,8 +987,10 @@ fn scrolling_up_past_unmeasured_tables_anchors_visible_content() {
                 saw_anchor = true;
                 let shift = y_after - y_before;
                 max_single_step_shift = max_single_step_shift.max(shift);
+                // One wheel step of three lines moves content by 78 px; allow
+                // a little slack, but not enough to hide a bounce.
                 assert!(
-                    (-1.0..220.0).contains(&shift),
+                    (-1.0..WHEEL_STEP_PX + 2.0).contains(&shift),
                     "step {step}: scrolling up caused abrupt jump ({y_before} -> {y_after}, delta={shift})"
                 );
             }

@@ -395,6 +395,12 @@ impl HeightEstimates {
     /// Forget everything and size for `n` lines.
     fn reset(&mut self, n: usize) {
         self.slots.clear();
+        // A far smaller document should not keep the old, larger buffers.
+        if self.slots.capacity() > n.saturating_mul(2).max(1024) {
+            self.slots.shrink_to(n);
+            self.block_sums.shrink_to(n / Self::BLOCK_SIZE + 1);
+            self.block_prefix.shrink_to(n / Self::BLOCK_SIZE + 2);
+        }
         self.slots.resize(n, Self::UNSET);
         self.block_sums.clear();
         self.block_prefix.clear();
@@ -3259,7 +3265,21 @@ impl<V: EntityInputHandler + EditorContentSource> Element for EditorElement<V> {
                             table_source,
                             ..
                         } = &**body;
-                        let table_key = table_keys.get(table_source).copied().unwrap_or_default();
+                        // Every table has a key by now. If one is somehow missing,
+                        // derive its own instead of sharing key 0 with other tables.
+                        let table_key =
+                            table_keys.get(table_source).copied().unwrap_or_else(|| {
+                                table_width_key(
+                                    self.entity
+                                        .read(cx)
+                                        .editor_content()
+                                        .get(table_source.clone())
+                                        .unwrap_or(""),
+                                    &self.font_family,
+                                    &self.mono_font_family,
+                                    self.font_size,
+                                )
+                            });
                         let shape_table =
                             *table_shaped.entry(table_source.clone()).or_insert_with(|| {
                                 let lines = table_rows
@@ -6016,6 +6036,22 @@ fn paint_ranges_mapped(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn height_estimates_reset_gives_back_memory_for_a_much_smaller_document() {
+        let mut estimates = super::HeightEstimates::default();
+        estimates.reset(200_000);
+        let big = estimates.slots.capacity();
+        estimates.reset(10);
+        assert_eq!(estimates.len(), 10);
+        assert!(estimates.slots.capacity() < big / 10);
+        // A moderately smaller document keeps its buffer instead of
+        // reallocating on every reset.
+        estimates.reset(200_000);
+        let cap = estimates.slots.capacity();
+        estimates.reset(150_000);
+        assert_eq!(estimates.slots.capacity(), cap);
+    }
 
     #[test]
     fn link_tooltip_shows_short_urls_whole_and_cuts_long_ones() {
