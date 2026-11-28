@@ -368,4 +368,164 @@ Footnote ref[^1].
             "only https:// link should become an annotation"
         );
     }
+
+    #[test]
+    fn renders_inline_images_in_paragraphs_headings_and_tables() {
+        let root =
+            std::env::temp_dir().join(format!("litemark-pdf-inline-img-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+
+        let mut png_bytes = Vec::new();
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 128, 255, 255]));
+        img.write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        std::fs::write(root.join("assets/icon.png"), &png_bytes).unwrap();
+
+        let md = "\
+# Heading with ![hdr-icon|14](assets/icon.png) badge
+
+Before ![para-icon|16](assets/icon.png) after, and [![linked-icon|16](assets/icon.png)](https://example.com).
+
+| Col | Pic |
+| --- | --- |
+| Row | ![cell-icon|20](assets/icon.png) |
+";
+        let out = export_to_pdf(
+            "Inline Images",
+            md,
+            FileType::Markdown,
+            PdfExportSettings::default(),
+            Some(&root),
+            Some(&root),
+        )
+        .unwrap();
+        let doc = load_lopdf(&out.bytes);
+        let text = doc.extract_text(&[1]).unwrap();
+        assert!(
+            !text.contains("[Image:"),
+            "inline local images should render as pictures, not placeholder text: {text}"
+        );
+        assert!(text.contains("Before") && text.contains("after"), "{text}");
+
+        // Page 1 resources must contain an XObject image entry.
+        let page1_id = *doc.get_pages().get(&1).unwrap();
+        let page1_dict = doc.get_dictionary(page1_id).unwrap();
+        let resources = page1_dict
+            .get(b"Resources")
+            .and_then(|o| doc.dereference(o))
+            .unwrap()
+            .1
+            .as_dict()
+            .unwrap();
+        let xobjects = resources
+            .get(b"XObject")
+            .and_then(|o| doc.dereference(o))
+            .expect("page 1 should embed image XObject")
+            .1
+            .as_dict()
+            .unwrap();
+        assert!(!xobjects.is_empty(), "expected embedded image XObject");
+
+        // Linked inline image should still produce a clickable annotation.
+        let annots = page1_dict
+            .get(b"Annots")
+            .expect("linked inline image should create an annotation")
+            .as_array()
+            .unwrap();
+        assert_eq!(annots.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pdf_tab_exports_as_plain_text_without_markdown_parsing() {
+        let extracted = "## Page 1\n\n# Not a heading\n**not bold**";
+        let out = export_to_pdf(
+            "scanned.pdf",
+            extracted,
+            FileType::Pdf,
+            PdfExportSettings::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        let doc = load_lopdf(&out.bytes);
+        let text = doc.extract_text(&[1]).unwrap();
+        assert!(text.contains("## Page 1"), "{text}");
+        assert!(text.contains("# Not a heading"), "{text}");
+        assert!(text.contains("**not bold**"), "{text}");
+        assert!(
+            doc.catalog().unwrap().get(b"Outlines").is_err(),
+            "PDF tab should not parse # lines into outline headings"
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_image_dimensions_before_decoding() {
+        // Minimal PNG signature + IHDR claiming 10,000 x 10,000 pixels (~400 MB RGBA),
+        // only 33 bytes on disk. Must be rejected from its header without decoding.
+        let mut crafted = Vec::new();
+        crafted.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]); // PNG signature
+        crafted.extend_from_slice(&13u32.to_be_bytes()); // IHDR length
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(b"IHDR");
+        ihdr.extend_from_slice(&(model::MAX_EMBED_IMAGE_DIM + 1).to_be_bytes()); // width
+        ihdr.extend_from_slice(&(model::MAX_EMBED_IMAGE_DIM + 1).to_be_bytes()); // height
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA
+        crafted.extend_from_slice(&ihdr);
+        crafted.extend_from_slice(&0u32.to_be_bytes()); // dummy CRC (dimensions only)
+
+        let root = std::env::temp_dir().join(format!("litemark-pdf-bomb-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("bomb.png"), &crafted).unwrap();
+
+        let out = export_to_pdf(
+            "Bomb",
+            "![huge bomb](bomb.png)",
+            FileType::Markdown,
+            PdfExportSettings::default(),
+            Some(&root),
+            Some(&root),
+        )
+        .unwrap();
+        let doc = load_lopdf(&out.bytes);
+        let text = doc.extract_text(&[1]).unwrap();
+        assert!(
+            text.contains("Image: huge bomb"),
+            "oversized image should fall back to placeholder: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn very_long_note_stops_at_max_pages_and_marks_truncated() {
+        // 70,000 lines inside a fenced code block exceed 2,000 landscape pages
+        // while staying fast to lay out in debug tests.
+        let mut md = String::with_capacity(70_016);
+        md.push_str("```\nstart\n");
+        for _ in 0..70_000 {
+            md.push('\n');
+        }
+        md.push_str("end\n```");
+
+        let settings = PdfExportSettings {
+            page_size: PdfPageSize::Letter,
+            orientation: PdfOrientation::Landscape,
+            margins: PdfMargins::Wide,
+            theme: PdfTheme::Light,
+            font_size: PdfFontSize::Large,
+            page_numbers: false,
+            open_after_export: false,
+        };
+        let out = export_to_pdf("Very Long", &md, FileType::Markdown, settings, None, None)
+            .expect("long export should stop cleanly at page cap");
+        assert!(out.truncated, "export should be marked truncated");
+        assert_eq!(out.page_count, layout::MAX_PDF_EXPORT_PAGES);
+
+        let doc = load_lopdf(&out.bytes);
+        assert_eq!(doc.get_pages().len(), layout::MAX_PDF_EXPORT_PAGES);
+    }
 }

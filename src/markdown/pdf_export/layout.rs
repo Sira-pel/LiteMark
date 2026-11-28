@@ -286,6 +286,7 @@ struct StyledLineSegment {
     font_size: f32,
     color: Rgb,
     runs: Vec<ShapedFontRun>,
+    inline_image: Option<(KrillaImage, f32, f32, String)>,
     width: f32,
     pad_x: f32,
     ascent: f32,
@@ -482,6 +483,7 @@ impl LayoutEngine {
                 InlineSpan {
                     text: s.text.clone(),
                     style: st,
+                    image: s.image.clone(),
                 }
             })
             .collect();
@@ -876,10 +878,29 @@ impl LayoutEngine {
 
         // Measure natural column widths from header & body cells.
         let mut desired = vec![24.0f32; num_cols];
+        let max_cell_img_h = (self.content_height() * 0.5).max(cell_pt * 4.0);
         let mut measure_row = |cells: &[Vec<InlineSpan>], is_head: bool| {
             for (c, cell) in cells.iter().enumerate().take(num_cols) {
                 let mut w = 0.0f32;
                 for span in cell {
+                    if let Some(img) = &span.image {
+                        if let PdfImageSource::Embedded {
+                            pixel_width,
+                            pixel_height,
+                            ..
+                        } = &img.source
+                        {
+                            let (iw, _) = fit_image_size(
+                                img,
+                                *pixel_width,
+                                *pixel_height,
+                                width * 0.6,
+                                max_cell_img_h,
+                            );
+                            w += iw;
+                            continue;
+                        }
+                    }
                     let role = FontRole::from_style(
                         is_head || span.style.bold,
                         span.style.italic,
@@ -914,6 +935,7 @@ impl LayoutEngine {
                         InlineSpan {
                             text: s.text.clone(),
                             style: st,
+                            image: s.image.clone(),
                         }
                     })
                     .collect();
@@ -1081,32 +1103,9 @@ impl LayoutEngine {
                 pixel_width,
                 pixel_height,
             } => {
-                let nat_w = (*pixel_width as f32 * PX_TO_PT).max(1.0);
-                let nat_h = (*pixel_height as f32 * PX_TO_PT).max(1.0);
-                let (mut draw_w, mut draw_h) = match (img.requested_width, img.requested_height) {
-                    (Some(rw), Some(rh)) => (rw as f32 * PX_TO_PT, rh as f32 * PX_TO_PT),
-                    (Some(rw), None) => {
-                        let w = rw as f32 * PX_TO_PT;
-                        (w, w * (nat_h / nat_w))
-                    }
-                    (None, Some(rh)) => {
-                        let h = rh as f32 * PX_TO_PT;
-                        (h * (nat_w / nat_h), h)
-                    }
-                    (None, None) => (nat_w, nat_h),
-                };
-
                 let max_h = self.content_height() * 0.85;
-                if draw_w > width {
-                    let s = width / draw_w;
-                    draw_w *= s;
-                    draw_h *= s;
-                }
-                if draw_h > max_h {
-                    let s = max_h / draw_h;
-                    draw_w *= s;
-                    draw_h *= s;
-                }
+                let (draw_w, draw_h) =
+                    fit_image_size(img, *pixel_width, *pixel_height, width, max_h);
 
                 if !self.ensure_space(draw_h) {
                     return;
@@ -1143,10 +1142,7 @@ impl LayoutEngine {
                     self.palette.muted
                 };
                 let lines = self.wrap_inline_spans(
-                    &[InlineSpan {
-                        text: label.clone(),
-                        style,
-                    }],
+                    &[InlineSpan::text(label.clone(), style)],
                     inner_w,
                     font_size,
                     1.4,
@@ -1237,13 +1233,13 @@ impl LayoutEngine {
             if self.truncated {
                 return;
             }
-            let prefix = InlineSpan {
-                text: format!("[{}] ", entry.label),
-                style: InlineStyle {
+            let prefix = InlineSpan::text(
+                format!("[{}] ", entry.label),
+                InlineStyle {
                     bold: true,
                     ..Default::default()
                 },
-            };
+            );
             if let Some(PdfBlock::Paragraph(first)) = entry.blocks.first() {
                 let mut combined = Vec::with_capacity(first.len() + 1);
                 combined.push(prefix);
@@ -1303,13 +1299,42 @@ impl LayoutEngine {
         #[derive(Clone)]
         enum Token {
             Newline,
-            Space { text: String, style: InlineStyle },
-            Piece { text: String, style: InlineStyle },
+            Space {
+                text: String,
+                style: InlineStyle,
+            },
+            Piece {
+                text: String,
+                style: InlineStyle,
+            },
+            InlineImage {
+                image: Box<PdfImage>,
+                style: InlineStyle,
+            },
         }
 
-        // Tokenize into whitespace, hard newlines, and breakable word/CJK pieces.
+        #[derive(Clone)]
+        enum LineItem {
+            Text(String, InlineStyle),
+            Image {
+                image: KrillaImage,
+                w: f32,
+                h: f32,
+                alt: String,
+                style: InlineStyle,
+            },
+        }
+
+        // Tokenize into whitespace, hard newlines, inline images, and breakable word/CJK pieces.
         let mut tokens: Vec<Token> = Vec::new();
         for span in spans {
+            if let Some(img) = &span.image {
+                tokens.push(Token::InlineImage {
+                    image: img.clone(),
+                    style: span.style.clone(),
+                });
+                continue;
+            }
             let mut rem = span.text.as_str();
             while !rem.is_empty() {
                 if let Some(nl) = rem.find('\n') {
@@ -1369,10 +1394,11 @@ impl LayoutEngine {
         }
 
         // Pack tokens into lines, coalescing adjacent same-style text before final shaping.
-        let mut raw_lines: Vec<Vec<(String, InlineStyle)>> = Vec::new();
-        let mut cur_line: Vec<(String, InlineStyle)> = Vec::new();
+        let mut raw_lines: Vec<Vec<LineItem>> = Vec::new();
+        let mut cur_line: Vec<LineItem> = Vec::new();
         let mut cur_w = 0.0f32;
         let max_w = max_width.max(16.0);
+        let max_inline_img_h = (self.content_height() * 0.65).max(base_font_size * 4.0);
 
         let measure_piece = |text: &str, style: &InlineStyle, fonts: &mut FontBook| -> f32 {
             let role = FontRole::from_style(style.bold, style.italic, style.code);
@@ -1385,19 +1411,30 @@ impl LayoutEngine {
             fonts.measure_width(text, role, sz) + pad
         };
 
-        let push_to_line =
-            |line: &mut Vec<(String, InlineStyle)>, text: &str, style: &InlineStyle| {
-                if text.is_empty() {
+        let push_to_line = |line: &mut Vec<LineItem>, text: &str, style: &InlineStyle| {
+            if text.is_empty() {
+                return;
+            }
+            if let Some(LineItem::Text(last_text, last_style)) = line.last_mut() {
+                if last_style == style {
+                    last_text.push_str(text);
                     return;
                 }
-                if let Some((last_text, last_style)) = line.last_mut() {
-                    if last_style == style {
-                        last_text.push_str(text);
-                        return;
-                    }
+            }
+            line.push(LineItem::Text(text.to_string(), style.clone()));
+        };
+
+        let trim_line_trailing_space = |line: &mut Vec<LineItem>| {
+            while let Some(LineItem::Text(text, _)) = line.last_mut() {
+                let trimmed_len = text.trim_end_matches(' ').len();
+                if trimmed_len == 0 {
+                    line.pop();
+                } else {
+                    text.truncate(trimmed_len);
+                    break;
                 }
-                line.push((text.to_string(), style.clone()));
-            };
+            }
+        };
 
         for token in tokens {
             match token {
@@ -1418,6 +1455,35 @@ impl LayoutEngine {
                         cur_w = 0.0;
                     }
                 }
+                Token::InlineImage { image, style } => {
+                    if let PdfImageSource::Embedded {
+                        image: krilla_img,
+                        pixel_width,
+                        pixel_height,
+                    } = &image.source
+                    {
+                        let (draw_w, draw_h) = fit_image_size(
+                            &image,
+                            *pixel_width,
+                            *pixel_height,
+                            max_w,
+                            max_inline_img_h,
+                        );
+                        if !cur_line.is_empty() && cur_w + draw_w > max_w {
+                            trim_line_trailing_space(&mut cur_line);
+                            raw_lines.push(std::mem::take(&mut cur_line));
+                            cur_w = 0.0;
+                        }
+                        cur_line.push(LineItem::Image {
+                            image: krilla_img.clone(),
+                            w: draw_w,
+                            h: draw_h,
+                            alt: image.alt.clone(),
+                            style,
+                        });
+                        cur_w += draw_w;
+                    }
+                }
                 Token::Piece { text, style } => {
                     let w = measure_piece(&text, &style, fonts);
                     if cur_w + w <= max_w {
@@ -1425,14 +1491,14 @@ impl LayoutEngine {
                         cur_w += w;
                     } else if w <= max_w && !cur_line.is_empty() {
                         // Trim trailing space on wrapped line.
-                        trim_trailing_space(&mut cur_line);
+                        trim_line_trailing_space(&mut cur_line);
                         raw_lines.push(std::mem::take(&mut cur_line));
                         push_to_line(&mut cur_line, &text, &style);
                         cur_w = w;
                     } else {
                         // Word itself exceeds `max_w`: split cleanly on grapheme boundaries.
                         if !cur_line.is_empty() {
-                            trim_trailing_space(&mut cur_line);
+                            trim_line_trailing_space(&mut cur_line);
                             raw_lines.push(std::mem::take(&mut cur_line));
                             cur_w = 0.0;
                         }
@@ -1458,7 +1524,7 @@ impl LayoutEngine {
             }
         }
         if !cur_line.is_empty() || raw_lines.is_empty() {
-            trim_trailing_space(&mut cur_line);
+            trim_line_trailing_space(&mut cur_line);
             raw_lines.push(cur_line);
         }
 
@@ -1475,40 +1541,66 @@ impl LayoutEngine {
                 let mut max_ascent = default_ascent;
                 let mut max_descent = default_descent;
 
-                for (text, style) in items {
-                    let role = FontRole::from_style(style.bold, style.italic, style.code);
-                    let font_size = if style.code {
-                        base_font_size * 0.88
-                    } else {
-                        base_font_size
-                    };
-                    let color = if style.link.is_some() {
-                        self.palette.link
-                    } else if style.code {
-                        self.palette.inline_code_text
-                    } else {
-                        base_color
-                    };
-                    let runs = fonts.shape_text(&text, role, font_size);
-                    let text_w: f32 = runs.iter().map(|r| r.width).sum();
-                    let pad_x = if style.code { 2.2 } else { 0.0 };
-                    let seg_w = text_w + 2.0 * pad_x;
-                    let asc = fonts.ascent(role, font_size);
-                    let desc = fonts.descent(role, font_size);
-                    max_ascent = max_ascent.max(asc);
-                    max_descent = max_descent.max(desc);
-                    total_w += seg_w;
+                for item in items {
+                    match item {
+                        LineItem::Text(text, style) => {
+                            let role = FontRole::from_style(style.bold, style.italic, style.code);
+                            let font_size = if style.code {
+                                base_font_size * 0.88
+                            } else {
+                                base_font_size
+                            };
+                            let color = if style.link.is_some() {
+                                self.palette.link
+                            } else if style.code {
+                                self.palette.inline_code_text
+                            } else {
+                                base_color
+                            };
+                            let runs = fonts.shape_text(&text, role, font_size);
+                            let text_w: f32 = runs.iter().map(|r| r.width).sum();
+                            let pad_x = if style.code { 2.2 } else { 0.0 };
+                            let seg_w = text_w + 2.0 * pad_x;
+                            let asc = fonts.ascent(role, font_size);
+                            let desc = fonts.descent(role, font_size);
+                            max_ascent = max_ascent.max(asc);
+                            max_descent = max_descent.max(desc);
+                            total_w += seg_w;
 
-                    segments.push(StyledLineSegment {
-                        style,
-                        font_size,
-                        color,
-                        runs,
-                        width: seg_w,
-                        pad_x,
-                        ascent: asc,
-                        descent: desc,
-                    });
+                            segments.push(StyledLineSegment {
+                                style,
+                                font_size,
+                                color,
+                                runs,
+                                inline_image: None,
+                                width: seg_w,
+                                pad_x,
+                                ascent: asc,
+                                descent: desc,
+                            });
+                        }
+                        LineItem::Image {
+                            image,
+                            w,
+                            h,
+                            alt,
+                            style,
+                        } => {
+                            max_ascent = max_ascent.max(h);
+                            total_w += w;
+                            segments.push(StyledLineSegment {
+                                style,
+                                font_size: base_font_size,
+                                color: base_color,
+                                runs: Vec::new(),
+                                inline_image: Some((image, w, h, alt)),
+                                width: w,
+                                pad_x: 0.0,
+                                ascent: h,
+                                descent: 0.0,
+                            });
+                        }
+                    }
                 }
 
                 let height = base_line_h.max((max_ascent + max_descent) * 1.18);
@@ -1559,6 +1651,7 @@ impl LayoutEngine {
                         font_size,
                         color,
                         runs: full_runs,
+                        inline_image: None,
                         width: full_w,
                         pad_x: 0.0,
                         ascent,
@@ -1586,6 +1679,7 @@ impl LayoutEngine {
                             font_size,
                             color,
                             runs,
+                            inline_image: None,
                             width: w,
                             pad_x: 0.0,
                             ascent,
@@ -1611,6 +1705,7 @@ impl LayoutEngine {
                         font_size,
                         color,
                         runs,
+                        inline_image: None,
                         width: w,
                         pad_x: 0.0,
                         ascent,
@@ -1643,6 +1738,29 @@ impl LayoutEngine {
         let mut x = left + x_offset;
 
         for seg in &line.segments {
+            if let Some((image, img_w, img_h, alt)) = &seg.inline_image {
+                let img_y = baseline_y - *img_h;
+                self.push_cmd(DrawCmd::Image(DrawImage {
+                    x,
+                    y: img_y,
+                    w: *img_w,
+                    h: *img_h,
+                    image: image.clone(),
+                }));
+                if let Some(target) = &seg.style.link {
+                    self.push_link(PageLink {
+                        x,
+                        y: img_y,
+                        w: *img_w,
+                        h: *img_h,
+                        target: target.clone(),
+                        alt: alt.clone(),
+                    });
+                }
+                x += seg.width;
+                continue;
+            }
+
             let seg_top = baseline_y - seg.ascent - 1.0;
             let seg_h = seg.ascent + seg.descent + 2.0;
 
@@ -1723,16 +1841,38 @@ impl LayoutEngine {
     }
 }
 
-fn trim_trailing_space(line: &mut Vec<(String, InlineStyle)>) {
-    while let Some((text, _)) = line.last_mut() {
-        let trimmed_len = text.trim_end_matches(' ').len();
-        if trimmed_len == 0 {
-            line.pop();
-        } else {
-            text.truncate(trimmed_len);
-            break;
+fn fit_image_size(
+    img: &PdfImage,
+    pixel_width: u32,
+    pixel_height: u32,
+    max_w: f32,
+    max_h: f32,
+) -> (f32, f32) {
+    let nat_w = (pixel_width as f32 * PX_TO_PT).max(1.0);
+    let nat_h = (pixel_height as f32 * PX_TO_PT).max(1.0);
+    let (mut draw_w, mut draw_h) = match (img.requested_width, img.requested_height) {
+        (Some(rw), Some(rh)) => (rw as f32 * PX_TO_PT, rh as f32 * PX_TO_PT),
+        (Some(rw), None) => {
+            let w = rw as f32 * PX_TO_PT;
+            (w, w * (nat_h / nat_w))
         }
+        (None, Some(rh)) => {
+            let h = rh as f32 * PX_TO_PT;
+            (h * (nat_w / nat_h), h)
+        }
+        (None, None) => (nat_w, nat_h),
+    };
+    if draw_w > max_w {
+        let s = max_w / draw_w;
+        draw_w *= s;
+        draw_h *= s;
     }
+    if draw_h > max_h {
+        let s = max_h / draw_h;
+        draw_w *= s;
+        draw_h *= s;
+    }
+    (draw_w.max(1.0), draw_h.max(1.0))
 }
 
 fn is_cjk_breakable(ch: char) -> bool {

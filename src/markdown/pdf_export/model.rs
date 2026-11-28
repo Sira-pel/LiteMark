@@ -12,6 +12,13 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Largest single image dimension (width or height) allowed for PDF embedding.
+pub(crate) const MAX_EMBED_IMAGE_DIM: u32 = 8_192;
+/// Largest total pixel count allowed for PDF embedding (~32 MP).
+pub(crate) const MAX_EMBED_IMAGE_PIXELS: u64 = 32_000_000;
+/// Maximum allocation the fallback image decoder may make while decoding one image.
+const MAX_DECODE_ALLOC_BYTES: u64 = 160 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LinkTarget {
     Uri(String),
@@ -33,6 +40,19 @@ pub(crate) struct InlineStyle {
 pub(crate) struct InlineSpan {
     pub(crate) text: String,
     pub(crate) style: InlineStyle,
+    /// When set, renders this embedded picture inline instead of `text`
+    /// (`text` holds the alt text for heading outlines and accessibility).
+    pub(crate) image: Option<Box<PdfImage>>,
+}
+
+impl InlineSpan {
+    pub(crate) fn text(text: impl Into<String>, style: InlineStyle) -> Self {
+        Self {
+            text: text.into(),
+            style,
+            image: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,8 +148,8 @@ pub(crate) fn build_document_model(
 ) -> PdfDocumentModel {
     match file_type {
         FileType::Code => build_code_model(content),
-        FileType::PlainText => build_plaintext_model(content),
-        FileType::Markdown | FileType::Pdf => build_markdown_model(content, base_dir, scope),
+        FileType::PlainText | FileType::Pdf => build_plaintext_model(content),
+        FileType::Markdown => build_markdown_model(content, base_dir, scope),
     }
 }
 
@@ -159,15 +179,12 @@ fn build_plaintext_model(content: &str) -> PdfDocumentModel {
             }
         } else {
             if !current.is_empty() {
-                current.push(InlineSpan {
-                    text: "\n".into(),
-                    style: InlineStyle::default(),
-                });
+                current.push(InlineSpan::text("\n", InlineStyle::default()));
             }
-            current.push(InlineSpan {
-                text: line.replace('\t', "    "),
-                style: InlineStyle::default(),
-            });
+            current.push(InlineSpan::text(
+                line.replace('\t', "    "),
+                InlineStyle::default(),
+            ));
         }
     }
     if !current.is_empty() {
@@ -273,9 +290,45 @@ fn build_markdown_model(
     let mut active_code: Option<(Option<String>, String)> = None;
     let mut active_table: Option<ActiveTable> = None;
     let mut image_stack: Vec<ActiveImage> = Vec::new();
-    let mut standalone_images_in_para: Vec<PdfImage> = Vec::new();
+    let mut standalone_images_in_para: Vec<(PdfImage, InlineStyle)> = Vec::new();
     let mut para_has_non_image_content = false;
     let mut image_budget = MAX_EMBED_TOTAL;
+
+    let push_inline_image = |buf: &mut Vec<InlineSpan>,
+                             built: PdfImage,
+                             base_style: &InlineStyle| match &built
+        .source
+    {
+        PdfImageSource::Embedded { .. } => {
+            buf.push(InlineSpan {
+                text: built.alt.clone(),
+                style: base_style.clone(),
+                image: Some(Box::new(built)),
+            });
+        }
+        PdfImageSource::Placeholder { remote_uri } => {
+            let label = if built.alt.is_empty() {
+                "[Image]".to_string()
+            } else {
+                format!("[Image: {}]", built.alt)
+            };
+            let mut img_style = base_style.clone();
+            img_style.italic = true;
+            if img_style.link.is_none() {
+                if let Some(uri) = remote_uri {
+                    img_style.link = Some(LinkTarget::Uri(uri.clone()));
+                }
+            }
+            push_inline(buf, &label, &img_style);
+        }
+    };
+
+    let demote_standalone_images = |standalone: &mut Vec<(PdfImage, InlineStyle)>,
+                                    buf: &mut Vec<InlineSpan>| {
+        for (img, img_style) in standalone.drain(..) {
+            push_inline_image(buf, img, &img_style);
+        }
+    };
 
     let flush_loose_inline = |containers: &mut [Container], buf: &mut Vec<InlineSpan>| {
         if !buf.is_empty() {
@@ -318,29 +371,18 @@ fn build_markdown_model(
                                 scope,
                                 &mut image_budget,
                             );
-                            if in_paragraph && !para_has_non_image_content && inline_buf.is_empty()
+                            if in_paragraph
+                                && !para_has_non_image_content
+                                && inline_buf.is_empty()
+                                && style.link.is_none()
                             {
-                                standalone_images_in_para.push(built);
+                                standalone_images_in_para.push((built, style.clone()));
                             } else {
-                                // Inline image inside a paragraph/heading/table cell:
-                                // if we're in a paragraph, emit a clean inline token or
-                                // promote standalone images if any.
-                                let label = if built.alt.is_empty() {
-                                    "[Image]".to_string()
-                                } else {
-                                    format!("[Image: {}]", built.alt)
-                                };
-                                let mut img_style = style.clone();
-                                img_style.italic = true;
-                                if img_style.link.is_none() {
-                                    if let PdfImageSource::Placeholder {
-                                        remote_uri: Some(uri),
-                                    } = &built.source
-                                    {
-                                        img_style.link = Some(LinkTarget::Uri(uri.clone()));
-                                    }
-                                }
-                                push_inline(&mut inline_buf, &label, &img_style);
+                                demote_standalone_images(
+                                    &mut standalone_images_in_para,
+                                    &mut inline_buf,
+                                );
+                                push_inline_image(&mut inline_buf, built, &style);
                                 para_has_non_image_content = true;
                             }
                         }
@@ -390,17 +432,13 @@ fn build_markdown_model(
             Event::End(TagEnd::Paragraph) => {
                 in_paragraph = false;
                 if !para_has_non_image_content && !standalone_images_in_para.is_empty() {
-                    for img in standalone_images_in_para.drain(..) {
+                    for (img, _) in standalone_images_in_para.drain(..) {
                         if let Some(top) = containers.last_mut() {
                             top.push_block(PdfBlock::Image(img));
                         }
                     }
                 } else {
-                    for img in standalone_images_in_para.drain(..) {
-                        if let Some(top) = containers.last_mut() {
-                            top.push_block(PdfBlock::Image(img));
-                        }
-                    }
+                    demote_standalone_images(&mut standalone_images_in_para, &mut inline_buf);
                     if !inline_buf.is_empty() {
                         let spans = std::mem::take(&mut inline_buf);
                         if let Some(top) = containers.last_mut() {
@@ -632,12 +670,23 @@ fn build_markdown_model(
             Event::Text(text) => {
                 if !text.is_empty() {
                     if !text.trim().is_empty() {
+                        if !standalone_images_in_para.is_empty() {
+                            demote_standalone_images(
+                                &mut standalone_images_in_para,
+                                &mut inline_buf,
+                            );
+                        }
                         para_has_non_image_content = true;
+                        push_inline(&mut inline_buf, &text, &style);
+                    } else if standalone_images_in_para.is_empty() {
+                        push_inline(&mut inline_buf, &text, &style);
                     }
-                    push_inline(&mut inline_buf, &text, &style);
                 }
             }
             Event::Code(code) => {
+                if !standalone_images_in_para.is_empty() {
+                    demote_standalone_images(&mut standalone_images_in_para, &mut inline_buf);
+                }
                 let mut code_style = style.clone();
                 code_style.code = true;
                 push_inline(&mut inline_buf, &code, &code_style);
@@ -671,15 +720,12 @@ fn push_inline(buf: &mut Vec<InlineSpan>, text: &str, style: &InlineStyle) {
         return;
     }
     if let Some(last) = buf.last_mut() {
-        if last.style == *style {
+        if last.image.is_none() && last.style == *style {
             last.text.push_str(text);
             return;
         }
     }
-    buf.push(InlineSpan {
-        text: text.to_string(),
-        style: style.clone(),
-    });
+    buf.push(InlineSpan::text(text, style.clone()));
 }
 
 fn unique_slug(base: String, counts: &mut HashMap<String, usize>) -> String {
@@ -772,7 +818,28 @@ fn load_local_krilla_image(
     Some((krilla_img, w, h))
 }
 
+/// Read only the image header to verify width, height, and total pixel count
+/// before allocating any decoded pixel buffer (guards against decompression bombs).
+fn image_dimensions_within_limits(bytes: &[u8]) -> Option<(u32, u32)> {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let (w, h) = reader.into_dimensions().ok()?;
+    if w == 0
+        || h == 0
+        || w > MAX_EMBED_IMAGE_DIM
+        || h > MAX_EMBED_IMAGE_DIM
+        || u64::from(w) * u64::from(h) > MAX_EMBED_IMAGE_PIXELS
+    {
+        return None;
+    }
+    Some((w, h))
+}
+
 fn decode_to_krilla_image(ext: &str, bytes: Vec<u8>) -> Option<(KrillaImage, u32, u32)> {
+    // Reject oversized dimensions from headers before any decoder allocates pixels.
+    let (header_w, header_h) = image_dimensions_within_limits(&bytes)?;
+
     let direct = match ext {
         "png" => KrillaImage::from_png(bytes.clone().into(), true).ok(),
         "jpg" | "jpeg" => KrillaImage::from_jpeg(bytes.clone().into(), true).ok(),
@@ -782,16 +849,29 @@ fn decode_to_krilla_image(ext: &str, bytes: Vec<u8>) -> Option<(KrillaImage, u32
     };
     if let Some(img) = direct {
         let (w, h) = img.size();
-        if w > 0 && h > 0 {
+        if w > 0
+            && h > 0
+            && w <= MAX_EMBED_IMAGE_DIM
+            && h <= MAX_EMBED_IMAGE_DIM
+            && u64::from(w) * u64::from(h) <= MAX_EMBED_IMAGE_PIXELS
+        {
             return Some((img, w, h));
         }
     }
 
     // Fallback (covers BMP and any exotic PNG/JPEG/WebP subformat): decode with
-    // `image` and re-encode as PNG for krilla.
-    let decoded = image::load_from_memory(&bytes).ok()?;
+    // explicit dimension & allocation caps and re-encode as PNG for krilla.
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_EMBED_IMAGE_DIM);
+    limits.max_image_height = Some(MAX_EMBED_IMAGE_DIM);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?;
     let (w, h) = (decoded.width(), decoded.height());
-    if w == 0 || h == 0 {
+    if w == 0 || h == 0 || w != header_w || h != header_h {
         return None;
     }
     let mut png_bytes = Vec::new();
