@@ -643,11 +643,13 @@ impl LayoutEngine {
                 }
             }
 
+            // Each line is drawn at `self.y`, so set it before (not after)
+            // emitting; otherwise the first line ignores the top padding.
             let mut cur_y = box_y + pad_y;
             for line in slice {
+                self.y = cur_y;
                 self.emit_wrapped_line(line, left + pad_x, inner_w, TableAlign::Left);
                 cur_y += line_h;
-                self.y = cur_y;
             }
             self.y = box_y + box_h;
 
@@ -2167,5 +2169,31 @@ mod tests {
                 "code line wrapped early: {w} of {max_w}"
             );
         }
+    }
+
+    #[test]
+    fn code_block_lines_are_evenly_spaced_inside_the_padding() {
+        let out = lay_out("```
+first
+second
+third
+```");
+        let page = &out.pages[0];
+        let box_top = page
+            .cmds
+            .iter()
+            .find_map(|c| match c {
+                DrawCmd::Rect(r) if r.fill == Some(out.palette.code_block_bg) => Some(r.y),
+                _ => None,
+            })
+            .expect("code block box");
+        let baselines: Vec<f32> = page_texts(page).iter().map(|(_, y)| *y).collect();
+        assert_eq!(baselines.len(), 3);
+        let gap1 = baselines[1] - baselines[0];
+        let gap2 = baselines[2] - baselines[1];
+        assert!((gap1 - gap2).abs() < 0.01, "uneven line gaps {gap1} vs {gap2}");
+        // The first line's top (baseline minus ascent) sits below the 8pt padding.
+        let font_size = (out.body_pt * 0.84).max(7.5);
+        assert!(baselines[0] - box_top > 8.0 + font_size * 0.5, "first line hugs the box top");
     }
 }
