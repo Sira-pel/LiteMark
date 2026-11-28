@@ -2173,11 +2173,7 @@ mod tests {
 
     #[test]
     fn code_block_lines_are_evenly_spaced_inside_the_padding() {
-        let out = lay_out("```
-first
-second
-third
-```");
+        let out = lay_out("```\nfirst\nsecond\nthird\n```");
         let page = &out.pages[0];
         let box_top = page
             .cmds
@@ -2191,9 +2187,15 @@ third
         assert_eq!(baselines.len(), 3);
         let gap1 = baselines[1] - baselines[0];
         let gap2 = baselines[2] - baselines[1];
-        assert!((gap1 - gap2).abs() < 0.01, "uneven line gaps {gap1} vs {gap2}");
+        assert!(
+            (gap1 - gap2).abs() < 0.01,
+            "uneven line gaps {gap1} vs {gap2}"
+        );
         // The first line's top (baseline minus ascent) sits below the 8pt padding.
         let font_size = (out.body_pt * 0.84).max(7.5);
-        assert!(baselines[0] - box_top > 8.0 + font_size * 0.5, "first line hugs the box top");
+        assert!(
+            baselines[0] - box_top > 8.0 + font_size * 0.5,
+            "first line hugs the box top"
+        );
     }
 }
